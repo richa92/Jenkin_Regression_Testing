@@ -1,0 +1,806 @@
+*** Settings ***
+Documentation       Keywords for high-availability
+  ...                 uses setup-bringup-keywords
+
+# When the operation is "asynchronous", the output variable is named ${out}  - 202 Accepted
+# When the operation is "synchronous", the output variable is named ${resp} - status_code = 200
+  
+
+Resource            ../../../../fusion/tests/resource/fusion_api_all_resource_files.txt
+Resource            ./setup-bringup-keywords.txt
+
+
+
+*** Variables ***
+${_min}              1
+${_debug}            0
+${_xdebug}           1
+
+${topEM}             1
+${bottomEM}          2
+${activeAppliance}   0
+${standbyAppliance}  1
+
+${Mgmt}              Management
+${Link}              External
+#${Internal}          Internal	 # removing this because it creates too much trouble (will document later)
+
+# The waitPostPowerUp is a tricky number - because the CIM comes up in 4 mins but powers itself off within 10 mins
+${SixtySeconds}       1
+${waitforResync}      52
+${waitPostShutdown}   4
+${waitPostPowerUp}    10
+${waitToJoinCluster}  20
+${waitPostRemoval}    17
+${waitPostReinsert}   20
+${waitServerBoot}     10
+${waitServerPower}    2
+${waitForAlert}       32
+${gapBetweenICMs}     8
+${testYourPatience}   3
+
+
+${resp202}            202 Accepted
+${resp200}            200 OK
+
+
+
+${PotashModel}        Virtual Connect SE 40Gb F8 Module for Synergy
+${MIN_ENCS}           3
+${MIN_POTASH}         2
+${i3S_PAIR}           2
+
+#########################################################################################################################
+*** Keywords ***
+
+
+Waiting
+   [Arguments]                ${timeInMinutes}  ${printFlag}=0
+   Run Keyword If  ${_debug} == ${_min}  Log to console  Waiting for ${timeInMinutes} minute(s)
+   :FOR  ${start}  IN RANGE  0  ${timeInMinutes}
+   \  Run Keyword If  ${printFlag} !=0  Log to console  Slept ${start} out of ${timeInMinutes} minutes
+   \  Sleep  60 seconds 
+
+#----------------------------------------------------------------------------------------------------------------   
+
+findCurlVersion
+  
+   Login to Appliance via SSH     ${fusion_IP}
+   ${out} =     Execute command   curl --version | grep curl | cut -d " " -f 2
+   Logout of Fusion Via SSH
+   
+   Run Keyword If  ${_xdebug} == ${_min}  Log to console  findCurlVersion says ${out}
+   ${curlVersion}             Set Variable   ${out}
+   [return]                   ${curlVersion}
+      
+#----------------------------------------------------------------------------------------------------------------      
+   
+curlWrapper
+  [Arguments]                ${mac}  ${interface}=bond0
+  ${ipWrapper}               Set Variable  ${mac}%${interface}
+  
+  
+  Run Keyword If  ${_xdebug} == ${_min}  Log to console   curlWrapper says ${ipWrapper}
+  ${result} =                Run Keyword If  '${curlversion}' == '${curl2}'  Set Variable  [${ipWrapper}]   ELSE
+                             ...  Set Variable  ${ipWrapper}
+  
+  Run Keyword If  ${_xdebug} == ${_min}  Log to console   curlWrapper says result is ${result}
+  [return]                   ${result}
+                              
+#----------------------------------------------------------------------------------------------------------------   
+
+Determine CIM Flag
+   [Arguments]                ${cim1}   ${cim2}  ${active}
+   ${isActive1} =             Get from dictionary  ${cim1}  isActive
+   ${isActive2} =             Get from dictionary  ${cim2}  isActive
+      
+   Run Keyword If  ${_debug} == ${_min}  Log to console  Determine CIM Flag ${isActive1} ${isActive2} ${active}
+   
+   ${x} =                     Set Variable  0
+   ${x} =  Run Keyword If  ${active} == 0 and '${isActive1}' == 'True'  Evaluate  ${x} + 1   ELSE  Evaluate  ${x} + 0
+   ${x} =  Run Keyword If  ${active} == 0 and '${isActive2}' == 'True'  Evaluate  ${x} + 2   ELSE  Evaluate  ${x} + 0
+   ${x} =  Run Keyword If  ${active} == 1 and '${isActive1}' == 'False'  Evaluate  ${x} + 3  ELSE  Evaluate  ${x} + 0
+   ${x} =  Run Keyword If  ${active} == 1 and '${isActive2}' == 'False'  Evaluate  ${x} + 4  ELSE  Evaluate  ${x} + 0
+     
+   [return]  ${x}
+#----------------------------------------------------------------------------------------------------------------   
+
+Get OSDS Details
+   [Documentation]               Get OSDS details
+   [Tags]                       Critical
+   Run Keyword If  ${_debug} == ${_min}  Log to console  Get OSDS details
+   ${osds}=                      Fusion API Get OS Deployment Server
+   ${count} =                    Get from dictionary  ${osds}  count
+   Run Keyword If  ${count} == 0  Fail  msg='ERROR: There is no OSDS created. Exiting ....'
+      
+   ${resp} =                     Fusion API Get I3SAppliance URI
+   [return]                      ${resp}
+#----------------------------------------------------------------------------------------------------------------   
+   
+Get CIM Dictionaries
+   [Documentation]              Return the CIM dictionaries --- need to do it only for the particular LE (TBD)
+   [Arguments]                  ${LE}=""
+   [Tags]                       Critical
+	${resp}=                    Get OSDS Details
+	${members}=                 Get from dictionary  ${resp}  members
+	${i3s} =                    Create Dictionary
+
+	#Run Keyword If   ${LE} == ""  Fail  msg='LE name is mandated now. Pls. add variable leToTestHA in input file. Exiting ...'
+	Run Keyword If  '${LE}' == ""  Fail  msg='ERROR: LE name is mandated now. Exiting ...'
+	${applianceCount} =        Get Length  ${members}
+	Run Keyword If  ${_debug} == ${_min}  Log to console  ${members}  
+	Run Keyword If  ${_debug} == ${_min}  Log to console  ${applianceCount} 
+	
+	:FOR  ${data}   IN  @{members}
+	\  ${i3s_appliance}=        Get from dictionary  ${data}  applianceSerialNumber
+	\  ${leName}=               Get from dictionary  ${data}  leName
+	\  ${status}=               Get from dictionary  ${data}  status
+	\  Run Keyword If  '${leName}' == '${LE}' and '${status}' != 'Unknown'   Set to dictionary        ${i3s}   ${i3s_appliance}=${data}
+	\  Run Keyword If  ${_xdebug} == ${_min}  Log to console  ${i3s_appliance}
+	
+	${i3sCount} =             Get Length  ${i3s}	
+	${sn_i3s_appliances} =    Create List
+	:FOR  ${sn}  IN  @{i3s}
+	\  Run Keyword If  ${_debug} == ${_min}  Log to console  ${sn}
+	\  Append to List    ${sn_i3s_appliances}   ${sn}
+	Run Keyword If  ${_xdebug} == ${_min}  Log to console   ${LE} CIMS: ${sn_i3s_appliances[0]} and ${sn_i3s_appliances[1]}
+	
+	${cim1} =                   Get from dictionary  ${i3s}  ${sn_i3s_appliances[0]}
+	${cim2} =                   Get from dictionary  ${i3s}  ${sn_i3s_appliances[1]}
+    [return]                    ${cim1}   ${cim2}  
+#----------------------------------------------------------------------------------------------------------------
+
+Are Webapps Started
+   [Documentation]				  Check if webapps have started
+   [Arguments]                    ${appliance}  
+   ${result}                      Set Variable  3
+   
+   # KEY VALUE FOR THIS FUNCTION IS TO SEE IF WEBAPPS ARE UP when factoryreset is done
+   #  ... otherwise, any other output is ok
+   
+   ${mac} =                       Get from dictionary   ${appliance}  applianceIpv6Address
+       
+   Login to Appliance via SSH     ${fusion_IP}
+   
+   ${ipWrapper} =                 curlWrapper  ${mac}
+   Log to console                 The output of curlWrapper is ${ipWrapper}
+                  
+   #${cmd}                         Set Variable  curl -kgX GET https://${ipWrapper}/controller-state.json 
+   ${cmd}                         Set Variable  curl -kgX GET https://[${mac}%bond0]/controller-state.json
+   Run Keyword If  ${_debug} == ${_min}  Log to console   ${cmd}
+   ${out} =                       Execute Command  ${cmd}
+   Run Keyword If  ${_xdebug} == ${_min}  Log to console   ${out}
+   Logout of Fusion Via SSH
+   #Fail                           Stopping midway since this is just a test !!! -Krishna
+
+
+   Run Keyword If  ${_xdebug} == ${_min}  Log to console   ${cmd} \n ${out}
+   ${state1}                     Set Variable   "state":"OK"  
+   ${state2}                     Set Variable   "state":"STARTING"  
+   ${state3}                     Set Variable   "state":"STOPPED"
+
+   ${res} =                       Get Lines containing String  ${out}   ${state1}
+   ${lc1} =                       Get Line Count  ${res}
+   ${res} =                       Get Lines containing String  ${out}   ${state2}
+   ${lc2} =                       Get Line Count  ${res}
+   ${res} =                       Get Lines containing String  ${out}   ${state3}
+   ${lc3} =                       Get Line Count  ${res}
+   
+   Run Keyword If   ${lc1} == 1   Log to console   ${mac} is ${state1} 
+   Run Keyword If   ${lc2} == 1   Log to console   ${mac} is ${state2} 
+   Run Keyword If   ${lc3} == 1   Log to console   ${mac} is ${state3} 
+   
+   ${result} =   Run Keyword If   ${lc1} == 1  Set Variable  0  ELSE  Evaluate  ${result} + 0
+   ${result} =   Run Keyword If   ${lc2} == 1  Set Variable  1  ELSE  Evaluate  ${result} + 0
+   ${result} =   Run Keyword If   ${lc3} == 1  Set Variable  2  ELSE  Evaluate  ${result} + 0
+         
+   Log to console                 Webapps says ${result} for ${mac}  
+   [return]                       ${result}
+#----------------------------------------------------------------------------------------------------------------
+
+Is Appliance Up
+   [Documentation]				  Check if appliance is up by pinging the IPv6
+   [Arguments]                    ${appliance}  
+   ${result}                      Set Variable  0
+   ${result1}                     Set Variable  1
+   
+   ${mac} =                       Get from dictionary   ${appliance}  applianceIpv6Address
+    
+   Run Keyword If  ${_debug} == ${_min}  Log to console  Is Appliance Up: ${mac} for ${appliance['applianceSerialNumber']}
+   
+   ${out} =                       setup-bringup-keywords.Windows Ping  ${mac}
+   ${result} =                    Evaluate  ${out} + ${result}
+   [return]                       ${result}
+#----------------------------------------------------------------------------------------------------------------   
+       
+Shutdown Appliance
+   [Documentation]                Shutdown and power-off appliance using SSH login 
+   [Arguments]			          ${appliance}
+   Run Keyword If  ${_debug} == ${_min}  Log to console  Shutdown Appliance
+   ${ipv6}=                       Get from dictionary   ${appliance}  applianceIpv6Address
+   Login to Appliance via SSH     ${ipv6}
+   ${out}=                         Execute Command  dmidecode -s system-serial-number
+   Run Keyword If  ${_debug} == ${_min}  Log to console  ${out}
+   ${out}=                        Execute Command  shutdown -P now
+   Waiting                        ${waitPostShutdown}
+   Log to console                 EOF: Power Off Appliance ${ipv6}
+#----------------------------------------------------------------------------------------------------------------   
+    
+Efuse Appliance
+   [Documentation]                EFuse Appliance
+   [Arguments]			          ${appliance}  ${action}=EFuseReset  
+   ${result}					  Set Variable   1
+   ${cimEnclosureName}=           Get from dictionary   ${appliance}  cimEnclosureName
+   ${cimBay}=                     Get from dictionary   ${appliance}  cimBay
+   Run Keyword If  ${_debug} == ${_min}  Log to console  EFuse Appliance: ${cimEnclosureName} ${cimBay} ${action}
+ 
+# 
+   Login to Appliance via SSH     ${fusion_IP}
+   ${em_ip}=  Execute Command  /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${cimEnclosureName}"
+   ${xauth}=  Execute Command  /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${cimEnclosureName}" -o t
+   Run Keyword If  ${_debug} == ${_min}  Log to console  ${em_ip} ${xauth}
+   
+   ${Header}                      Set Variable   "x-auth-token:${xauth}"
+   ${Url}                         Set Variable   https://[${em_ip}%bond0]/rest/v1/CIManagerBays/${cimBay}
+   ${Data}                        Set Variable   '{"Action":"${action}"}'
+   ${cmd}                         Set Variable   curl -g -x "" -k -i -H ${Header} ${Url} -d ${Data}
+   Run Keyword If  ${_debug} == ${_min}  Log to console  ${cmd}
+   ${out} =						  Execute Command  ${cmd}
+   Logout of Fusion Via SSH
+   
+   Run Keyword If  ${_xdebug} == ${_min}  Log to console   ${cmd} \n ${out}
+#
+   
+# ERROR - what happens if the above call fails?   
+# Uncomment below
+    ${str202} =                    Get Lines containing String  ${out}  ${resp202}
+    ${lc} =                        Get Line Count  ${str202}
+    ${result} =                    Evaluate  ${result} - ${lc}
+    Run Keyword If  ${result} != 0  Log to console  WARNING: EFuse ${action} ${cimEnclosureName}- bay ${cimBay} failed \n ${out}
+	[return]                       ${result}
+#----------------------------------------------------------------------------------------------------------------
+
+
+ICM EFuse
+   [Documentation]                ICM EFuse
+   [Arguments]                    ${PotashDetails}  ${action}=EFuseReset
+   ${result}					  Set Variable   1
+   
+   ${encName}  ${bay} =           Check ICM  ${PotashDetails}
+   Run Keyword If  ${_debug} == ${_min}  Log to console  ICM EFuse for ${bay} in ${encName}
+
+# 
+   Login to Appliance via SSH     ${fusion_IP}
+   ${em_ip}=  Execute Command  /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${encName}"
+   ${xauth}=  Execute Command  /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${encName}" -o t
+   Run Keyword If  ${_debug} == ${_min}  Log to console  ${em_ip} ${xauth}
+   
+   ${Header}                      Set Variable   "x-auth-token:${xauth}"
+   ${Url}                         Set Variable   https://[${em_ip}%bond0]/rest/v1/InterconnectBays/${bay} 
+   ${Data}                        Set Variable   '{"Action":"${action}"}'
+   ${cmd}                         Set Variable   curl -g -x "" -k -i -H ${Header} ${Url} -d ${Data}
+   Run Keyword If  ${_debug} == ${_min}  Log to console  ${cmd}
+   ${out} =						  Execute Command  ${cmd}
+   Logout of Fusion Via SSH
+#
+   Run Keyword If  ${_xdebug} == ${_min}  Log to console   ${cmd} \n ${out}
+
+# Uncomment below
+    ${str202} =                    Get Lines containing String  ${out}  ${resp202}
+    ${lc} =                        Get Line Count  ${str202}
+    ${result} =                    Evaluate  ${result} - ${lc}
+    Run Keyword If  ${result} != 0  Log to console  WARNING: EFuse ${action} ICM - ${encName} -bay ${bay} failed \n ${out}
+   
+   [return]                       ${result}
+#----------------------------------------------------------------------------------------------------------------   
+   
+EM Operations
+   [Documentation]                EM Operations
+   [Arguments]			          ${appliance}  ${portType}=Management  ${portNumber}=1  ${upOrDown}=UP
+   ${result}					  Set Variable   1
+   ${cimEnclosureName}=           Get from dictionary   ${appliance}  cimEnclosureName
+   Run Keyword If  ${_debug} == ${_min}  Log to console   EM Operations ${cimEnclosureName}
+   ${result} =                    EM Operations Core  ${cimEnclosureName}  ${portType}  ${portNumber}  ${upOrDown}
+   [return]                       ${result}
+
+#----------------------------------------------------------------------------------------------------------------   
+
+EM Operations Core
+   [Documentation]               EM Operations at enclosure level
+   [Arguments]			         ${enclosure}  ${pType}  ${pNum}  ${pUp}
+   ${result}                     Set Variable  1
+   Log to console                ${fusion_IP} from EM Operations Core. _debug/_min = ${_debug} / ${_min}
+   
+#
+   Login to Appliance via SSH     ${fusion_IP}
+   ${em_ip}=  Execute Command  /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enclosure}"
+   ${xauth}=  Execute Command  /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enclosure}" -o t
+   Run Keyword If  ${_debug} == ${_min}  Log to console   EM Operations Core: EM and auth = ${em_ip} ${xauth}
+   ${Header}                      Set Variable   "x-auth-token:${xauth}"
+   ${Url}                         Set Variable   https://[${em_ip}%bond0]/rest/v1/Diags/EmSwitchPortFaultInjection/${pType}/${pUp}/${pNum}
+   ${cmd}                         Set Variable   curl -ikgX GET -H ${Header} ${Url}
+   Run Keyword If  ${_debug} == ${_min}  Log to console  ${cmd}
+   ${out} =						  Execute Command  ${cmd}
+   Logout of Fusion Via SSH
+#
+   
+   Run Keyword If  ${_xdebug} == ${_min}  Log to console   ${cmd} \n ${out}
+# Uncomment below
+   ${str202} =                    Get Lines containing String  ${out}  ${resp200}
+   ${lc} =                        Get Line Count  ${str202}
+   ${result} =                    Evaluate  ${result} - ${lc}
+   Run Keyword If  ${_debug} == ${_min}  Log to console   EOF: EM Operations Core -- ${result} 
+   Run Keyword If  ${result} != 0  Log to console  WARNING: EM Op failed ${enclosure} ${pType} ${pNum} ${pUp} \n ${out}
+   [return]                       ${result}
+
+#----------------------------------------------------------------------------------------------------------------   
+     
+Check ICM
+   [Arguments]                    ${icName}
+   ${temp} =                      Split String    ${icName}  ,
+   ${encName} =                   Get from List  ${temp}  0
+   ${temp2} =                     Get from List  ${temp}  1
+   Run Keyword If  ${_debug} == ${_min}   Log to console     ${temp2} ----
+   ${temp3} =                     Split String   ${temp2}
+   ${bay} =                       Get from List  ${temp3}  1
+   Run Keyword If  ${_debug} == ${_min}   Log to console    \n Check ICM: \t ${bay} in ${encName} 
+   [return]                       ${encName}  ${bay}
+#----------------------------------------------------------------------------------------------------------------   
+
+Ensure Appliances in pair are up
+# Ideally, never have to use this function fully - because it is just an attempt to get things working
+#   also, if this is fully used, we are never really sure that the systems are resync-ed.
+   [Arguments]                    ${cim1}  ${cim2}
+   ${result1} =                   Is Appliance Up  ${cim1}
+   ${result2} =                   Is Appliance Up  ${cim2}
+   Run Keyword If  ${_debug} == ${_min}  Log to console  Is Appliance Up -  ${result1} ${result2}  
+
+   Run Keyword If  ${result1} != 0   Log to console  "CAUTION: WE NEED TO RESET CIM1 AND WAIT FOR RESYNC"
+   Run Keyword If  ${result2} != 0   Log to console  "CAUTION: WE NEED TO RESET CIM2 AND WAIT FOR RESYNC"
+   
+   ${flag1}                        Set Variable  99	  
+   ${flag2}                        Set Variable  199	   
+   ${flag1} =  Run Keyword If  ${result1} != 0  EFuse Appliance  ${cim1}  ELSE  Evaluate  ${flag1} + 1 
+   ${flag2} =  Run Keyword If  ${result2} != 0  EFuse Appliance  ${cim2}  ELSE  Evaluate  ${flag2} + 1
+
+   Run Keyword If  ${_debug} == ${_min}  Log to console  Flags are ${flag1} and ${flag2} - Sleeping ${waitToJoinCluster}
+   Run Keyword If  ${flag1} == 0 or ${flag2} == 0  Waiting  ${waitToJoinCluster}
+
+# do an IO Check to see if everything is fine before starting the test   
+   AutoCheckIO   ${cim1}  ${cim2}   0
+   
+#----------------------------------------------------------------------------------------------------------------
+
+Remove Appliance
+   [Documentation]	      		  Remove appliance
+   [Arguments]                    ${cim}
+   ${testResult}                  Set Variable  1
+   ${sn} =                        Get from dictionary  ${cim}  applianceSerialNumber
+   Run Keyword If  ${_debug} == ${_min}  Log to console  Remove Appliance ${sn}
+   ${testResult} =                EFuse Appliance  ${cim}  EFuseOn
+   Waiting                        ${waitPostRemoval}
+  [return]                       ${testResult}
+
+#----------------------------------------------------------------------------------------------------------------   
+   
+FactoryReset i3S Appliance
+   [Documentation]	      		  Factory-reset the appliance
+   [Arguments]                    ${cim}  ${SessionId}
+   ${result}                      Set Variable  1
+   
+   ${i3S_IP} =                   Get from dictionary  ${cim}  applianceIpv6Address
+   Run Keyword If  ${_debug} == ${_min}  Log to console  [${i3S_IP}] 
+   
+   
+   ${areWebappsOK} =              Are Webapps Started  ${cim}
+   Run Keyword If   ${areWebappsOK} != 0   Log to console   ERROR: The webapps are not OK. Cannot factory-reset ${i3S_IP}
+   
+   
+   Run Keyword If  ${_xdebug} == ${_min}  Log to console  --- FACTORY RESET ${cim['applianceSerialNumber']}
+  
+   Run Keyword If  ${_xdebug} == ${_min}  Log to console  --- NOT DOING Factory-reset. Just efuse-reset of appliance
+   
+		
+#	Run Keyword If  ${_debug} == ${_min}  Log to console  --- Start: FACTORY RESET ----
+#   	${out} =                     I3S API LOGIN APPLIANCE      [${i3S_IP}]    ${SessionId}
+#	Run Keyword If  ${_xdebug} == ${_min}  Log to console  ${out}
+#	${out} =                     I3S API Factory Reset  
+#	Run Keyword If  ${_xdebug} == ${_min}  Log to console  ${out}
+#   ${str202} =                  Get Lines containing String  ${out}  ${resp202}
+#   ${lc} =                      Get Line Count  ${str202}
+#   ${result} =                  Evaluate  ${result} - ${lc}
+#   Run Keyword If  ${result} != 0  Log to console  WARNING: Factory-reset of ${i3s_IP} failed \n ${out}
+
+	
+# do a second reset of the appliance which will be equivalent to 'Refresh Image Streamer'	
+	EFuse Appliance                ${cim}  EFuseReset
+	Run Keyword If  ${_debug} == ${_min}  Log to console  --- EOF: FACTORY RESET ---- Now wait for resync ${waitForResync} mins
+	Waiting                       ${waitForResync}
+	
+	
+	[return]                      ${result}  
+#----------------------------------------------------------------------------------------------------------------   
+   
+Insert and FactoryReset Appliance
+   [Documentation]	      		  Insert and factory-reset the appliance
+   [Arguments]                    ${cim}  ${SessionId}  ${factoryReset}=0
+   ${testResult}                  Set Variable  1
+   ${isApplianceBack}             Set Variable  1
+   ${trials}                      Set Variable   ${testYourPatience}
+   
+   ${sn} =                        Get from dictionary  ${cim}  applianceSerialNumber
+   Run Keyword If  ${_debug} == ${_min}  Log to console  Insert And FactoryReset Appliance ${sn}
+   Run Keyword If  ${_debug} == ${_min}  Log to console  EFuseOff and waiting for ${sn}
+   EFuse Appliance                ${cim}  EFuseOff
+   Waiting                        ${waitPostPowerUp}
+#Extra step of efuse-resetting appliance before the Factory-reset   
+   EFuse Appliance                ${cim}  EFuseReset
+   Waiting                        ${waitPostPowerUp}
+   
+   
+   ${isApplianceBack}             Set Variable   1
+        
+   :FOR  ${x}  IN RANGE  0  ${trials}
+   \  ${isApplianceBack} =        Is Appliance Up  ${cim} 
+   \  Run Keyword If  ${isApplianceBack} != 0  Waiting  ${SixtySeconds}   ELSE  Exit For Loop   
+    
+    Run Keyword If  ${isApplianceBack} != 0   Log to console   ${sn} is not yet up. Resetting again and waiting for ${waitPostPowerUp}
+	Run Keyword If  ${isApplianceBack} != 0   EFuse Appliance  ${cim}  EFuseReset
+	Run Keyword If  ${isApplianceBack} != 0   Waiting   ${waitPostPowerUp}
+	
+   ${AreWebappsBack}              Set Variable   1
+   ${trials}                      Set Variable   ${waitPostReinsert}
+   ${powerFlag}                   Set Variable   0
+   ${zombie}                      Set Variable   1
+      
+   
+   :FOR  ${x}  IN RANGE  0  ${trials}
+   \  ${counter}                  Set Variable  ${x}
+   \  ${isApplianceBack} =        Is Appliance Up  ${cim} 
+   \  ${powerFlag} =   Run Keyword If  ${isApplianceBack} == 0  Evaluate  ${powerFlag} + 1  ELSE  Evaluate  ${powerFlag} + 0
+   \  Run Keyword If  ${_debug} == ${_min}  Log to console   powerFlag = ${powerFlag}, appliance = ${isApplianceBack}, loop = ${x}, counter = ${counter}
+   \                 Run Keyword If  ${powerFlag} == 1 and ${isApplianceBack} == 1  EFuse Appliance    ${cim}  EFuseReset
+   \                 Run Keyword If  ${powerFlag} == 1 and ${isApplianceBack} == 1  Waiting  ${waitPostPowerUp}
+   \  ${zombie} =    Run Keyword If  ${powerFlag} == 1 and ${isApplianceBack} == 1  Is Appliance Up  ${cim}  ELSE  Evaluate  ${zombie} + 0
+   \                 Run Keyword If  ${powerFlag} == 1 and ${isApplianceBack} == 1 and ${zombie} != 0  Support Dump  ${i3S_IP} not restarted
+   \  ${x} =         Run Keyword If  ${powerFlag} == 1 and ${isApplianceBack} == 1  Evaluate  ${x} - ${counter}  ELSE  Evaluate  ${x} + 0
+   \  ${powerFlag}=  Run Keyword If  ${powerFlag} == 1 and ${isApplianceBack} == 1  Evaluate  ${powerFlag} - 1  ELSE  Evaluate  ${powerFlag} + 0
+   \  ${areWebappsBack} =  Run Keyword If  ${isApplianceBack} == 0   Are Webapps Started  ${cim}  ELSE  Evaluate  ${areWebappsBack} + 0
+   \  Run Keyword If  ${areWebappsBack} == 1  Waiting  ${SixtySeconds}   ELSE  Exit For Loop  
+     
+   ${flagToContinue}             Set Variable   0
+   
+   Run Keyword If  ${isApplianceBack} != 0                             Support Dump   ERROR & FAILURE: ${sn} is not powered up
+   Run Keyword If  ${isApplianceBack} == 0 and ${areWebappsBack} == 1  Support Dump   ERROR & FAILURE: ${sn} is up but Webapps are in STARTING
+   Run Keyword If  ${isApplianceBack} == 0 and ${areWebappsBack} == 2  Log to console  ${sn} does not need a factory-reset
+
+# Don't do a factory-reset immediately!   
+# Wait for some time to see if the node rejoins the cluster. If it still does not join the cluster and remains at 0, then do a factory-reset   
+   :FOR  ${x}  IN RANGE  0  ${trials}
+   \  ${areWebappsBack} =         Are Webapps Started  ${cim}
+   \  Run Keyword If  ${areWebappsBack} != 2  Waiting  ${SixtySeconds}   ELSE  Exit For Loop
+   
+   
+#FactoryReset by default. But, keep an option to skip this step  
+   Run Keyword If  ${areWebappsBack} == 0 and ${factoryReset} == 0   FactoryReset I3S Appliance   ${cim}  ${SessionId}
+   
+   [return]                       ${testResult}
+#----------------------------------------------------------------------------------------------------------------
+
+CheckDataConnections
+    [Arguments]                   ${cim1}  ${cim2}  ${dataIp1}  ${dataIp2}  ${msg2}
+    ${trials}                      Set Variable   ${waitServerBoot}
+	
+	${mac1} =                     Get from dictionary   ${cim1}  applianceIpv6Address	 
+	${mac2} =                     Get from dictionary   ${cim2}  applianceIpv6Address
+	
+	${sys1} =                     Is Appliance Up  ${cim1}
+	${sys2} =                     Is Appliance Up  ${cim2}
+	
+	Run Keyword If  ${sys1} != 0 and ${sys2} != 0  Fail  msg='ERROR: Neither appliance is up.  Exiting ...'
+	Run Keyword If  ${_debug} == ${_min}  Log to console  ${dataIp1} ${dataIp2} ${msg2}
+	
+	${flag}                       Set Variable  0
+	${flag} =  Run Keyword If  ${sys1} == 0  Evaluate  ${flag} + 1   ELSE  Evaluate  ${flag} + 2
+
+#	Login 
+	Run Keyword If  ${flag} == 1     Login to Appliance via SSH     ${mac1}
+	Run Keyword If  ${flag} == 2     Login to Appliance via SSH     ${mac2}
+
+    ${out} =                    Execute Command  ifconfig -a | grep bond0
+    Run Keyword If  ${_debug} == ${min}  Log to console  -- logged in from ${out}	
+	
+   :FOR  ${x}  IN RANGE  0  ${trials}
+   \  ${out} =                    Execute Command  ping -c 4 ${dataIp1} 
+   \  Run Keyword If  ${_xdebug} == ${min}  Log to console  ${out}
+   \  ${unreachable} =            Get Lines containing String  ${out}  100% packet loss
+   \  ${result1} =                Get Line Count  ${unreachable}
+   \  ${out} =                    Execute Command  ping -c 4 ${dataIp2}  
+   \  Run Keyword If  ${_xdebug} == ${min}  Log to console  ${out}      
+   \  ${unreachable} =            Get Lines containing String  ${out}  100% packet loss
+   \  ${result2} =                Get Line Count  ${unreachable}
+   \  Run Keyword If  ${result1} != 0 and ${result2} != 0   Waiting  ${SixtySeconds}  1  ELSE  Exit For Loop   	
+   SSH Logout of Appliance
+#  Logout
+   
+   Run Keyword If   ${result1} == 0   Log to console  ${dataIp1} reached in ${x} minutes
+   Run Keyword If   ${result2} == 0   Log to console  ${dataIp2} reached in ${x} minutes
+
+   #Run Keyword If   ${result1} != 0 and ${result2} != 0   Fail  msg 'HA FAILURE !!!: Blade ${dataIp1} or ${dataIp2} IS NOT REACHABLE - ${msg2}'
+   Run Keyword If   ${result1} != 0 and ${result2} != 0   Support Dump   HA FAILURE !!!: Blade ${dataIp1} or ${dataIp2} IS NOT REACHABLE - ${msg2}
+      	
+	
+	
+#----------------------------------------------------------------------------------------------------------------------
+
+CheckIOStatusX
+    [Arguments]                   ${cim1}  ${cim2}  ${reboot}=1
+    
+	${vsaDataClusterIpv4Address} =   Get from dictionary  ${cim1}  vsaDataClusterIpv4Address
+	${leName} =   Get from dictionary  ${cim1}  leName
+	Run Keyword If  ${_xdebug} == ${_min}  Log to console  CheckIOStatusX: LE and storage-ip is ${leName} and ${vsaDataClusterIpv4Address} 
+	
+	
+# Get all the server-profiles. 
+    ${resp} =                     Fusion API Get Server Profiles   
+    ${members}=                   Get from dictionary  ${resp}  members
+   
+    ${spInfo} =                   Create dictionary
+    :FOR  ${x}  IN  @{members}
+    \  ${spName} =                Get from dictionary  ${x}  name
+    \  Set to dictionary          ${spInfo}  ${spName}=${x}
+   
+    ${spList} =                  Create List
+    :FOR  ${x}  IN  @{spInfo}
+    \  Append to List            ${spList}  ${x}
+	${totalSps} =                Get Length  ${spList}
+	Run Keyword If  ${totalSps} == 0   Fail  msg='ERROR! - There are no server profiles at all. Exiting ...'
+   
+# create a list having sps only having i3S related sps   
+   ${osList} =                  Create List
+   :FOR  ${x}  IN  @{spList}
+   \  ${temp} =                Get from dictionary    ${spInfo}  ${x}
+   \  ${osDP} =                Get from dictionary    ${temp}  osDeploymentSettings
+   #\  Run Keyword If  ${osDP} != ""  Append to List  ${osList}  ${x}
+   \  ${firstBootTargetIp}     Set variable  100
+   \  Run Keyword If  ${_xdebug} == ${_min}  Log to console  ${firstBootTargetIp}
+   \  ${firstBootTargetIp} =   Run Keyword If  ${osDP} != ""   GetFirstBootTargetIp  ${temp}
+   \  Run Keyword If  ${_xdebug} == ${_min}  Log to console  ${firstBootTargetIp}
+   \  Run Keyword If  '${vsaDataClusterIPv4Address}' == '${firstBootTargetIp}'   Append to List  ${osList}  ${x}
+   ${numOfsps} =               Get Length  ${osList}
+   Run Keyword If  ${_xdebug} == ${_min}  Log to console   Number of i3S SPs = ${numOfSps}
+   Run Keyword If  ${numOfSps} == 0   Fail  msg='ERROR! - There are no profiles with OS-dep plan IN ${leName}. Exiting ...'
+   
+
+# create a dictionary that contains a set of dictionaries ${ipInfo}
+#   each subset dictionary should have  'serverHWuri, and both iscsi data connections'
+   ${ipInfo} =                 Create dictionary
+   :FOR  ${x}  IN  @{osList}
+   \  ${temp} =                Get from dictionary    ${spInfo}  ${x}
+   \  ${serverHardwareUri} =   Get from dictionary    ${temp}  serverHardwareUri
+   \  ${cons} =                Get from dictionary    ${temp}  connectionSettings
+   \  ${y} =                   Get from dictionary    ${cons}  connections
+   #\  ${nc} =                  Get Length  ${y}
+   \  ${c1} =                  Get from dictionary  ${y[0]}  ipv4
+   \  ${ip1} =                 Get from dictionary  ${c1}   ipAddress
+   \  ${c2} =                  Get from dictionary  ${y[1]}  ipv4
+   \  ${ip2} =                 Get from dictionary  ${c2}   ipAddress
+   \  Run Keyword If  ${_debug} == ${_min}  Log to console  ${x} : ${ip1} and ${ip2}
+   \  ${sp} =                  Create dictionary   uri=${serverHardwareUri}
+   \  ...                                          ip1=${ip1}
+   \  ...                                          ip2=${ip2}
+   \  Run Keyword If  ${_debug} == ${_min}  Log to console  ${sp}
+   \  Set to dictionary   ${ipInfo}  ${x}=${sp}
+     
+   :FOR   ${x}  IN  @{ipInfo}
+   \  Run Keyword If  ${_debug} == ${_min}  Log to console  ${x}
+   
+   
+# for each sp, check if the server is ON - if yes, then check if it is pinging - if not - FAIL
+#         if pass, ok and power off and power on the server
+    :FOR  ${x}  IN  @{osList}
+	\  ${temp} =              Get from dictionary    ${ipInfo}  ${x}
+	\  ${uri} =               Get from dictionary    ${temp}  uri 
+	\  ${ip1} =               Get from dictionary    ${temp}  ip1 
+	\  ${ip2} =               Get from dictionary    ${temp}  ip2
+	\  Run Keyword If  ${_debug} == ${_min}  Log to console  \n ${ip1} ${ip2} ${uri} 
+	\  ${server} =            Fusion API Get Server Hardware  ${uri}
+	\  Run Keyword If  ${_debug} == ${_min}  Log to console  \n ${server}
+	\  ${powerState} =        Get from dictionary   ${server}   powerState
+	\  Run Keyword If  ${_debug} == ${_min}  Log to console  \n ${powerState} for ${uri}
+	\  Run Keyword If  '${powerState}' != 'On'  Server Power Ops   ${uri}  On
+	\  Run Keyword If  '${powerState}' == 'On'  CheckDataConnections  ${cim1}  ${cim2}  ${ip1}  ${ip2}  "BEFORE reboot and ${reboot}"
+#    \  Server Power Ops      ${uri}  Off
+#	\  Server Power Ops      ${uri}  On
+    \  Run Keyword If  	${reboot} != 0    Server Power Ops    ${uri}  Off
+    \  Run Keyword If  	${reboot} != 0    Server Power Ops    ${uri}  On
+	
+	    	
+# for each sp, check if the server is ON - if yes, then check if it is pinging - if not - FAIL
+    :FOR  ${x}  IN  @{osList}
+	\  ${temp} =              Get from dictionary    ${ipInfo}  ${x}
+	\  ${uri} =               Get from dictionary    ${temp}  uri 
+	\  ${ip1} =               Get from dictionary    ${temp}  ip1 
+	\  ${ip2} =               Get from dictionary    ${temp}  ip2
+	\  Run Keyword If  ${_debug} == ${_min}  Log to console  \n ${ip1} ${ip2} ${uri}
+	\  ${server} =            Fusion API Get Server Hardware  ${uri}
+	\  Run Keyword If  ${_debug} == ${_min}  Log to console  \n ${server}
+	\  ${powerState} =        Get from dictionary  ${server}  powerState
+	\  Run Keyword If  ${_debug} == ${_min}  Log to console  \n ${powerState} for ${uri}
+	\  Run Keyword If  '${powerState}' == 'On'  CheckDataConnections  ${cim1}  ${cim2}  ${ip1}  ${ip2}  "AFTER reboot -but rebooting = ${reboot}"
+
+	
+	
+	
+   
+#----------------------------------------------------------------------------------------------------------------------
+Server Power Ops
+	[Documentation]		Server Power Ops
+	[Arguments]         ${ServerHwUri}    ${power_state}
+	
+	${server} =            Fusion API Get Server Hardware  ${ServerHwUri}
+	
+	${existingPowerState}=    Get from dictionary  ${server}  powerState
+	${sn} =                   Get from dictionary  ${Server}  serialNumber
+	Run Keyword If  ${_debug} == ${_min}   Log to console  Server Power Ops = ${power_state} ${sn} Existing= ${existingPowerState}
+	Run Keyword If  '${existingPowerState}' != '${power_state}'   
+    ...                       ServerPowerOpsCore   ${ServerHwUri}  ${power_state}  ${sn} 
+    ...                       ELSE  
+	...                            Log to console  No power change required for ${sn}
+	
+#----------------------------------------------------------------------------------------------------------------------	
+ServerPowerOpsCore	
+    [Arguments]         ${ServerHwUri}    ${power_state}  ${serialNumber}
+	${blade_load}=		Create Dictionary		powerState=${power_state}  
+	...										powerControl=MomentaryPress
+	${Response}=    Fusion Api Edit Server Hardware Power State		${blade_load}		${ServerHwUri}
+	${taskuri}=	   Get From Dictionary		${Response}		uri
+	${retries}=    Convert To Integer		20
+	${sleep_time}=    Convert To Integer		30
+	${Resp}=    Fusion Api Wait For Task To Complete	${taskuri}		retries=${retries}		sleep_time=${sleep_time}
+	${taskState}		Get From Dictionary		${Resp}		taskState
+	${taskStatus}		Get From Dictionary		${Resp}		taskStatus
+	
+	Run Keyword If  ${_debug} == ${_min}   Log to console   ${serialNumber} Power ${power_state} ${taskState}
+	Run Keyword If  '${taskState}' != 'Completed'  Fail  msg='ERROR: Failed to power ${power_state}  server ${serialNumber}'
+	[return]              0
+
+#----------------------------------------------------------------------------------------------------------------------
+
+
+AutoCheckIO
+      [Arguments]             ${cim1}  ${cim2}  ${autoIOFlag}=1
+#      Run Keyword If  ${autoIOFlag} == 1  CheckIOStatusX  ${cim1}  ${cim2}
+      CheckIOStatusX  ${cim1}  ${cim2}  ${autoIOFlag}   
+
+#----------------------------------------------------------------------------------------------------------------------
+
+Support Dump OV
+   [Documentation]			  Create support-dump for OV
+   [Arguments]                ${msg2}
+   Log to console             ${msg2} \t ---OV support-dump starting
+   ${resp} =                  Fusion API Create Support Dump  ${sdmp_body}
+   Log to console             ${resp}
+
+#----------------------------------------------------------------------------------------------------------------------   
+
+Support Dump i3sCluster
+   [Documentation]            Create support-dump for I3S
+   [Arguments]                ${msg2}
+   
+   ${resp} =                  Fusion Api Get i3sCluster IP 
+   ${i3S_IP} =                Get From Dictionary    ${resp['members'][0]}    primaryIPV4
+   ${resp}=                   I3S API LOGIN APPLIANCE      ${i3S_IP}    ${SessionId}
+       
+   Log to console             ${msg2} \t ---i3S support-dump starting	   
+   ${resp} =                  I3S API Create Support Dump   ${sdmp_body}
+  
+#----------------------------------------------------------------------------------------------------------------------   
+
+Support Dump LE
+   [Documentation]            Create support-dump for LE
+   [Arguments]                ${msg2}
+   
+   Log to console             ${msg2} \t ---LE support-dump starting	   
+   #add the LE id to the line below -Krishna 
+   #${resp} =                  Fusion API Get Logical Enclosure Support Dump   ${LE_SupportDump_Payload}         
+
+  
+  
+#----------------------------------------------------------------------------------------------------------------------   
+         
+Support Dump
+   [Arguments]                ${msg2}
+   Log to console             ${msg2} \t TAKING SUPPORT DUMPS now!
+   Support Dump OV            ${msg2}
+   Support Dump i3sCluster    ${msg2}
+   Fail                       msg='${msg2}'
+   
+#----------------------------------------------------------------------------------------------------------------------   
+
+StoppingToDebug
+  [Arguments]       ${msg1}=""
+  Fail              msg="Stopping to DEBUG!- ${msg1}"
+
+#----------------------------------------------------------------------------------------------------------------------    
+Insert And Rediscover Appliance
+  [Arguments]       ${cim}
+  Run Keyword If  ${_xdebug} == ${_min}  Log to Console  Insert and rediscover ${cim['applianceSerialNumber']}
+  #EFuse Appliance   ${cim}  EFuseOff
+  #Waiting           ${waitPostPowerUp}
+    
+  
+  Run Keyword If  ${_xdebug} == ${_min}  Log to Console  CIM is inserted ${waitPostPowerUp} mins ago. Wait max ${waitForAlert} mins
+  ${alertActive}    Set Variable  99
+  :FOR  ${start}  IN RANGE  0  ${waitForAlert}
+  \  ${alertActive} =  MatchApplianceAlert  ${cim}
+  \  Run Keyword If  ${_debug} == ${_min}  Log to console  ${alertActive}
+  \  Run Keyword If  ${alertActive} == 0  Exit For Loop
+  \  Waiting  1  1
+  Run Keyword If  ${alertActive} != 0  Fail  msg = 'the alert for ${cim['applianceSerialNumber'] did not come up'
+  Run Keyword If  ${_xdebug} == ${_min}  Log to console  the alert came up in ${start} minutes
+  
+  ${serverHardwareUri}   Set Variable  ${cim['serverHardwareUri']}
+  @{words} =       Split String   ${serverHardwareUri}  /
+  ${idToUse}=      Get from List    ${words}  3
+  Run Keyword If  ${_xdebug} == ${_min}  Log to console  ${serverHardwareUri} and ${idToUse}
+  ${payload} =     Create Dictionary  '"cimEnclosureName"'=null  '"description"'=null
+  Run Keyword If  ${_xdebug} == ${_min}  Log to console   Payload = ${payload}
+  ${Response} =  Fusion API Rediscover Appliance  param=${idToUse}  body=${payload}
+  Log to console   Initiated re-discover of ${cim['cimEnclosureName']} bay ${cim['cimBay']}
+  Log to console   Status of call = ${Response['status_code']}
+  Run Keyword If  ${Response['status_code']} > 202  Fail   msg = 'Failed Fusion API Rediscover Appliance ----' \n ${Response}
+  Waiting   ${waitforResync}  
+
+#----------------------------------------------------------------------------------------------------------------------    
+MatchApplianceAlert
+  [Arguments]       ${cim}
+  ${resp} =         Fusion API Get Alerts
+  ${members}=       Get from Dictionary  ${resp}  members
+  ${activeAlerts}   Create List
+  :FOR  ${data}  IN  @{members}
+  \  Run Keyword If  '${data['alertState']}' == 'Active'  Append to List  ${activeAlerts}  ${data['description']}
+  Run Keyword If  ${_debug} == ${_min}  Log to console   Active alerts are ${activeAlerts}
+  Run Keyword If  ${_debug} == ${_min}  Log to console   ${cim['msg']}
+  ${enc}        Set Variable  ${cim['cimEnclosureName']}
+  ${bay}        Set Variable  ${cim['cimBay']}
+  ${msg}        Set Variable  Image Streamer appliance trust establishment failed, Location enclosure ${enc} bay ${bay}.
+  ${flag}           Set Variable  99
+  Run Keyword If  ${_xdebug} == ${_min}  Log to console  ${flag} --- ${msg}
+  :FOR  ${data}  IN  @{activeAlerts}
+  \  ${flag} =  Run Keyword If  '${data}' == '${msg}'  Set Variable  0   ELSE  Set Variable  99
+  \  Run Keyword If  ${flag} == 0  Exit For Loop
+  \  Run Keyword If  ${_debug} == ${_min}  Log to console  ${data} --- ${flag}
+  [return]          ${flag}  
+
+#----------------------------------------------------------------------------------------------------------------------    
+
+AppliancePowerOps   
+  [Arguments]       ${cim}
+  ${encUri} =       Get from Dictionary   ${cim}  cimEnclosureUri
+  ${enc} =          Fusion Api Get Enclosures  ${encUri}
+  ${eTag} =         Get from Dictionary   ${enc}  eTag
+  ${bay} =          Get from Dictionary   ${cim}  cimBay
+  Run Keyword If  ${_xdebug} == ${_min}  Log to console   ${encUri} and ${bay} and ${eTag}
+  ${payload} =     Create Dictionary  op=replace  path=/applianceBays/1/power  value=On
+  ${payload} =     Create List  ${payload}
+  Run Keyword If  ${_xdebug} == ${_min}  Log to console   ${payload}
+  ${resp} =  Fusion Api Patch Enclosure  ${payload}  ${encUri}  etag=${eTag}
+  Run Keyword If  ${_xdebug} == ${_min}  Log to console  ${resp}
+  
+#----------------------------------------------------------------------------------------------------------------------      
+  
+GetFirstBootTargetIp
+  [Arguments]      ${sp}
+  ${osDP} =                Get from dictionary    ${sp}  osDeploymentSettings
+  Run Keyword If  ${osDP} == ""  Fail   msg='ERROR! -GetFirstBootTargetIp - there is no OSDP for this SP. Exiting ... '
+  ${cons} =        Get from dictionary    ${sp}  connectionSettings
+  ${y} =           Get from dictionary    ${cons}  connections
+  ${boot} =        Get from dictionary  ${y[0]}  boot
+  ${iscsi} =       Get from dictionary  ${boot}  iscsi
+  ${firstBootTargetIp}=    Get from dictionary  ${iscsi}  firstBootTargetIp
+  Run Keyword If  ${_xdebug} == ${_min}  Log to console  ${firstBootTargetIp}
+  [return]        ${firstBootTargetIp}
+  
+#----------------------------------------------------------------------------------------------------------------------        
+  

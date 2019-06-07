@@ -1,0 +1,490 @@
+*** Settings ***
+Documentation		Feature Test: Exercise high availability for i3S 
+
+
+
+############################################################################################
+#Resource            ../../../../fusion/tests/resource/fusion_api_all_resource_files.txt
+#Resource            ./setup-bringup-keywords.txt
+# ./ha-keywords.txt already has included the above 2 files
+
+
+Resource            ./ha-keywords.txt
+Resource            ./bot.txt
+
+Library             i3SLibrary
+Variables 	        ./data_variables.py
+
+
+*** Variables ***
+${active}				0
+${standby}				1
+${desc}                 description
+${cimEnc}               cimEnclosureName
+
+
+############################################################################################
+
+*** Keywords ***
+# Look up the "ha-keywords.txt". All the keywords are generic and can be used across any test
+
+   
+############################################################################################
+
+
+
+
+
+*** Test cases ***
+
+
+# -------------------------------------------------------------------------------------------------   
+Check if OV is up
+   [Documentation]               Proceed only if OV is up
+   [Tags]                        Critical-OV
+
+   Set Log Level                 TRACE   
+   ${out} =                      setup-bringup-keywords.Windows ping  ${fusion_IP}
+   Run Keyword If    ${out} !=0  Fail  msg='OV is not reachable. Exiting ...'
+   Log to console                \n EOF: ${out} : OV is up? --- STEP 1
+       
+# -------------------------------------------------------------------------------------------------
+Log into OV
+   [Documentation]	      		 Log into OV: Get a OV session and set suite variables
+   [Tags]                        Critical-OV
+
+# Set suite variable for le to target   
+   Set Suite Variable            ${leTarget}  ${leToTestHA}
+# Create 2 suite-variables based on input data:  fusion_IP, admin_credentials 
+   Set Suite Variable             ${fusion_IP}  ${fusion_IP}
+   Set Suite Variable             ${admin_credentials}  ${admin_credentials}
+# Is OV in good state to proceed or not?
+   ${resp} =                      Fusion API Get Appliance State  ${fusionIP}
+   ${ovState} =                   Get from dictionary  ${resp}  state
+   Run Keyword If  '${ovState}' != 'OK'  Fail  msg='Webapps not up on OV.  Exiting ...'
+# Generate SessionID and store it in a suite-variable
+   ${resp}    ${SessionId}=       Fusion Api Login Appliance  ${fusion_IP}  ${admin_credentials}
+   Set Suite Variable             ${SessionId}  ${SessionId}
+   Run Keyword If  ${_debug} == ${_min}   Log to Console   ${SessionId} and ${admin_credentials}
+# determine curl version   
+   ${curlversion} =              findCurlVersion
+   Set Suite Variable            ${curlVersion}   
+# Get the list of CIMs in the target LE  
+   ${cimX}  ${cimY} =            Get CIM Dictionaries  ${leTarget}
+   ${leUri} =                    Get from dictionary  ${cimX}  leUri
+   Run Keyword If  ${_xdebug} == ${_min}   Log to Console  LE -URI = ${leUri}
+   ${leInfo} =                   Fusion API Get Resource  ${leUri}
+   ${egUri} =                    Get from dictionary  ${leInfo}   enclosureGroupUri
+   Run Keyword If  ${_xdebug} == ${_min}   Log to Console  EG -URI = ${egUri}
+   Set Suite Variable            ${cimX}  ${cimX}
+   Set Suite Variable            ${cimY}  ${cimY}
+
+# DEBUGGING
+  AutoCheckIO   ${cimX}  ${cimY}   0
+  Run Keyword If  ${StopToDebug} == 1   Fail  msg='Stopping to DEBUG!'
+  
+# Get the list of Potash modules in the target LE   
+   ${resp} =                      Fusion API Get Interconnect
+   ${members} =                   Get from dictionary  ${resp}  members
+   ${potashInfo} =                Create List
+   :FOR  ${x}  IN  @{members}
+   \  ${model} =                 Get from dictionary  ${x}  model
+   \  ${icName} =                Get from dictionary  ${x}  name
+   \  ${encUri} =                Get from dictionary  ${x}  enclosureUri
+   \  ${encInfo}=                Fusion API Get Resource  ${encUri}
+   \  ${encEGUri} =              Get from dictionary  ${encInfo}  enclosureGroupUri
+   \  Run Keyword If  ${_xdebug} == ${_min}   Log to Console  enc Potash EG -URI = ${encEGUri}
+   \  Run Keyword If  '${model}' == '${PotashModel}' and '${encEGUri}' == '${egUri}'  Append to List  ${potashInfo}  ${icName}
+   \  Check ICM                  ${icName}
+      
+   Set Suite Variable            ${potashList}  ${potashInfo}
+   :FOR  ${x}  IN  @{potashList}
+   \  Run Keyword If  ${_xdebug} == ${_min}   Log to Console  ${x}
+   
+     
+# Get the enclosure list and store it in a suite-variable
+   ${resp} =                      Fusion API Get Enclosures
+   #Log to console                 ${resp}
+   ${members} =                   Get from dictionary  ${resp}  members
+   ${encNames} =                  Create List
+   :FOR  ${x}  IN  @{members}
+   \  ${enc} =                    Get from dictionary  ${x}  name
+   \  Append to List              ${encNames}  ${enc}
+   Set Suite Variable             ${enclosureList}  ${encNames}
+   ${numEncs} =                  Get Length  ${encNames}
+   Run Keyword If  ${numEncs} < ${MIN_ENCS}   Fail  msg='Less than ${MIN_ENCS} encs. Exiting ...'
+   :FOR  ${x}  IN  @{enclosureList}
+   \  Run Keyword If  ${_debug} == ${_min}   Log to Console  ${x}
+  
+  
+   #Log to console			      \n EOF: Log into OV --- STEP 2
+# -------------------------------------------------------------------------------------------------
+
+
+Run Loop HA
+   [Documentation]               Run all HA tests in loop
+   [Tags]                        LOOP
+   
+   ${encX} =                     Get from dictionary   ${cimX}  cimEnclosureName
+   ${encY} =                     Get from dictionary   ${cimY}  cimEnclosureName
+   ${icm1} =                     Set Variable  ${potashList[0]}
+   ${icm2} =                     Set Variable  ${potashList[1]}
+      
+   Log to console                ${icm1} and ${icm2}, ${encX} and ${encY}
+   #Fail                          msg='Pause for breath! -Krishna'
+   
+   :FOR  ${runs}  IN RANGE  0  ${loops}
+   \  Run Keyword If  ${mgmtCases} == 1    MgmtCables   ${activeAppliance}  ${topEM}       ELSE  Log to console  'MA0 skipped'
+   \  Run Keyword If  ${mgmtCases} == 1    MgmtCables   ${activeAppliance}  ${bottomEM}    ELSE  Log to console  'MA1 skipped'
+   \  Run Keyword If  ${mgmtCases} == 1    MgmtCables   ${standbyAppliance}  ${topEM}      ELSE  Log to console  'MS0 skipped'
+   \  Run Keyword If  ${mgmtCases} == 1    MgmtCables   ${standbyAppliance}  ${bottomEM}   ELSE  Log to console  'MS1 skipped'
+   \  Run Keyword If  ${linkCases} == 1    LinkCables   ${encX}                            ELSE  Log to console  'LX skipped'
+   \  Run Keyword If  ${linkCases} == 1    LinkCables   ${encY}                            ELSE  Log to console  'LY skipped'
+  # \  Run Keyword If  ${emCases} == 1      EMDisable    ${encX}  ${topEM}                  ELSE  Log to console  'EMX0 skipped'
+  # \  Run Keyword If  ${emCases} == 1      EMDisable    ${encX}  ${bottomEM}               ELSE  Log to console  'EMX1 skipped'
+  # \  Run Keyword If  ${emCases} == 1      EMDisable    ${encY}  ${topEM}                  ELSE  Log to console  'EMY0 skipped'
+  # \  Run Keyword If  ${emCases} == 1      EMDisable    ${encY}  ${bottomEM}               ELSE  Log to console  'EMY1 skipped'
+   \  Run Keyword If  ${cimPCases} == 1    PowerCycle Appliance  ${standbyAppliance}       ELSE  Log to console  'PS0 skipped'
+   \  Run Keyword If  ${cimPCases} == 1    PowerCycle Appliance  ${activeAppliance}        ELSE  Log to console  'PS1 skipped'
+   \  Run Keyword If  ${cimRmCasesUI} == 1   RemoveInsert Appliance  ${standbyAppliance}  ${SessionId}  ${cimRmCasesUI}  ELSE  Log to console  'UI0 skipped'
+   \  Run Keyword If  ${cimRmCasesUI} == 1   RemoveInsert Appliance  ${activeAppliance}  ${SessionId}  ${cimRmCasesUI}   ELSE  Log to console  'UI1 skipped' 
+   \  Run Keyword If  ${cimRmCases} == 1   RemoveInsert Appliance  ${standbyAppliance}  ${SessionId}  ELSE  Log to console  'RS0 skipped'
+   \  Run Keyword If  ${cimRmCases} == 1   RemoveInsert Appliance  ${activeAppliance}  ${SessionId}   ELSE  Log to console  'RS1 skipped' 
+   \  Run Keyword If  ${icmCases} == 1     ICMPowerCycle  ${icm1}                          ELSE  Log to console  'ICM1 skipped'
+   \  Run Keyword If  ${icmCases} == 1     ICMPowerCycle  ${icm2}                          ELSE  Log to console  'ICM2 skipped'
+   
+   
+      
+   
+   
+The End
+   [Tags]                        LOOP
+    Log to console               \n \n That's all folks! --- STEP 99
+# -------------------------------------------------------------------------------------------------
+
+
+
+# Unit tests start here
+# -------------------------------------------------------------------------------------------------
+
+Print all variables
+   [Documentation]               Print all variable values from included files
+   [Tags]                        UT0
+   Log to console                \n Variables from ha-keywords
+   Log to console                \n DEBUG LEVELS: \t ${_min}, ${_debug}, ${_debug}
+   Log to console                \n top, bottom, Mgmt, Link, Internal
+   Log to console                ${topEM}, ${bottomEM}, ${Mgmt}, ${Link}
+   Log to console				 \n Timing: Sixty, resync, postShutdown, postPowerUp, postRemoval, testYourPatience, IOFlag
+   Log to console                ${SixtySeconds}, ${waitforResync}, ${waitPostShutdown}, ${waitPostPowerUp}, ${waitPostRemoval}, ${testYourPatience}, ${IOFlag}
+   Log to console                \n Potash model = ${PotashModel}
+   Log to console                \n fusion_IP = ${fusion_IP}
+   Log to console                \n FROM the physical config files \n
+   Log to console                ${repair1}
+   
+# -------------------------------------------------------------------------------------------------
+
+Unit Test for EM Operations Core
+    [Tags]                      UT1
+	
+# Test if every enclosure gets picked up	
+	:FOR  ${enc}  IN  @{enclosureList}
+	\  Log to console           ${enc}
+	\  EM Operations Core       ${enc}  ${Mgmt}  ${bottomEM}  UP
+	\  EM Operations Core       ${enc}  ${Link}  ${bottomEM}  UP
+	\  EM Operations Core       ${enc}  ${Mgmt}  ${topEM}  UP
+	\  EM Operations Core       ${enc}  ${Link}  ${topEM}  UP
+
+	
+	
+	
+	
+	Log to console              \n EOF: Unit Test for EM Operations Core --- UT1
+# -------------------------------------------------------------------------------------------------
+
+Unit Test for ICM EFuse 
+    [Tags]                      UT2
+	
+# Test if every Potash gets picked up
+	:FOR  ${icName}  IN  @{potashList}
+	\  Log to console           ${icName}
+	\  ICM EFuse                ${icName}  EFuseOn
+	\  ICM EFuse                ${icName}  EFuseOff
+	
+# For the last ${icName}, check the other operations also
+	ICM EFuse                   ${icName}  
+	
+	Log to console              \n EOF: Unit Test for 'ICM EFuse' and internally 'Check ICM' --- UT2
+# -------------------------------------------------------------------------------------------------
+
+
+
+Unit Test for CheckIOStatusX
+   [Tags]                       UT3
+  
+    CheckIOStatusX               ${cimX}  ${cimY}
+    	
+	
+# -------------------------------------------------------------------------------------------------
+
+Unit Test for ServerPowerOps
+  [Tags]                        UT4
+  Fail                          msg='Hardcode the server-hardware-uri before running this'
+  
+  ${uri} =                         Set Variable  /rest/server-hardware/36343537-3338-4448-3537-4E5030303237
+  Log to console                ${uri}
+  ${server} =                   Fusion API Get Server Hardware  ${uri}
+  ${powerState} =               Get from dictionary  ${server}  powerState
+  Log to console                ${powerState}
+  #Log to console                ${server}
+  Server Power Ops              ${uri}  ${powerState}
+  Run Keyword If  '${powerState}' == 'On'   Server Power Ops       ${uri}  Off
+  Run Keyword If  '${powerState}' == 'Off'  Server Power Ops       ${uri}  On
+
+
+
+
+# -------------------------------------------------------------------------------------------------
+
+   
+
+
+Unit Test for Sdmp
+  [Tags]                        UT5
+  #Support Dump OV  
+  #Support Dump i3sCluster
+  ${x}                          Set Variable  3
+  Support Dump  ERROR & FAILURE: On ${x}, the webapps not up in ${waitPostReinsert} mins. So, cannot Factory-reset
+
+# -------------------------------------------------------------------------------------------------
+Unit Test for ssh
+  [Tags]                       UT6
+  Login to Appliance via SSH   ${fusion_IP}
+  Waiting   5
+  SSH Logout of Appliance
+
+# -------------------------------------------------------------------------------------------------  
+Unit Test for Factory-reset
+   [Tags]                      UT7
+   
+   ${mac} =                    Get from dictionary   ${cimX}  applianceIpv6Address    	
+   Log to console              ${mac} and ${repair1}
+   Run Keyword If  '${mac}' == '${repair1}'  FactoryReset i3S Appliance  ${cimX}  ${SessionID}  
+   
+   
+   ${mac} =                    Get from dictionary   ${cimY}  applianceIpv6Address    	
+   Log to console              ${mac} and ${repair1}
+   Run Keyword If  '${mac}' == '${repair1}'  FactoryReset i3S Appliance  ${cimY}  ${SessionID}  
+   
+# -------------------------------------------------------------------------------------------------  
+Unit Test for EFuseReset
+   [Tags]                      UT8
+   
+   ${mac} =                    Get from dictionary   ${cimX}  applianceIpv6Address    	
+   Log to console              ${mac} and ${repair2}
+   Run Keyword If  '${mac}' == '${repair2}'  EFuse Appliance  ${cimX}  
+   
+   
+   ${mac} =                    Get from dictionary   ${cimY}  applianceIpv6Address    	
+   Log to console              ${mac} and ${repair2}
+   Run Keyword If  '${mac}' == '${repair2}'  EFuse Appliance  ${cimY}  
+
+# -------------------------------------------------------------------------------------------------  
+Unit Test for MatchApplianceAlert
+   [Tags]                      UT9
+   Log to console              UT9:: ${cimX['cimEnclosureName']} - ${cimX['cimBay']}
+   ${match} =                  MatchApplianceAlert  ${cimX}
+   Log to console              UT9:: match = ${match}
+   
+
+# -------------------------------------------------------------------------------------------------  
+Unit Test for Insert And Rediscover Appliance
+   [Tags]                      UT10
+   Insert And Rediscover Appliance   ${cimY}
+# -------------------------------------------------------------------------------------------------  
+Unit Test for payload
+   [Tags]                      UT11
+   ${rediscover_appliance_Payload}   Set Variable  {"description":null, "cimEnclosureName":null}
+   Log to console              ${rediscover_appliance_Payload}
+   
+   
+# -------------------------------------------------------------------------------------------------  
+Unit Test for AMVM API call
+   [Tags]                      UT12
+   ${resp} = 	    Fusion Api Get i3sCluster IP 
+   ${i3S_IP} = 	    Get From Dictionary		${resp['members'][0]}	primaryIPV4	
+   ${Response}      ${xSessionId}=	Fusion Api Login Appliance 		${fusion_IP}		${admin_credentials}
+   I3S API LOGIN APPLIANCE    ${i3S_IP}  ${xSessionId}
+   ${payload} =     Create Dictionary   X-API-Version=300  action=destroy
+   ${payload} =     Create Dictionary   X-API-Version=300  action=start
+   ${resp} =        I3S API AMVM OPS  headers=${payload}
+   Run Keyword If  ${resp['status_code']} > 202  Fail   msg="${resp}"  ELSE  Log to Console   The AMVM passed
+   
+   
+# -------------------------------------------------------------------------------------------------     
+Unit Test for AppliancePowerOps
+   [Tags]                      UT13
+   AppliancePowerOps  ${cimY}
+   
+
+# -------------------------------------------------------------------------------------------------     
+Unit Test for Shutdown Appliance
+   [Tags]                      UT14
+   Shutdown Appliance  ${cimY}
+
+
+# -------------------------------------------------------------------------------------------------     
+Unit Test for re-discover api
+   [Tags]                      UT15
+   
+  ${serverHardwareUri}   Set Variable  ${cimY['serverHardwareUri']}
+  @{words} =       Split String   ${serverHardwareUri}  /
+  ${idToUse}=      Get from List    ${words}  3
+  Run Keyword If  ${_xdebug} == ${_min}  Log to console  ${serverHardwareUri} and ${idToUse}
+  
+  
+  #${payload} =     Create Dictionary  op=replace  path=/applianceBays/1/power  value=On
+  ${payload} =     Create Dictionary  ${desc}=${null}  ${cimEnc}=${null}
+  #Run Keyword If  ${_xdebug} == ${_min}  Log to console   list Payload = ${payload}
+  ${Response} =  Fusion API Rediscover Appliance  param=${idToUse}  body=${rediscover_appliance_Payload}
+  Log to Console  ${Response}
+  Run Keyword If  ${Response['status_code']} > 202  Fail   msg = 'Failed Fusion API Rediscover Appliance ----' \n ${Response}   
+  StoppingToDebug  "UT for re-discover api"
+  
+  
+  
+  
+   
+
+The End of UT
+   [Tags]                        UT999
+    Log to console               \n \n The END of Unit-tests --- STEP 999
+
+# -------------------------------------------------------------------------------------------------  	
+Unit Test for power-on-appliance
+   [Tags]                      UT16
+   AppliancePowerOps  ${cimY}
+
+# -------------------------------------------------------------------------------------------------  	
+
+	
+Repair Setup
+   [Tags]                      REPAIR
+   
+   ${mac} =                    Get from dictionary   ${cimX}  applianceIpv6Address    	
+   Log to console              ${mac} and ${repair1}
+   
+   Run Keyword If  '${mac}' == '${repair1}'  Insert and FactoryReset Appliance  ${cimX}  ${SessionID}  
+   
+   
+   ${mac} =                    Get from dictionary   ${cimY}  applianceIpv6Address    	
+   Log to console              ${mac} and ${repair1}
+   Run Keyword If  '${mac}' == '${repair1}'  Insert and FactoryReset Appliance  ${cimY}  ${SessionID}  
+   
+	
+# -------------------------------------------------------------------------------------------------
+
+
+
+
+
+*** Comment ***
+Run InternalPorts HA
+
+    [Documentation]	      		  Run InternalPorts HA --- DON'T RUN THIS TEST UNLESS REQUIRED
+    [Tags]                        INTPORTS
+	Fail                          msg='Run InternalPorts HA --- DON'T RUN THIS TEST UNLESS REQUIRED'
+
+    Log to console                 Start: Run Internal Port HA --- TEST 7	
+	#Ensure Appliances in pair are up   ${cimX}  ${cimY}
+	
+	${enclosureName} =           Get from dictionary  ${cimX}  cimEnclosureName
+    ${testResult}=               InternalPorts  ${enclosureName}
+	
+	${enclosureName} =           Get from dictionary  ${cimY}  cimEnclosureName
+    ${testResult}=               InternalPorts  ${enclosureName}
+	
+    Log to console                 EOF: Run Internal Port HA --- TEST 7
+# -------------------------------------------------------------------------------------------------
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+
+
+

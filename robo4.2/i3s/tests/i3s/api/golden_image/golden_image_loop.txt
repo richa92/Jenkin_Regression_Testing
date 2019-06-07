@@ -1,0 +1,97 @@
+*** Settings ***
+Documentation       Feature Test: Goldenimage
+
+Variables           data_variables_loop.py
+
+Library             Collections
+Library             json
+Library             OperatingSystem
+Library             Selenium2Library
+Library             BuiltIn
+Library             FusionLibrary
+Library             RoboGalaxyLibrary
+Library             i3SLibrary
+Variables           /robo4.2/i3s/tests/testdata/i3s_QA_testdata.py
+
+*** Variables ***
+${VAL_DELETE}   <Response [202]>
+${GI_SLEEP}     200
+
+*** Test Cases ***
+#Test Specific Setup
+Login to Fusion appliance
+    #Login to fusion appliance and assign hostname to self._host
+    ${admin_credentials}=    Create Dictionary    userName=${DEFAULT_USER}
+    ...                                             password=${DEFAULT_PASSWORD}
+    Set Suite Variable    ${admin_credentials}    ${admin_credentials}
+    ${Response}    ${SessionId}=    Fusion Api Login Appliance    ${fusion_IP}    ${admin_credentials}
+
+#Above login is a must to get the fusion hostname assigned to self._host
+Get i3s Appliance Cluster IP and Login
+    ${resp}=    Fusion Api Get i3sCluster IP
+    ${i3S_IP}=    Get From Dictionary    ${resp['members'][0]}    primaryIPV4
+    # Login to i3s appliance
+    ${admin_credentials}=    Create Dictionary    userName=${DEFAULT_USER}
+    ...                                             password=${DEFAULT_PASSWORD}
+    Set Suite Variable    ${admin_credentials}    ${admin_credentials}
+    ${Response}    ${SessionId}=    Fusion Api Login Appliance    ${fusion_IP}    ${admin_credentials}
+    I3S API LOGIN APPLIANCE    ${i3S_IP}    ${SessionId}
+
+#Golden Image operations
+Add Golden Image
+
+	Set Log Level    TRACE
+	[Tags]    critical    REG    GIL-Test
+	:FOR    ${index}    IN RANGE    83    93
+    \    ${NAME}=    Get From Dictionary     ${goldenimage_add}    name
+    \    ${DESC}=    Get From Dictionary     ${goldenimage_add}    description
+    \    ${LOCAL_FILE}=    Get From Dictionary    ${goldenimage_add}    file
+    \    ${NEW_NAME}=    Set Variable    ${NAME}${INDEX}
+    \    Log To Console    ${NEW_NAME}
+    \    ${Response}=    i3s Api Add Golden Image    ${LOCAL_FILE}    param=?name=${NEW_NAME}&description=${DESC}
+    \    Should Be Equal as Strings    ${Response['status_code']}    202    msg=Failed to create GoldenImage
+    \    Run Keyword If    ${Response['status_code']}==202    Wait For GI Complete  ${Response}   ${NEW_NAME}
+    
+#-------------------- Build the required JSON body-----------------------------------
+*** Keywords ***
+Get GoldenImage Uri
+    [Arguments]    ${Name}
+    ${resp}=    i3s Api Get Golden Image    param=?filter="'name'=='${NAME}'"
+    ${uri} =    Get From Dictionary    ${resp['members'][0]}    uri
+    [Return]    ${uri}
+    
+GV Create Success
+    [Arguments]    ${GV_Response}    ${NAME}
+    Log To Console    Check GV status
+    Run Keyword If    '${GV_Response['members'][0]['status']}' == 'OK'
+    ...    Log To Console    GV_created_successfully for ${NAME}
+    ...    ELSE 
+    ...    Log to Console    GV created but status yet to get updated to OK
+
+Wait For GI Complete
+    # Wait for task to complete
+    [Arguments]    ${Response}    ${NAME}
+    ${Retry Interval}    Convert To Number    20
+	${Retries}    Convert To Integer    10
+	${Resp}=    i3s API Wait For Task To Complete	${Response['headers']['location']}    sleep_time=${Retry Interval}    retries=${Retries}
+	
+	# Check for errors
+	${Errors}=    Get From Dictionary    ${Resp}    taskErrors
+	${Errors}=    Get Length    ${Errors}
+	Run Keyword If    ${Errors} != 0
+		...    Log    Errors encountered while creating GI    level=WARN
+	Should Be Equal As Integers    ${Errors}    0    msg=Could not create Golden Image !!
+    Run Keyword If    ${Errors} == 0  Log to console  No errors
+        ${Response}=    i3s Api Get Golden Image    param=?filter="'name'=='${NAME}'"
+        Run Keyword If    '${Response['members'][0]['status']}' != 'OK'
+            ...    Log to console    i3S API Add Golden Image failed,imageStatus not Active
+        Run Keyword If	'${Response['members'][0]['status']}' == 'OK'
+            ...    Log To Console    i3S API Add Golden Image successful,imageStatus is Active
+        ${gv_image_uri}=    Get GoldenImage Uri    ${NAME}
+        Sleep    ${GI_SLEEP}
+        #Form param to get golden volume Uri
+        ${GV_Response}=    i3s Api Get Golden Volume    param=?filter="'imageuri'='${gv_image_uri}'"
+        ${length}=    Get Length    ${GV_Response['members']}
+        Run Keyword If    ${length} == 1    GV Create Success    ${GV_Response}    ${NAME}           
+        ...    ELSE
+	    ...    Should Be Equal as Strings    ${length}    1    msg=Failed to create GoldenImage for ${NAME}

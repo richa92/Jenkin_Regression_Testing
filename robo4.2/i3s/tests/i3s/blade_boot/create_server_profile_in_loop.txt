@@ -1,0 +1,123 @@
+*** Settings ***
+Documentation		Feature Test: Fusion i3S Integration
+...		
+Variables 		    data_variables_scale.py	
+	
+Resource            C:/RG_CODE/Fusion_scale/tests/resource/fusion_api_all_resource_files.txt
+
+Library				Collections
+Library             json
+Library				OperatingSystem 
+Library				BuiltIn
+Library				FusionLibrary
+Library				RoboGalaxyLibrary
+Library				i3SLibrary
+Variables   ../../testdata/i3s_QA_testdata.py
+
+
+*** Variables ***
+
+${VAL_DELETE}				<Response [204]>
+${POTASH}					Virtual Connect SE 40Gb F8 Module for Synergy
+${CHLORIDE20}				Virtual Connect SE 40Gb F8 Module for Synergy
+${timeout}					1800
+${interval}					30
+#${osdp_uri}					/rest/os-deployment-plans/4f7af589-894e-4328-b69f-80faba4ffa18
+
+*** Test Cases ***
+
+#Test Specific Setup
+Login to Appliance
+	${admin_credentials}=		Create Dictionary	userName=${DEFAULT_USER}
+    ...												password=${DEFAULT_PASSWORD}
+    Set Suite Variable		${admin_credentials}	${admin_credentials}
+	${Response}    ${SessionId}=	Fusion Api Login Appliance 		${fusion_IP}		${admin_credentials}	
+	  
+#Create Server Profile
+CREATE SERVER PROFILE	
+	:FOR    ${sp}  IN  @{serverprofile_1enc}
+	\	Log to console    Create Server Profile	
+	\	Log to console	${sp['name']}
+	\	${sp_body}=		Create Server Profile Payload		${serverprofile_1enc}		${sp['name']}	    
+	\	${Response}=    Fusion API Create Server Profile    ${sp_body}	
+	\	Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to initiate Create SP.
+	\
+	\	# Wait for task to complete
+	\   ${Retry Interval}    Convert To Number     60
+	\   ${Retries}           Convert To Integer    15
+	\   ${Response}=    Fusion API Wait For Task To Complete    ${Response['uri']}    sleep_time=${Retry Interval}    retries=${Retries}
+	\
+	\   # Check for errors
+	\   ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+	\   ${Errors}=    Get Length    ${Errors}
+    \	Run Keyword If    ${Errors} != 0
+	\	 ...    Log    Errors encountered while creating Server Profile.    level=WARN
+	
+  
+#-------------------- Build the required JSON body-----------------------------------
+*** Keywords ***
+   
+Get OSDP URI
+	[Arguments]		${osdp}
+	${resp} = 	Fusion Api Get OS Deploymentplan		param=?filter="'name'=='${osdp}'"	
+	${uri} = 	Get From Dictionary		${resp['members'][0]}	uri		
+	[Return]	${uri}	
+ 
+Create Server Profile Payload
+	[Documentation]	Create Server Profile Payload
+	...				    profile = {"type":"ServerProfileV6","serverHardwareUri":'SH:'+ ${ENC1SHBAY1},
+	...                            "serverHardwareTypeUri":'SHT:SY 480 Gen9 1',
+	...                            "enclosureGroupUri":"EG:EG1",
+	...							   "osdeployment settings" : "OSDP:OSDP1",
+	...                           ...}	
+	[Arguments]		${sp_groups}	${server_profile_name}	
+	Log to console and logfile  	Adding SERVER PROFILE
+	:FOR	${sp_group1}	IN	@{sp_groups}	
+	\		${sp_name1} =		Get From Dictionary		${sp_group1}		name	
+	\		Run Keyword If	'${sp_name1}'!='${server_profile_name}'		Continue For Loop	
+	\		${sp_body}=	Copy Dictionary		${sp_group1}	
+	\		${payload} =  Copy Dictionary	${sp_body}	
+	\		${shuri} = 	Get from Dictionary	${payload}	serverHardwareUri
+	\		# Get Server Hardware Information
+	\  		${ServerHardware}=    Fusion API Get Server Hardware    param=?filter="name='${shuri}'"
+	\  	 	${ServerHardwareData}=    Get From List    ${ServerHardware['members']}    0
+	\   	#Log to console and logfile		${ServerHardwareData}
+	\		# Check PowerState
+	\  		Should Not Be Equal As Strings    ${ServerHardwareData['powerState']}    On    msg=Server Hardware is powered on. Must be powered off for Server Profile creation.	
+	\		${uri} = 	Get Server Hardware URI		${shuri}
+	\		Log to console and logfile		${uri}
+	\		Set to Dictionary	${payload}	serverHardwareUri	${uri}	
+	\		# SHT
+	\		${sht} =	Get From Dictionary  ${payload}  serverHardwareTypeUri
+	\		${uri} = 	Get Server Hardware Type URI		${sht}
+	\		Log to console and logfile		${uri}
+	\		Set to Dictionary	${payload}	serverHardwareTypeUri	${uri}
+	\		# EG
+	\		${eg} =		Get From Dictionary  ${payload}  enclosureGroupUri
+	\		${eg_uri} =  Get Enclosure Group URI    ${eg}
+	\		Log to console and logfile		${eg_uri}
+	\		Set to Dictionary	${payload}	enclosureGroupUri	${eg_uri}	
+	\		# Enclosure
+	\		${enc} =   Get From Dictionary  ${payload}  enclosureUri
+	\		Log to console and logfile		${enc}
+	\		${enc_uri} =	Get Enclosure URI    ${enc}
+	\		Log to console and logfile		${enc_uri}
+	\		Set to Dictionary	${payload}	enclosureUri	${enc_uri}
+	\		# Get OS DeploymentPlan
+	\		${osdp} =	Get From Dictionary  ${payload}  osDeploymentSettings
+	\		${osdp1} =	Get From Dictionary		${osdp}		osDeploymentPlanUri	
+	\		Log to console and logfile		${osdp1}
+	\		${osdp_uri} =	Get OSDP URI    ${osdp1}
+	\		Log to console and logfile		${osdp_uri}
+	\		Set to Dictionary	${payload['osDeploymentSettings']}	osDeploymentPlanUri=${osdp_uri}
+	\		# Get Network URI
+	\		${connection}=	Get From Dictionary  ${payload}   connections
+	\		Log to console and logfile		VALUE IN CONNECTION
+	\		${connection1} 		Get From List  ${connection}   0	
+	\		${nwuri} =	Get From Dictionary		${connection1}  networkUri
+	\		log to console and logfile   ${nwuri}
+	\		${uri} = 	Get Ethernet URIs		${nwuri}
+	\		Log to console and logfile		${uri[0]}	
+	\		Set to Dictionary	${connection1}	networkUri=${uri[0]}
+	\		#Log to console and logfile		${payload}	
+	[Return]   ${payload}

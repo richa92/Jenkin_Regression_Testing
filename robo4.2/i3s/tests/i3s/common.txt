@@ -1,0 +1,477 @@
+
+*** Keywords ***
+[Documentation] Common functionality will be added in this file
+
+#-------------------- Build the required JSON body-----------------------------------
+#Create Server Profile Payload for NIC
+Create Server Profile Payload
+    [Documentation]    Create Server Profile Payload
+    ...                 profile = {"type":"ServerProfileV6","serverHardwareUri":'SH:'+ ${ENC1SHBAY1},
+    ...                            "serverHardwareTypeUri":'SHT:SY 480 Gen9 1',
+    ...                            "enclosureGroupUri":"EG:EG1",
+    ...                            "osdeployment settings" : "OSDP:OSDP1",
+    ...                           ...}
+    [Arguments]    ${sp_groups}
+    ${payload} =  Copy Dictionary  ${sp_groups}
+    ${server_hw} =    Get from Dictionary    ${payload}    serverHardwareUri
+    # Get server hardware URI
+    ${ServerHwUri} =    Run Keyword If    '${server_hw}' != 'None'    Get Server Hardware URI    ${server_hw}
+    ...    ELSE    Set Variable    ${server_hw}
+    Log        ${server_hw} : ${ServerHwUri}
+    Set to Dictionary    ${payload}    serverHardwareUri    ${ServerHwUri}
+    #  Ensuring that Blade is Powered off before Server Profile creation
+    ${taskState}    ${taskStatus} =    Run Keyword If    '${ServerHwUri}' != 'None'    Power On Off Server    ${ServerHwUri}    Off
+    ...    ELSE    Set Variable    ${ServerHwUri}    ${ServerHwUri}
+    ${status}=        Run Keyword If    '${taskState}'=='Completed'        Log To Console        ${taskStatus}
+    ...        ELSE        Log    Task Status : ${taskStatus}
+    #  SHT
+    ${sht} =    Get From Dictionary  ${payload}  serverHardwareTypeUri
+    ${sht_uri} =     Get Server Hardware Type URI    ${sht}
+    Log    ${sht} : ${sht_uri}
+    Set to Dictionary    ${payload}    serverHardwareTypeUri    ${sht_uri}
+    #  EG
+    ${eg} =    Get From Dictionary  ${payload}  enclosureGroupUri
+    ${eg_uri} =  Get Enclosure Group URI    ${eg}
+    Log    ${eg} : ${eg_uri}
+    Set to Dictionary    ${payload}    enclosureGroupUri    ${eg_uri}
+    #  Enclosure
+    ${enc} =   Get From Dictionary  ${payload}  enclosureUri
+    ${enc_uri} =    Run Keyword If    '${enc}' != 'None'    Get Enclosure URI    ${enc}
+    ...    ELSE    Set Variable    ${enc}
+    Log    ${enc} : ${enc_uri}
+    Set to Dictionary    ${payload}    enclosureUri    ${enc_uri}
+    #  SPT
+    ${spt} =    Get From Dictionary  ${payload}  serverProfileTemplateUri
+    ${SPTUri} =    Run Keyword If    '${spt}' != 'None'    Get SPT URI    ${spt}
+    ...    ELSE    Set Variable    ${spt}
+    Log    ${spt} : ${SPTUri}
+    Set to Dictionary    ${payload}    serverProfileTemplateUri    ${SPTUri}
+    #  Get OS DeploymentPlan
+    ${osds} =   Get From Dictionary  ${payload}  osDeploymentSettings
+    ${osdp} =    Run Keyword If    ${osds} != None    Get From Dictionary    ${osds}  osDeploymentPlanUri
+    ...    ELSE    Set Variable    ${osds}
+    ${osdp_Uri} =    Run Keyword If    '${osdp}' != 'None'    Get OSDP URI    ${osdp}
+    ...    ELSE    Set Variable    ${osdp}
+    Log    ${osdp} : ${osdp_uri}
+    Log to console and logfile    ${osdp_uri}
+    Run Keyword If    ${osds} != None    Set to Dictionary    ${payload['osDeploymentSettings']}    osDeploymentPlanUri=${osdp_uri}
+    #  Get Network URI of os custom attributes
+    ${OS_CA} =    Run Keyword If    ${osds} != None    Get From Dictionary    ${osds}    osCustomAttributes
+    ...    ELSE    Create List
+    :FOR    ${CA}    IN    @{OS_CA}
+    \    ${CA_name} =    Get From Dictionary    ${CA}    name
+    \    ${regex_match} =    Evaluate    re.search(r'networkuri', '${CA_name}', re.I)    re
+    \    Run Keyword If    '${regex_match}' == 'None'    continue For Loop
+    \    ${Mgmt_Nic} =    Get From Dictionary    ${CA}    value
+    \    ${nwuri} =    Get Ethernet URI    ${Mgmt_Nic}
+    \    Log to console and logfile    ${nwuri}
+    \    Set to Dictionary    ${CA}    value=${nwuri}
+    #  Get Network URI of connections
+    ${connectionSettings}=    Get From Dictionary  ${payload}   connectionSettings
+    ${connection}=       Get From Dictionary  ${connectionSettings}   connections
+    ${Number_of_connections}=  Get Length    ${connection}
+    Log    Number of connections : ${Number_of_connections}
+    Log to console and logfile    ${Number_of_connections}
+    Log    VALUE IN CONNECTION :
+    :FOR    ${conn_index}    IN Range    0    ${Number_of_connections}
+    \    ${connection_id}    Get From List    ${connection}    ${conn_index}
+    \    ${nw_uri} =    Get From Dictionary    ${connection_id}    networkUri
+    \    ${uri} =    Get Ethernet URI    ${nw_uri}
+    \    Log to console and logfile    ${uri}
+    \    Set to Dictionary    ${connection_id}    networkUri=${uri}
+    [Return]    ${payload}
+
+
+
+Get ArtifactBundle Uri
+    [Arguments]    ${Name}
+    ${Response}=    i3s Api Get Artifact Bundle    param=?filter="'name'=='${NAME}'"
+    ${uri} =     Get From Dictionary        ${Response['members'][0]}    uri
+    [Return]    ${uri}
+
+GV Create Success
+    [Arguments]    ${GV_Response}    ${NAME}
+    Log To Console    Check GV status
+    Run Keyword If    '${GV_Response['members'][0]['status']}' == 'OK'
+    ...    Log To Console    GV_created_successfully for ${NAME}
+    ...    ELSE
+    ...    Log to Console    GV created but status yet to get updated to OK
+
+Wait For GI Complete
+    # Wait for task to complete
+    [Arguments]    ${Response}    ${NAME}
+    ${Retry Interval}    Convert To Number    30
+    ${Retries}    Convert To Integer    30
+    ${Response}=    i3s API Wait For Task To Complete    ${Response['headers']['location']}    sleep_time=${Retry Interval}    retries=${Retries}
+
+    # Check for errors
+    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    ${Errors}=    Get Length    ${Errors}
+    Run Keyword If    ${Errors} != 0
+        ...    Log    Errors encountered while creating GI    level=WARN
+    Should Be Equal As Integers    ${Errors}    0    msg=Could not create Golden Image !!
+    Run Keyword If    ${Errors} == 0  Log to console  No errors
+        ${Response}=    i3s Api Get Golden Image    param=?filter="'name'=='${NAME}'"
+        Run Keyword If    '${Response['members'][0]['status']}' != 'OK'
+            ...    Log to console    i3S API Add Golden Image failed,imageStatus not Active
+        Run Keyword If    '${Response['members'][0]['status']}' == 'OK'
+            ...    Log To Console    i3S API Add Golden Image successful,imageStatus is Active
+        ${gv_image_uri}=    Get GoldenImage Uri    ${NAME}
+        Sleep    ${GI_SLEEP}
+        #Form param to get golden volume Uri
+        ${GV_Response}=    i3s Api Get Golden Volume    param=?filter="'imageuri'='${gv_image_uri}'"
+        ${length}=    Get Length    ${GV_Response['members']}
+        Run Keyword If    ${length} == 1    GV Create Success    ${GV_Response}    ${NAME}
+        ...    ELSE
+        ...    Should Be Equal as Strings    ${length}    1    msg=Failed to create GoldenImage for ${NAME}
+
+GET PLANSCRIPT URI
+    [Arguments]    ${psuri}
+    ${Response} =    I3S GET PLANSCRIPT    param=?filter="'name'=='${psuri}'"
+    ${uri} =    Get From Dictionary    ${Response['members'][0]}    uri
+    [Return]    ${uri}
+
+Get Goldenimage URI
+    [Arguments]    ${giuri}
+    ${Response} =     i3s Get Goldenimage        param=?filter="'name'=='${giuri}'"
+    ${uri} =     Get From Dictionary        ${Response['members'][0]}    uri
+    [Return]    ${uri}
+
+Get Buildplan URI
+    [Arguments]        ${bpuri}
+    ${Response} =     i3s Get Buildplan        param=?filter="'name'=='${bpuri}'"
+    ${uri} =     Get From Dictionary        ${Response['members'][0]}    uri
+    [Return]    ${uri}
+
+Create Deploymentplan Payload
+    [Arguments]    ${deploymentplan_create}
+    ${dp_body} =    Copy Dictionary    ${deploymentplan_create}
+
+    #Buildplan URI
+    ${bp_name} =    Get from Dictionary    ${dp_body}    oeBuildPlanURI
+    setup-bringup-keywords.Log to console and logfile        \nBP Name is:\t ${bp_name}
+    ${bp_uri} =    Run Keyword If  '${bp_name}' is not ''        Get Buildplan URI    ${bp_name}
+    setup-bringup-keywords.Log to console and logfile        \nBP URI is:\t ${bp_uri}
+    #${bp_uri} =    Get Buildplan URI    ${bp_name}
+    Set to Dictionary    ${dp_body}    oeBuildPlanURI    ${bp_uri}
+
+    #Goldenimage URI
+    ${gi_name} =    Get from Dictionary    ${dp_body}    goldenImageURI
+    setup-bringup-keywords.Log to console and logfile        \nGI Name is:\t ${gi_name}
+    ${gi_uri} =    Run Keyword If  '${gi_name}' is not ''    Get Goldenimage URI    ${gi_name}
+    setup-bringup-keywords.Log to console and logfile        \nGI URI is:\t ${gi_uri}
+    #${gi_uri} =    Get Goldenimage URI    ${gi_name}
+    Set to Dictionary    ${dp_body}    goldenImageURI    ${gi_uri}
+    [Return]    ${dp_body}
+
+Power On Off Server
+    [Documentation]        Power On/Power Off Server Hardware
+    [Arguments]    ${ServerHwUri}    ${power_state}
+    Log    Powering ${power_state} Server Hardware : ${ServerHwUri}
+    ${blade_load}=        Create Dictionary        powerState=${power_state}
+    ...                                        powerControl=MomentaryPress
+    ${Response}=    Fusion Api Edit Server Hardware Power State        ${blade_load}        ${ServerHwUri}
+    #${taskuri}=       Get From Dictionary        ${Response}        uri
+    ${retries}=    Convert To Integer        20
+    ${sleep_time}=    Convert To Integer        30
+    ${Resp}=    Fusion Api Wait For Task To Complete    ${Response['headers']['Location']}        retries=${retries}        sleep_time=${sleep_time}
+    ${taskState}        Get From Dictionary        ${Resp}        taskState
+    ${taskStatus}        Get From Dictionary        ${Resp}        taskStatus
+    [Return]    ${taskState}    ${taskStatus}
+
+Power On Server
+    [Documentation]    Power on the server by its name.
+    ...                    Power on Server  SH:${ENC1SHBAY1}
+    ...                    Power on Server  ${ENC1SHBAY1}
+    [Arguments]     ${ServerHwUri}
+    ${body} =     Create Dictionary    powerState=On
+    ...                                powerControl=MomentaryPress
+    ${ServerHwUri} =  replace string using regexp  ${ServerHwUri}  SH:  ${EMPTY}
+    Log      \nPowering On ${ServerHwUri}    console=True
+    ${ServerHwUri}=    setup-bringup-keywords.Get Server Hardware Uri    ${ServerHwUri}
+    ${Response} =     Fusion Api Edit Server Hardware Power State        body=${body}    uri=${ServerHwUri}
+    Should Be Equal as Strings    ${Response['status_code']}    202    msg=Failed to power On server ${ServerHwUri}.
+
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number     60
+    ${Retries}           Convert To Integer    15
+    ${Response} =    Fusion API Wait For Task To Complete    ${Response['headers']['Location']}    sleep_time=${Retry Interval}    retries=${Retries}
+
+Power Off Server
+    [Documentation]    Power on the server by its name.
+    ...                    Power on Server  SH:${ENC1SHBAY1}
+    ...                    Power on Server  ${ENC1SHBAY1}
+    [Arguments]     ${ServerHwUri}
+    ${body} =     Create Dictionary    powerState=Off
+    ...                                powerControl=PressAndHold
+    ${ServerHwUri} =  replace string using regexp  ${ServerHwUri}  SH:  ${EMPTY}
+    Log      \nPowering Off ${ServerHwUri}    console=True
+    ${ServerHwUri}=    setup-bringup-keywords.Get Server Hardware Uri    ${ServerHwUri}
+    ${Response} =     Fusion Api Edit Server Hardware Power State        body=${body}    uri=${ServerHwUri}
+    Should Be Equal as Strings    ${Response['status_code']}    202    msg=Failed to power Off server ${ServerHwUri}.
+
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number     60
+    ${Retries}           Convert To Integer    15
+	${Response} =    Fusion API Wait For Task To Complete    ${Response['headers']['Location']}    sleep_time=${Retry Interval}    retries=${Retries}
+
+Execute efuse script to efuse on ICM OFF
+   [Tags]  critical
+   Set Log Level  TRACE
+   Login to Appliance via SSH  ${fusion_IP}
+   ${em_ipv6} =   Execute Command  /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${active_ov_enclosure} -o i
+   ${enclosure_credentials}=    Execute Command  /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${active_ov_enclosure} -o p
+   ${authtoken_pair} =  Execute Command  curl -gkvx "" -X POST -d '{"UserName":"Administrator","Password":"${enclosure_credentials}"}' -i https://[${em_ipv6}%bond0]/rest/v1/Sessions | grep 'X-Auth-Token'
+   ${authtoken_bstrip} =     Remove String    ${authtoken_pair}    X-Auth-Token:
+   ${authtoken1} =  Strip String  ${authtoken_bstrip}   characters=' '
+   ${authtoken} =  Strip String  ${authtoken1}   characters='\r'
+   ${output} =  Execute Command  curl -gkvX "" -X POST -H 'x-auth-token:${authtoken}' -d '{"Action":"EFuseOn"}' -i https://[${em_ipv6}%bond0]/rest/v1/InterconnectBays/${icm_bay_number}
+   Should Contain    ${output}    HTTP/1.1 202
+
+Execute efuse script to efuse on ICM ON
+   [Tags]  critical
+   Set Log Level  TRACE
+   Login to Appliance via SSH  ${fusion_IP}
+   ${em_ipv6} =   Execute Command  /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${active_ov_enclosure} -o i
+   ${enclosure_credentials}=    Execute Command  /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${active_ov_enclosure} -o p
+   ${authtoken_pair} =  Execute Command  curl -gkvx "" -X POST -d '{"UserName":"Administrator","Password":"${enclosure_credentials}"}' -i https://[${em_ipv6}%bond0]/rest/v1/Sessions | grep 'X-Auth-Token'
+   ${authtoken_bstrip} =     Remove String    ${authtoken_pair}    X-Auth-Token:
+   ${authtoken1} =  Strip String  ${authtoken_bstrip}   characters=' '
+   ${authtoken} =  Strip String  ${authtoken1}   characters='\r'
+   ${output} =  Execute Command  curl -gkvX "" -X POST -H 'x-auth-token:${authtoken}' -d '{"Action":"EFuseOff"}' -i https://[${em_ipv6}%bond0]/rest/v1/InterconnectBays/${icm_bay_number}
+   Should Contain    ${output}    HTTP/1.1 202
+
+Get OS Volume Name
+   [Arguments]        ${spName}
+
+   ${sp_body}=        Get Server Profile    ${spname}
+
+   # Get OS Volume name
+   ${connectionSettings}=    Get From Dictionary  ${sp_body}   connectionSettings
+   ${connection}=       Get From Dictionary  ${connectionSettings}   connections
+   ${Number_of_connections}=  Get Length    ${connection}
+   Log to console    Number of connections : ${Number_of_connections}
+
+   :FOR    ${conn_index}    IN Range    0    ${Number_of_connections}
+   \    ${connection_id}    Get From List    ${connection}    ${conn_index}
+   \    ${boot}=       Get From Dictionary  ${connection_id}   boot
+   \    ${priority}=   Get From Dictionary  ${boot}   priority
+   \    Run Keyword If  ("${priority}"=="NotBootable")  Exit For Loop
+   \    ${iscsi2}=     Get From Dictionary  ${boot}   iscsi
+   \    ${bootTargetName}=   Get From Dictionary  ${iscsi2}   bootTargetName
+
+   ${var} =    Fetch From Right    ${bootTargetName}    :
+   [Return]    ${var}
+
+Change OSDP To None In SP Json Body
+   [Arguments]    ${sp_body}
+   ${sp_response_body} =    Copy Dictionary    ${sp_body}
+   Set To Dictionary    ${sp_response_body}    osDeploymentSettings    ${null}
+   Set To Dictionary    ${sp_response_body}    iscsiInitiatorName    ${null}
+   ${boot_mode} =    Create Dictionary    manageMode=${false}
+   Set To Dictionary    ${sp_response_body}    bootMode    ${boot_mode}
+   Set To Dictionary    ${sp_response_body}    boot    ${null}
+
+   ${connectionSettings}=    Get From Dictionary  ${sp_response_body}   connectionSettings
+   ${connections} =    Get From Dictionary    ${connectionSettings}    connections
+
+   ${Number_of_connections}=  Get Length    ${connections}
+    :FOR    ${conn_index}    IN Range    0    ${Number_of_connections}
+    \    Remove From Dictionary    ${connections[${conn_index}]}    boot
+   ${ipv4} =    Get From Dictionary    ${connections[0]}    ipv4
+   ${ipv4_attrib} =    Get Dictionary Keys    ${ipv4}
+   :FOR    ${attrib}    IN    @{ipv4_attrib}
+   \    Set To Dictionary    ${ipv4}    ${attrib}    ${null}
+   [Return]    ${sp_response_body}
+
+Verifying OS Volume
+    [Arguments]    ${spname}
+    ${sp_body}=        Get Server Profile    ${spname}
+    Log Dictionary    ${sp_body}
+    ${OSDS}=    Get from Dictionary    ${sp_body}    osDeploymentSettings
+    ${osvol}=    Get from Dictionary    ${OSDS}    osVolumeUri
+    [Return]    ${osvol}
+
+Verifying OS Volume when None
+    [Arguments]    ${spname}
+    ${sp_body}=        Get Server Profile    ${spname}
+    Log Dictionary    ${sp_body}
+    ${OSDS}=    Get from Dictionary    ${sp_body}    osDeploymentSettings
+    [Return]    ${OSDS}
+
+Get OSDP URI
+    [Arguments]        ${osdp}
+    ${Response} =     Fusion Api Get OS Deploymentplan        param=?filter="'name'=='${osdp}'"
+    ${uri} =     Get From Dictionary        ${Response['members'][0]}    uri
+    [Return]    ${uri}
+
+Edit Server Profile payload to null
+    [Arguments]    ${spname}
+
+    ${Response} =    Fusion API Get Server Profiles    param=?filter="name='${spname}'"
+    ${SP_unassign_body} =    Copy Dictionary    ${Response['members'][0]}
+    ${SP_uri} =    Get From Dictionary    ${SP_unassign_body}    uri
+
+    Set to Dictionary    ${SP_unassign_body}    serverHardwareUri   ${null}
+    Set to Dictionary    ${SP_unassign_body}    enclosureUri   ${null}
+    Set to Dictionary    ${SP_unassign_body}    enclosureBay   ${null}
+
+    [Return]    ${SP_unassign_body}    ${SP_uri}
+
+Change CA value in SP body
+    [Arguments]    ${spjson_body}    ${osca_value}
+    ${sp_body}=    copy dictionary    ${spjson_body}
+    ${osds}=    Get from dictionary    ${sp_body}    osDeploymentSettings
+    ${oscustattr}=    Get from dictionary    ${osds}    osCustomAttributes
+    set to dictionary    ${oscustattr[0]}    value    ${osca_value}
+    [Return]    ${sp_body}
+
+Get Server Profile
+    [Documentation]    Get Server Profile by Name
+    [Arguments]    ${ServerProfileName}
+    ${ServerProfileCollection}=    Fusion Api Get Server Profiles
+    ${count}=    Get From Dictionary      ${ServerProfileCollection}    count
+    Should not be Equal as Integers       ${count}           0           msg=No Server Profiles Found
+    @{members}=    Get From Dictionary    ${ServerProfileCollection}    members
+
+    :FOR    ${member}    IN    @{members}
+    \    Log Dictionary    ${member}
+    \    ${name}=     Get From Dictionary    ${member}          name
+    \    Continue For Loop If    '${ServerProfileName}'!='${name}'
+    \    Return From Keyword    ${member}
+
+    Fail    msg=FaileYd to find Server Profile ${ServerProfileName}.
+
+Delete Server Profile force
+    [Arguments]     ${sp_name}
+    Log To Console    Deleting Server Profile... ${sp_name}.
+    ${members} =     Get Server Profile    ${sp_name}
+    ${var} =  set variable    ${members['uri']}"?force=True"
+    Log To Console   ${var}
+    ${Response}=  Fusion API Delete Server Profile    name=${sp_name}    uri=${members['uri']}
+
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number     60
+    ${Retries}           Convert To Integer    15
+    ${Response} =    Fusion API Wait For Task To Complete    ${Response['headers']['Location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    [Return]   ${Response}
+
+Delete Server Profile
+    [Arguments]     ${sp_name}
+    Log To Console    Deleting Server Profile...
+
+    ${Response}=  Fusion API Delete Server Profile    ${sp_name}
+    Should Not Be Equal    ${Response}    ${None}    msg=Server Profile ${sp_name} not found.
+    Should Be Equal as Strings    ${Response['status_code']}    202    msg=Failed to initiate Delete Server Profile ${sp_name}.
+
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number     60
+    ${Retries}           Convert To Integer    15
+	${Response} =    Fusion API Wait For Task To Complete    ${Response['headers']['Location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    [Return]   ${Response}
+
+Get Server Profile body
+    [Arguments]    ${SP_name}
+    ${Response} =    Fusion API Get Server Profiles    param=?filter="name='${SP_name}'"
+    Run Keyword If    ${Response['count']} != 0    Log    ${Response['count']} Server Profile[s] are present with name ${SP_name}
+    ...    ELSE    Fail    msg=ERROR: No Server Profiles are present with name ${SP_name}
+    # Log to console    Get SP Response : ${Response}
+    ${SP_response_body} =    Copy Dictionary    ${Response['members'][0]}
+    Log Dictionary    ${SP_response_body}
+    [Return]    ${SP_response_body}
+
+
+Get Management IP Of Server Profile
+    [Arguments]    ${SP_response_body}
+    ${osds} =   Get From Dictionary    ${SP_response_body}    osDeploymentSettings
+    ${OS_CA} =    Get From Dictionary    ${osds}    osCustomAttributes
+    :FOR    ${CA}    IN    @{OS_CA}
+    \    ${CA_name} =    Get From Dictionary    ${CA}    name
+    \    ${regex_match} =    Evaluate    re.search(r'NIC.ipaddress', '${CA_name}', re.I)    re
+    \    ${regex_match1} =    Evaluate    re.search(r'NIC1.ipaddress', '${CA_name}', re.I)    re
+    \    Run Keyword If    '${regex_match}' == 'None' and '${regex_match1}' == 'None'  continue For Loop
+    \    ${MGMT_IP_address} =    Get From Dictionary    ${CA}    value
+    \    Log to console    ${MGMT_IP_address}
+    [Return]    ${MGMT_IP_address}
+
+
+Asssign Server Profile to Hardware
+    Log to console    Create Server Profile
+    ${sp_body}=        Create Server Profile Payload        ${serverprofile_newCreate}
+    ${spname}=    Get from Dictionary    ${sp_body}    name
+    ${Response}=    Fusion API Create Server Profile    ${sp_body}
+    Log to console    ${Response}
+    Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to initiate Create SP.
+
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number     60
+    ${Retries}           Convert To Integer    15
+    ${Response}=    Fusion API Wait For Task To Complete    ${Response['uri']}    sleep_time=${Retry Interval}    retries=${Retries}
+
+    # Check for errors
+    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    ${Errors}=    Get Length    ${Errors}
+    Run Keyword If    ${Errors} != 0
+    ...    Log    Errors encountered while creating Server Profile.    level=WARN
+
+    # check for OS volumes
+    ${os_vol_create}=    Get OS Volume Name    ${spname}
+    Log to console    ${os_vol_create}
+    Should not be equal as strings    '${os_vol_create}'    'None'    msg=OS volume should be created
+
+    [Return]    ${spname}    ${os_vol_create}
+
+UnAsssign Server Profile to Hardware
+    [Arguments]     ${spname}
+    # Reassign the Same SH
+    Log to console    Edit Server Profile  unassign
+    ${Response} =    Fusion API Get Server Profiles    param=?filter="name='${spname}'"
+    ${SP_unassign_body} =    Copy Dictionary    ${Response['members'][0]}
+    ${SP_uri} =    Get From Dictionary    ${SP_unassign_body}    uri
+
+    Set to Dictionary    ${SP_unassign_body}    serverHardwareUri   ${null}
+    Set to Dictionary    ${SP_unassign_body}    enclosureUri   ${null}
+    Set to Dictionary    ${SP_unassign_body}    enclosureBay   ${null}
+
+    ${Response} =    Fusion API Edit Server Profile    ${SP_unassign_body}    ${sp_uri}
+    Log to console    ${Response}
+    Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to initiate update SP.
+
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number     60
+    ${Retries}           Convert To Integer    15
+    ${Response}=    Fusion API Wait For Task To Complete    ${Response['uri']}    sleep_time=${Retry Interval}    retries=${Retries}
+
+    # Check for errors
+    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    ${Errors_count}=    Get Length    ${Errors}
+    Run Keyword If    ${Errors_count} == 0    Log to console    Succesfully updated server unassigned profile..
+    ...    ELSE    Fail    msg=Errors encountered while updating Server Profile...\n${Errors}
+
+    # check for OS volumes
+    ${os_vol_unassign}=    Get OS Volume Name    ${spname}
+    Log to console    ${os_vol_unassign}
+    Should not be equal as strings    '${os_vol_unassign}'    'None'    msg=OS volume should be present
+    [Return]    ${os_vol_unassign}
+
+Find OS Volume Name
+   [Arguments]        ${spName}
+
+   ${sp_body}=        Get Server Profile    ${spname}
+
+   # Get OS Volume name
+   ${connectionSettings}=    Get From Dictionary  ${sp_body}   connectionSettings
+   ${connection}=       Get From Dictionary  ${connectionSettings}   connections
+   ${Number_of_connections}=  Get Length    ${connection}
+   Log to console    Number of connections : ${Number_of_connections}
+
+   :FOR    ${conn_index}    IN Range    0    ${Number_of_connections}
+   \    ${connection_id}    Get From List    ${connection}    ${conn_index}
+   \    ${boot}=       Get From Dictionary  ${connection_id}   boot
+   \    ${priority}=   Get From Dictionary  ${boot}   priority
+   \    Run Keyword If  ("${priority}"=="NotBootable")  Exit For Loop
+   \    ${iscsi2}=     Get From Dictionary  ${boot}   iscsi
+   \    ${bootTargetName}=   Get From Dictionary  ${iscsi2}   bootTargetName
+
+   ${var} =    Fetch From Right    ${bootTargetName}    :
+   [Return]    ${var}

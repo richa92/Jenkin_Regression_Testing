@@ -1,0 +1,116 @@
+*** Settings ***
+Documentation		Feature Test: Upgrade
+...		
+Variables 		    data_variables_Up.py	
+	
+Resource            ../../../../../fusion/tests/resource/fusion_api_all_resource_files.txt
+
+Library             Collections
+Library             json
+Library             OperatingSystem
+Library             Selenium2Library 
+Library             BuiltIn
+Library             FusionLibrary
+Library             RoboGalaxyLibrary
+Library             i3SLibrary
+Variables			/robo4.2/i3s/tests/testdata/i3s_QA_testdata.py
+Resource            ../../E2E/setup-bringup-keywords.txt
+Resource            ./keywords.txt
+
+*** Test Cases ***
+#Test Specific Setup
+Login to Appliance
+    ${admin_credentials} =    Create Dictionary    userName=${DEFAULT_USER}
+    ...												password=${DEFAULT_PASSWORD}
+    Set Suite Variable    ${admin_credentials}    ${admin_credentials}
+    ${Response}    ${SessionId} =    Fusion Api Login Appliance    ${fusion_IP}    ${admin_credentials}
+
+Uploading the BIN File to OV
+    Set Log Level    TRACE
+    setup-bringup-keywords.Log to console and logfile    ${bin_file_loc}/${ov_bin}
+    ${upload_resp} =    Fusion Api Upload Appliance Firmware    ${bin_file_loc}/${ov_bin}
+    Run keyword unless    ${upload_resp['status_code']}== 200    Fail    "Unable to Upload Bin File"
+
+Get i3s Appliance Cluster IP and Login
+    ${resp} =    Fusion Api Get i3sCluster IP
+    ${i3S_IP} =    Get From Dictionary    ${resp['members'][0]}    primaryIPV4
+    Log to console    ${i3S_IP}
+    # Login to i3s appliance
+    ${admin_credentials} =    Create Dictionary    userName=${DEFAULT_USER}
+    ...												 password=${DEFAULT_PASSWORD}
+    Set Suite Variable    ${admin_credentials}    ${admin_credentials}
+    ${Response}    ${SessionId} =    Fusion Api Login Appliance    ${fusion_IP}    ${admin_credentials}
+    I3S API LOGIN APPLIANCE    ${i3S_IP}    ${SessionId}
+
+Uploading the BIN File to i3s
+    setup-bringup-keywords.Log to console and logfile    ${bin_file_loc}/${i3s_bin}
+    ${upload_resp} =    i3s Api Upload Appliance Firmware    ${bin_file_loc}/${i3s_bin}
+    Run keyword unless    ${upload_resp['status_code']}== 200    Fail    "Unable to Upload Bin File to i3s"
+
+Upgrade OV Appliance
+    ${upgrade_resp} =    Fusion Api Upgrade Appliance Firmware    ${ov_bin}
+    Run keyword If    ${upgrade_resp['status_code']} != 202    Fail    "Unable to Upgrade Appliance to OV"
+    Wait For Appliance State To Be UPGRADE          timeout=20 mins      interval=5 s
+    
+    Wait For Appliance State To Be OK               timeout=70 mins      interval=60 s
+
+Validate OV upgrade
+    Set Log Level    TRACE
+    ${upgrade_resp_1} =    Fusion Api Get Appliance Firmware Upgrade Status
+    setup-bringup-keywords.Log to console and logfile    \n\nupgrade_resp_1..${upgrade_resp_1}
+    ${version_dict} =    Get From Dictionary    ${upgrade_resp_1}    version
+    ${status} =    Get From Dictionary    ${upgrade_resp_1}    success
+    ${version_dict} =    Get From Dictionary    ${upgrade_resp_1}    version
+    ${string} =    Fetch From Left    ${version_dict}    ,
+    setup-bringup-keywords.Log to console and logfile    \n\nstring...${string}
+    Run keyword unless	'${string}' == '${ov_version_Check}'    Fail    "OV Appliance did not get upgraded to the version ${ov_version_Check}"
+    Log to console    \n\nOV Appliance got upgraded to the version ${ov_version_Check}
+
+Upgrade i3s Appliance
+    ${upgrade_resp} =    i3s Api Upgrade Appliance Firmware    ${i3s_bin}
+    Run keyword If    ${upgrade_resp['status_code']} != 202    Fail    "Unable to Upgrade Appliance"
+#    Log    Waiting for OneView state to change to "UPGRADE"    console=True
+    Sleep    75min
+
+Validate i3s update on active appliance
+    Set Log Level    TRACE
+    ${resp} =    Fusion Api Get i3sCluster IP
+    ${i3S_IP} =    Get From Dictionary    ${resp['members'][0]}    primaryIPV4
+    Login to Appliance via SSH  ${i3S_IP}
+    ${output} =    Execute Command    cat /ci/etc/version | cut -d ',' -f 1
+    Should be Equal  ${output}    ${i3s_version_Check}
+
+Validate vsa version on active appliance
+    Set Log Level    TRACE
+    ${resp} =    Fusion Api Get i3sCluster IP
+    ${i3S_IP} =    Get From Dictionary    ${resp['members'][0]}    primaryIPV4
+    Login to Appliance via SSH  ${i3S_IP}
+    ${vsa_ver} =    Execute Command    cat /ci/etc/vsa-version
+    Should be Equal    ${vsa_ver}    ${vsa_version}
+
+Validate i3s update on standby appliance
+    Set Log Level    TRACE
+    Sleep    75min
+    ${resp} =    Fusion Api Get i3sCluster IP
+    ${i3S_IP} =    Get From Dictionary    ${resp['members'][0]}    primaryIPV4
+    Login to Appliance via SSH  ${i3S_IP}
+    ${standby_ipv4} =    Execute Command    grep -i PEERMGMTIPV4 /ci/etc/I3SApplianceConfig.conf | cut -d '=' -f 2
+    Login to Appliance via SSH  ${standby_ipv4}
+    ${output1} =    Execute Command    cat /ci/etc/version | cut -d ',' -f 1
+    Should be Equal    ${output1}    ${i3s_version_Check}
+
+Validate vsa version on standby appliance
+    Set Log Level    TRACE
+    ${resp} =    Fusion Api Get i3sCluster IP
+    ${i3S_IP} =    Get From Dictionary    ${resp['members'][0]}    primaryIPV4
+    Login to Appliance via SSH    ${i3S_IP}
+    ${standby_ipv4} =    Execute Command    grep -i PEERMGMTIPV4 /ci/etc/I3SApplianceConfig.conf | cut -d '=' -f 2
+    Login to Appliance via SSH    ${standby_ipv4}
+    ${vsa_ver} =    Execute Command    cat /ci/etc/vsa-version
+    Should be Equal    ${vsa_ver}    ${vsa_version}
+
+Get HA information
+    Set Log Level    TRACE
+    Log To Console    Getting HA Nodes and building dictionary off it...
+    ${resp} =    i3s Api Get HA Nodes
+    Should Be Equal as Strings    ${resp['count']}    2    msg=HA is not formed.

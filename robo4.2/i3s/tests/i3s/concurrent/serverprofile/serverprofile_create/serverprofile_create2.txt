@@ -1,0 +1,294 @@
+*** Settings ***
+Documentation		Feature Test: Fusion i3S Integration
+...		
+Variables 		    sp_data_variables.py	
+	
+Resource            C:/RG_CODE/fusion_scale/tests/resource/fusion_api_all_resource_files.txt
+
+Library				Collections
+Library             json
+Library				OperatingSystem
+Library		        Selenium2Library 
+Library				BuiltIn
+Library				FusionLibrary
+Library				RoboGalaxyLibrary
+Library				i3SLibrary
+
+Variables   		C:/RG_CODE/i3s_scale/tests/testdata/i3s_QA_testdata.py
+
+
+*** Variables ***
+
+${VAL_DELETE}				<Response [204]>
+${POTASH}					Virtual Connect SE 40Gb F8 Module for Synergy
+${CHLORIDE20}				Virtual Connect SE 40Gb F8 Module for Synergy
+${timeout}					1800
+${interval}					30
+
+*** Test Cases ***
+#Test Specific Setup
+Login to Appliance
+	${admin_credentials}=		Create Dictionary	userName=${DEFAULT_USER}
+	...												password=${DEFAULT_PASSWORD}
+	Set Suite Variable		${admin_credentials}	${admin_credentials}
+	${Response}    ${SessionId}=	Fusion Api Login Appliance 		${fusion_IP}		${admin_credentials}
+
+Create Server Profile
+	Log to console    Create Server Profile	
+	${sp_body}=		Create Server Profile Payload		${serverprofile_1enc[1]}
+	${Response}=    Fusion API Create Server Profile    ${sp_body}
+	Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to initiate Create SP.
+
+	# Wait for task to complete
+	${Retry Interval}    Convert To Number     60
+	${Retries}           Convert To Integer    15
+	${Response}=    Fusion API Wait For Task To Complete    ${Response['uri']}    sleep_time=${Retry Interval}    retries=${Retries}
+
+	# Check for errors
+	${Errors}=    Get From Dictionary    ${Response}    taskErrors
+	${Errors}=    Get Length    ${Errors}
+	Run Keyword If    ${Errors} != 0
+	...    Log    Errors encountered while creating Server Profile.    level=WARN
+  
+	
+#-------------------- Build the required JSON body-----------------------------------
+*** Keywords ***
+
+Get Subnet
+	[Arguments] 			${NETWORK_ID}	
+	${resp} =   fusion api get ipv4 subnet	
+	${subnetcounts} =     Get From Dictionary     ${resp}    members
+	${l} = 	Get Length	${subnetcounts}
+	:FOR	${x}	IN RANGE	0	${l}
+    \   ${subnet} =     Get From List   ${subnetcounts}    ${x}
+    \	Exit For Loop If 	'${subnet['networkId']}' == '${NETWORK_ID}'
+	[Return]    ${subnet}
+	#Log			${subnet}
+
+Get from Subnet
+	[Arguments]     ${subnet_list}   	${element}    
+	${return} =     Get From Dictionary     ${subnet_list}			${element}  
+	[Return]    ${return}
+   
+Get OSDP URI
+	[Arguments]		${osdp}
+	${resp} = 	Fusion Api Get OS Deploymentplan		param=?filter="'name'=='${osdp}'"
+	Log to console and logfile		${resp}
+	${uri} = 	Get From Dictionary		${resp['members'][0]}	uri	
+	[Return]	${uri}	
+	
+Get Appliance URI	
+	[Arguments]		${appliance}	
+	${resp} = 	Fusion Api Get i3sAppliance Uri		param=?filter="'name'=='${appliance}'"	
+	${uri} = 	Get From Dictionary		${resp['members'][0]}	uri	
+	[Return]	${uri}
+ 
+   
+Build Network Body With Subnet Uri
+	[Documentation]	Select the Subnet Uri and add in the Subnet Uri field of the Request Body to create a Network and associate the Subnet
+	#[Aguments]			${Ethernet_network_1}		${NETWORK_ID}
+	[Arguments]		${networks}		${networkname}	${NETWORK_ID}
+	${subnets}=    Get Subnet        ${NETWORK_ID}
+    ${uri}=         Get from Subnet         ${subnets}              uri
+	Log		${uri}
+	#Log		${networkname}
+	Log to console and logfile  	Adding ETHERNET NETWORKS
+	:FOR	${network1}	IN	@{networks}	
+	\		${networkname1} =	Get From Dictionary		${network1}		name	
+	\		Run Keyword If	'${networkname}'!='${networkname1}'		Continue For Loop
+	\		Set to dictionary    		${network1}     		subnetUri=${uri}
+	\		${network_body}=	Copy Dictionary 	${network1}	
+	[Return]	${network_body}
+	
+Build IPRange Body
+	[Arguments]   	${ipv4ranges}   	${NETWORK_ID}    	${RANGE_NAME}	
+	${subnets}=    Get Subnet        ${NETWORK_ID}
+	${uri}=         Get from Subnet         ${subnets}              uri      
+	${ipv4_1}=  Create List 
+	:For  ${ipv4}  IN   @{ipv4ranges}
+	\           ${name} =   Get From Dictionary   ${ipv4}  name      
+	\           Run Keyword If    '${name}'!='${RANGE_NAME}'        Continue For Loop      
+	\           Set to dictionary    		${ipv4}     		subnetUri=${uri}      
+	\           Append to List    ${ipv4_1}    	${ipv4}
+	[Return]   ${ipv4_1}
+
+Build SUBNET Body
+	[Arguments]   	${subnet}   	${SUBNET_SELECT}    
+	Log 				"Subnet ":${subnet}
+	${subnet_ret}=     Create Dictionary
+	:For  ${subnetdetails}  IN   @{subnet}
+	\		Log 		${subnetdetails}
+	\     ${networkId} =   Get From Dictionary   ${subnetdetails}  networkId
+	\		Log			${networkId}
+	\		Log			${SUBNET_SELECT}
+	\		Run Keyword If    '${networkId}'!='${SUBNET_SELECT}'        Continue For Loop
+	\		Log 			"Subnet Matching ":${subnetdetails}
+	\		${subnet_ret}=		Copy Dictionary		${subnetdetails} 	
+	Log 		"Val Subnet_ret":${subnet_ret}
+	[Return]	${subnet_ret} 
+   
+Create LIG TBird Payload
+	[Arguments]       ${ligs}
+	Set Log Level    Trace
+	${Potash}=   Get Interconnect Type URI     ${POTASH}
+	#${Chloride}=     Get Interconnect Type URI    ${CHLORIDE20}
+	${Response}=   Get From Dictionary     ${ligs}    interconnectMapTemplate
+	${interconnectMapEntryTemplates}=		Create List
+	${interconnectMapEntryTemplates1}=	Get From Dictionary     ${Response}     interconnectMapEntryTemplates
+	:For   ${item}   IN   @{interconnectMapEntryTemplates1}
+	\     ${ICM}=    Get From Dictionary    ${item}   permittedInterconnectTypeUri
+	\   Run keyword If   '${ICM}' == 'Virtual Connect SE 40Gb F8 Module for Synergy - 794502-B23'     Set to Dictionary     ${item}   permittedInterconnectTypeUri=${Potash}
+	\   Run keyword If   '${ICM}' == '${CHLORIDE20}'     Set to Dictionary     ${item}   permittedInterconnectTypeUri=${Chloride}
+	\   Append To List    ${interconnectMapEntryTemplates}     ${item}
+	# Create LIG Body
+	${ls}=    Set to Dictionary     ${Response}   interconnectMapEntryTemplates=${interconnectMapEntryTemplates}
+	Set to Dictionary   ${ligs}         interconnectMapTemplate=${Response}  
+       
+	${uplinkSets1}=	Get From Dictionary  ${ligs}   uplinkSets
+	${uplinkSets2}=	Create List 
+	${fcnetworkuri}=		Create List
+	${ethnetworkuri}=		Create List      
+	:FOR  ${x}  IN    @{uplinkSets1}
+	\     ${networkType}=		Get From Dictionary     ${x}  networkType
+	\     ${networks} =           Get From Dictionary           ${x}  networkUris
+	\     Run Keyword If    '${networkType}' == 'Ethernet'            Continue For Loop
+	\     ${networkUris}=		Get FC Uris ${networks}
+	\    Append to List    ${fcnetworkuri}   ${networkUris}	
+	\		Log to Console and logfile THIS IS NOT FOR ETHERNET
+	\     log to console and logfile   ${networkUris}
+	\     Set to dictionary	${x}	networkUris=${networkUris}
+	\		Log to Console and logfile IAM I APPENDING HERE
+	\     Append to List    ${uplinkSets2}    ${x}
+	log to console and logfile   ${uplinkSets2}
+
+	:FOR  ${x}  IN    @{uplinkSets1}
+	\     ${networkType}=		Get From Dictionary     ${x}  networkType
+	\     ${networks} =		Get From Dictionary           ${x}  networkUris
+	\		Log to Console and logfile	${networkType}
+	\		Log to Console and logfile	${networks}
+	\     Run Keyword If    '${networkType}' == 'FibreChannel'  Continue For Loop
+	\     ${networkUris}=		Get FCoE Uris     ${networks}
+	\		Log to Console and logfile 	${networkUris}
+	\   ${ethernetUris}=		Get Ethernet URIs   ${networks}
+	\		Log to Console and logfile		${ethernetUris}
+	\   ${networkUris}=			combine lists   ${networkUris}  ${ethernetUris}
+	\		Log to Console and logfile		${networkUris}
+	\		Log to Console and logfile		${x}
+	#\      Append to List    ${ethnetworkuri}  ${networkUris}
+	\     Set to dictionary	${x}	networkUris=${networkUris}
+	\     Append to List    ${uplinkSets2}    ${x}
+	log to console and logfile   ${uplinkSets2}
+      
+	Set to Dictionary		${ligs}     uplinkSets=${uplinkSets2}
+	#log to console and logfile  ${ligs}
+	[Return]   ${ligs}
+      
+Create EG Body
+	[Documentation]	Adds Enclosure Group to an appliance from a variable which contains a list of dicts with the entire payload and also Associate a Range
+	[Arguments]		${enc_groups}		${enc_group_name}
+	#[Arguments]		${networks}		${networkname}	${NETWORK_ID}
+	Log to console and logfile  	Adding ENCLOSURE GROUP
+	:FOR	${enc_group1}	IN	@{enc_groups}	
+	\		${enc_group_name1} =		Get From Dictionary		${enc_group1}		name	
+	\		Run Keyword If	'${enc_group_name1}'!='${enc_group_name}'		Continue For Loop	
+	\		${enc_group_body}=	Copy Dictionary 	${enc_group1}
+	
+	${Response}=   Get From Dictionary     ${enc_group_body}		osDeploymentSettings
+	${deploymentSettings}=	Get From Dictionary     ${Response}		deploymentModeSettings
+	${deployment}=	Get From Dictionary     ${deploymentSettings}		deploymentNetworkUri
+	${ethernetUris}=		Get Ethernet URIs   ${deployment}
+	Log to console and logfile		${ethernetUris[0]}		
+	Set to dictionary	${deploymentSettings}		deploymentNetworkUri	${ethernetUris[0]}
+	
+    Log to console and logfile  	GET LIG URI
+	${l} = 	Get Length	${enc_group_body['interconnectBayMappings']}
+	:FOR 	${x}	IN RANGE	0	${l}
+	\	${liguri} = 	Get From Dictionary	${enc_group_body['interconnectBayMappings'][${x}]}	logicalInterconnectGroupUri	
+	\   Continue For Loop If    '${liguri}' == 'None'
+	\	${liguri} = 	Common URI Lookup by name    ${liguri}
+	\	Set to dictionary	${enc_group_body['interconnectBayMappings'][${x}]}	logicalInterconnectGroupUri		${liguri}	
+	Log to console and logfile		ENC GROUP BODY VALUE
+	#Log to console and logfile		${enc_group_body}
+	[Return]	${enc_group_body}		
+    
+Create Deployment Server Payload
+	[Arguments]		${osdeploymentserver}	${osdp_name}
+	Log to console and logfile  	Adding OSDS
+	${osds_body}=	Copy Dictionary 	${osdeploymentserver}
+	#Network URI
+	${nwuri} = 	Get from Dictionary	${osds_body}	mgmtNetworkUri
+	${uri} = 	Get Ethernet URIs		${nwuri}
+	#Log to console and logfile		${uri[0]}
+	Set to Dictionary	${osds_body}	mgmtNetworkUri	${uri[0]}	
+	#APPLIANCE URI
+	${appuri} =	Get From Dictionary  ${osds_body}  applianceUri	
+	${uri} = 	Get Appliance URI		${appuri}	
+	Set to Dictionary	${osds_body}	applianceUri	${uri}
+	[Return]   ${osds_body}
+	
+Create Server Profile Payload
+	[Documentation]	Create Server Profile Payload
+	...				    profile = {"type":"ServerProfileV6","serverHardwareUri":'SH:'+ ${ENC1SHBAY1},
+	...                            "serverHardwareTypeUri":'SHT:SY 480 Gen9 1',
+	...                            "enclosureGroupUri":"EG:EG1",
+	...							   "osdeployment settings" : "OSDP:OSDP1",
+	...                           ...}	
+	[Arguments]		${sp_groups}	
+	Log to console and logfile  	Adding SERVER PROFILE	
+	${payload} =  Copy Dictionary  ${sp_groups}	
+	${shuri} = 	Get from Dictionary	${payload}	serverHardwareUri
+	# Get Server Hardware Information
+    ${ServerHardware}=    Fusion API Get Server Hardware    param=?filter="name='${shuri}'"
+    ${ServerHardwareData}=    Get From List    ${ServerHardware['members']}    0
+    # Check PowerState
+    #Should Not Be Equal As Strings    ${ServerHardwareData['powerState']}    On    msg=Server Hardware is powered on. Must be powered off for Server Profile creation.      
+    ${ServerHwUri} = 	Get Server Hardware URI		${shuri}
+	Log to console and logfile		${ServerHwUri}
+	Set to Dictionary	${payload}	serverHardwareUri	${ServerHwUri}
+	# Ensuring that Blade is Powered off before Server Profile creation
+	${Bladeload}=		Create Dictionary		powerState=Off
+	...										powerControl=PressAndHold
+	${Response}=		Fusion Api Edit Server Hardware Power State		${Bladeload}		${ServerHwUri}
+	${taskuri}=		Get From Dictionary		${Response}		uri
+	${retries}=		Convert To Integer		10
+	${sleep_time}=		Convert To Integer		10
+	${Resp}=	Fusion Api Wait For Task To Complete	${taskuri}		retries=${retries}		sleep_time=${sleep_time}
+	${taskState}		Get From Dictionary		${Resp}		taskState
+	${taskStatus}		Get From Dictionary		${Resp}		taskStatus
+	${status}=		Run Keyword If 		'${taskState}'=='Completed'		Log To Console		${taskStatus}
+	...				ELSE		Fail	msg=Failed to Power Off Server Successfully	
+	# SHT
+	${sht} =	Get From Dictionary  ${payload}  serverHardwareTypeUri
+	${uri} = 	Get Server Hardware Type URI		${sht}
+	Log to console and logfile		${uri}
+	Set to Dictionary	${payload}	serverHardwareTypeUri	${uri}
+	# EG	
+	${eg} =		Get From Dictionary  ${payload}  enclosureGroupUri
+	Log to console and logfile	${eg}
+	${eg_uri} =  Get Enclosure Group URI    ${eg}	
+	Set to Dictionary	${payload}	enclosureGroupUri	${eg_uri}	
+	# Enclosure
+	${enc} =   Get From Dictionary  ${payload}  enclosureUri
+	Log to console and logfile		${enc}
+	${enc_uri} =	Get Enclosure URI    ${enc}
+	Log to console and logfile		${enc_uri}
+	Set to Dictionary	${payload}	enclosureUri	${enc_uri}
+	# Get OS DeploymentPlan
+	${osdp} =   Get From Dictionary  ${payload}  osDeploymentSettings
+	${osdp1} =           Get From Dictionary           ${osdp}  osDeploymentPlanUri
+	${osdp_Uri} =	Get OSDP URI    ${osdp1}
+	Log to console and logfile		${osdp_uri}
+	Set to Dictionary	${payload['osDeploymentSettings']}	osDeploymentPlanUri=${osdp_uri}
+	# Get Network URI
+	${connection}=	Get From Dictionary  ${payload}   connections
+	Log to console and logfile		VALUE IN CONNECTION
+	${connection1} 		Get From List  ${connection}   0	
+	${nwuri} =	Get From Dictionary		${connection1}  networkUri
+	log to console and logfile   ${nwuri}
+	${uri} = 	Get Ethernet URIs		${nwuri}
+	Log to console and logfile		${uri[0]}	
+	Set to Dictionary	${connection1}	networkUri=${uri[0]}
+	Log to console and logfile		${payload}	
+	[Return]   ${payload} 
+
+ 

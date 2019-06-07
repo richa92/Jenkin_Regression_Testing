@@ -1,0 +1,1918 @@
+*** Settings ***
+Documentation        Feature Test: REST API CRUD automation
+
+Resource             ../../../../fusion/tests/resource/fusion_api_all_resource_files.txt
+
+Library             Collections
+Library             json
+Library             OperatingSystem
+Library             Selenium2Library
+Library             BuiltIn
+Library             FusionLibrary
+Library             RoboGalaxyLibrary
+Library             i3SLibrary
+
+Variables           ../../testdata/i3s_QA_testdata.py
+Variables           data_variables_rest_api_ME.py
+
+*** Variables ***
+
+${VAL_DELETE}                <Response [204]>
+${POTASH}                    Virtual Connect SE 40Gb F8 Module for Synergy
+${CHLORIDE20}                Synergy 20Gb Interconnect Link Module
+${CHLORIDE10}                Synergy 10Gb Interconnect Link Module
+${GI_SLEEP}                  600
+${AB_SLEEP}                  180
+${SP_SLEEP}                  180
+${timeout}                   1800
+${interval}                  30
+${Blade_boot}                900
+${Blade_powerOff}            300
+${InvalidOSvolumeUri}        /rest/os-volumes/123
+
+*** Test Cases ***
+
+# Test Specific Setup
+Login to Appliance
+    [Tags]    critical
+    ${admin_credentials} =    Create Dictionary    userName=${DEFAULT_USER}
+    ...                                            password=${DEFAULT_PASSWORD}
+    Set Suite Variable    ${admin_credentials}    ${admin_credentials}
+    Log to console and logfile    ${fusion_IP}
+    ${Response}    ${SessionId} =    Fusion Api Login Appliance    ${fusion_IP}    ${admin_credentials}
+    Set Suite Variable    ${SessionId}    ${SessionId}
+
+# Create Subnet for mgmt and Associate to Network
+Create subnet for Mgmt
+    Set log level  TRACE
+    ${sub} =    Build SUBNET Body    ${subnet}    ${mgmt_subnet}
+    ${resp} =    fusion_api_create_ipv4_subnet    body=${sub}
+    Log to console and logfile    ${resp}
+    ${valDict} =    Create Dictionary    status_code=${200}
+    Validate Response    ${resp}    ${valDict}
+
+Create range for Mgmt
+    Set log level  TRACE
+    ${range}=   Build IPRange Body    ${ipv4ranges}    ${mgmt_subnet}    ${mgmt_ip_range}
+    :For  ${x}  in  @{range}
+    \   ${resp}=    fusion_api_create_ipv4_range    ${x}
+    \   ${valDict} =    Create Dictionary    status_code=${200}
+    \   Validate Response    ${resp}    ${valDict}
+
+Create untagged network and associate subnet having range
+    Set log level  TRACE
+    ${network_body} =    Build Network Body With Subnet Uri    ${Ethernet_network}    ${mgmt_network_name}    ${mgmt_subnet}
+    ${resp} =    Fusion Api Create Ethernet Network    body=${network_body}
+    ${valDict} =    Create Dictionary    status_code=${202}
+    Validate Response    ${resp}    ${valDict}
+
+# Create Subnet for deploy and Associate to Network
+Create subnet for Deploy
+    Set log level  TRACE
+    ${sub} =    Build SUBNET Body    ${subnet}    ${deploy_subnet}
+    ${resp} =    fusion_api_create_ipv4_subnet    body=${sub}
+    ${valDict} =    Create Dictionary    status_code=${200}
+    Validate Response    ${resp}    ${valDict}
+
+Create range for Deploy
+    Set log level  TRACE
+    ${range} =    Build IPRange Body    ${ipv4ranges}    ${deploy_subnet}    ${deploy_ip_range}
+    :For  ${x}  in  @{range}
+    \    ${resp} =    fusion_api_create_ipv4_range    ${x}
+    \    ${valDict} =    Create Dictionary    status_code=${200}
+    \    Log to console and logfile    ${valDict}
+    \    Validate Response    ${resp}    ${valDict}
+
+Create tagged network and associate subnet having range
+    Set log level  TRACE
+    ${network_body} =    Build Network Body With Subnet Uri    ${Ethernet_network}    ${deploy_network_name}    ${deploy_subnet}
+    ${resp} =    Fusion Api Create Ethernet Network    body=${network_body}
+    ${valDict} =    Create Dictionary    status_code=${202}
+    Validate Response    ${resp}    ${valDict}
+
+# OSDS REST API calls
+Create OS Deployment Server
+    Set log level  TRACE
+    ${osds_body} =    Create Deployment Server Payload    ${osdeploymentserver}
+    ${Response} =    Fusion Api Create OS DeploymentServer    ${osds_body}
+    Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to Create OSDS
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number     60
+    ${Retries}           Convert To Integer    40
+    ${Response} =    Fusion API Wait For Task To Complete    ${Response['headers']['Location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    # Check for errors
+    ${Errors} =    Get From Dictionary    ${Response}    taskErrors
+    ${Errors} =    Get Length    ${Errors}
+    Should be True    ${Errors} == 0    msg=Errors encountered while creating OS Deployment Server
+
+Get OS Deployment Server by name
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${osdeploymentserver}    name
+    Log To Console    \nOS Deployment Server:\t ${NAME}
+    ${Response} =    Fusion Api Get OS DeploymentServer    param=?filter="'name'=='${NAME}'"
+    Should Be Equal as Strings    ${Response['status_code']}    200    msg=Failed to Get OS Deployment Server
+    Should Be Equal as Strings    ${Response['count']}    1    msg=Failed to Get OS Deployment Server by Name
+
+Get the first 10 OS Deployment Servers
+    Set log level  TRACE
+    ${Response} =    Fusion Api Get OS DeploymentServer    param=?count=10&?filter="uuid matches'%25Image'"
+    Should Be Equal as Strings    ${Response['count']}    1    msg=Failed to get OS Deployment Servers
+
+Get OS Deployment Server by count higher than available
+    Set log level  TRACE
+    ${Response} =    Fusion Api Get OS DeploymentServer    param=?count=5
+    Should Be Equal as Strings    ${Response['count']}   1    msg=Failed to get OS Deployment Servers
+
+Get All OS Deployment Servers
+    Set log level  TRACE
+    ${Response} =    Fusion Api Get OS DeploymentServer
+    Should Be Equal as Strings    ${Response['count']}    1    msg=Failed to get OS Deployment Servers
+
+Get OS Deployment Server by ascending order
+    Set log level  TRACE
+    ${Response} =    Fusion Api Get OS DeploymentServer
+    ${osdslist} =    Create List
+    ${cnt} =    Convert To Integer    ${Response['count']}
+    :FOR    ${OSDSCNT}    IN RANGE    0    ${cnt}
+    \    append to list    ${osdslist}    ${Response['members'][${OSDSCNT}]['name']}
+    Sort List    ${osdslist}
+    ${Response} =    Fusion Api Get OS DeploymentServer    param=?sort=name:asc
+    ${sortedosdslist} =    Create List
+    ${cnt1} =    Convert To Integer    ${Response['count']}
+    :FOR    ${OSDSCNT1}    IN RANGE    0    ${cnt1}
+    \      append to list    ${sortedosdslist}    ${Response['members'][${OSDSCNT1}]['name']}
+    Lists Should Be Equal    ${osdslist}    ${sortedosdslist}    msg="lists are not equal"
+
+Get a list of image streamer appliances
+    Set log level  TRACE
+    ${Response} =    Fusion_Api_Get_i3sappliance_uri
+    Should Be Equal as Strings    ${Response['count']}    2    msg=Failed to get image streamer appliances
+
+Get image streamer appliances by ID
+    Set log level  TRACE
+    ${Response} =    Fusion_Api_Get_i3sappliance_uri
+    Should Be Equal as Strings    ${Response['count']}    2    msg=Failed to get image streamer appliances
+    ${i3s_json_list} =    Get from Dictionary    ${Response}    members
+    # Get image streamer appliance
+    ${Response_from_uri} =    Fusion_Api_Get_i3sappliance_uri    ${i3s_json_list[0]['uri']}
+    Should Be Equal as Strings    ${Response_from_uri['uri']}    ${i3s_json_list[0]['uri']}    msg=Failed to get image streamer appliance
+
+Get all the One View networks associated with deployment-server
+    Set log level  TRACE
+    ${Response} =    Fusion Api Get OS DeploymentServer    param=/network
+    ${network} =    Get Substring    ${Response['_content']}    134   142
+    Log To Console    \n\n${network}
+    Should Be Equal as Strings    ${Response['status_code']}    200    msg=Failed to get One View networks associated with deployment-server
+    Should Not Be Equal as Strings    ${network}    null    msg=Failed to get One View networks associated with deployment-server
+
+Update OS Deployment Server by description
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${osdeploymentserver}    name
+    Log To Console    \nOS Deployment Server which will be updated is: ${NAME}
+    ${osds_json} =    Fusion Api Get OS DeploymentServer    param=?filter="'name'=='${NAME}'"
+    ${osds_members_list} =    Get from Dictionary    ${osds_json}    members
+    ${osds_members_dict} =    Convert to Dictionary    @{osds_members_list}
+    # Get the OSDS uri, to be used next in update call
+    ${osds_uri} =    Get from Dictionary    ${osds_members_dict}    uri
+    # Get the value of description from the update json
+    ${Desc} =    Get from Dictionary    ${osdeploymentserver_update[0]}    description
+    Set to Dictionary    ${osds_members_dict}    description    ${Desc}
+    ${Response} =    Fusion Api Update OS DeploymentServer....${osds_members_dict}  ${osds_uri}
+    Should Be Equal as Strings    ${Response['status_code']}    202    msg=Failed to Update OS Deployment Server
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number     60
+    ${Retries}           Convert To Integer    10
+    ${Response} =    Fusion API Wait For Task To Complete    ${Response['headers']['Location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    # Check for errors
+    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    ${Errors}=    Get Length    ${Errors}
+    Should be True    ${Errors} == 0    msg=Errors encountered while updating OS Deployment Server
+
+# Logical Interconnect Group (LIG) REST API Calls
+Create LIG
+    Set log level  TRACE
+    :FOR    ${lig}  IN  @{logical_interconnect_group}
+    \    Log to console    ${lig['name']}
+    \    ${lig_body} =    Create LIG TBird Payload    ${lig}
+    \    ${Response} =    fusion api create lig     ${lig_body}
+    \    Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to Create LIG
+    \    # Wait for task to complete
+    \    ${Retry Interval}    Convert To Number     60
+    \    ${Retries}           Convert To Integer    15
+    \    ${Response} =    Fusion API Wait For Task To Complete    ${Response['headers']['Location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    \    # Check for errors
+    \    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    \    ${Errors}=    Get Length    ${Errors}
+    \    Should be True    ${Errors} == 0    msg=Errors encountered while create Logical Interconnect Group(LIG)
+
+Get Logical Interconnect Group by name
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${logical_interconnect_group[0]}    name
+    Log To Console    \nLogical Interconnect Group:\t ${NAME}
+    ${Response} =    Fusion Api Get LIG    param=?filter="'name'=='${NAME}'"
+    Should Be Equal as Strings    ${Response['status_code']}    200    msg=Failed to Get Logical Interconnect Group
+    Should Be Equal as Strings    ${Response['count']}    1    msg=Failed to Get Logical Interconnect Group by Name
+
+Get the first 10 Logical Interconnect Groups
+    Set log level  TRACE
+    ${Response} =    Fusion Api Get LIG    param=?count=10&?filter="uuid matches'%25Image'"
+    Should Be Equal as Strings    ${Response['count']}    3    msg=Failed to get Logical Interconnect Groups
+
+Get Logical Interconnect Group by count higher than available
+    Set log level  TRACE
+    ${Response} =    Fusion Api Get LIG    param=?count=5
+    Should Be Equal as Strings    ${Response['count']}   3    msg=Failed to get Logical Interconnect Groups
+
+Get All Logical Interconnect Groups
+    Set log level  TRACE
+    ${Response} =    Fusion Api Get LIG
+    Should Be Equal as Strings    ${Response['count']}    3    msg=Failed to get Logical Interconnect Groups
+
+Get Logical Interconnect Group by ascending order
+    Set log level  TRACE
+    ${Response} =    Fusion Api Get LIG
+    ${liglist} =    Create List
+    ${cnt} =    Convert To Integer    ${Response['count']}
+    :FOR    ${LIGCNT}    IN RANGE    0    ${cnt}
+    \    append to list    ${liglist}    ${Response['members'][${LIGCNT}]['name']}
+    Sort List    ${liglist}
+    ${Response} =    Fusion Api Get LIG    param=?sort=name:asc
+    ${sortedliglist} =    Create List
+    ${cnt1} =    Convert To Integer    ${Response['count']}
+    :FOR    ${LIGCNT1}    IN RANGE    0    ${cnt1}
+    \     append to list    ${sortedliglist}    ${Response['members'][${LIGCNT1}]['name']}
+    Lists Should Be Equal    ${liglist}    ${sortedliglist}   msg="lists are not equal"
+
+Get Logical Interconnect Group by ID
+    Set log level  TRACE
+    ${Response} =    Fusion Api Get LIG
+    Should Be Equal as Strings    ${Response['count']}    3    msg=Failed to get Logical Interconnect Group
+    ${LIG_json_list} = ....Get from Dictionary    ${Response}    members
+    # Get LIG by uri
+    ${Response_from_uri} =    Fusion Api Get LIG    ${LIG_json_list[0]['uri']}
+    Should Be Equal as Strings    ${Response_from_uri['uri']}    ${LIG_json_list[0]['uri']}    msg=Failed to get Logical Interconnect Group
+
+Update Logical Interconnect Group to add additional uplink
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${logical_interconnect_group[0]}    name
+    Log To Console    \nLogical Interconnect Group which will be updated is: ${NAME}
+    ${lig_json} =    Fusion Api Get LIG    param=?filter="'name'=='${NAME}'"
+    ${lig_members_list} =    Get from Dictionary    ${lig_json}    members
+    ${lig_members_dict} =    Convert to Dictionary    @{lig_members_list}
+    # Get the LIG uri, to be used next in update call
+    ${lig_uri} =    Get from Dictionary    ${lig_members_dict}    uri
+    # Get the value of uplink set from the update json
+    ${uplink_new} =    Copy Dictionary      ${logical_interconnect_group_update_uplink}
+    ${uplink_set} =    Get from Dictionary    ${lig_members_dict}    uplinkSets
+    ${uplink_count_0} =    Get Length    ${uplink_set[0]['logicalPortConfigInfos']}
+    ${uplink_count_1} =    Get Length    ${uplink_set[1]['logicalPortConfigInfos']}
+    Run Keyword If    ${uplink_count_0} == 1     Append To List    ${uplink_set[0]['logicalPortConfigInfos']}    ${uplink_new}
+    ...    ELSE    Append To List    ${uplink_set[1]['logicalPortConfigInfos']}    ${uplink_new}
+    Set to Dictionary    ${lig_members_dict}    uplinkSets    ${uplink_set}
+    ${ligs_update_json} =    Create LIG TBird Payload    ${lig_members_dict}
+    ${Response} =    Fusion Api Edit LIG    ${ligs_update_json}    ${lig_uri}
+    Should Be Equal as Strings    ${Response['status_code']}    202    msg=Failed to Update Logical Interconnect Group
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number     30
+    ${Retries}           Convert To Integer    10
+    ${Response} =    Fusion API Wait For Task To Complete    ${Response['headers']['Location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    # Check for errors
+    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    ${Errors}=    Get Length    ${Errors}
+    Should be True    ${Errors} == 0    msg=Errors encountered while updating Logical Interconnect Group
+
+# Enclosure Group (EG) REST API Calls
+Create Enclosure Group
+    Set log level  TRACE
+    ${enc_body} =    Create EG Body    ${enclosure_group[0]}
+    ${resp} =    Fusion Api Create Enclosure Group    ${enc_body}
+    Log to console    ${resp}
+    ${valDict} =     Create Dictionary    status_code=${201}
+    Validate Response    ${resp}    ${valDict}
+
+Get Enclosure Group by name
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${enclosure_group[0]}    name
+    Log To Console    \nEnclosure Group:\t ${NAME}
+    ${Response} =    Fusion Api Get Enclosure Groups    param=?filter="'name'=='${NAME}'"
+    Should Be Equal as Strings    ${Response['status_code']}    200    msg=Failed to Get Enclosure Group
+    Should Be Equal as Strings    ${Response['count']}    1    msg=Failed to Get Enclosure Group by Name
+
+Get the first 10 Enclosure Groups
+    Set log level  TRACE
+    ${Response} =    Fusion Api Get Enclosure Groups    param=?count=10&?filter="uuid matches'%25Image'"
+    Should Be Equal as Strings    ${Response['count']}    1    msg=Failed to get Enclosure Groups
+
+Get Enclosure Group by count higher than available
+    Set log level  TRACE
+    ${Response} =    Fusion Api Get Enclosure Groups    param=?count=5
+    Should Be Equal as Strings    ${Response['count']}   1    msg=Failed to get Enclosure Groups
+
+Get All Enclosure Groups
+    Set log level  TRACE
+    ${Response} =    Fusion Api Get Enclosure Groups
+    Should Be Equal as Strings    ${Response['count']}    1    msg=Failed to get Enclosure Groups
+
+Get Enclosure Group by ascending order
+    Set log level  TRACE
+    ${Response} =    Fusion Api Get Enclosure Groups
+    ${eglist} =    Create List
+    ${cnt} =    Convert To Integer    ${Response['count']}
+    :FOR    ${EGCNT}    IN RANGE    0    ${cnt}
+    \    append to list    ${eglist}    ${Response['members'][${EGCNT}]['name']}
+    Sort List    ${eglist}
+    ${Response} =    Fusion Api Get Enclosure Groups    param=?sort=name:asc
+    ${sorted_eglist} =    Create List
+    ${cnt1} =    Convert To Integer    ${Response['count']}
+    :FOR    ${EGCNT1}    IN RANGE    0    ${cnt1}
+    \      append to list    ${sorted_eglist}    ${Response['members'][${EGCNT1}]['name']}
+    Lists Should Be Equal    ${eglist}    ${sorted_eglist}   msg="lists are not equal"
+
+Get Enclosure Group by ID
+    Set log level  TRACE
+    ${Response} =    Fusion Api Get Enclosure Groups
+    Should Be Equal as Strings    ${Response['count']}    1    msg=Failed to get Enclosure Group
+    ${EG_json_list} =    Get from Dictionary    ${Response}    members
+    ${EG_json_dict} =    Convert to Dictionary    @{EG_json_list}
+    ${EG_uri} =    Get from Dictionary    ${EG_json_dict}    uri
+    # Get EG by uri
+    ${Response_from_uri} =    Fusion Api Get Enclosure Groups    ${EG_uri}
+    Should Be Equal as Strings    ${Response['count']}    1    msg=Failed to get Enclosure Group
+
+Update Enclosure Group by name
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${enclosure_group[0]}    name
+    Log To Console    \nEnclosure Group which will be updated is: ${NAME}
+    ${eg_json} =    Fusion Api Get Enclosure Groups    param=?filter="'name'=='${NAME}'"
+    ${eg_members_list} =    Get from Dictionary    ${eg_json}    members
+    ${eg_members_dict} =    Convert to Dictionary    @{eg_members_list}
+    # Get the eg uri, to be used next in update call
+    ${eg_uri} =    Get from Dictionary    ${eg_members_dict}    uri
+    Log To Console    \n\n${eg_uri}
+    # Get the value of name  from the update json
+    ${eg_name} =    Get from Dictionary    ${enclosure_group_update[0]}    name
+    Set to Dictionary    ${eg_members_dict}    name    ${eg_name}
+    ${Response} =    fusion_api_edit_enclosure_group    ${eg_members_dict}  ${eg_uri}
+    # Log to console    ${Response}
+    Should Be Equal as Strings    ${Response['status_code']}    200    msg=Failed to Update Enclosure Group
+
+Update Enclosure Group by LIG
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${enclosure_group_update[0]}    name
+    Log To Console    \nEnclosure Group which will be updated is: ${NAME}
+    ${eg_json} =    Fusion Api Get Enclosure Groups   param=?filter="'name'=='${NAME}'"
+    ${eg_members_list} =    Get from Dictionary    ${eg_json}    members
+    ${eg_members_dict} =    Convert to Dictionary    @{eg_members_list}
+    # Get the eg uri, to be used next in update call
+    ${eg_uri} =    Get from Dictionary    ${eg_members_dict}    uri
+    Log To Console    \n\n${eg_uri}
+    # Get the value of name  from the update json
+    ${eg_name} =    Get from Dictionary    ${enclosure_group_update[1]}    name
+    Set to Dictionary    ${eg_members_dict}    name    ${eg_name}
+    # Get the interconnectBayMappings from the update json
+    ${up_interconnectBayMappings} =    Get from Dictionary    ${enclosure_group_update[1]}    interconnectBayMappings
+    Set to Dictionary    ${eg_members_dict}    interconnectBayMappings    ${up_interconnectBayMappings}
+    ${enc_update_body} =    Create EG Body    ${eg_members_dict}
+    ${Response} =    fusion_api_edit_enclosure_group    ${enc_update_body}    ${eg_uri}
+    Should Be Equal as Strings    ${Response['status_code']}    200    msg=Failed to Update Enclosure Group
+
+################ REST API calls for Logical Enclosure ################
+Create Logical Enclosure
+    Set log level  TRACE
+    ${Response} =    Add Logical Enclosure from variable       ${logical_enclosure}
+    Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to initiate Create Logical Enclosure
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number    60
+    ${Retries}           Convert To Integer    120
+    ${Response}=    Fusion API Wait For Task To Complete    ${Response['headers']['Location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    # Check for errors
+    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    ${Errors}=    Get Length    ${Errors}
+    Should be True    ${Errors} == 0    msg=Errors encountered while creating Logical Enclosure
+    Sleep    600
+
+Get Logical Enclosure by name
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${logical_enclosure}    name
+    Log To Console    \nLogical Enclosure:\t ${NAME}
+    ${Response} =    Fusion Api Get Logical Enclosure    param=?filter="'name'=='${NAME}'"
+    Log To Console    ${Response}
+    Should Be Equal as Strings    ${Response['status_code']}    200    msg=Failed to Get Logical Enclosure
+    Should Be Equal as Strings    ${Response['count']}    1    msg=Failed to Get Logical Enclosure by Name
+
+Get the first 10 Logical Enclosures
+    Set log level  TRACE
+    ${Response} =    Fusion Api Get Logical Enclosure   param=?count=10&?filter="uuid matches'%25Image'"
+    Should Be Equal as Strings    ${Response['count']}    1    msg=Failed to get Logical Enclosures
+
+Get Logical Enclosure by count higher than available
+    Set log level  TRACE
+    ${Response} =    Fusion Api Get Logical Enclosure    param=?count=5
+    Should Be Equal as Strings    ${Response['count']}   1    msg=Failed to get Logical Enclosures
+
+Get All Logical Enclosures
+    Set log level  TRACE
+    ${Response} =    Fusion Api Get Logical Enclosure
+    Should Be Equal as Strings    ${Response['count']}    1    msg=Failed to get Logical Enclosure
+
+Get Logical Enclosure by ascending order
+    Set log level  TRACE
+    ${Response} =    Fusion Api Get Logical Enclosure
+    ${lelist} =    Create List
+    ${cnt} =    Convert To Integer    ${Response['count']}
+    :FOR    ${LECNT}    IN RANGE    0    ${cnt}
+    \    append to list    ${lelist}    ${Response['members'][${LECNT}]['name']}
+    Sort List    ${lelist}
+    ${Response} =    Fusion Api Get Logical Enclosure    param=?sort=name:asc
+    ${sorted_lelist} =    Create List
+    ${cnt1} =    Convert To Integer    ${Response['count']}
+    :FOR    ${LECNT1}    IN RANGE    0    ${cnt1}
+    \      append to list    ${sorted_lelist}    ${Response['members'][${LECNT1}]['name']}
+    Lists Should Be Equal    ${lelist}    ${sorted_lelist}   msg="lists are not equal"
+
+Get Logical Enclosure by ID
+    Set log level  TRACE
+    ${Response} =    Fusion Api Get Logical Enclosure
+    Should Be Equal as Strings    ${Response['count']}    1    msg=Failed to get Logical Enclosure
+    ${LE_json_list} =    Get from Dictionary    ${Response}    members
+    ${LE_json_dict} =    Convert to Dictionary    @{LE_json_list}
+    ${LE_uri} =    Get from Dictionary    ${LE_json_dict}    uri
+    # Get LE by uri
+    ${Response_from_uri} =    Fusion Api Get Logical Enclosure   ${LE_uri}
+    Should Be Equal as Strings    ${Response['count']}    1    msg=Failed to get Logical Enclosure
+
+Update Logical Enclosure by name
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${logical_enclosure}    name
+    Log To Console    \nLogical Enclosure which will be updated is: ${NAME}
+    ${le_json} =    Fusion Api Get Logical Enclosure   param=?filter="'name'=='${NAME}'"
+    ${le_members_list} =    Get from Dictionary    ${le_json}    members
+    ${le_members_dict} =    Convert to Dictionary    @{le_members_list}
+    # Get the le uri, to be used next in update call
+    ${le_uri} =    Get from Dictionary    ${le_members_dict}    uri
+    Log To Console    \n\n${le_uri}
+    # Get the value of name  from the update json
+    ${le_name} =    Get from Dictionary    ${logical_enclosure_update[0]}    name
+    Set to Dictionary    ${le_members_dict}    name    ${le_name}
+    ${Response} =    fusion_api_update_logical_enclosure    ${le_members_dict}    ${le_uri}
+    # Log to console    ${Response}
+    Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to initiate Create Logical Enclosure
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number    60
+    ${Retries}           Convert To Integer    30
+    ${Response} =    Fusion API Wait For Task To Complete    ${Response['headers']['location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    # Check for errors
+    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    ${Errors}=    Get Length    ${Errors}
+    Should be True    ${Errors} == 0    msg=Errors encountered while updating Logical Enclosure
+
+################ REST API for GoldenImage ################
+# Login to i3s appliance using Fuion session ID
+Get i3s Appliance Cluster IP and Login to i3s
+    [Tags]   critical
+    Set log level  TRACE
+    ${resp} =    Fusion Api Get i3sCluster IP
+    ${i3S_IP} =    Get From Dictionary    ${resp['members'][0]}    primaryIPV4
+    Log to console and logfile    ${i3S_IP}
+    Log to console    ${SessionId}
+    I3S API LOGIN APPLIANCE    ${i3S_IP}    ${SessionId}
+
+Add Golden Image
+    Set log level  TRACE
+    ${GI_NAME} =    Get From Dictionary     ${goldenimage_add[0]}    name
+    ${GI_DESC} =    Get From Dictionary     ${goldenimage_add[0]}    description
+    ${LOCAL_FILE} =    Get From Dictionary    ${goldenimage_add[0]}    file
+    Log to console    ${GI_NAME}
+    ${Response} =    i3s Api Add Golden Image    ${LOCAL_FILE}    param=?name=${GI_NAME}&description=${GI_DESC}
+    Should Be Equal as Strings    ${Response['status_code']}    202    msg=Failed to create GoldenImage
+    Run Keyword If    ${Response['status_code']}==202    Wait For GI Complete    ${Response}   ${GI_NAME}
+
+# Capture Golden Image is written along with Server profile CRUD operations as it requires OSVolume
+Download Golden Image
+    Set log level  TRACE
+    ${NAME}=    Get From Dictionary     ${goldenimage_add[0]}   name
+    Log To Console    Download Golden Image Bundle    ${NAME}
+    ${Response} =    i3s Api Download Golden Image   param=?filter="'name'=='${NAME}'"
+    Should Be Equal as Strings    ${Response['status_code']}    200    msg=Failed to download Golden Image
+
+Update Golden Image by name and description
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${goldenimage_add[0]}    name
+    Log To Console    \nGoldenimage which will be updated is: ${NAME}
+    ${GI_json} =    i3s Get Goldenimage     param=?filter="'name'=='${NAME}'"
+    ${GI_members_list} =    Get from Dictionary    ${GI_json}    members
+    ${GI_members_dict} =    Convert to Dictionary    @{GI_members_list}
+    # Get the GI uri, to be used next in update call
+    ${gi_uri} =    Get from Dictionary    ${GI_members_dict}    uri
+    Log To Console    \n\n${gi_uri}
+    # Get the value of name  from the update json
+    ${gi_name} =    Get from Dictionary    ${goldenimage_update[0]}    name
+    Set to Dictionary    ${GI_members_dict}    name    ${gi_name}
+    ${gi_desc} =    Get from Dictionary    ${goldenimage_update[0]}    description
+    Set to Dictionary    ${GI_members_dict}    description    ${gi_desc}
+    ${Response}=    i3s Api Update GoldenImage    ${GI_members_dict}    ${gi_uri}
+    Should Be Equal as Strings    ${Response['status_code']}    200    msg=Failed to update golden image by name & description
+
+Get All GoldenImages
+    Set log level  TRACE
+    ${Response} =    i3s Api Get Golden Image
+    ${cnt} =    Convert To Integer    ${Response['count']}
+    Should Be Equal as Strings    ${Response['count']}    1    msg=Failed to Get Golden Image
+
+################ REST API for Artifact Bundles ################
+Add Artifact Bundle
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${artifactbundle_add[0]}    name
+    ${Response} =    i3s Api Add Artifact Bundle    ${NAME}
+    Should Be Equal as Strings    ${Response['status_code']}    202    msg=Failed to add Artifact Bundle
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number     60
+    ${Retries}    Convert To Integer    20
+    ${Resp} =    i3s API Wait For Task To Complete    ${Response['headers']['location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    # Check for errors
+    ${Errors} =    Get From Dictionary    ${Resp}    taskErrors
+    ${Errors} =    Get Length    ${Errors}
+    Should be True    ${Errors} == 0    msg=Errors encountered while adding Artifact Bundle
+
+Extract Artifact Bundle
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${artifact_bundle_extract[0]}    name
+    ${ab_uri} =    Get ArtifactBundle Uri    ${NAME}
+    Log to console    ${ab_uri}
+    ${Response} =    i3s Api Extract Artifact Bundle    ${ab_uri}
+    Log to console    ${Response}
+    Should Be Equal as Strings    ${Response['status_code']}    202    msg=Failed to extract Artifact Bundle
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number     60
+    ${Retries}    Convert To Integer    20
+    ${Resp} =    i3s API Wait For Task To Complete    ${Response['headers']['location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    # Check for errors
+    ${Errors} =    Get From Dictionary    ${Resp}    taskErrors
+    ${Errors} =    Get Length    ${Errors}
+    Should be True    ${Errors} == 0    msg=Errors encountered while extracting Artifact Bundle
+
+Download Artifact Bundle
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${artifactbundle_extract[0]}    name
+    ${Response} =    i3s Api Download Artifact Bundle    param=?filter="'name'=='${NAME}'"
+    Should Be Equal as Strings    ${Response['status_code']}    200    msg=Failed to download Artifact Bundle ${NAME}
+
+Get Artifact Bundle by Name
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${artifactbundle_extract[0]}    name
+    ${Response} =    i3s Api Get Artifact Bundle    param=?filter="'name'=='${NAME}'"
+    Should Be Equal as Strings    ${Response['members'][0]['name']}    ${NAME}    msg=Failed to Get Artifact Bundle
+
+################ REST API for Planscript ################
+Create Planscript with type Deploy
+    Set log level  TRACE
+    ${Response} =    I3s Api Create Plan Scripts  ${planscript_create[0]}
+    Should Be Equal as Strings    ${Response['status_code']}    201    msg=Couldn't create Planscript for deploy planType, status : ${Response['status_code']}
+
+Create Planscript with type Capture
+    Set log level  TRACE
+    ${Response} =    I3s Api Create Plan Scripts    ${planscript_create[1]}
+    Should Be Equal as Strings    ${Response['status_code']}    201    msg=Couldn't create Planscript with capture planType, status : ${Response['status_code']}
+
+Update Planscripts by name and description
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${planscript_create[0]}    name
+    Log To Console    \nPlanscript which will be updated is: ${NAME}
+    ${PS_json} =    i3s Api Get Plan Scripts    param=?filter="'name'=='${NAME}'"
+    ${PS_members_list} =    Get from Dictionary    ${PS_json}    members
+    ${PS_members_dict} =    Convert to Dictionary    @{PS_members_list}
+    # Get the PS uri, to be used next in update call
+    ${ps_uri} =    Get from Dictionary    ${PS_members_dict}    uri
+    Log To Console    \n\n${ps_uri}
+    # Get the value of name  from the update json
+    ${ps_name} =    Get from Dictionary    ${planscript_update[0]}    name
+    Set to Dictionary    ${PS_members_dict}    name    ${ps_name}
+    ${ps_desc} =    Get from Dictionary    ${planscript_update[0]}    description
+    Set to Dictionary    ${PS_members_dict}    description    ${ps_desc}
+    ${Response} =    i3s Api Update Plan Scripts    ${PS_members_dict}    ${ps_uri}
+    Should Be Equal as Strings    ${Response['status_code']}    200    msg= Update planscript return status does not match the expected return status , status : ${Response['status_code']}
+
+Get All Planscripts
+    Set log level  TRACE
+    ${Response} =    i3s Api Get Plan Scripts
+    Should Be Equal as Strings    ${Response['status_code']}    200    msg=Get Planscript return status does not match the expected return status , status : ${Response['status_code']}
+
+# Post planscript to retrieve the modified contents of the selected Plan Script as per the selected attributes - NOT WORKING
+
+################ REST API for Buildplan ################
+Create OSBuildplan1 of OSBP type Deploy
+    Set log level  TRACE
+    ${bp_body}=    Create Build Plan Payload    ${buildplan_create[0]}
+    ${Response}=    i3S api create buildplan    ${bp_body}
+    Should Be Equal as Strings    ${Response['status_code']}    201    msg=Failed to Create Build Plan with Type Deploy
+
+Create OSBuildplan2 of OSBP type Deploy
+    Set log level  TRACE
+    ${bp_body} =    Create Build Plan Payload    ${buildplan_create[1]}
+    ${Response} =    i3S api create buildplan    ${bp_body}
+    Should Be Equal as Strings    ${Response['status_code']}    201    msg=Failed to Create Build Plan with Type Capture
+
+Create OSBuildplan3 of OSBP type Capture
+    Set log level  TRACE
+    Log to console    Create OS Build Plan With Type Capture
+    ${bp_body}=    Create Build Plan Payload    ${buildplan_create[2]}
+    ${Response}=    i3S api create buildplan    ${bp_body}
+    Should Be Equal as Strings    ${Response['status_code']}    201    msg=Failed to Create Build Plan with Type Capture
+
+Get Build Plan by Valid Name
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${buildplan_create[0]}    name
+    Log To Console    \Get Build Plan     ${NAME}
+    ${Response}=    i3S Api Get Buildplan    uri=?filter="'name'=='${NAME}'"
+    Should Be Equal as Strings    ${Response['members'][0]['name']}    ${NAME}    msg=Failed to Get Build Plan with valid name
+
+Update Buildplan by name and description
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${buildplan_create[2]}    name
+    Log To Console    \Buildplan which will be updated is: ${NAME}
+    ${BP_json} =    i3S Api Get Buildplan    param=?filter="'name'=='${NAME}'"
+    ${BP_members_list} =    Get from Dictionary    ${BP_json}    members
+    ${BP_members_dict} =    Convert to Dictionary    @{BP_members_list}
+    # Get the BP uri, to be used next in update call
+    ${bp_uri} =    Get from Dictionary    ${BP_members_dict}    uri
+    Log To Console    \n\n${bp_uri}
+    # Get the value of name  from the update json
+    ${bp_name} =    Get from Dictionary    ${buildplan_update[0]}    name
+    Set to Dictionary    ${BP_members_dict}    name    ${bp_name}
+    ${bp_desc} =    Get from Dictionary    ${buildplan_update[0]}    description
+    Set to Dictionary    ${BP_members_dict}    description    ${bp_desc}
+    ${Response} =    i3s Api Update Buildplan    ${BP_members_dict}    ${bp_uri}
+    Should Be Equal as Strings    ${Response['status_code']}    200    msg= Update buildplan return status does not match the expected return status , status : ${Response['status_code']}
+
+################ REST API for Deployment plan ################
+Create Deployment Plans
+    Set log level  TRACE
+    :FOR    ${dp}  IN  @{deploymentplan_create}
+    \    Log to console    ${dp['name']}
+    \    ${dp_body} =    Create Deploymentplan Payload    ${dp}
+    \    ${Response} =    i3s Api Create Deploymentplan    ${dp_body}
+    \    Should Be Equal as Strings    ${Response['status_code']}    201    msg=Failed to Create DeploymentPlan
+
+Update Deploymentplan by name and description
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${deploymentplan_create[0]}    name
+    Log To Console    \deploymentplan which will be updated is: ${NAME}
+    ${DP_json} =    i3S Api Get deploymentplan    param=?filter="'name'=='${NAME}'"
+    ${DP_members_list} =    Get from Dictionary    ${DP_json}    members
+    ${DP_members_dict} =    Convert to Dictionary    @{DP_members_list}
+    # Get the DP uri, to be used next in update call
+    ${DP_uri} =    Get from Dictionary    ${DP_members_dict}    uri
+    Log To Console    \n\n${DP_uri}
+    # Get the value of name  from the update json
+    ${DP_name} =    Get from Dictionary    ${deploymentplan_update[0]}    name
+    Set to Dictionary    ${DP_members_dict}    name    ${DP_name}
+    ${DP_desc} =    Get from Dictionary    ${deploymentplan_update[0]}    description
+    Set to Dictionary    ${DP_members_dict}    description    ${DP_desc}
+    ${Response}=    i3s Api Update deploymentplan    ${DP_members_dict}    ${DP_uri}
+    Should Be Equal as Strings    ${Response['status_code']}    200    msg= Update deploymentplan return status does not match the expected return status , status : ${Response['status_code']}
+
+Get Deploymentplan by DP Name
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${deploymentplan_update[0]}    name
+    Log To Console    \nGet Deploymentplan:\t ${NAME}
+    ${Response} =    i3s Api Get Deploymentplan    param=?filter="'name'=='${NAME}'"
+    Should Be Equal as Strings    ${Response['members'][0]['name']}    ${NAME}    msg=Failed to Get Deployment Plan with valid name
+
+Get Deploymentplan by OSDP
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${deploymentplan_update[0]}    name
+    Log To Console    \Get deploymentplan for: ${NAME}
+    ${DP_json} =    i3S Api Get deploymentplan    param=?filter="'name'=='${NAME}'"
+    ${DP_members_list} =    Get from Dictionary    ${DP_json}    members
+    ${DP_members_dict} =    Convert to Dictionary    @{DP_members_list}
+    # Get the DP uri, to be used next in update call
+    ${DP_uri} =    Get from Dictionary    ${DP_members_dict}    id
+    # GEt Deploymentplan by OSDP
+    ${DP_json} =    i3S Api Get deploymentplan    param=/${DP_uri}/osdp
+    Should Be Equal as Strings    ${DP_json['name']}    ${NAME}    msg=Failed to Get Deployment Plan by osdp
+
+Get Deploymentplan by Usedby
+    ${NAME} =    Get From Dictionary    ${deploymentplan_update[0]}    name
+    Log To Console    \Get deploymentplan for: ${NAME}
+    ${DP_json} =    i3S Api Get deploymentplan    param=?filter="'name'=='${NAME}'"
+    ${DP_members_list} =    Get from Dictionary    ${DP_json}    members
+    ${DP_members_dict} =    Convert to Dictionary    @{DP_members_list}
+    # Get the DP uri, to be used next in update call
+    ${DP_uri} =    Get from Dictionary    ${DP_members_dict}    id
+    # GEt Deploymentplan by OSDP
+    ${DP_json} =    i3S Api Get deploymentplan    param=/${DP_uri}/usedby
+    Log to console    ${DP_json}
+    Should Be Equal as Strings    ${DP_json['status_code']}    200    msg=Failed to Get Deployment Plan by usedby field
+
+################ REST API for Artifact Bundles for Create and Update ################
+Create Artifact Bundle
+    Set log level  TRACE
+    ${ab_body} =    Create Artifact Bundle Payload    ${artifactbundle_create[0]}
+    ${Response} =    i3s Api Create Artifact Bundle    ${ab_body}
+    Should Be Equal as Strings    ${Response['status_code']}    202    msg=Failed to Create AB
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number     60
+    ${Retries}    Convert To Integer    20
+    ${Resp} =    i3s API Wait For Task To Complete    ${Response['headers']['Location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    # Check for errors
+    ${Errors} =    Get From Dictionary    ${Resp}    taskErrors
+    ${Errors} =    Get Length    ${Errors}
+    Run Keyword If    ${Errors} != 0
+       ...    Log    Errors encountered while creating AB    level=WARN
+    ${NAME} =    Get From Dictionary    ${artifactbundle_create[0]}    name
+    ${Response} =    i3s Api Get Artifact Bundle    param=?filter="'name'=='${NAME}'"
+    Should Be Equal as Strings    ${Response['members'][0]['status']}    OK    msg=Failed to Create Artifact Bundle
+
+Update Artifact Bundle by name
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${artifactbundle_create[0]}    name
+    Log To Console    \Artifact Bundle which will be updated is: ${NAME}
+    ${AB_json} =    i3S Api Get Artifact Bundle    param=?filter="'name'=='${NAME}'"
+    ${AB_members_list} =    Get from Dictionary    ${AB_json}    members
+    ${AB_members_dict} =    Convert to Dictionary    @{AB_members_list}
+    # Get the AB uri, to be used next in update call
+    ${AB_uri} =    Get from Dictionary    ${AB_members_dict}    uri
+    Log To Console    \n\n${AB_uri}
+    # Get the value of name from the update json
+    ${AB_name} =    Get from Dictionary    ${artifactbundle_update[0]}    name
+    Set to Dictionary    ${AB_members_dict}    name    ${AB_name}
+    ${Response}=    i3s Api Update Artifact Bundle    ${AB_members_dict}    ${AB_uri}
+    Should Be Equal as Strings    ${Response['status_code']}    200    msg= Update Artifact Bundle return status does not match the expected return status , status : ${Response['status_code']}
+
+################ REST API test for Server profile template ################
+Create Server profile template with NIC attributes
+    Set log level  TRACE
+    Log to console and Logfile    Create SPT when dp having NIC attributes is selected in OS Deployment section
+    ${Server_Profile_template_body} =    Copy Dictionary    ${serverprofile_template_create[0]}
+    ${SPT_name} =    Get From Dictionary    ${Server_Profile_template_body}    name
+    # Create Server profile template
+    ${spt_body} =    Create Server Profile Template Payload    ${Server_Profile_template_body}
+    ${Response} =    Fusion API Create Server Profile Template   ${spt_body}
+    Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to initiate Create SPT
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number     60
+    ${Retries}           Convert To Integer    5
+    ${Response} =    Fusion API Wait For Task To Complete    ${Response['headers']['Location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    # Check for errors
+    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    ${Errors_count} =    Get Length    ${Errors}
+    Run Keyword If    ${Errors_count} == 0    Log to console    \nSuccessfully created server profile template with deploymentplan having NIC attributes
+    ...    ELSE    Fail    msg=Errors encountered while creating Server Profile Template with valid deploymentplan...\n${Errors}
+
+Get all server profile template information
+    Set Log Level    TRACE
+    ${resp} =    Fusion API Get Server Profile Templates
+    Should Be Equal as Strings    ${resp['status_code']}    200    msg=Failed to get server profile template information
+
+Get server profile template by ID
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${serverprofile_template_create[0]}    name
+    Log To Console    \nServer profile template:\t ${NAME}
+    ${Response} =    Fusion API Get Server Profile Templates    param=?filter="'name'=='${NAME}'"
+    Should Be Equal as Strings    ${Response['count']}    1    msg=Failed to get Server Profile Template
+    ${spt_json_list} = ....Get from Dictionary    ${Response}    members
+    ${spt_json_dict} =    Convert to Dictionary    @{spt_json_list}
+    ${spt_uri} =    Get from Dictionary    ${spt_json_dict}    uri
+    # Get Server Profile Template
+    ${Response_from_uri} =    Fusion API Get Server Profile Templates    ${spt_uri}
+    Should Be Equal as Strings    ${Response['count']}    1    msg=Failed to get Fusion API Get Server Profile Template
+
+Create Serverprofile from Serverprofile Template and Delete Serverprofile
+    Set log level  TRACE
+    Log to console and Logfile    Verify whether SP gets created successfully from SPT
+    ${Server_Profile_body} =    Copy Dictionary    ${Serverprofile_from_SPT[0]}
+    ${SP_name} =    Get From Dictionary    ${Server_Profile_body}    name
+    Log to console    \nCreate Server Profile from SPT
+    # Create Server profile
+    ${sp_body} =    Create Server Profile Payload    ${Server_Profile_body}
+    ${Response} =    Fusion API Create Server Profile    ${sp_body}
+    Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to initiate Create SPT
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number     60
+    ${Retries}           Convert To Integer    10
+    ${Response} =    Fusion API Wait For Task To Complete    ${Response['headers']['Location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    # Check for errors
+    ${Errors} =    Get From Dictionary    ${Response}    taskErrors
+    ${Errors_count} =    Get Length    ${Errors}
+    Run Keyword If    ${Errors_count} == 0    Log to console    \nSuccessfully created server profile
+    ...    ELSE    Fail    msg=Errors encountered while creating Server Profile...\n${Errors}
+    Sleep    ${SP_SLEEP}
+    # Delete server profile
+    ${Response} =    Delete Server Profile    ${SP_name}
+    # Check for errors
+    ${Errors} =    Get From Dictionary    ${Response}    taskErrors
+    ${Errors_count} =    Get Length    ${Errors}
+    Run Keyword If    ${Errors_count} == 0    Log to console    \Created server profile successfully...${SP_name}
+    ...    ELSE    Fail    msg=Errors encountered while creating Server Profile...\n${Errors}
+
+Copy Server Profile Template by name, description and OSDP
+    [Tags]   Run-this16
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${serverprofile_template_create[0]}    name
+    Log To Console    \n\nServer Profile Template to be updated is: ${NAME}
+    ${SPT_json} =    Fusion API Get Server Profile Templates    param=?filter='name'=='${NAME}'
+    ${SPT_members_list} =    Get from Dictionary    ${SPT_json}    members
+    ${SPT_members_dict} =    Convert to Dictionary    @{SPT_members_list}
+    # Get the values to be modified in the copy template, by default, name has to be provided
+    ${SPT_name} =    Get from Dictionary    ${Serverprofile_template_copy[0]}    name
+    Set to Dictionary    ${SPT_members_dict}    name    ${SPT_name}
+    ${SPT_desc} =    Get from Dictionary    ${Serverprofile_template_copy[0]}    description
+    Run Keyword If    '${SPT_desc}' != 'None'    Set to Dictionary    ${SPT_members_dict}    description    ${SPT_desc}
+    # Get OS DeploymentPlan
+    ${osds} =    Get From Dictionary    ${Serverprofile_template_edit[0]}    osDeploymentSettings
+    Set to Dictionary    ${SPT_members_dict}    osDeploymentSettings    ${osds}
+    ${osdp} =    Run Keyword If    ${osds} != None    Get From Dictionary    ${osds}    osDeploymentPlanUri
+    ...    ELSE    Set Variable    ${osds}
+    ${osdp_Uri} =    Run Keyword If    '${osdp}' != 'None'    Get OSDP URI    ${osdp}
+    ...    ELSE    Set Variable    ${osdp}
+    Log    ${osdp} : ${osdp_uri}
+    Run Keyword If    ${osds} != None    Set to Dictionary    ${SPT_members_dict['osDeploymentSettings']}    osDeploymentPlanUri=${osdp_uri}
+    ${Response} =    Fusion API Create Server Profile Template    ${SPT_members_dict}
+    Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to initiate copy SPT
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number     10
+    ${Retries}           Convert To Integer    5
+    ${Response} =    Fusion API Wait For Task To Complete    ${Response['headers']['Location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    # Check for errors
+    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    ${Errors_count} =    Get Length    ${Errors}
+    Run Keyword If    ${Errors_count} == 0    Log to console    \nSuccessfully copied server profile template
+    ...    ELSE    Fail    msg=Errors encountered while copying Server Profile Template ...\n${Errors}
+
+Update Server Profile Template by name, description and OSDP
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${Serverprofile_template_copy[0]}    name
+    Log To Console    \n\nServer Profile Template to be updated is: ${NAME}
+    ${SPT_json} =    Fusion API Get Server Profile Templates    param=?filter='name'=='${NAME}'
+    ${SPT_members_list} =    Get from Dictionary    ${SPT_json}    members
+    ${SPT_members_dict} =    Convert to Dictionary    @{SPT_members_list}
+    # Get the SPT uri, to be used next in update call
+    ${SPT_uri} =    Get from Dictionary    ${SPT_members_dict}    uri
+    Log To Console    \n\n${SPT_uri}
+    # Get the value of name  from the update json
+    ${SPT_name} =    Get from Dictionary    ${Serverprofile_template_edit[0]}    name
+    Set to Dictionary    ${SPT_members_dict}    name    ${SPT_name}
+    ${SPT_desc} =    Get from Dictionary    ${Serverprofile_template_edit[0]}    description
+    Set to Dictionary    ${SPT_members_dict}    description    ${SPT_desc}
+    # Get OS DeploymentPlan
+    ${osds} =    Get From Dictionary    ${Serverprofile_template_edit[0]}    osDeploymentSettings
+    Set to Dictionary    ${SPT_members_dict}    osDeploymentSettings    ${osds}
+    ${osdp} =    Run Keyword If    ${osds} != None    Get From Dictionary    ${osds}  osDeploymentPlanUri
+    ...    ELSE    Set Variable    ${osds}
+    ${osdp_Uri} =    Run Keyword If    '${osdp}' != 'None'    Get OSDP URI    ${osdp}
+    ...    ELSE    Set Variable    ${osdp}
+    Log    ${osdp} : ${osdp_uri}
+    Run Keyword If    ${osds} != None    Set to Dictionary    ${SPT_members_dict['osDeploymentSettings']}    osDeploymentPlanUri=${osdp_uri}
+    ${Response}=    Fusion Api Edit Server Profile Template    ${SPT_members_dict}    ${SPT_uri}
+    Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to initiate update SPT
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number     30
+    ${Retries}           Convert To Integer    5
+    ${Response} =    Fusion API Wait For Task To Complete    ${Response['headers']['Location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    # Check for errors
+    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    ${Errors_count} =    Get Length    ${Errors}
+    Run Keyword If    ${Errors_count} == 0    Log to console    \nSuccessfully updated server profile template
+    ...    ELSE    Fail    msg=Errors encountered while updating Server Profile Template ...\n${Errors}
+
+# Delete Server Profile Templates
+Delete Server Profile Template1
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${serverprofile_template_create[0]}    name
+    Log To Console    \nDeleting Server Profile Template ${NAME}
+    ${Response} =    Fusion API Delete Server Profile Template    ${NAME}
+    Log to console and logfile    ${Response}
+    Should Be Equal as Strings    ${Response['status_code']}    202    msg=Failed to initiate delete server profile template
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number     30
+    ${Retries}    Convert To Integer    10
+    ${Resp}=    Fusion API Wait For Task To Complete    ${Response['headers']['location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    # Check for errors
+    ${Errors} =    Get From Dictionary    ${Resp}    taskErrors
+    ${Errors} =    Get Length    ${Errors}
+    Should be True    ${Errors} == 0    msg=Errors encountered while deleting Server Profile Template..\n${Errors}
+
+Delete Server Profile Template2
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${serverprofile_template_edit[0]}    name
+    Log To Console    \nDeleting Server Profile Template ${NAME}
+    ${Response} =    Fusion API Delete Server Profile Template    ${NAME}
+    Log to console and logfile    ${Response}
+    Should Be Equal as Strings    ${Response['status_code']}    202    msg=Failed to initiate delete server profile template
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number     30
+    ${Retries}    Convert To Integer    10
+    ${Resp}=    Fusion API Wait For Task To Complete    ${Response['headers']['location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    # Check for errors
+    ${Errors} =    Get From Dictionary    ${Resp}    taskErrors
+    ${Errors} =    Get Length    ${Errors}
+    Should be True    ${Errors} == 0    msg=Errors encountered while deleting Server Profile Template..\n${Errors}
+
+################ REST API for Server profile ################
+Create ServerProfile
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${serverprofile_create[0]}    name
+    Log to console    \n${NAME}
+    ${sp_body} =    Create Server Profile Payload    ${Serverprofile_create[0]}
+    ${Response}=    Fusion API Create Server Profile    ${sp_body}
+    Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to initiate Create SP
+    #  Wait for task to complete
+    ${Retry Interval}    Convert To Number     60
+    ${Retries}           Convert To Integer    15
+    ${Response}=    Fusion API Wait For Task To Complete    ${Response['headers']['Location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    #  Check for errors
+    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    ${Errors}=    Get Length    ${Errors}
+    Should be True    ${Errors} == 0    msg=Errors encountered while creating Server Profile
+
+Get all server profiles
+    Set Log Level    TRACE
+    ${resp} =    Fusion API Get Server Profiles
+    Should Be Equal as Strings    ${resp['status_code']}    200    msg=Failed to get server profile information
+
+Get server profile by ID
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${Serverprofile_create[0]}    name
+    Log To Console    \nServer profile :\t ${NAME}
+    ${Response} =    Fusion API Get Server Profiles    param=?filter="'name'=='${NAME}'"
+    Should Be Equal as Strings    ${Response['count']}    1    msg=Failed to get Server Profile
+    ${sp_json_list} =    Get from Dictionary    ${Response}    members
+    ${sp_json_dict} =    Convert to Dictionary    @{sp_json_list}
+    ${sp_uri} =    Get from Dictionary    ${sp_json_dict}    uri
+    #  Get Server Profile
+    ${Response_from_uri} =    Fusion API Get Server Profiles    ${sp_uri}
+    Should Be Equal as Strings    ${Response['count']}    1    msg=Failed to get Fusion API Get Server Profile
+
+Create Serverprofile Template from Serverprofile
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${Serverprofile_create[0]}    name
+    Log To Console    \n\nServer Profile to be updated is: ${NAME}
+    ${SP_json} =    Fusion API Get Server Profiles    param=?filter='name'=='${NAME}'
+    ${SP_members_list} =     Get from Dictionary    ${SP_json}    members
+    ${SP_members_dict} =    Convert to Dictionary    @{SP_members_list}
+    #  Get the SP uri, to be used next in update call
+    ${SP_uri} =    Get from Dictionary    ${SP_members_dict}    uri
+    Log To Console    \n\n${SP_uri}
+    ${SPT_Request_body} =    Fusion API Get Server Profiles    uri=${SP_uri}    param=/new-profile-template
+    ${SPT_members_dict} =    Convert to Dictionary    ${SPT_Request_body}
+    #  Get the value of name  from the SPT_from_SP json
+    ${SP_name} =    Get from Dictionary    ${SPT_from_SP[0]}    name
+    Set to Dictionary    ${SPT_members_dict}    name    ${SP_name}
+    #  Get call with new-profile-template returns all members in a dictionary , it does not have members field seperatly
+    #  SPT_members_dict contains dict members with status_code and headers which is not
+    #  required for the SPT create, hence removing the same
+    Remove From Dictionary    ${SPT_members_dict}    status_code
+    Remove From Dictionary    ${SPT_members_dict}    headers
+    # Log to console    \n\n${SPT_members_dict}
+    ${Response} =    Fusion API Create Server Profile Template   ${SPT_members_dict}
+    Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to initiate Create SPT
+    #  Wait for task to complete
+    ${Retry Interval}    Convert To Number     60
+    ${Retries}           Convert To Integer    5
+    ${Response} =    Fusion API Wait For Task To Complete    ${Response['headers']['Location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    #  Check for errors
+    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    ${Errors_count} =    Get Length    ${Errors}
+    Run Keyword If    ${Errors_count} == 0    Log to console    \nSuccessfully created server profile template from server profile
+    ...    ELSE    Fail    msg=Errors encountered while creating Server Profile Template from server profile...\n${Errors}
+
+Update Server Profile by name and description
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${Serverprofile_create[0]}    name
+    Log To Console    \n\nServer Profile to be updated is: ${NAME}
+    ${SP_json} =    Fusion API Get Server Profiles    param=?filter='name'=='${NAME}'
+    ${SP_members_list} =    Get from Dictionary    ${SP_json}    members
+    ${SP_members_dict} =    Convert to Dictionary    @{SP_members_list}
+    #  Get the SP uri, to be used next in update call
+    ${SP_uri} =    Get from Dictionary    ${SP_members_dict}    uri
+    Log To Console    \n\n${SP_uri}
+    #  Get the value of name  from the update json
+    ${SP_name} =    Get from Dictionary    ${Serverprofile_edit[0]}    name
+    Set to Dictionary    ${SP_members_dict}    name    ${SP_name}
+    ${SP_desc} =    Get from Dictionary    ${Serverprofile_edit[0]}    description
+    Set to Dictionary    ${SP_members_dict}    description    ${SP_desc}
+    ${Response}=    Fusion Api Edit Server Profile    ${SP_members_dict}    ${SP_uri}
+    Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to initiate update SP
+    #  Wait for task to complete
+    ${Retry Interval}    Convert To Number     30
+    ${Retries}           Convert To Integer    5
+    ${Response} =    Fusion API Wait For Task To Complete    ${Response['headers']['Location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    #  Check for errors
+    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    ${Errors_count} =    Get Length    ${Errors}
+    Run Keyword If    ${Errors_count} == 0    Log to console    \nSuccessfully updated server profile
+    ...    ELSE    Fail    msg=Errors encountered while updating Server Profile  ...\n${Errors}
+
+Power On Server
+    [Documentation]    Power On Server Hardware
+    Set Log Level    TRACE
+    ${Server_Profile_body} =    Copy Dictionary    ${Serverprofile_edit[0]}
+    ${SP_name} =    Get From Dictionary    ${Server_Profile_body}    name
+    ${SP_Response} =    Get Server Profile    ${SP_name}
+    ${server_hw}    Get From Dictionary    ${SP_Response}    serverHardwareUri
+    ${taskState}    ${taskStatus} =    Power On Off Server    ${server_hw}    On
+    ${status} =    Run Keyword If    '${taskState}'=='Completed'    Log To Console    ${taskStatus}
+    ...    ELSE    Fail    msg=Failed to Power On Server Successfully
+    #  Sleep
+    Sleep    ${Blade_boot}      #  For the server to boot
+
+Ping MgmtIP
+    [Documentation]    Ping Server Hardware Using Management IP
+    Set Log Level    TRACE
+    ${Server_Profile_body} =    Copy Dictionary    ${Serverprofile_edit[0]}
+    ${SP_name} =    Get From Dictionary    ${Server_Profile_body}    name
+    ${SP_Response} =    Get Server Profile    ${SP_name}
+    ${Mgmt_IP} =    Get Management IP Of Server Profile    ${SP_Response}
+    Log to console and logfile    ${Mgmt_IP}
+    ${ping_status} =    Windows ping    ${Mgmt_IP}
+    Run Keyword If    ${ping_status} == 0    Log to console    \nIP is set and reachable
+    ...    ELSE    Fail    msg=IP is not reachable
+
+Power Off Server
+    [Documentation]    Power Off Server Hardware
+    Set Log Level    TRACE
+    ${Server_Profile_body} =    Copy Dictionary    ${Serverprofile_edit[0]}
+    ${SP_name} =    Get From Dictionary    ${Server_Profile_body}    name
+    ${SP_Response} =    Get Server Profile    ${SP_name}
+    ${server_hw}    Get From Dictionary    ${SP_Response}    serverHardwareUri
+    ${taskState}    ${taskStatus} =    Power On Off Server    ${server_hw}    Off
+    ${status} =    Run Keyword If    '${taskState}'=='Completed'    Log To Console    ${taskStatus}
+    ...    ELSE    Fail    msg=Failed to Power Off Server Successfully
+    Sleep    ${Blade_powerOff}
+
+#  Goldenimage capture written here as it requires OSVolume
+Golden Image Capture
+    [Tags]   Run-this12
+    Set Log Level  TRACE
+    Log to console    Golden Image Capture
+    ${NAME} =    Get From Dictionary     ${goldenimage_create[0]}   name
+    ${gic_body} =    Create GI Capture Payload    ${goldenimage_create[0]}
+    ${Response} =    i3s Api Golden Image Capture    ${gic_body}
+    Log to console and logfile    ${Response}
+    Should Be Equal as Strings    ${Response['status_code']}    202        msg=Failed to Create GoldenImage
+    Run Keyword If    ${Response['status_code']}==202   Wait For GI Complete  ${Response}    ${NAME}
+
+################ Delete SP, SPT, DP and GI before BAckup Restore cases ################
+Delete Server Profile
+    [Tags]   Run-this12
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${Serverprofile_edit[0]}    name
+    Log To Console    \nDeleting Server Profile ${NAME}
+    ${Response}=    Fusion API Delete Server Profile    ${NAME}
+    Should Not Be Equal    ${Response}    ${None}    msg=Server Profile ${Name} not found
+    Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to initiate Delete Server Profile ${Name}
+    #  Wait for task to complete
+    ${Retry Interval}    Convert To Number     60
+    ${Retries}           Convert To Integer    10
+    ${Response}=    Fusion API Wait For Task To Complete    ${Response['headers']['Location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    #  Check for errors
+    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    ${Errors}=    Get Length    ${Errors}
+    Should be True    ${Errors} == 0    msg=Errors encountered while deleting Server Profile
+    ${Response}=    Fusion API Get Server Profiles    param=?filter="name='${NAME}'"
+    Should Be Equal as Integers    ${Response['count']}    0    msg=Failed to delete Server Profile ${Name}
+
+Delete Server Profile Template
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${SPT_from_SP[0]}    name
+    Log To Console    \nDeleting Server Profile Template ${NAME}
+    ${Response} =    Fusion API Delete Server Profile Template    ${NAME}
+    Log to console and logfile    ${Response}
+    Should Be Equal as Strings    ${Response['status_code']}    202    msg=Failed to initiate delete server profile template
+    #  Wait for task to complete
+    ${Retry Interval}    Convert To Number     30
+    ${Retries}    Convert To Integer    10
+    ${Resp}=    Fusion API Wait For Task To Complete    ${Response['headers']['location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    #  Check for errors
+    ${Errors} =    Get From Dictionary    ${Resp}    taskErrors
+    ${Errors} =    Get Length    ${Errors}
+    Should be True    ${Errors} == 0    msg=Errors encountered while deleting Server Profile Template..\n${Errors}
+
+Delete Deployment Plans
+    Set log level  TRACE
+    :FOR    ${dp}  IN  @{deploymentplan_delete}
+    \    Log To Console    \nDeleting Deploymentplan ${dp['name']}
+    \    ${Response} =    i3s Api Delete Deploymentplan    ${dp['name']}
+    \    Should Be Equal As Strings    ${Response['status_code']}    204    msg=Failed to delete Deploymentplan
+
+Delete Golden Image
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${goldenimage_update[0]}    name
+    Log To Console    Deleting goldenimag   ${NAME}
+    ${Response} =    i3s Api Delete Golden Image    ${NAME}
+    Should Be Equal as Strings    ${Response['status_code']}    202    msg=Failed to delete GoldenImage
+
+Delete Captured Golden Image
+    [Tags]   Run-this12
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${goldenimage_create[0]}    name
+    Log To Console    Deleting goldenimag   ${NAME}
+    ${Response} =    i3s Api Delete Golden Image    ${NAME}
+    Should Be Equal as Strings    ${Response['status_code']}    202    msg=Failed to delete GoldenImage
+
+################ REST API for Backup Restore ################
+Create backup of all the artifacts on image streamer
+    Set Log Level    TRACE
+    ${dp_grp_response} =    I3S Api Get Deploymentgroup
+    Log to console    ${dp_grp_response['members'][0]['uri']}
+    ${dp_grp_json} =    Create Dictionary
+    Set To Dictionary    ${dp_grp_json}    deploymentGroupURI    ${dp_grp_response['members'][0]['uri']}
+    Log to console    ${dp_grp_json}
+    ${Response} =    i3s Api Create Backup    ${dp_grp_json}
+    Should Be Equal as Strings    ${Response['status_code']}    202    msg=Failed to Create image streamer backup bundle
+    #  Wait for task to complete
+    ${Retry Interval}    Convert To Number     60
+    ${Retries}    Convert To Integer    20
+    ${Resp} =    i3s API Wait For Task To Complete    ${Response['headers']['Location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    #  Check for errors
+    ${Errors} =    Get From Dictionary    ${Resp}    taskErrors
+    ${Errors} =    Get Length    ${Errors}
+    Should be True    ${Errors} == 0    msg=Errors encountered while creating image streamer backup bundle
+
+Get image streamer backup information
+    Set Log Level    TRACE
+    ${resp} =    I3S Api Get Backup
+    Log to console    \n${resp['members'][0]['uri']}
+    Should Be Equal as Strings    ${resp['status_code']}    200    msg=Failed to get backup bundle information
+
+Get image streamer backup information by ID
+    Set Log Level    TRACE
+    ${Response} =    I3S Api Get Backup
+    Log to console    \n${Response['members'][0]['uri']}
+    ${Get_Response} =    I3S Api Get Backup    param=${Response['members'][0]['artifactsbundleID']}
+    Log to console    \n${Get_Response['uri']}
+
+Create new buildplan before Restore
+    Set log level  TRACE
+    Log to console    Create OS Build Plan With Type Capture
+    ${bp_body} =    Create Build Plan Payload    ${buildplan_create[2]}
+    ${Response} =    i3S api create buildplan    ${bp_body}
+    Should Be Equal as Strings    ${Response['status_code']}    201    msg=Failed to Create Build Plan with Type Capture
+
+Restore backup bundle on image streamer
+    #  The new buildplan created above should not be present in the setup after Restore
+    Set Log Level    TRACE
+    ${dp_grp_response} =    I3S Api Get Deploymentgroup
+    Log to console    ${dp_grp_response['members'][0]['uri']}
+    ${dp_grp_json} =    Create Dictionary
+    Set To Dictionary    ${dp_grp_json}    deploymentGroupURI    ${dp_grp_response['members'][0]['uri']}
+    ${Response} =    I3s Api Extract Backupbundle    ${dp_grp_json}
+    Should Be Equal as Strings    ${Response['status_code']}    202    msg=Failed to extract Backup bundle
+    #  Wait for task to complete
+    ${Retry Interval}    Convert To Number     60
+    ${Retries}    Convert To Integer    20
+    ${Resp} =    i3s API Wait For Task To Complete    ${Response['headers']['Location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    #  Check for errors
+    ${Errors} =    Get From Dictionary    ${Resp}    taskErrors
+    ${Errors} =    Get Length    ${Errors}
+    Should be True    ${Errors} == 0    msg=Errors encountered while extracting Artifact Bundle
+
+Upload backup bundle
+    Set Log Level    TRACE
+    ${NAME} =    Get From Dictionary    ${backup_bundle_add[0]}    name
+    ${Response} =    i3s Api Add backup    ${NAME}
+    Log to console    ${Response}
+    Should Be Equal as Strings    ${Response['status_code']}    202    msg=Failed to add Backup Bundle
+    #  Wait for task to complete
+    ${Retry Interval}    Convert To Number     60
+    ${Retries}    Convert To Integer    20
+    ${Resp} =    i3s API Wait For Task To Complete    ${Response['headers']['location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    #  Check for errors
+    ${Errors} =    Get From Dictionary    ${Resp}    taskErrors
+    ${Errors} =    Get Length    ${Errors}
+    Should be True    ${Errors} == 0    msg=Errors encountered while adding Artifact Bundle
+
+# Download backup bundle by name
+#     ${NAME} =    Get From Dictionary    ${backup_bundle_download[0]}    name
+#     ${Response} =    i3s Api Download Artifact Bundle    param=?filter="'name'=='${NAME}'"
+#     Log to console and logfile    ${Response}
+#     Should Be Equal as Strings    ${Response['status_code']}    200    msg=Failed to download Backup Bundle ${NAME}
+
+################ Delete all resources created ################
+Delete All Artifact Bundles
+    Set log level  TRACE
+    ${Response} =    i3s Api Get Artifact Bundle
+    ${cnt} =    Convert To Integer    ${Response['count']}
+    :FOR    ${ABCNT}    IN RANGE    0    ${cnt}
+    \    ${Response1} =    i3s Api Delete Artifact Bundle    ${Response['members'][${ABCNT}]['name']}
+    ${Response} =    i3s Api Get Artifact Bundle
+    Should Be Equal as Strings    ${Response['count']}    0    msg=Not Able delete AB
+
+Delete All Build Plans
+    Set log level  TRACE
+    ${Response} =    i3S api get buildplan
+    ${cnt} =    Convert To Integer    ${Response['count']}
+    :FOR    ${ABCNT}    IN RANGE    0    ${cnt}
+    \    ${Response1} =    i3S api delete buildplan    ${Response['members'][${ABCNT}]['name']}
+    ${Response} =    i3S api get buildplan
+    Should Be Equal as Strings    ${Response['count']}    0    msg=Not Able delete BP
+
+Delete All Plan Scripts
+    Set log level  TRACE
+    ${Response} =    i3s Api Get Plan Scripts
+    ${cnt} =    Convert To Integer    ${Response['count']}
+    :FOR    ${ABCNT}    IN RANGE    0    ${cnt}
+    \    ${Response1} =    i3s Api Delete Plan Scripts    ${Response['members'][${ABCNT}]['name']}
+    ${Response} =    i3s Api Get Plan Scripts
+    Should Be Equal as Strings    ${Response['count']}    0    msg=Not Able delete PS
+
+Delete Logical Enclosure
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${logical_enclosure_update[0]}    name
+    Log To Console    \nLogical Enclosure which will be deleted is: ${NAME}
+    ${le_json} =    Fusion Api Get Logical Enclosure   param=?filter="'name'=='${NAME}'"
+    ${le_members_list} =    Get from Dictionary    ${le_json}    members
+    ${le_members_dict} =    Convert to Dictionary    @{le_members_list}
+    #  Get the le uri, to be used next in update call
+    ${le_uri} =    Get from Dictionary    ${le_members_dict}    uri
+    Log To Console    \n\n${le_uri}
+    ${Response} =    Fusion Api Delete Logical Enclosure    uri=${le_uri}    param=?force=False
+    Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to delete Logical Enclosure
+    #  Wait for task to complete
+    ${Retry Interval}    Convert To Number    120
+    ${Retries}           Convert To Integer    40
+    ${Response} =    Fusion API Wait For Task To Complete    ${Response['headers']['Location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    #  Check for errors
+    ${Errors} =    Get From Dictionary    ${Response}    taskErrors
+    ${Errors} =    Get Length    ${Errors}
+    Should be True    ${Errors} == 0    msg=Errors encountered while deleting Logical Enclosure
+
+Delete Enclosure Group
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${enclosure_group[0]}    name
+    Log To Console    \nEnclosure Group which will be deleted is: ${NAME}
+    ${eg_json} =    Fusion Api Get Enclosure Groups    param=?filter="'name'=='${NAME}'"
+    ${eg_members_list} =    Get from Dictionary    ${eg_json}    members
+    ${eg_members_dict} =    Convert to Dictionary    @{eg_members_list}
+    #  Get the EG Uri, to be used next in update call
+    ${eg_uri} =    Get from Dictionary    ${eg_members_dict}    uri
+    Log    ${eg_uri}
+    ${resp} =    Fusion Api Delete Enclosure Group    uri=${eg_uri}
+    ${valDict} =    Create Dictionary    status_code=${204}
+    Validate Response    ${resp}    ${valDict}
+
+Delete Logical Interconnect Group
+    Set log level  TRACE
+    :FOR    ${lig}  IN  @{logical_interconnect_group}
+    \    Log to console    \n${lig['name']}
+    \    ${lig_json} =    Fusion Api Get LIG    param=?filter="'name'=='${lig['name']}'"
+    \    ${lig_members_list} =    Get from Dictionary    ${lig_json}    members
+    \    ${lig_members_dict} =    Convert to Dictionary    @{lig_members_list}
+    \    #  Get the LIG Uri, to be used next in update call
+    \    ${lig_uri} =    Get from Dictionary    ${lig_members_dict}    uri
+    \    Log    ${lig_uri}
+    \    ${Response} =    Fusion Api Delete LIG    uri=${lig_uri}
+    \    Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to delete Logical Interconnect Group
+    \    #  Wait for task to complete
+    \    ${Retry Interval}    Convert To Number     30
+    \    ${Retries}           Convert To Integer    10
+    \    ${Response} =    Fusion API Wait For Task To Complete    ${Response['headers']['Location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    \    #  Check for errors
+    \    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    \    ${Errors}=    Get Length    ${Errors}
+    \    Should be True    ${Errors} == 0    msg=Errors encountered while updating Logical Interconnect Group
+
+Delete OS Deployment Server
+    Set log level  TRACE
+    ${NAME} =    Get From Dictionary    ${osdeploymentserver[0]}    name
+    ${Response} =    Fusion Api Delete OS DeploymentServer    ${NAME}
+    Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to delete OSDS
+    #  Wait for task to complete
+    ${Retry Interval}    Convert To Number     60
+    ${Retries}           Convert To Integer    20
+    ${Response} =    Fusion API Wait For Task To Complete    ${Response['headers']['Location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    #  Check for errors
+    ${Errors} =    Get From Dictionary    ${Response}    taskErrors
+    ${Errors} =    Get Length    ${Errors}
+    Should be True    ${Errors} == 0    msg=Errors encountered while deleting OS Deployment Server
+
+Delete MGMT NETWORK
+    Set log level  TRACE
+    ${neturi} =    Get Ethernet URI    mgmt_nw
+    ${resp} =    Fusion Api Delete Ethernet Network    uri=${neturi}
+    ${valDict} =    Create Dictionary    status_code=${202}
+    Validate Response    ${resp}    ${valDict}
+
+Delete DEPLOY NETWORK
+    Set log level  TRACE
+    ${neturi} =    Get Ethernet URI    iscsi_nw
+    ${resp} =    Fusion Api Delete Ethernet Network    uri=${neturi}
+    ${valDict} =    Create Dictionary    status_code=${202}
+    Validate Response    ${resp}    ${valDict}
+
+Delete RANGE for MGMT
+    Set log level  TRACE
+    ${subnets} =    Get Subnet    15.212.164.0
+    ${uri} =    Get from Subnet    ${subnets}    uri
+    ${resp} =    fusion api get ipv4 subnet    uri=${uri}
+    ${rangeuri} =     Get From Dictionary     ${resp}    rangeUris
+    ${resp} =    fusion api delete ipv4 range    uri=${rangeuri[0]}
+    ${valDict} =    Create Dictionary    status_code=${204}
+    Validate Response    ${resp}    ${valDict}
+
+Delete RANGE for DEPLOY
+    Set log level  TRACE
+    ${subnets} =    Get Subnet    10.10.7.0
+    ${uri}=    Get from Subnet    ${subnets}    uri
+    ${resp} =    fusion api get ipv4 subnet    uri=${uri}
+    ${rangeuri} =    Get From Dictionary     ${resp}    rangeUris
+    ${resp} =    fusion api delete ipv4 range    uri=${rangeuri[0]}
+    ${valDict} =    Create Dictionary    status_code=${204}
+    Validate Response    ${resp}    ${valDict}
+
+Delete SUBNET for MGMT
+    Set log level  TRACE
+    ${subnets} =   Get Subnet    15.212.164.0
+    ${uri} =    Get from Subnet    ${subnets}    uri
+    ${resp} =       fusion_api_delete_ipv4_subnet    uri=${uri}
+    ${valDict} =    Create Dictionary    status_code=${204}
+    Validate Response    ${resp}    ${valDict}
+
+Delete SUBNET for DEPLOY
+    Set log level  TRACE
+    ${subnets} =   Get Subnet    10.10.7.0
+    ${uri}=    Get from Subnet    ${subnets}    uri
+    ${resp} =       fusion_api_delete_ipv4_subnet    uri=${uri}
+    ${valDict} =    Create Dictionary    status_code=${204}
+    Validate Response    ${resp}    ${valDict}
+
+#-------------------- Build the required JSON body-----------------------------------
+*** Keywords ***
+Get Subnet
+    [Arguments]    ${NETWORK_ID}
+    ${resp} =    fusion api get ipv4 subnet
+    ${subnetcounts} =     Get From Dictionary     ${resp}    members
+    ${l} =    Get Length    ${subnetcounts}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    ${subnet} =     Get From List   ${subnetcounts}    ${x}
+    \    Exit For Loop If    '${subnet['networkId']}' == '${NETWORK_ID}'
+    [Return]    ${subnet}
+
+Get from Subnet
+    [Arguments]     ${subnet_list}    ${element}
+    ${return} =    Get From Dictionary     ${subnet_list}    ${element}
+    [Return]    ${return}
+
+Build Network Body With Subnet Uri
+    [Documentation]    Select the Subnet Uri and add in the Subnet Uri field of the Request Body to create a Network and associate the Subnet
+    # [Aguments]    ${Ethernet_network_1}    ${NETWORK_ID}
+    [Arguments]    ${networks}    ${networkname}    ${NETWORK_ID}
+    ${subnets} =    Get Subnet        ${NETWORK_ID}
+    ${uri} =         Get from Subnet         ${subnets}              uri
+    Log    ${uri}
+    # Log    ${networkname}
+    Log to console and logfile    Adding ETHERNET NETWORKS
+    :FOR    ${network1}    IN    @{networks}
+    \    ${networkname1} =    Get From Dictionary    ${network1}    name
+    \    Run Keyword If    '${networkname}'!='${networkname1}'    Continue For Loop
+    \    Set to dictionary    ${network1}    subnetUri=${uri}
+    \    ${network_body} =    Copy Dictionary    ${network1}
+    [Return]    ${network_body}
+
+Build IPRange Body
+    [Arguments]    ${ipv4ranges}    ${NETWORK_ID}    ${RANGE_NAME}
+    ${subnets} =    Get Subnet        ${NETWORK_ID}
+    ${uri} =         Get from Subnet         ${subnets}              uri
+    ${ipv4_1} =    Create List
+    :For  ${ipv4}  IN   @{ipv4ranges}
+    \           ${name} =   Get From Dictionary   ${ipv4}  name
+    \           Run Keyword If    '${name}'!='${RANGE_NAME}'        Continue For Loop
+    \           Set to dictionary    ${ipv4}     subnetUri=${uri}
+    \           Append to List    ${ipv4_1}    ${ipv4}
+    [Return]    ${ipv4_1}
+
+Build SUBNET Body
+    [Arguments]    ${subnet}    ${SUBNET_SELECT}
+    Log            "Subnet ":${subnet}
+    ${subnet_ret}=     Create Dictionary
+    :For  ${subnetdetails}  IN   @{subnet}
+    \        Log        ${subnetdetails}
+    \        ${networkId} =   Get From Dictionary   ${subnetdetails}  networkId
+    \        Log        ${networkId}
+    \        Log        ${SUBNET_SELECT}
+    \        Run Keyword If    '${networkId}'!='${SUBNET_SELECT}'        Continue For Loop
+    \        Log          "Subnet Matching ":${subnetdetails}
+    \        ${subnet_ret}=        Copy Dictionary        ${subnetdetails}
+    Log      "Val Subnet_ret":${subnet_ret}
+    [Return]    ${subnet_ret}
+
+Get ArtifactBundle Uri
+    [Arguments]    ${Name}
+    ${resp} =    i3s Api Get Artifact Bundle    param=?filter="'name'=='${NAME}'"
+    ${uri} =    Get From Dictionary    ${resp['members'][0]}    uri
+    [Return]    ${uri}
+
+Get OSDeploymentserver Uri
+    [Arguments]    ${Name}
+    ${resp}=    Fusion Api Get OS DeploymentServer    param=?filter="'name'=='${NAME}'"
+    ${uri} =    Get From Dictionary    ${resp['members'][0]}    uri
+    [Return]    ${uri}
+
+GET PLANSCRIPT URI
+    [Arguments]    ${psuri}
+    ${resp} =    I3S GET PLANSCRIPT    param=?filter="'name'=='${psuri}'"
+    ${uri} =    Get From Dictionary    ${resp['members'][0]}    uri
+    [Return]    ${uri}
+
+Get Goldenimage URI
+    [Arguments]    ${giuri}
+    ${resp} =    i3s Get Goldenimage    param=?filter="'name'=='${giuri}'"
+    ${uri} =    Get From Dictionary    ${resp['members'][0]}    uri
+    [Return]    ${uri}
+
+Get Buildplan URI
+    [Arguments]    ${bpuri}
+    ${resp} =    i3s Get Buildplan    param=?filter="'name'=='${bpuri}'"
+    ${uri} =    Get From Dictionary    ${resp['members'][0]}    uri
+    [Return]    ${uri}
+
+Get Deploymentplan Uri
+    [Arguments]    ${dpuri}
+    ${resp} =    i3s Get Deploymentplan    param=?filter="'name'=='${dpuri}'"
+    ${uri} =    Get From Dictionary    ${resp['members'][0]}    uri
+    [Return]    ${uri}
+
+Get OSDP URI
+    [Arguments]    ${osdp}
+    ${resp} =    Fusion Api Get OS Deploymentplan    param=?filter="'name'=='${osdp}'"
+    ${uri} =    Get From Dictionary    ${resp['members'][0]}    uri
+    [Return]    ${uri}
+
+Get OSvolume Uri
+    [Arguments]    ${osvolumename}
+    ${resp} =    Fusion Api Get Server Profiles    param=?filter="'name'=='${osvolumename}'"
+    ${ov_osvolume_uri} =    Run Keyword if  ${resp['count']} != 0
+     ...    Get From Dictionary    ${resp['members'][0]['osDeploymentSettings']}    osVolumeUri
+     ...    ELSE
+     ...    Set Variable    ${InvalidOSvolumeUri}
+    ${resp1} =    Fusion Api Get Resource   ${ov_osvolume_uri}
+    ${i3s_osvolume_uri}=    Run Keyword if  '${resp1['status']}' == 'OK'
+     ...    Get From Dictionary    ${resp1}    osVolumeUri
+     ...    ELSE
+     ...    Set Variable    ${InvalidOSvolumeUri}
+    Log to Console and Logfile    ${i3s_osvolume_uri}
+    [Return]    ${i3s_osvolume_uri}
+
+Get Goldenimage Body
+    [Arguments]    ${mx}    ${gi_body}
+    :FOR    ${IND}    IN RANGE    0    ${mx}
+    \    ${giuri} =    Get From Dictionary    ${gi_body[${IND}]}    resourceUri
+    \    ${uri} =    Get Goldenimage Uri    ${giuri}
+    \    Set to Dictionary    ${gi_body[${IND}]}    resourceUri    ${uri}
+    [Return]    ${gi_body}
+
+Get Planscript Body
+    [Arguments]    ${mx}    ${ps_body}
+    :FOR    ${IND}    IN RANGE    0    ${mx}
+    \    ${psuri} =    Get From Dictionary    ${ps_body[${IND}]}    resourceUri
+    \    ${uri} =    Get Planscript Uri    ${psuri}
+    \    Set to Dictionary    ${ps_body[${IND}]}    resourceUri    ${uri}
+    [Return]    ${ps_body}
+
+Get Buildplan Body
+    [Arguments]    ${mx}    ${bp_body}
+    :FOR    ${IND}    IN RANGE    0    ${mx}
+    \    ${bpuri} =    Get From Dictionary    ${bp_body[${IND}]}    resourceUri
+    \    Log to console    ${bpuri}
+    \    ${uri} =    Get Buildplan Uri    ${bpuri}
+    \    Set to Dictionary    ${bp_body[${IND}]}    resourceUri    ${uri}
+    [Return]    ${bp_body}
+
+Get Deploymentplan Body
+    [Arguments]    ${mx}    ${dp_body}
+    :FOR    ${IND}    IN RANGE    0    ${mx}
+    \    ${dpuri} =    Get From Dictionary    ${dp_body[${IND}]}    resourceUri
+    \    Log to console    ${dpuri}
+    \    ${uri} =    Get Deploymentplan Uri    ${dpuri}
+    \    Set to Dictionary    ${dp_body[${IND}]}    resourceUri    ${uri}
+    [Return]    ${dp_body}
+
+GV Create Success
+    [Arguments]    ${GV_Response}    ${NAME}
+    Log To Console    Check GV status
+    Run Keyword If    '${GV_Response['members'][0]['status']}' == 'OK'
+    ...    Log To Console    GV_created_successfully for ${NAME}
+    ...    ELSE
+    ...    Log to Console    GV created but status yet to get updated to OK
+
+Wait For GI Complete
+    #  Wait for task to complete
+    [Arguments]    ${Response}    ${NAME}
+    ${Retry Interval}    Convert To Number    60
+    ${Retries}    Convert To Integer    30
+    ${Resp}=    i3s API Wait For Task To Complete    ${Response['headers']['location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    #  Check for errors
+    ${Errors}=    Get From Dictionary    ${Resp}    taskErrors
+    ${Errors}=    Get Length    ${Errors}
+    Run Keyword If    ${Errors} != 0
+    ...    Log    Errors encountered while creating GI    level=WARN
+    Should Be Equal As Integers    ${Errors}    0    msg=Could not create Golden Image !!
+    Run Keyword If    ${Errors} == 0  Log to console  No errors
+        ${Response}=    i3s Api Get Golden Image    param=?filter="'name'=='${NAME}'"
+        Run Keyword If    '${Response['members'][0]['status']}' != 'OK'
+            ...    Log to console    i3S API Add Golden Image failed,imageStatus not Active
+        Run Keyword If    '${Response['members'][0]['status']}' == 'OK'
+            ...    Log To Console    i3S API Add Golden Image successful,imageStatus is Active
+        ${gv_image_uri}=    Get GoldenImage Uri    ${NAME}
+        Sleep    ${GI_SLEEP}
+        # Form param to get golden volume Uri
+        ${GV_Response}=    i3s Api Get Golden Volume    param=?filter="'imageuri'='${gv_image_uri}'"
+        ${length}=    Get Length    ${GV_Response['members']}
+        Run Keyword If    ${length} == 1    GV Create Success    ${GV_Response}    ${NAME}
+        ...    ELSE
+        ...    Should Be Equal as Strings    ${length}    1    msg=Failed to create GoldenImage for ${NAME}
+
+Get Server Profile
+    [Arguments]    ${SP_name}
+    ${resp} =    Fusion API Get Server Profiles    param=?filter="name='${SP_name}'"
+    Run Keyword If    ${resp['count']} != 0    Log    ${resp['count']} Server Profile[s] are present with name ${SP_name}
+    ...    ELSE    Fail    msg=ERROR: No Server Profiles are present with name ${SP_name}
+    #  Log to console    Get SP Response : ${resp}
+    ${SP_response_body} =    Copy Dictionary    ${resp['members'][0]}
+    [Return]    ${SP_response_body}
+
+Get SPT URI
+    [Arguments]    ${spt}
+    ${resp} =    Fusion API Get Server Profile Templates    param=?filter="'name'=='${spt}'"
+    ${uri} =    Get From Dictionary    ${resp['members'][0]}    uri
+    [Return]    ${uri}
+
+Get Appliance URI
+    [Arguments]    ${appliance}
+    ${resp} =    Fusion Api Get i3sAppliance Uri    param=?filter="'name'=='${appliance}'"
+    ${uri} =    Get From Dictionary    ${resp['members'][0]}    uri
+    [Return]    ${uri}
+
+Get Management IP Of Server Profile
+    [Arguments]    ${SP_response_body}
+    ${osds} =   Get From Dictionary    ${SP_response_body}    osDeploymentSettings
+    ${OS_CA} =    Get From Dictionary    ${osds}    osCustomAttributes
+    :FOR    ${CA}    IN    @{OS_CA}
+    \    ${CA_name} =    Get From Dictionary    ${CA}    name
+    \    ${regex_match} =    Evaluate    re.search(r'ipaddress', '${CA_name}', re.I)    re
+    \    Run Keyword If    '${regex_match}' == 'None'    continue For Loop
+    \    ${MGMT_IP_address} =    Get From Dictionary    ${CA}    value
+    Log to console    ${MGMT_IP_address}
+    [Return]    ${MGMT_IP_address}
+
+Create GI Capture Payload
+    [Arguments]    ${creategoldenimage}
+    ${gic_body} =  Copy Dictionary  ${creategoldenimage}
+    # Buildplan URI
+    ${bp_name} =    Get from Dictionary    ${gic_body}    buildPlanUri
+    ${bp_uri} =    Run Keyword If  '${bp_name}' is not ''    Get Buildplan URI    ${bp_name}
+    Set to Dictionary    ${gic_body}  buildPlanUri    ${bp_uri}
+    # OSvolume URI
+    ${sp_name} =    Get from Dictionary    ${gic_body}    osVolumeURI
+    ${osvolume_uri} =    Run Keyword If  '${sp_name}' is not ''    Get OSvolume URI    ${sp_name}
+    Set to Dictionary    ${gic_body}  osVolumeURI    ${osvolume_uri}
+    [Return]    ${gic_body}
+
+Create Deployment Server Payload
+    [Arguments]    ${osdeploymentserver}
+    ${osds_body} =    Copy Dictionary    ${osdeploymentserver}
+    # Network URI
+    ${nwuri} =    Get from Dictionary    ${osds_body}    mgmtNetworkUri
+    ${uri} =    Get Ethernet URIs    ${nwuri}
+    Set to Dictionary    ${osds_body}    mgmtNetworkUri    ${uri[0]}
+    # APPLIANCE URI
+    ${appuri} =    Get From Dictionary    ${osds_body}    applianceUri
+    ${uri} =    Get Appliance URI    ${appuri}
+    Set to Dictionary    ${osds_body}    applianceUri    ${uri}
+    [Return]    ${osds_body}
+
+Create LIG TBird Payload
+    [Arguments]       ${ligs}
+    Set Log Level    Trace
+    ${Potash}=   Get Interconnect Type URI     ${POTASH}
+    ${Chloride20}=     Get Interconnect Type URI    ${CHLORIDE20}
+    ${Chloride10}=     Get Interconnect Type URI    ${CHLORIDE10}
+    ${Response}=   Get From Dictionary     ${ligs}    interconnectMapTemplate
+    ${interconnectMapEntryTemplates}=    Create List
+    ${interconnectMapEntryTemplates1}=    Get From Dictionary     ${Response}     interconnectMapEntryTemplates
+    :For   ${item}   IN   @{interconnectMapEntryTemplates1}
+    \     ${ICM}=    Get From Dictionary    ${item}   permittedInterconnectTypeUri
+    \   Run keyword If   '${ICM}' == 'Virtual Connect SE 40Gb F8 Module for Synergy'     Set to Dictionary     ${item}   permittedInterconnectTypeUri=${Potash}
+    \   Run keyword If   '${ICM}' == 'Synergy 20Gb Interconnect Link Module'     Set to Dictionary     ${item}   permittedInterconnectTypeUri=${Chloride20}
+    \   Run keyword If   '${ICM}' == 'Synergy 10Gb Interconnect Link Module'     Set to Dictionary     ${item}   permittedInterconnectTypeUri=${Chloride10}
+    \   Append To List    ${interconnectMapEntryTemplates}     ${item}
+    #  Create LIG Body
+    ${ls}=    Set to Dictionary     ${Response}   interconnectMapEntryTemplates=${interconnectMapEntryTemplates}
+    Set to Dictionary   ${ligs}         interconnectMapTemplate=${Response}
+    ${uplinkSets1}=    Get From Dictionary  ${ligs}   uplinkSets
+    ${uplinkSets2}=    Create List
+    ${fcnetworkuri}=        Create List
+    ${ethnetworkuri}=        Create List
+    :FOR  ${x}  IN    @{uplinkSets1}
+    \     ${networkType}=    Get From Dictionary     ${x}  networkType
+    \     ${networks} =           Get From Dictionary           ${x}  networkUris
+    \     Run Keyword If    '${networkType}' == 'Ethernet'            Continue For Loop
+    \     ${networkUris}=    Get FC Uris ${networks}
+    \    Append to List    ${fcnetworkuri}   ${networkUris}
+    \        Log to Console and logfile THIS IS NOT FOR ETHERNET
+    \     log to console and logfile   ${networkUris}
+    \     Set to dictionary    ${x}    networkUris=${networkUris}
+    \        Log to Console and logfile I AM I APPENDING HERE
+    \     Append to List    ${uplinkSets2}    ${x}
+    :FOR  ${x}  IN    @{uplinkSets1}
+    \     ${networkType}=    Get From Dictionary     ${x}  networkType
+    \     ${networks} =    Get From Dictionary           ${x}  networkUris
+    \        Log to Console and logfile    ${networkType}
+    \     Run Keyword If    '${networkType}' == 'FibreChannel'  Continue For Loop
+    \     ${networkUris}=        Get FCoE Uris     ${networks}
+    \        Log to Console and logfile    ${networkUris}
+    \   ${ethernetUris}=        Get Ethernet URIs   ${networks}
+    \        Log to Console and logfile    ${ethernetUris}
+    \   ${networkUris}=        combine lists    ${networkUris}    ${ethernetUris}
+    \        Log to Console and logfile    ${networkUris}
+    \        Log to Console and logfile    ${x}
+    \     Set to dictionary    ${x}    networkUris=${networkUris}
+    \     Append to List    ${uplinkSets2}    ${x}
+    Set to Dictionary    ${ligs}     uplinkSets=${uplinkSets2}
+    [Return]    ${ligs}
+
+Create EG Body
+    [Documentation]    Adds Enclosure Group to an appliance from a variable which contains a list of dicts with the entire payload and also Associate a Range
+    [Arguments]        ${enc_groups}
+    Log to console and logfile      Adding ENCLOSURE GROUP
+    ${enc_group_body} =  Copy Dictionary  ${enc_groups}
+    # ${Response}=   Get From Dictionary     ${enc_group_body}        osDeploymentSettings
+    # ${deploymentSettings}=    Get From Dictionary     ${Response}        deploymentModeSettings
+    # ${deployment}=    Get From Dictionary     ${deploymentSettings}        deploymentNetworkUri
+    # Log to console and logfile    ${deployment}
+    # ${ethernetUris}=        Get Ethernet URIs   ${deployment}
+    # Log to console and logfile    ${ethernetUris}
+    # Set to dictionary    ${deploymentSettings}        deploymentNetworkUri    ${ethernetUris[0]}
+    Log to console and logfile    GET LIG URI
+    ${l} =    Get Length    ${enc_group_body['interconnectBayMappings']}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    ${liguri} =    Get From Dictionary    ${enc_group_body['interconnectBayMappings'][${x}]}    logicalInterconnectGroupUri
+    \   Continue For Loop If    '${liguri}' == 'None'
+    \    ${liguri} =    Common URI Lookup by name    ${liguri}
+    \    Set to dictionary    ${enc_group_body['interconnectBayMappings'][${x}]}    logicalInterconnectGroupUri    ${liguri}
+    Log to console and logfile    ${enc_group_body}
+    [Return]    ${enc_group_body}
+
+Add Logical Enclosure from variable
+    [Documentation]    Adds a Logical Enclosures to an appliance from a variable which contains a list of dicts with the entire payload
+    [Arguments]    ${enc}
+    Log to console and logfile     Adding LOGICAL ENCLOSURE
+    ${eguri} =    Get From Dictionary    ${enc}    enclosureGroupUri
+    @{words} =    Split String    ${eguri}    :
+    ${type} =    Get From List    ${words}    0
+    ${e} =    Get From List    ${words}    1
+    ${eguri} =    Get Enclosure Group URI   ${e}
+    ${encuris} =    Get From Dictionary     ${enc}  enclosureUris
+    Set to dictionary    ${enc}    enclosureGroupUri    ${eguri}
+    ${encuri_list} =    Create List
+    :FOR    ${encuri}   IN  @{encuris}
+    \       @{words} =    Split String    ${encuri}    :
+    \       ${type} =    Get From List    ${words}    0
+    \       ${e} =     Get From List    ${words}    1
+    \       ${encuri} =    Get Enclosure URI    ${e}
+    \       Append to List    ${encuri_list}    ${encuri}
+    set to dictionary   ${enc}  enclosureUris   ${encuri_list}
+    ${resp} =    Fusion Api Create Logical Enclosure    ${enc}
+    [Return]    ${resp}
+
+Create buildplan Payload
+    [Arguments]    ${buildplan_create}
+    ${bp_body} =    Copy Dictionary  ${buildplan_create}
+    # planscript URI
+    ${ps_body} =    Get from Dictionary    ${bp_body}    buildStep
+    ${mx} =  Get Length  ${ps_body}
+    Log To Console    ${mx}
+    :FOR    ${NUM}    IN RANGE    0    ${mx}
+    \    ${psuri} =    Get From Dictionary    ${ps_body[${NUM}]}    planScriptUri
+    \    ${uri} =    GET PLANSCRIPT URI    ${psuri}
+    \    Set to Dictionary    ${ps_body[${NUM}]}    planScriptUri    ${uri}
+    \    Log to console    ${uri}
+    [Return]    ${bp_body}
+
+Create Deploymentplan Payload
+    [Arguments]    ${deploymentplan_create}
+    ${dp_body} =    Copy Dictionary    ${deploymentplan_create}
+    # Buildplan URI
+    ${bp_name} =    Get from Dictionary    ${dp_body}    oeBuildPlanURI
+    Log to console and logfile    \nBP Name is:\t ${bp_name}
+    ${bp_uri} =    Run Keyword If  '${bp_name}' is not ''    Get Buildplan URI    ${bp_name}
+    Log to console and logfile    \nBP URI is:\t ${bp_uri}
+    Log to console and logfile  ${bp_uri}
+    Set to Dictionary    ${dp_body}    oeBuildPlanURI    ${bp_uri}
+    # Goldenimage URI
+    ${gi_name} =    Get from Dictionary    ${dp_body}    goldenImageURI
+    Log to console and logfile    \nGI Name is:\t ${gi_name}
+    ${gi_uri} =    Run Keyword If  '${gi_name}' is not ''    Get Goldenimage URI    ${gi_name}
+    Log to console and logfile    \nGI URI is:\t ${gi_uri}
+    Log to console and logfile    ${gi_uri}
+    # ${gi_uri} =    Get Goldenimage URI    ${gi_name}
+    Set to Dictionary    ${dp_body}    goldenImageURI    ${gi_uri}
+    [Return]    ${dp_body}
+
+Create Artifact Bundle Payload
+    [Arguments]    ${artifactbundle}
+    ${ab_body} =    Copy Dictionary    ${artifactbundle}
+    # GoldenImage URI
+    ${Gstatus} =    run keyword and return status    Dictionary should contain key    ${ab_body}    goldenImages
+    ${gi_body} =    Run keyword if    ${Gstatus} ==${True}    Get from Dictionary    ${ab_body}    goldenImages
+    ${mx} =    Run keyword if    ${Gstatus} ==${True}    Get Length    ${gi_body}
+    ${gisUri} =    Run keyword If    '${mx}'!='None'    Get Goldenimage Body    ${mx}    ${gi_body}
+    # Planscript URI
+    ${Pstatus} =    run keyword and return status    Dictionary should contain key    ${ab_body}    planScripts
+    ${ps_body} =    Run keyword if    ${Pstatus} ==${True}    Get from Dictionary    ${ab_body}    planScripts
+    ${mx} =    Run keyword if    ${Pstatus} ==${True}    Get Length    ${ps_body}
+    ${psUri} =    Run keyword If    '${mx}'!='None'    Get Planscript Body    ${mx}    ${ps_body}
+    # Buildplan URI
+    ${Bstatus} =   run keyword and return status    Dictionary should contain key    ${ab_body}    buildPlans
+    ${bp_body} =    Run keyword if    ${Bstatus} ==${True}    Get from Dictionary    ${ab_body}    buildPlans
+    ${mx} =    Run keyword if    ${Bstatus} ==${True}    Get Length    ${bp_body}
+    ${bpUri} =    Run keyword If    '${mx}'!='None'    Get Buildplan Body    ${mx}    ${bp_body}
+    # Deploymentplan URI
+    ${Dstatus} =    run keyword and return status    Dictionary should contain key    ${ab_body}    deploymentPlans
+    ${dp_body} =    Run keyword if    ${Dstatus} ==${True}    Get from Dictionary    ${ab_body}    deploymentPlans
+    ${mx} =    Run keyword if    ${Dstatus} ==${True}    Get Length    ${dp_body}
+    ${depUri} =    Run keyword If    '${mx}'!='None'    Get Deploymentplan Body    ${mx}    ${dp_body}
+    [Return]    ${ab_body}
+
+Create Server Profile Template Payload
+    [Documentation]    Create Server Profile Template payload
+    [Arguments]    ${profile_template}    ${api}=${None}
+    ${payload} =  copy dictionary  ${profile_template}
+    Log    Creating SERVER PROFILE TEMPLATE Payload    console=True
+    #  Scope
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${payload}  initialScopeUris
+    ${scope_names} =  set variable if  '${status}'=='PASS'  ${return}  error
+    ${scopes} =    run keyword if  '${status}'=='PASS'    Run Keyword For List    ${scope_names}    Common URI Lookup by name
+    run keyword if  '${status}'=='PASS'    Set To Dictionary    ${payload}    initialScopeUris    ${scopes}
+    #  SHT
+    ${sht} =    Get From Dictionary  ${payload}  serverHardwareTypeUri
+    ${sht_uri} =    Get Server Hardware Type URI    ${sht}
+    Log    ${sht} : ${sht_uri}
+    Set to Dictionary    ${payload}    serverHardwareTypeUri    ${sht_uri}
+    #  EG
+    ${eg} =        Get From Dictionary  ${payload}  enclosureGroupUri
+    ${eg_uri} =  Get Enclosure Group URI    ${eg}
+    Set to Dictionary    ${payload}    enclosureGroupUri    ${eg_uri}
+    #  Connections
+    ${connectionSettings} =    Get From Dictionary    ${payload}    connectionSettings
+    ${status}  ${manageConnections} =  Run Keyword and Ignore Error  Get From Dictionary  ${connectionSettings}  manageConnections
+    ${connections} =    Run Keyword if  '${status}'=='PASS' and '${manageConnections}'=='True'  Get From Dictionary  ${connectionSettings}  connections
+    ${connections} =    Run Keyword if  '${manageConnections}'=='True'  Lookup Connection Uris    ${connections}
+    Run Keyword if  '${manageConnections}'=='True'  Set to Dictionary   ${connectionSettings}  connections     ${connections}
+    Run Keyword if  '${status}'=='PASS'  Set to Dictionary   ${payload}  connectionSettings     ${connectionSettings}
+    #  osDeploymentSettings
+    ${status}  ${return} =  Run Keyword and Ignore Error      Get From Dictionary    ${payload}    osDeploymentSettings
+    ${osDeploymentSettings} =  set variable if  '${status}'=='PASS'  ${return}  error
+    ${osDeploymentSettings} =   run keyword if  '${status}'=='PASS' and ${osDeploymentSettings}!=${None}     Set OS Deployment settings        ${osDeploymentSettings}
+    Run keyword if  '${status}'=='PASS' and ${osDeploymentSettings}!=${None}    Set to Dictionary   ${payload}  osDeploymentSettings     ${osDeploymentSettings}
+    [return]    ${payload}
+
+Set OS Deployment settings
+    [Documentation]      Set the OS deployment settings in Server Profile payload
+    [Arguments]      ${osds}
+    ${osdp} =    Run Keyword If    ${osds} != None    Get From Dictionary    ${osds}  osDeploymentPlanUri
+    ...    ELSE    Set Variable    ${osds}
+    ${osdp_Uri} =   Run Keyword If    '${osdp}' != 'None'    Get OSDP URI    ${osdp}
+    ...    ELSE    Set Variable    ${osdp}
+    Run Keyword If    ${osds} != None    Set to Dictionary  ${osds}  osDeploymentPlanUri=${osdp_uri}
+    #  Get Network URI of os custom attributes
+    ${os_cas} =    Run Keyword If    ${osds} != None    Get From Dictionary    ${osds}    osCustomAttributes
+    ...    ELSE    Create List
+    :FOR  ${os_ca}  IN  @{os_cas}
+    \    ${ca_name} =  Get From Dictionary  ${os_ca}  name
+    \    ${regex_match} =  Evaluate  re.search(r'networkuri', '${ca_name}', re.I)    re
+    \    Run Keyword If  '${regex_match}' == 'None'  continue For Loop
+    \    ${mgmt_nic} =  Get From Dictionary  ${os_ca}  value
+    \    @{words} =     Split String  ${mgmt_nic}    :
+    \    ${net} =  Get From List  ${words}  1
+    \    ${nwuri} =  Get Ethernet URI  ${net}
+    \    Log   \n${mgmt_nic} Network URI ${nwuri}    console=True
+    \    Set to Dictionary  ${os_ca}  value=${nwuri}
+    [return]    ${osds}
+
+Create Server Profile Payload
+    [Documentation]    Create Server Profile Payload
+    ...                 profile = {"type":"ServerProfileV6","serverHardwareUri":'SH:'+ ${ENC1SHBAY1},
+    ...                            "serverHardwareTypeUri":'SHT:SY 480 Gen9 1',
+    ...                            "enclosureGroupUri":"EG:EG1",
+    ...                            "osdeployment settings" : "OSDP:OSDP1",
+    ...                           ...}
+    [Arguments]    ${sp_groups}
+    ${payload} =  Copy Dictionary  ${sp_groups}
+    ${server_hw} =    Get from Dictionary    ${payload}    serverHardwareUri
+    # Get server hardware URI
+    ${ServerHwUri} =    Run Keyword If    '${server_hw}' != 'None'    Get Server Hardware URI    ${server_hw}
+    ...    ELSE    Set Variable    ${server_hw}
+    Log        ${server_hw} : ${ServerHwUri}
+    Set to Dictionary    ${payload}    serverHardwareUri    ${ServerHwUri}
+    #  Ensuring that Blade is Powered off before Server Profile creation
+    ${taskState}    ${taskStatus} =    Run Keyword If    '${ServerHwUri}' != 'None'    Power On Off Server    ${ServerHwUri}    Off
+    ...    ELSE    Set Variable    ${ServerHwUri}    ${ServerHwUri}
+    ${status}=        Run Keyword If    '${taskState}'=='Completed'        Log To Console        ${taskStatus}
+    ...        ELSE        Log    Task Status : ${taskStatus}
+    #  SHT
+    ${sht} =    Get From Dictionary  ${payload}  serverHardwareTypeUri
+    ${sht_uri} =     Get Server Hardware Type URI    ${sht}
+    Log    ${sht} : ${sht_uri}
+    Set to Dictionary    ${payload}    serverHardwareTypeUri    ${sht_uri}
+    #  EG
+    ${eg} =    Get From Dictionary  ${payload}  enclosureGroupUri
+    ${eg_uri} =  Get Enclosure Group URI    ${eg}
+    Log    ${eg} : ${eg_uri}
+    Set to Dictionary    ${payload}    enclosureGroupUri    ${eg_uri}
+    #  Enclosure
+    ${enc} =   Get From Dictionary  ${payload}  enclosureUri
+    ${enc_uri} =    Run Keyword If    '${enc}' != 'None'    Get Enclosure URI    ${enc}
+    ...    ELSE    Set Variable    ${enc}
+    Log    ${enc} : ${enc_uri}
+    Set to Dictionary    ${payload}    enclosureUri    ${enc_uri}
+    #  SPT
+    ${spt} =    Get From Dictionary  ${payload}  serverProfileTemplateUri
+    ${SPTUri} =    Run Keyword If    '${spt}' != 'None'    Get SPT URI    ${spt}
+    ...    ELSE    Set Variable    ${spt}
+    Log    ${spt} : ${SPTUri}
+    Set to Dictionary    ${payload}    serverProfileTemplateUri    ${SPTUri}
+    #  Get OS DeploymentPlan
+    ${osds} =   Get From Dictionary  ${payload}  osDeploymentSettings
+    ${osdp} =    Run Keyword If    ${osds} != None    Get From Dictionary    ${osds}  osDeploymentPlanUri
+    ...    ELSE    Set Variable    ${osds}
+    ${osdp_Uri} =    Run Keyword If    '${osdp}' != 'None'    Get OSDP URI    ${osdp}
+    ...    ELSE    Set Variable    ${osdp}
+    Log    ${osdp} : ${osdp_uri}
+    Log to console and logfile    ${osdp_uri}
+    Run Keyword If    ${osds} != None    Set to Dictionary    ${payload['osDeploymentSettings']}    osDeploymentPlanUri=${osdp_uri}
+    #  Get Network URI of os custom attributes
+    ${OS_CA} =    Run Keyword If    ${osds} != None    Get From Dictionary    ${osds}    osCustomAttributes
+    ...    ELSE    Create List
+    :FOR    ${CA}    IN    @{OS_CA}
+    \    ${CA_name} =    Get From Dictionary    ${CA}    name
+    \    ${regex_match} =    Evaluate    re.search(r'networkuri', '${CA_name}', re.I)    re
+    \    Run Keyword If    '${regex_match}' == 'None'    continue For Loop
+    \    ${Mgmt_Nic} =    Get From Dictionary    ${CA}    value
+    \    ${nwuri} =    Get Ethernet URI    ${Mgmt_Nic}
+    \    Log to console and logfile    ${nwuri}
+    \    Set to Dictionary    ${CA}    value=${nwuri}
+    #  Get Network URI of connections
+    ${connectionSettings}=    Get From Dictionary  ${payload}   connectionSettings
+    ${connection}=       Get From Dictionary  ${connectionSettings}   connections
+    ${Number_of_connections}=  Get Length    ${connection}
+    Log    Number of connections : ${Number_of_connections}
+    Log to console and logfile    ${Number_of_connections}
+    Log....VALUE IN CONNECTION :
+    :FOR    ${conn_index}    IN Range    0    ${Number_of_connections}
+    \    ${connection_id}    Get From List    ${connection}    ${conn_index}
+    \    ${nw_uri} =    Get From Dictionary    ${connection_id}    networkUri
+    \    ${uri} =    Get Ethernet URI    ${nw_uri}
+    \    Log to console and logfile    ${uri}
+    \    Set to Dictionary    ${connection_id}    networkUri=${uri}
+    [Return]    ${payload}
+
+Power On Off Server
+    [Documentation]    Power On/Power Off Server Hardware
+    [Arguments]    ${ServerHwUri}    ${power_state}
+    Log    Powering ${power_state} Server Hardware : ${ServerHwUri}
+    ${blade_load} =    Create Dictionary    powerState=${power_state}
+    ...                                     powerControl=MomentaryPress
+    ${Response} =    Fusion Api Edit Server Hardware Power State    ${blade_load}    ${ServerHwUri}
+    ${taskuri} =    Get From Dictionary    ${Response}    uri
+    ${retries} =    Convert To Integer    20
+    ${sleep_time} =    Convert To Integer    30
+    ${Resp} =    Fusion Api Wait For Task To Complete    ${taskuri}    retries=${retries}    sleep_time=${sleep_time}
+    ${taskState}    Get From Dictionary    ${Resp}    taskState
+    ${taskStatus}    Get From Dictionary    ${Resp}    taskStatus
+    [Return]    ${taskState}    ${taskStatus}
+
+Delete Server Profile
+    [Arguments]     ${sp_name}
+    Log To Console    \n\nDeleting Server Profile... ${sp_name}
+    ${SP_response_body} =    Get Server Profile    ${sp_name}
+    #  Ensuring that Blade is Powered off before Server Profile deletion
+    ${server_hw}    Get From Dictionary    ${SP_response_body}    serverHardwareUri
+    ${taskState}    ${taskStatus} =    Power On Off Server    ${server_hw}    Off
+    ${status} =    Run Keyword If    '${taskState}'=='Completed'    Log To Console    ${taskStatus}
+    ...    ELSE    Fail    msg=Failed to Power Off Server Successfully
+    ${Response}=    Fusion API Delete Server Profile    ${sp_name}
+    Should Not Be Equal    ${Response}    ${None}    msg=Server Profile ${sp_name} not found
+    Should Be Equal as Strings    ${Response['status_code']}    202    msg=Failed to initiate Delete Server Profile ${sp_name}
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number     60
+    ${Retries}           Convert To Integer    5
+    ${Response} =    Fusion API Wait For Task To Complete    ${Response['headers']['Location']}    sleep_time=${Retry Interval}    retries=${Retries}
+    [Return]    ${Response}
+
+Windows ping
+    [Arguments]     ${host}
+    ${rc}    ${Output}=    Run And Return Rc And Output    ping -n 4 ${host}
+    Log to console and Logfile   ${Output}
+    Log to console and Logfile   ${rc}
+    #  Should Contain    ${Output}    TTL=
+    [Return]    ${rc}
+
+Wait Until IP Pings
+    [Arguments]    ${ip}    ${retries}    ${sleep}
+    :FOR    ${trial}    IN RANGE    0    ${retries}
+    \    Sleep    ${sleep}
+    \    ${Response}    ${ping_output} =    Windows ping    ${ip}
+    \    Run Keyword If    ${Response} == 0    Exit For Loop
+    Log to Console    ${ping_output}
+    [Return]    ${Response}
