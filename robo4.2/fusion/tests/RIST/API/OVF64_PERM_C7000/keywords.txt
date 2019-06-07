@@ -1,0 +1,93 @@
+*** Settings ***
+Library              FusionLibrary
+Library              RoboGalaxyLibrary
+Library              OperatingSystem
+Library              BuiltIn
+Library              Collections
+Library              robot.api.logger
+Library              SSHLibrary
+Library              String
+Variables            ./Regression_Data.py
+Variables            ../Fusion_Env_Setup/data_variables.py
+
+
+*** Keywords ***
+Get Security Compatibility Report
+    [Documentation]         Get target security mode's compatibility report
+    ...                 targetMode:FIPS/CNSA
+    [Arguments]         ${targetMode}
+    Log To Console    \n Get the compatiblity report for mode: ${targetMode}
+    ${resp} =    Fusion Api Get Security Compatibility Report
+    ${resp_delete} =    Run Keyword If    '${resp['status_code']}' == '200'    Fusion Api Delete Security Compatibility Report
+    Run Keyword If    '${resp['status_code']}' == '200'    Wait For Task2    ${resp_delete}
+    ${create_report}    Create Dictionary  targetMode=${target_mode}
+    ${resp} =    Fusion Api Create Security Compatibility Report    ${create_report}
+    Wait For Task2    ${resp}  timeout=180  interval=5
+    ${resp} =    Fusion Api Get Security Compatibility Report
+    [Return]    ${resp}
+
+Check Non-compliant Item In Compatibility Report
+    [Documentation]         Check Non-compliant Item In Compatibility Report
+    ...                     item= wpst32 | Power Delivery Devices | All Storage Devices
+    [Arguments]            ${item}    ${report_response}    ${expected_info}
+    Log To Console    \nCheck Compatibility Report: ${item} Is Not Compliant
+    ${report_members}=    Get From Dictionary    ${report_response}    members
+     :FOR    ${member}    IN    @{report_members}
+    \       ${deviceName} =      Get From Dictionary  ${member}  deviceName
+    \       ${nonCompatibilityDetails} =      Get From Dictionary  ${member}  nonCompatibilityDetails
+    \       Run Keyword And Return if    '${deviceName}'=='${item}'    Should Be Equal As Strings    ${nonCompatibilityDetails}    ${expected_info}
+
+Switch Security Mode To
+    [Documentation]    Switch Security Mode To LEGACY/FIPS/CNSA
+    [Arguments]  ${target_mode}
+    ${current_mode_resp}=    Fusion Api Get Current Security Mode
+    ${modename}=    Get From Dictionary  ${current_mode_resp}  modeName
+    Run Keyword And Return if  '${target_mode}'=='${modename}'    Log  ${\n}******Current Mode Is Already ${modename}, Ignore Mode Switch.******    console=true
+    ${target_mode_body}    Create Dictionary  modeName=${target_mode}
+    Log To Console  ${\n}******Switching Mode To ${target_mode}******
+    ${response}=    Fusion Api Change Security Mode  ${target_mode_body}
+    Wait For Appliance State To Be Expected State    ExpectedState=STARTING
+    Wait For Appliance State To Be Expected State    ExpectedState=OK
+
+Check If Current Security Mode Meets Target Mode
+    [Documentation]    Check current Security Mode Meets Target Mode: LEGACY/FIPS/CNSA
+    [Arguments]  ${target_mode}
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    ${current_mode_resp}=    Fusion Api Get Current Security Mode
+    ${modename}=    Get From Dictionary  ${current_mode_resp}  modeName
+    Run Keyword And Return if  '${target_mode}'=='${modename}'    Log To Console  ${\n}******Current Mode Is Target Mode ${target_mode}.******
+    Fail    The current security mode '${modename}' does not meet the target mode '${target_mode}'
+
+Enclosures Status Should Be Critical
+    [Documentation]  Check status of Enclosure
+    ...              Fail test where status is other than Critical
+    ${encs} =    Fusion Api Get Enclosures
+    # Make sure we get (more than zero) enclosures listed
+    ${count} =    Get From Dictionary    ${encs}    count
+    Run Keyword If  '${count}'=='0'    Fail    msg=No enclosures found
+    :FOR  ${enc}  IN  @{encs['members']}
+    \  Run Keyword If  '${enc['status']}' != 'Critical'  Log  ${enc['name']}, Status ${enc['status']}
+    \  Run Keyword If  '${enc['status']}' != 'Critical'  Fail    The enclisure is not in critial status
+
+Add C7000 Enclosure And Check The Error Code
+    [Documentation]  Add C7000 Enclosure and check the error code
+    Log  ${\n} Set the enclusore to be used     console=true
+    ${settings} =    Set Variable    ${C7000EnvSetup.${Team_Name}}
+    ${Encs} =    Set Suite Variable    ${null}
+    Set Suite Variable    ${Encs}    ${settings.${Ring}.Encs}
+    Log  ${\n} try to add the enclosure and check the error code    console=true
+    ${resp} =    Run Keyword If    ${Encs} is not ${null}    Add Enclosures from variable    ${Encs}
+    Wait For Task2   ${resp}   timeout=120   PASS=Error  errorCode=${enclosure_errorCode}
+
+C7000 Enclosure Compliancevalidator
+    [Documentation]    Validate FLM is FIPS/CNSA compliant
+    [Arguments]    ${Ring}    ${security_mode}
+    ${hostname} =  Set variable    ${Ring}-oa1.vse.rdlabs.hpecorp.net
+    Set To Dictionary    ${compliancevalidator}    host     ${hostname}
+    Set To Dictionary    ${compliancevalidator}    securityMode     ${security_mode}
+    ${resp} =  Fusion Api Compliance Validator    ${compliancevalidator}
+    ${compliant} =    Run Keyword And Ignore Error    Get From Dictionary    ${resp}    compliant
+    ${non_compliant} =    Run Keyword And Ignore Error    Get From Dictionary    ${resp}    errorCode
+    ${compliant} =    Run Keyword And Return If    '${compliant[0]}' == 'PASS'    Set Variable    True
+    ${compliant} =    Run Keyword If    '${non_compliant[0]}' == 'PASS'    Set Variable    False
+    [Return]    ${compliant}

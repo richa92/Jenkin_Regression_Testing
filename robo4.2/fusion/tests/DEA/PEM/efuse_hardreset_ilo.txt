@@ -1,0 +1,81 @@
+*** Settings ***
+Documentation    Efuse Hard Reset Blade iLO
+...    = USAGE =
+...    | pybot | -v ENCLOSURE:dcs          | FUSION_IP:my_fusion_ip | efuse_hardreset_ilo.txt |
+...    | pybot | -v ENCLOSURE:dcs          | efuse_hardreset_ilo.txt |
+...    = Variables =
+...    | ENCLOSURE | Optional. Dictionary key from variables.py representing the desired enclosure.  Default value is dcs. |
+...    | FUSION_IP | Required if ENCLOSURE is dcs.
+...    Pre-requisite:  iLO time setting is assumed to match current time.
+...           Blade iLO connect info in variables.py.
+...    User Story: US35834    Author: David Gray
+
+# AM-DVT US35834
+# David Gray
+# 2014, December
+
+Library           RoboGalaxyLibrary                               # DVTs Robot Framework extensions
+Library           FusionLibrary                                   # DVTs Robot Framework extensions
+Library           loginPEMClass
+Resource          ../HAL/resources/ilo_cli.txt               # AM-DVT Fusion API extensions
+Resource          ../HAL/resources/fusion_api.txt            # AM-DVT Fusion API extensions
+Resource          ../HAL/resources/hal_webapp.txt            # AM-DVT HAL Webapp extensions
+Resource          ../HAL/resources/system_info.txt           # AM-DVT fusion API extensions
+Variables         ../variables/dea_variables.py
+Resource          ../resource/fusion_api_resource.txt    # AM-DVT Fusion API Resource
+Resource          ../HAL/resources/perm_api.txt     # AM-DVT PERM webapp extensions
+Resource          ../HAL/resources/hal_resource.txt     # AM-DVT PERM webapp extensions
+
+Suite Setup    Run Keywords     Login to Fusion via SSH    AND    Login to Fusion Via REST  
+Suite Teardown     Run Keywords    Login to Fusion via REST    AND    Logout of Fusion via REST    AND    Logout of Fusion via SSH
+
+
+*** Testcases ***
+
+Efuse HardReset Blade Bays
+    [Documentation]    Test script to Validate Hard reset Blade manager
+    [Tags]    DCS    HW    HAL    Automated
+    ${auth}=    Get Trusted Token
+    set_header_to_pem_token    ${FUSION_IP}    ${creds}    ${auth}
+    ${bayurl}=    Set Variable If    ${DCS}==True    /rest/v1/chassis/1/BladeBays    /rest/v1/BladeBays
+    ${filled}    ${unfilled}=    Find Filled Bays    ${bayurl}
+    Set Suite Variable    ${filled}    ${filled}
+    Set Suite Variable    ${unfilled}    ${unfilled}
+    ${bayno}=    Select Random ELement From List    ${filled}
+    ${bay}=    Convert to String    ${bayno}
+    ${bayinfo}=    Get From Dictionary    ${BLADE_DATA}    ${bay}
+    ${ip}=    Get From Dictionary    ${bayinfo}    BLADE_ILO_IP4
+    # Verify iLO is up
+    iLO Connect    ${ip}    ${user}    ${pw}
+    iLO Get Uid Status
+    ${curtime}=    Evaluate    time.time()    time
+    HAL Action    BladeManagerHardReset    ${bayno}
+    Log    Wait for Reset
+    Sleep    2
+    # Verify iLO is down
+    Run Keyword and Expect Error    *    iLO Get Uid Status
+    Log    Wait for iLO to Reset    console=yes
+    :For    ${t}    in range    1    10
+    \    ${status}=    Run Keyword and Return Status
+    \    ...    iLO Get Uid Status
+    \    Exit for Loop If    "${status}" == "True"
+    \    Sleep    10
+    Run Keyword If    ${t} == 9    Fail    msg=Failed to re-connect with iLO
+    Verify Reset via iLO Log    ${curtime}
+
+Negative: Efuse HardReset EmptyBay
+    [Documentation]    Test script to Validate Hard reset on Empty Blade bay
+    [Tags]    DCS    HW    HAL    Automated
+    ${length}=    Get Length    ${unfilled}
+    ${status}    ${emptyno}=    Run Keyword and Ignore Error
+    ...    Select Random Element From List    ${unfilled}
+    Run Keyword If    ${length}>0
+    ...    HAL Action    BladeManagerHardReset    ${emptyno}    invalid
+
+Negative: Efuse HardReset Invalid Bay
+    [Documentation]    Test script to Validate Hard reset on Invalid bay
+    [Tags]    DCS    HW    HAL    Automated
+    ${invalid}=    Set Variable    ${-1}
+    HAL Action    BladeManagerHardReset    ${invalid}    invalid
+    ${invalid}=    Set Variable    ${99}
+    HAL Action    BladeManagerHardReset    ${invalid}    invalid

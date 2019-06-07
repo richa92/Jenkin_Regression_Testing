@@ -1,0 +1,206 @@
+*** Settings ***
+#FVT-CRM OVF296: Validating the connector and digital diagnostics information of Carbon module.
+# The test cases covered in the suites are - OVTC117, OVTC118, OVTC119, OVT120, OVTC121, OVTC121, OVTC768
+Documentation       OVF296 - SuiteName : Verifying Connector and Digital diagnostics information of Carbon modules
+
+
+Library         json
+Library         FusionLibrary
+Library         RoboGalaxyLibrary
+Variables       data_variables.py
+Library         data_variables.py
+Library         Collections
+Library         Dialogs
+Library         local_keywords_digi
+Library         OperatingSystem
+Library         Process
+Library         decrypt_dump.py
+Library         ServerOperations
+Resource         SETUP.txt
+Resource            ../../../../../Resources/api/fusion_api_resource.txt
+
+*** Variables ***
+${Api_Version}  800
+${le_dump_file_path}          ${CURDIR}\\LESupportdump
+${app_dump_file_path}          ${CURDIR}\\Appliancesdump
+${decryptor_path}          ${CURDIR}\\Decrypted
+${content_path}            ${app_dump_file_path}/oneview/support-dump-temp/cidb.out
+*** Test Cases ***
+
+1_API_TC_Verify the Carbon module shows up in support dump for LE
+    [Documentation]    MISC.1 Verify the Carbon module shows up in support dump for LE, LI
+
+    Set Log Level   Trace
+    Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+    #Presetup
+    Create Directory    ${le_dump_file_path}
+    ${SNlist}=    Create List
+    ${Bay_list}=    Create List
+    ${Count}=   Get Length  ${Interconnects_ENC2}
+    :FOR    ${x}    IN RANGE    0   ${Count}
+    \  ${Bay}=  Split String    ${Interconnects_ENC2[${x}]}
+    \   Append to List  ${Bay_list} ${Bay[-1]}
+    :FOR    ${x}    IN RANGE    0   ${Count}
+    \   ${resp} Get Interconnect    ${Interconnects_ENC2[${x}]}
+    #\  Should Match    ${resp['state']}    Configured
+    \   ${sn}=     Get From Dictionary    ${resp}    serialNumber
+    \   Append To List    ${SNlist}    ${sn}
+    ${Search_Dir}   ${remove_dir}=  Split Path  ${CURDIR}
+    Remove File ${Search_Dir}/*.sdmp
+    ${pattern}= Get From Dictionary ${enclsdump_body[0]}    errorCode
+    Create And Download Logical Enclosure Support Dump  ${enclsdump_body}   True
+    ${File}=    OperatingSystem.List Files In Directory ${Search_Dir}   pattern=*${pattern}*.sdmp
+    Move File   ${Search_Dir}/${File[0]}    ${le_dump_file_path}
+    Decrypt and extract the dump file    ${le_dump_file_path}    ${decryptor_path}
+    :FOR    ${x}    IN RANGE    0   2
+    \    OperatingSystem.File Should Exist    ${le_dump_file_path}/logical-enclosure/var/tmp/le-support-dumps/li-0/${LI2}/encl*${ENC2}/bay${Bay_list[${x}]}/VCFC5${SNlist[${x}]}*
+    ...    msg=The Carbon module VCFC5${SNlist[${x}]} is not found in LE Dump
+    \    Log to console and logfile    \n- Verified Carbon Module VCFC5${SNlist[${x}]} is showing up in LE support dump
+
+2_API_TC_Verify the Carbon module shows up in support dump for Appliance
+    [Documentation]     Create an appliance support dump, decrypt it, extract and validate for the existence of files
+    Create Directory    ${app_dump_file_path}
+    ${IC_uri}=  Get IC URI  ${Interconnects_ENC2[0]}
+    Change_Directory    ${CURDIR}
+    ${Search_Dir}   ${remove_dir}=  Split Path  ${CURDIR}
+    Remove File ${Search_Dir}/*.sdmp
+    Create Support Dump And Downloads Batch On Verify   ${sdmp_body}    True
+    ${File}=    OperatingSystem.List Files In Directory ${Search_Dir}   pattern=*.sdmp
+    ${Count}=   Get Length  ${File}
+    Run Keyword If  ${Count} != 0   Move File   ${Search_Dir}/${File[0]}    ${app_dump_file_path}
+    Decrypt_and_extract_the_dump_file       ${app_dump_file_path}       ${decryptor_path}
+    ${contents} =    OperatingSystem.Get File    ${content_path}
+    ${Lines}=    Get Lines Containing String    ${contents}    ${IC_uri}
+    ${Count}=    Get Line Count    ${Lines}
+    Run Keyword If    ${Count} > 0  log to console    Carbon32 module is present in support dump    Else    fail
+
+3_API_TC_Verify the Connector and Digital diagnostics informations are available for API version 800
+    [Documentation]     Verify the Connector and Digital diagnostics informations are available for API version 800
+    Clear ULS in LIG & LI
+    Create Uplinkset
+    ${icm_uri0}=    Get IC URI  ${Interconnects_ENC2[0]}
+    ${icm_uri1}=    Get IC URI  ${Interconnects_ENC2[1]}
+    Set Global Variable     ${ICM_URI0}     ${icm_uri0}
+    Set Global Variable     ${ICM_URI1}     ${icm_uri1}
+    Validate Connector Info Output  ${ICM_URI0}    ${Api_Version}    ${sfp_connector_32}
+
+4_API_TC_Verify no connector and digital diagnostics information is available after the poweroff of the interconnect
+    [Documentation]     Verify no connector and digital diagnostics information is available after the poweroff of the interconnect
+    Patch Interconnect     ${Interconnect_dto_1IC}    op=replace  path=/powerState  value=Off  timeout=60  interval=10
+    Wait Until Keyword Succeeds 10 min  10s IC reached state    ${ICM_URI0}    Maintenance
+    Validate Connector Info Output  ${ICM_URI0}    ${Api_Version}    ${sfp_connector_32}    1
+
+5_API_TC_Verify connector and digital diagnostics information is available after the poweron of the interconnect
+    [Documentation]     Verify connector and digital diagnostics information is available after the poweron of the interconnect
+    Patch Interconnect     ${Interconnect_dto_1IC}    op=replace  path=/powerState  value=On  timeout=60  interval=10
+    Wait Until Keyword Succeeds 10 min  10s IC reached state    ${ICM_URI0}    Configured
+    sleep   2s
+    Validate Connector Info Output  ${ICM_URI0}    ${Api_Version}    ${sfp_connector_32}
+
+6_API_TC_Verify connector and digital diagnostics information is available after disable enable uplink port
+    [Documentation]     Verify connector and digital diagnostics information is available after disable enable uplink port
+    ${Supported_port}   Get From Dictionary ${sfp_connector_32} portName
+    :FOR     ${x}   IN RANGE    0     2
+    \   Run Keyword If  ${x} == 0   Enable/disable Port ${Supported_port}   false   ${Interconnects_ENC2[0]}    ${ICM_URI0} ELSE    Enable/disable Port ${Supported_port}   true    ${Interconnects_ENC2[0]}    ${ICM_URI0}
+    \   Validate Connector Info Output  ${ICM_URI0}    ${Api_Version}    ${sfp_connector_32}
+
+7_API_TC_Verify connector and digital diagnostics information is available after efuse of interconnect
+    [Documentation]     Verify connector and digital diagnostics information is available after efuse of interconnect
+    @{Bay}  Split String    ${Interconnects_ENC2[0]}
+    :FOR     ${x}   IN RANGE    1     2
+    \   Run Keyword If  ${x} == 0   Efuse IC    ${ICM_URI0} ${Bay[-1]}  EFuseOn ELSE    Efuse IC    ${ICM_URI0} ${Bay[-1]}  EFuseOff
+    \   Run Keyword If  ${x} == 0   Validate Connector Info Output  ${ICM_URI0}    ${Api_Version}    ${sfp_connector_32}    1   ELSE    Validate Connector Info Output  ${ICM_URI0}    800    ${sfp_connector_32}
+
+8_API_TC_Verify both digital diagnostics and connector information is available for API version 800 with FC 16Gb Connector
+    [Documentation]     Verify both digital diagnostics and connector information is available for API version 800 with FC 16Gb Connector
+    Validate Connector Info Output  ${ICM_URI1}    ${Api_Version}    ${sfp_connector_16}
+
+9_API_TC_Verify both digital diagnostics and connector information is available for API version 800 with QSFP port1-4
+    [Documentation]     Verify both digital diagnostics and connector information is available for API version 800 with QSFP port1-4
+    :FOR     ${x}   IN RANGE    1     5
+    \    Validate Connector Info Output ${ICM_URI0}    ${Api_Version}    ${qsfp_connector${x}}
+
+10_API_TC_Verify both digital diagnostics and connector information is not available for API version 800 for Unsupported Module - 4GB SFP
+    [Documentation]     Verify both digital diagnostics and connector information is not available for API version 800 for Unsupported Module - 4GB SFP
+    :FOR     ${x}   IN RANGE    0   3
+    \   ${unsupported_port} Get From Dictionary ${unsupported_sfp_ports[${x}]}  portName
+    \   ${resp}=    Get IC Port ${ICM_URI1} ${unsupported_port}
+    \   Should be Equal As Strings  ${resp['portStatusReason']}    ModuleIncompatible
+    \   Validate Connector Info Output  ${ICM_URI1}    ${Api_Version}    ${unsupported_sfp_ports[${x}]}    1
+
+11_API_TC_Verify the connector and digital diagnostics information when the interconnect module is in monitored mode
+    [Documentation]     Verify the connector and digital diagnostics information when the interconnect module is in monitored mode
+    #Delete all the Profile Connections and delete the LE
+    Power off ALL Servers
+    Remove All Server Profiles
+    Remove All LEs
+    :FOR     ${x}   IN RANGE    0     2
+    \    ${resp}=        Get Interconnect    ${Interconnects_ENC2[${x}]}
+    \    Log to Console     "The State of the interconnect after deleting the LE enclosure   ${resp['state']}"
+    \    Run Keyword If  "${resp['state']}" !="Monitored"    fail     The Interconnect module ${Interconnects_ENC2[${x}]} is not in Monitored state!!   ${\n}
+    \    Run Keyword If ${x} == 0   Validate Connector Info Output  ${ICM_URI${x}}    ${Api_Version}    ${sfp_connector_32} ELSE    Validate Connector Info Output  ${ICM_URI${x}}    ${Api_Version}    ${sfp_connector_16}
+    Add Logical Enclosure from variable ${le_body}
+
+***Keywords***
+Validate Connector Info Output
+    [Documentation]   Keyword to validate connector information
+    [Arguments]    ${uri}    ${api_version}    ${connector_info}    ${send_flag}=0
+    ${resp}     fusion_api_get_interconnect_pluggable_module_info   ${uri}   ${api_version}
+    ${flag}     ${msg}      validate_connector_info     ${connector_info}   ${resp['_content']}
+    Log to Console      "The return Flag value of the output is ${flag}"
+    Log to Console      "The return Message of the Connector method is ${msg}"
+    Run Keyword If    ${send_flag}== 1    Run Keyword If  "${flag}" != "Off"    fail    ${msg}  ${\n}
+    ...    ELSE    Run Keyword If  "${flag}" == "Off" or "${flag}" == "Fail" or "${flag}" == "False"    fail    ${msg}  ${\n}
+    Log to Console      "The connector and Digital diagnostics information as follows ${\n} ${resp}"
+
+Enable/disable Port
+    [Documentation]    Perform port enable/disable
+    [Arguments]     ${Supported_port}   ${enabled}  ${ICM_name} ${ICM_uri}
+
+    ${Resp}    Get IC Port    ${ICM_uri}    ${Supported_port}
+    Set to Dictionary   ${Resp}   enabled    ${enabled}
+    ${Return}    Update IC Port    ${ICM_name}    ${Supported_port}    ${Resp}
+    sleep   120s
+    ${Resp_after_action}    Get IC Port    ${ICM_uri}    ${Supported_port}
+    Run Keyword If  '${enabled}'=='false'   Should be Equal As Strings    ${Resp_after_action['portStatusReason']}    NotLoggedIn   ELSE    Should be Equal As Strings    ${Resp_after_action['portStatusReason']}    LoggedIn
+
+Efuse IC
+    [Documentation]    perform IC efuse
+    [Arguments]    ${ic_uri}    ${ic_bay}   ${Efuse_Command}
+    Get EM IP   ${ENC2}
+    Get EM Token    ${ENC2}
+    EFuse ICM    ${Efuse_Command}   ${ic_bay}
+    Run Keyword If  '${Efuse_Command}' == 'EFuseOn' Wait Until Keyword Succeeds    5 min   20s     IC reached state    ${ic_uri}    Absent
+    ... ELSE If '${Efuse_Command}' == 'EFuseOff'    Wait Until Keyword Succeeds    35 min   20s     IC reached state    ${ic_uri}    Configured
+
+Get IC Port
+    [Documentation]    Returns the port info of the named port of specified interconnect uri
+    [Arguments]        ${uri}    ${portName}
+
+    ${return} =    Create List
+    ${resp} =    fusion api get interconnect ports    uri=${uri}
+    ${ports} =    Get From Dictionary    ${resp}    members
+    :FOR    ${port}    IN    @{ports}
+    \    ${return} =    Run Keyword If    '${port['portName']}' == '${portName}'    set variable    ${port}
+    \    Exit for loop if    '${port['portName']}' == '${portName}'
+    [Return]    ${return}
+
+Clear ULS in LIG & LI
+    [Documentation]    This keyword will clear uplink sets in both LI and LIG
+    ${resp}=    Get LIG member  ${LIG_ME[1]}
+    ${liguri} = Get LIG URI ${LIG_ME[1]}
+    ${empty_list}   Create List
+    Remove From Dictionary    ${resp}    headers
+    Remove From Dictionary    ${resp}    status_code
+    Set To Dictionary    ${resp}    uplinkSets    ${empty_list}
+    ${resp1}    Fusion Api Edit Lig    ${resp}    ${liguri}
+    ${task}    Wait For Task2    ${resp1}    20m    2
+
+Create Uplinkset
+    [Documentation]    This keyword will create uplinkset
+    ${liguri} = Get LIG URI ${LIG_ME[1]}
+    ${body} =   Build LIG body      ${lig_set}
+    ${resp} =   Fusion Api Edit Lig     ${body}     ${liguri}
+    ${task}=    Wait For Task2  ${resp}   10m    10
+    ${LE_Dto}=  Create Dictionary   name=${LI2}
+    Update Logical Interconnect from Group    ${LE_Dto}

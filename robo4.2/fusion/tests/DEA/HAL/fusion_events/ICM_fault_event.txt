@@ -1,0 +1,514 @@
+*** Settings ***
+Documentation    Test suite to validate Interconnect related events on OneView and FLM
+...    = GENERIC USAGE =
+...    | pybot | -v ENC_SERIAL_NO:[enclosure serial #] | -v APPLIANCE_IP:<ipv4> | -v CIM_Linux_IP:<ipv4> |-v GIT_REPO_ROOT: | ICM_fault_event.txt |
+...    = Variables =
+...    | GIT_REPO_ROOT |      Required: Repo root path if NOT defined in environment variable this is mgmtfw root location|
+...    | ENC_SERIAL_NO |      Optional: If omitted, will use the 1st enclosure detected in OV |
+...    | APPLIANCE_IP |       Required: OneView IPv4 address |
+...    | CIM_Linux_IP |       Required:CI Manager ipv4 under test |
+
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Library           RoboGalaxyLibrary
+Library           MgmtFWLibrary
+Library           json
+
+Suite Setup       Configure Events Test Environment
+Suite Teardown    Run Keywords  Logout of EM RIS   AND    Logout of Fusion Via REST
+
+*** Test Case ***
+TC 01: Interconnect critical/ok Fault Events show up in OV UI
+    [Documentation]    This test is to verify events for Interconnect status change using CommFaultInjection
+    ...                InterconnectCommFault
+    ...                InterconnectCommFaultCleared
+    ...                InterconnectCritical
+    ...                InterconnectOk
+    [Tags]    ICM    Alert    Events    FLM2.00    OV3.10    Automated
+    ${icm_list}=    Get ICM Bay List
+    Should Not Be Empty    ${icm_list}    msg=No Interconnect present in the enlcosure
+    :FOR    ${bay}   IN   @{icm_list}
+    \    Log    message=Failing the Interconnect for bay:${bay} and verify failed status/alert event in diags audit log    console=True
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${Interconnect_Fault_Status}=    Set EM RIS CANmic Faults    ${ICM_Device}    ${bay}    true
+    \    Should Be Equal As Strings    ${Interconnect_Fault_Status}    <Response [200]>
+    \    Sleep    8
+    \    Wait for Device Critical    ${ICM_Device}    ${bay}
+    \    #Verifying alert event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_ICM_Critical}    ${ICM_Device}    ${bay}    250
+    \    Verify Audit Log Alert Event    ${EL_ICM_CommFault}    ${ICM_Device}    ${bay}    250
+    \    Sleep    30
+    \    Verify Fusion Event Sent By EM    ${EL_ICM_CommFault}    ${last_fusion_event_id}
+    \    Log    message=Clearing Interconnect commfault injection for bay:${bay} and verify ok status/alert event in diags audit log    console=True
+    \    ${Interconnect_Fault_Status}=    Set EM RIS CANmic Faults    ${ICM_Device}    ${bay}    false
+    \    Should Be Equal As Strings    ${Interconnect_Fault_Status}    <Response [200]>
+    \    Sleep    5
+    \    Wait for Device OK    ${ICM_Device}    ${bay}
+    \    #Verifying alert event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_ICM_OK}    ${ICM_Device}    ${bay}    250
+    \    Verify Audit Log Alert Event    ${EL_ICM_CommFault_Cleared}    ${ICM_Device}    ${bay}    250
+    \    Sleep    30
+    \    Verify Fusion Event Sent By EM    ${EL_ICM_CommFault_Cleared}    ${last_fusion_event_id}
+    [Teardown]    Run Keyword If Test Failed    Run keywords    Set EM RIS CANmic Faults    ${ICM_Device}    ${bay}    false    AND
+    ...    Wait for Device OK    ${ICM_Device}    ${bay}
+
+TC 02: Interconnect Matedetect Fault Events show up in OV UI
+    [Documentation]    This test is to verify events for Interconnect status change Using Matedetect
+    ...                InterconnectMateDetectFault
+    ...                InterconnectMateDetectFaultCleared
+    ...                InterconnectWarning
+    ...                InterconnectOk
+    ...                InterconnectPowerDeniedDueToMating
+    ...                InterconnectPowerDeniedDueToMatingCleared
+    ...                InterconnectPowerRequestGranted
+    ...                InterconnectPowerReleaseGranted    
+    [Tags]    ICM    Alert    Events    FLM1.01     FLM2.00    OV3.10    Automated
+    ${icm_list}=    Get ICM Bay List
+    Should Not Be Empty    ${icm_list}    msg=No Interconnect present in the enlcosure
+    :FOR    ${bay}   IN   @{icm_list}
+    \    Log    message=Failing the Interconnect for bay:${bay} and verify failed status/alert event in diags audit log    console=True
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${powerstate_status}=    Set Interconnect Powerstate    ${bay}    Off
+    \    Sleep    10
+    \    ${Interconnect_Fault_Status}=    Set EM RIS Faults   ICMFaultInjection    ${bay}    MateDetect    true
+    \    Should Be Equal As Strings    ${Interconnect_Fault_Status}    <Response [200]>
+    \    Sleep    8
+    \    Wait for Device Degraded    ${ICM_Device}    ${bay}
+    \    ${powerstate_status}=    Set Interconnect Powerstate    ${bay}    On
+    \    Sleep    10
+    \    #Verifying alert and resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_ICM_Warning}    ${ICM_Device}    ${bay}    250
+    \    Verify Audit Log Resource Updated Event    ${ICM_Device}    ${EL_ICM_PowerReleaseGranted}    ${bay}    250
+    \    Verify Audit Log Alert Event    ${EL_ICM_MateDetectFault}    ${ICM_Device}    ${bay}    250
+    \    Verify Audit Log Alert Event    ${EL_ICM_PowerDeniedDueToMating}    ${ICM_Device}    ${bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_ICM_MateDetectFault}    ${last_fusion_event_id}
+    \    Verify Fusion Event Sent By EM    ${EL_ICM_PowerDeniedDueToMating}    ${last_fusion_event_id}
+    \    ${fusion_event}=    Verify Fusion Event Sent By EM without desc   ${EL_ICM_PowerReleaseGranted}    ${last_fusion_event_id}
+    \    ${fusion_event_desc}=    Get Description From Fusion Event    ${fusion_event}
+    \    Should Be Equal As Strings    ${fusion_event_desc}    Interconnect power release request has been granted
+    \    Log    message=Clearing Interconnect Matedetect fault injection for bay:${bay} and verify ok status/alert event in diags audit log    console=True
+    \    ${Interconnect_Fault_Status}=    Set EM RIS Faults   ICMFaultInjection    ${bay}    MateDetect    false
+    \    Should Be Equal As Strings    ${Interconnect_Fault_Status}    <Response [200]>
+    \    Sleep    10
+    \    Wait for Device OK    ${ICM_Device}    ${bay}
+    \    #Verifying alert and resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_ICM_OK}    ${ICM_Device}    ${bay}    250
+    \    Verify Audit Log Alert Event    ${EL_ICM_MateDetectFault_Cleared}    ${ICM_Device}    ${bay}    250
+    \    Verify Audit Log Alert Event    ${EL_ICM_PowerDeniedDueToMating_Cleared}    ${ICM_Device}    ${bay}    250
+    \    Verify Audit Log Resource Updated Event    ${ICM_Device}    ${EL_ICM_PowerRequestGranted}    ${bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_ICM_MateDetectFault_Cleared}    ${last_fusion_event_id}
+    \    Verify Fusion Event Sent By EM    ${EL_ICM_PowerDeniedDueToMating_Cleared}    ${last_fusion_event_id}
+    \    ${fusion_event}=    Verify Fusion Event Sent By EM without desc   ${EL_ICM_PowerRequestGranted}    ${last_fusion_event_id}
+    \    ${fusion_event_desc}=    Get Description From Fusion Event    ${fusion_event}
+    \    Should Be Equal As Strings    ${fusion_event_desc}    Interconnect power request has been granted
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Set EM RIS Faults   ICMFaultInjection    ${bay}    MateDetect    false   AND
+    ...    Set Interconnect Powerstate    ${bay}    On    AND    Wait for Device OK    ${ICM_Device}    ${bay}
+
+TC 03a: Interconnect EfusePGood Fault Events show up in OV UI
+    [Documentation]    This test is to verify events for Interconnect status change Using EfusePGood
+    ...                InterconnectEfusePGoodFault
+    ...                InterconnectEfusePGoodFaultCleared
+    [Tags]    ICM    Alert    Events    FLM1.01     FLM2.00    OV3.10    Automated
+    ${icm_list}=    Get ICM Bay List
+    Should Not Be Empty    ${icm_list}    msg=No Interconnect present in the enlcosure
+    :FOR    ${bay}   IN   @{icm_list}
+    \    Log    message=Failing the Interconnect for bay:${bay} and verify failed status/alert event in diags audit log    console=True
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${Interconnect_Fault_Status}=    Set EM RIS Faults   ICMFaultInjection    ${bay}    EfusePGood    true
+    \    Should Be Equal As Strings    ${Interconnect_Fault_Status}    <Response [200]>
+    \    Sleep    20
+    \    Wait for Device Critical    ${ICM_Device}    ${bay}
+    \    #Verifying alert event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_ICM_Critical}    ${ICM_Device}    ${bay}    250
+    \    Verify Audit Log Alert Event    ${EL_ICM_EfusePGoodFault}    ${ICM_Device}    ${bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_ICM_EfusePGoodFault}    ${last_fusion_event_id}
+    \    Log    message=Clearing Interconnect EfusePGood fault injection for bay:${bay} and verify ok status/alert event in diags audit log    console=True
+    \    ${Interconnect_Fault_Status}=    Set EM RIS Faults   ICMFaultInjection    ${bay}    EfusePGood    false
+    \    Should Be Equal As Strings    ${Interconnect_Fault_Status}    <Response [200]>
+    \    Sleep    200
+    \    Wait for Device OK    ${ICM_Device}    ${bay}
+    \    #Verifying alert event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_ICM_OK}    ${ICM_Device}    ${bay}    250
+    \    Verify Audit Log Alert Event    ${EL_ICM_EfusePGoodFaultCleared}    ${ICM_Device}    ${bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_ICM_EfusePGoodFaultCleared}    ${last_fusion_event_id}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Set EM RIS Faults   ICMFaultInjection    ${bay}    EfusePGood    false    AND
+    ...    Wait for Device OK    ${ICM_Device}    ${bay}
+
+TC 03b: Interconnect SystemPGoodFault Fault Events show up in OV UI
+    [Documentation]    This test is to verify events for Interconnect status change Using SystemPGoodFault
+    ...                InterconnectSystemPGoodFault
+    ...                InterconnectSystemPGoodFaultCleared
+    [Tags]    ICM    Alert    Events    FLM1.01     FLM2.00    OV3.10    Automated
+    ${icm_list}=    Get ICM Bay List
+    Should Not Be Empty    ${icm_list}    msg=No Interconnect present in the enlcosure
+    :FOR    ${bay}   IN   @{icm_list}
+    \    Log    message=Failing the Interconnect for bay:${bay} and verify failed status/alert event in diags audit log    console=True
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${Interconnect_Fault_Status}=    Set EM RIS Faults   ICMFaultInjection    ${bay}    SysPGood    true
+    \    Should Be Equal As Strings    ${Interconnect_Fault_Status}    <Response [200]>
+    \    Sleep    20
+    \    Wait for Device Critical    ${ICM_Device}    ${bay}
+    \    #Verifying alert event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_ICM_Critical}    ${ICM_Device}    ${bay}    250
+    \    Verify Audit Log Alert Event    ${EL_ICM_SystemPGoodFault}   ${ICM_Device}    ${bay}    250 
+    \    Verify Fusion Event Sent By EM    ${EL_ICM_SystemPGoodFault}    ${last_fusion_event_id}
+    \    Log    message=Clearing Interconnect SystemPGoodFault fault injection for bay:${bay} and verify ok status/alert event in diags audit log    console=True
+    \    ${Interconnect_Fault_Status}=    Set EM RIS Faults   ICMFaultInjection    ${bay}    SysPGood    false
+    \    Should Be Equal As Strings    ${Interconnect_Fault_Status}    <Response [200]>
+    \    Sleep    200
+    \    Wait for Device OK    ${ICM_Device}    ${bay}
+    \    #Verifying alert event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_ICM_OK}    ${ICM_Device}    ${bay}    250
+    \    Verify Audit Log Alert Event    ${EL_ICM_SystemPGoodFaultCleared}    ${ICM_Device}    ${bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_ICM_SystemPGoodFaultCleared}    ${last_fusion_event_id}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Set EM RIS Faults   ICMFaultInjection    ${bay}    SysPGood    false    AND
+    ...    Wait for Device OK    ${ICM_Device}    ${bay}
+
+TC 04: Verify the events InterconnectInsufficientCooling/cleared
+    [Documentation]    This test will verify the InterconnectInsufficientCooling/cleared events
+    ...                InterconnectInsufficientCooling
+    ...                InterconnectInsufficientCoolingCleared
+    ...    Note: Make sure there is atleast one ICM in bays 1-4
+    [Tags]    ICM    Alert    Events    FLM1.01     FLM2.00    OV3.10    Automated
+    ${present_list}=    Get List of Occupied Interconnect Bays
+    Should Not Be Empty    ${present_list}    msg=No Interconnect present in the enclosure
+    ${occupied_fan_list}=    Get List of Occupied Top Row Fan Bays
+    ${fan1}    ${fan2}=    Get Two Random Item From List  ${occupied_fan_list}
+    RIS EM Efuse On Fan  ${fan1}
+    Sleep  2
+    RIS EM Efuse On Fan  ${fan2}
+    Sleep  2
+    ${last_fusion_event_id}=    get last fusion event ID
+    ${powerstate_status}=    Set Interconnect Powerstate    ${present_list[0]}    Off
+    Sleep    10
+    ${powerstate_status}=    Set Interconnect Powerstate    ${present_list[0]}    On
+    Sleep    10
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_Interconnect_Insufficient_Cooling}    ${ICM_Device}    ${present_list[0]}    250
+    Verify Fusion Event Sent By EM    ${EL_Interconnect_Insufficient_Cooling}    ${last_fusion_event_id}
+    RIS EM Efuse Off Fan  ${fan1}
+    Sleep  2
+    RIS EM Efuse Off Fan  ${fan2}
+    Sleep  2
+    ${powerstate_status}=    Set Interconnect Powerstate    ${present_list[0]}    Off
+    Sleep    10
+    ${powerstate_status}=    Set Interconnect Powerstate    ${present_list[0]}    On
+    Sleep    10
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_Interconnect_Insufficient_Cooling_Cleared}    ${ICM_Device}    ${present_list[0]}    250
+    Verify Fusion Event Sent By EM    ${EL_Interconnect_Insufficient_Cooling_Cleared}    ${last_fusion_event_id}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    RIS EM Efuse Off Fan  ${fan1}   AND   RIS EM Efuse Off Fan  ${fan2}
+    ...           AND   Set Interconnect Powerstate    ${present_list[0]}    On   AND   Sleep   30
+
+TC 05: Verify the events InterconnectPowerDenied/cleared
+    [Documentation]    This test will verify the InterconnectPowerDenied/cleared events
+    ...                InterconnectPowerDenied
+    ...                InterconnectPowerDeniedCleared
+    [Tags]    ICM    Alert    Events    FLM1.01     FLM2.00    OV3.10    Automated
+    ${present_list}=    Get List of Occupied Potash Bays
+    Should Not Be Empty    ${present_list}    msg=No Interconnect present in the enclosure
+    Log To Console    Flashing Low capacity FRU to last PS - required for Tests
+    ${AvailablePS}=   Get List of Occupied PowerSupply Bays
+    Sort List    ${AvailablePS}
+    ${ps}=    Get From List    ${AvailablePS}    -1
+    Flash Powersupply Fru    ${ps}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\${Cust_PS_Fru_Path}\\${ps}\\fru.bin
+    RIS EM Efuse On Powersupply    ${ps}
+    Sleep    10
+    RIS EM Efuse Off Powersupply    ${ps}
+    Remove PS Until PowerSuppliesGood is less than PowerSuppliesNeededWithoutBonus
+    : FOR    ${bay}    IN    @{present_list}
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${powerstate_status}=    Set Interconnect Powerstate    ${bay}    Off
+    \    Sleep    10
+    \    ${powerstate_status}=    Set Interconnect Powerstate    ${bay}    On
+    \    Sleep    10
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_Interconnect_Insufficient_Power}    ${ICM_Device}    ${bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Interconnect_Insufficient_Power}    ${last_fusion_event_id}
+    \    Ensure All PS Are In Good State
+    \    Build RIS Object Model at Root Level
+    \    ${powerstate_status}=    Set Interconnect Powerstate    ${bay}    Off
+    \    Sleep    10
+    \    ${powerstate_status}=    Set Interconnect Powerstate    ${bay}    On
+    \    Sleep    10
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_Interconnect_Insufficient_Power_Cleared}    ${ICM_Device}    ${bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Interconnect_Insufficient_Power_Cleared}    ${last_fusion_event_id}
+    Flash Powersupply Fru    ${ps}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\Fru_Files\\${CAT}\\Good_Fru\\PS\\${ps}\\fru.bin
+    RIS EM Efuse On Powersupply    ${ps}
+    Sleep    10
+    RIS EM Efuse Off Powersupply    ${ps}
+    Ensure All PS Are In Good State
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Ensure All PS Are In Good State   AND   Build RIS Object Model at Root Level
+    ...           AND   Flash Powersupply Fru    ${ps}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\Fru_Files\\${CAT}\\Good_Fru\\PS\\${ps}\\fru.bin
+    ...           AND    RIS EM Efuse On Powersupply    ${ps}    AND   Sleep    10   AND   RIS EM Efuse Off Powersupply    ${ps}
+    ...           AND   Set Interconnect Powerstate    ${bay}    On   AND   Sleep   10
+
+TC 06: Interconnect critical/ok Fault Events show up in OV UI
+    [Documentation]    This test is to verify events for Interconnect status change using CommFaultInjection
+    ...                hpris.emRegistry.1.0.InterconnectFault
+    ...                hpris.emRegistry.1.0.InterconnectFaultCleared
+    ...                hpris.emRegistry.1.0.InterconnectCritical
+    ...                hpris.emRegistry.1.0.InterconnectOk
+    [Tags]    ICM    Alert    Events    FLM1.01     OV3.10    Automated
+    ${icm_list}=    Get ICM Bay List
+    Should Not Be Empty    ${icm_list}    msg=No Interconnect present in the enlcosure
+    :FOR    ${bay}   IN   @{icm_list}
+    \    Log    message=Failing the Interconnect for bay:${bay} and verify failed status/alert event in diags audit log    console=True
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${Interconnect_Fault_Status}=    Set EM RIS CANmic Faults    ${ICM_Device}    ${bay}    true
+    \    Should Be Equal As Strings    ${Interconnect_Fault_Status}    <Response [200]>
+    \    Sleep    8
+    \    Wait for Device Critical    ${ICM_Device}    ${bay}
+    \    #Verifying alert event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_ICM_Critical}    ${ICM_Device}    ${bay}    250
+    \    Verify Audit Log Alert Event    ${EL_ICM_Fault}    ${ICM_Device}    ${bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_ICM_Fault}    ${last_fusion_event_id}
+    \    ${fusion_event}=    Verify Fusion Event Sent By EM without desc   ${EL_ICM_Critical}    ${last_fusion_event_id}
+    \    ${fusion_event_desc}=    Get Description From Fusion Event    ${fusion_event}
+    \    Should Be Equal As Strings    ${fusion_event_desc}    The interconnect internal health status is critical
+    \    Log    message=Clearing Interconnect commfault injection for bay:${bay} and verify ok status/alert event in diags audit log    console=True
+    \    ${Interconnect_Fault_Status}=    Set EM RIS CANmic Faults    ${ICM_Device}    ${bay}    false
+    \    Should Be Equal As Strings    ${Interconnect_Fault_Status}    <Response [200]>
+    \    Sleep    5
+    \    Wait for Device OK    ${ICM_Device}    ${bay}
+    \    #Verifying alert event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_ICM_OK}    ${ICM_Device}    ${bay}    250
+    \    Verify Audit Log Alert Event    ${EL_ICM_Fault_Cleared}    ${ICM_Device}    ${bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_ICM_Fault_Cleared}    ${last_fusion_event_id}
+    \    ${fusion_event}=    Verify Fusion Event Sent By EM without desc   ${EL_ICM_OK}    ${last_fusion_event_id}
+    \    ${fusion_event_desc}=    Get Description From Fusion Event    ${fusion_event}
+    \    Should Be Equal As Strings    ${fusion_event_desc}    The interconnect internal health status is ok
+    [Teardown]    Run Keyword If Test Failed    Run keywords    Set EM RIS CANmic Faults    ${ICM_Device}    ${bay}    false    AND
+    ...    Wait for Device OK    ${ICM_Device}    ${bay}
+
+TC 07: Validate InterconnectThermalWarning event is generated on Potash
+    [Documentation]    This test to verify if InterconnectThermaWarning event is generated on Potash
+    [Tags]    ICM    Alert    Events     FLM1.01    FLM2.00    OV3.10    Automated
+    ${last_fusion_event_id}=    get last fusion event ID
+    ${present_list}=    Get List of Occupied Potash Bays
+    Should Not Be Empty    ${present_list}    msg=No Interconnect present in the enlcosure
+    ${active_ipaddr}=    Get Diags Active EM IPv6 LL Address
+    : FOR    ${icm_bay}    IN    @{present_list}
+    \    Validate Interconnect Health    ${icm_bay}    ${HEALTH_OK}
+    \    Flash Interconnect Updated Fru    ${icm_bay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\${Custom_Potash_Degrade_Fru_Path}
+    \    ${sensor}  ${temperature}=   Find the sensor and temperature   ${ICM_Device}   ${icm_bay}   26
+    \    ${ambtemp}=    Get Last AmbTemp value
+    \    Run keyword If    ${sensor} == 0    Validate Interconnect Health    ${icm_bay}    ${HEALTH_OK}
+    \    Run keyword If    ${sensor} != 0    Wait for Device Degraded    ${ICM_Device}    ${icm_bay}
+    \    Run keyword If    ${sensor} != 0    Validate Interconnect Health    ${icm_bay}    ${HEALTH_WARNING}
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_ICM_Thermal_Warning}    ${ICM_Device}    ${icm_bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_ICM_Thermal_Warning}    ${last_fusion_event_id}
+    \    ${thermal_sensor_status}=     Get Interconnect Fault Status    ${icm_bay}    ThermalSensors
+    \    Run keyword If    ${sensor} != 0    Should Be Equal      ${thermal_sensor_status}    ${HEALTH_WARNING}
+    \    Run keyword If    ${sensor} != 0    Validate thermal fault details    ${ICM_Device}    ${icm_bay}   26   ${sensor}   ${temperature}    ${ambtemp}
+    \    #Erasing the updated fru for the Interconnect bay
+    \    ${updatedfruerase}=    EM API Get Diags UpdatedFruErase   ${ICM_Device}    ${icm_bay}
+    \    Should Be Equal As Strings    ${updatedfruerase}    Successfully erased Updated Fru for device type INTERCONNECT bay ${icm_bay}\n\n
+    \    Sleep    10
+    \    RIS EM Efuse Interconnect    ${icm_bay}    ${EM_EFUSE_Duration}
+    \    EM Clear Interconnect Status    ${icm_bay}
+    \    Get Diags DeviceTemp    ${ICM_Device}    ${icm_bay}    [${active_ipaddr}]
+    [Teardown]    Run Keyword If Test Failed    Run Keywords
+    ...    EM API Get Diags UpdatedFruErase   ${ICM_Device}    ${icm_bay}    AND    Sleep    10    AND
+    ...    RIS EM Efuse Interconnect    ${icm_bay}    ${EM_EFUSE_Duration}    AND    EM Clear Interconnect Status    ${icm_bay}   AND
+    ...    Get Diags DeviceTemp    ${ICM_Device}    ${icm_bay}    [${active_ipaddr}]
+
+TC 08: Verify InterconnectInsertFault & InterconnectInsertFaultCleared
+    [Documentation]    This test will verify InterconnectInsertFault & InterconnectInsertFaultCleared events
+    [Tags]    ICM    Alert    Events     FLM2.00    OV3.10    Automated    OVD6393
+    Set Test Variable    ${device}    Interconnect
+    Set Test Variable    ${device_diag_response}    INTERCONNECT
+    ${device_list}=    Get List of Occupied interconnect Bays
+    Should Not Be Empty    ${device_list}    msg=No Interconnects present in the enlcosure
+    : FOR    ${bay}    IN    @{device_list}
+    \    Log To Console    \rRemoving and Inserting the ${device} in bay: ${bay}
+    \    ${result}=    RIS EM Efuse On Interconnect    ${bay}
+    \    Should be True    ${result}
+    \    ${result}=    RIS EM Efuse Off Interconnect    ${bay}
+    \    Should be True    ${result}
+    \    Sleep    60
+    \    ${result}=    EM API Get Diags    ShowState/${device}/${bay}
+    \    Should Contain    ${result}    State: SM_STATE_INTEGRATED
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${result}=    EM API Get Diags    deviceStateTransition/${device}/${bay}/remove
+    \    Should Contain    ${result}    Successfully sent diag state transition event remove for ${device_diag_response} ${bay}
+    \    ${result}=    EM API Get Diags    ShowState/${device}/${bay}
+    \    Should Contain    ${result}    State: SM_STATE_ABSENT
+    \    ${result}=    EM API Get Diags    deviceStateTransition/${device}/${bay}/operational
+    \    Should Contain    ${result}    Successfully sent diag state transition event operational for ${device_diag_response} ${bay}
+    \    ${result}=    EM API Get Diags    ShowState/${device}/${bay}
+    \    Should Contain    ${result}    State: SM_STATE_OPERATIONAL
+    \    ${status}    ${result}=    Wait timeout for Device State    ${device}    ${bay}    SM_STATE_INSERTED_ERR    600
+    \    Should Be True    ${status}    msg=expectedSM_STATE_INSERTED_ERR but got ${result}
+    \    ${result}=    EM API Get Diags    deviceStateTransition/${device}/${bay}/operational
+    \    Should Contain    ${result}    Successfully sent diag state transition event operational for ${device_diag_response} ${bay}
+    \    ${result}=    EM API Get Diags    ShowState/${device}/${bay}
+    \    Should Contain    ${result}    State: SM_STATE_INSERTED_ERR
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_Interconnect_InsertFault}    ${ICM_Device}    ${bay}    900
+    \    Verify Fusion Event Sent By EM    ${EL_Interconnect_InsertFault}    ${last_fusion_event_id}
+    \    ${result}=    EM API Get Diags    deviceStateTransition/${device}/${bay}/insert
+    \    Should Contain    ${result}    Successfully sent diag state transition event insert for ${device_diag_response} ${bay}
+    \    Sleep    10
+    \    ${result}=    EM API Get Diags    ShowState/${device}/${bay}
+    \    Should Contain    ${result}    State: SM_STATE_INTEGRATED
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_Interconnect_InsertFault_Cleared}    ${ICM_Device}    ${bay}    900
+    \    Verify Fusion Event Sent By EM    ${EL_Interconnect_InsertFault_Cleared}    ${last_fusion_event_id}
+    \    ${result}=    RIS EM Efuse On Interconnect    ${bay}
+    \    Should be True    ${result}
+    \    ${result}=    RIS EM Efuse Off Interconnect    ${bay}
+    \    Should be True    ${result}
+    \    Wait for Device OK    ${ICM_Device}    ${bay}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    EM API Get Diags    deviceStateTransition/${device}/${bay}/insert
+    ...    AND    RIS EM Efuse On Interconnect    ${bay}
+    ...    AND    RIS EM Efuse Off Interconnect    ${bay}
+    ...    AND    Wait for Device OK    ${ICM_Device}    ${bay}
+
+TC 09: Validate InterconnectThermalWarning event is generated on Potash
+    [Documentation]    This test to verify if InterconnectThermaWarning event is generated on Potash
+    [Tags]    ICM    Alert    Events     FLM1.01    FLM2.00    OV3.10    Automated
+    ${last_fusion_event_id}=    get last fusion event ID
+    ${present_list}=    Get List of Occupied Potash Bays
+    Should Not Be Empty    ${present_list}    msg=No Interconnect present in the enlcosure
+    ${active_ipaddr}=    Get Diags Active EM IPv6 LL Address
+    : FOR    ${icm_bay}    IN    @{present_list}
+    \    Validate Interconnect Health    ${icm_bay}    ${HEALTH_OK}
+    \    Flash Interconnect Updated Fru    ${icm_bay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\${Custom_Potash_Degrade_Fru_Path}
+    \    ${sensor}  ${temperature}=   Find the sensor and temperature   ${ICM_Device}   ${icm_bay}    26
+    \    ${ambtemp}=    Get Last AmbTemp value
+    \    Run keyword If    ${sensor} == 0    Validate Interconnect Health    ${icm_bay}    ${HEALTH_OK}
+    \    Run keyword If    ${sensor} != 0    Wait for Device Degraded    ${ICM_Device}    ${icm_bay}
+    \    Run keyword If    ${sensor} != 0    Validate Interconnect Health    ${icm_bay}    ${HEALTH_WARNING}
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_ICM_Thermal_Warning}    ${ICM_Device}    ${icm_bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_ICM_Thermal_Warning}    ${last_fusion_event_id}
+    \    ${thermal_sensor_status}=     Get Interconnect Fault Status    ${icm_bay}    ThermalSensors
+    \    Run keyword If    ${sensor} != 0    Should Be Equal      ${thermal_sensor_status}    ${HEALTH_WARNING}
+    \    Run keyword If    ${sensor} != 0    Validate thermal fault details    ${ICM_Device}    ${icm_bay}   26   ${sensor}   ${temperature}    ${ambtemp}
+    \    #Erasing the updated fru for the Interconnect bay
+    \    ${updatedfruerase}=    EM API Get Diags UpdatedFruErase   ${ICM_Device}    ${icm_bay}
+    \    Should Be Equal As Strings    ${updatedfruerase}    Successfully erased Updated Fru for device type INTERCONNECT bay ${icm_bay}\n\n
+    \    Sleep    10
+    \    RIS EM Efuse Interconnect    ${icm_bay}    ${EM_EFUSE_Duration}
+    \    EM Clear Interconnect Status    ${icm_bay}
+    \    Get Diags DeviceTemp    ${ICM_Device}    ${icm_bay}    [${active_ipaddr}]
+    [Teardown]    Run Keyword If Test Failed    Run Keywords
+	...    EM API Get Diags UpdatedFruErase   ${ICM_Device}    ${icm_bay}    AND    Sleep    10    AND
+    ...    RIS EM Efuse Interconnect    ${icm_bay}    ${EM_EFUSE_Duration}    AND    EM Clear Interconnect Status    ${icm_bay}   AND
+    ...    Get Diags DeviceTemp    ${ICM_Device}    ${icm_bay}    [${active_ipaddr}]
+
+TC 10: Validate InterconnectConfigurationFault & InterconnectConfigurationFaultCleared Events
+    [Documentation]    This test to verify ICM Configuration Fault/Cleared events
+    [Tags]    ICM    Alert    Events     FLM1.01    FLM2.00    OV3.10    Automated
+    ${present_list_icm}=    Get List of Occupied Interconnect Bays
+    should not be empty      ${present_list_icm}     No ICMs Found in the Enclosure
+    set test variable       ${present_list_icm}
+    ${affected_icm_list}=    Create List
+    ${icm_list}=    Create List
+    ${supported_list}=  Create List  Potash  Potassium
+    : FOR    ${bay}   IN   @{present_list_icm}
+    \    ${icm_type}=    Get ICM Type By ModelNo    ${bay}
+    \    ${verify_icm_type}=    Run Keyword And Return Status    List Should Contain Value    ${supported_list}    ${icm_type}
+    \    Run Keyword If   '${verify_icm_type}' == 'True'   Append To List    ${icm_list}    ${bay}
+    Ekey Initialize ICM TP Test Case    Ethernet   ${icm_list}
+    ${blade_match_list}=    Ekey Initialize Blades TP Test Case    Blackbird    3    Ethernet
+    FRU_Init_File Cleanup
+    Fru_File Cleanup
+    ${ekey_blade_list}=    Create List
+    # Iterate through matching blade list and verify ekey configuration fault
+    : FOR    ${blade_bay}    IN    @{blade_match_list}
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${mezz_slot}=   Convert To Integer  3
+    \    ${mezz_type}=    Get Mezz Type By Slot Number   ${mezz_slot}  ${blade_bay}
+    \    set test variable     ${mezz_type}
+    \    Update Fru Utility config_data File    ${FLOATING_IP}    False
+    \    ${mezz_fru_filename}=    Get Fru Filename in FRU INIT FILE    ${GIT_REPO_ROOT}${FRU_UPDATE_ROOT}${FRU_JSON_Init_Filename}    ${mezz_type}
+    \    ${quartz_fru}=    Get Fru Filename in FRU INIT FILE    ${GIT_REPO_ROOT}${FRU_UPDATE_ROOT}${FRU_JSON_Init_Filename}    QUARTZ
+    \    Replace Text in FRU INIT FILE    ${GIT_REPO_ROOT}${FRU_UPDATE_ROOT}${FRU_JSON_Init_Filename}    ${mezz_fru_filename}    ${quartz_fru}
+    \    Replace Text in Mezz Update Config Data File    compaq    ${iLO_Admin_Password}
+    \    Perform Mezz FRU Update on Blade in Bay    ${blade_bay}
+    \    Insert Into List  ${ekey_blade_list}  -1  ${blade_bay}
+    \    Sort List  ${ekey_blade_list}
+    \    FRU_Init_File Cleanup
+    \    Fru_File Cleanup
+    \    RIS EM Efuse On Blade    ${blade_bay}
+    \    sleep    10
+    \    RIS EM Efuse Off Blade No Sleep    ${blade_bay}
+    \    Sleep  5
+    \    Build RIS Object Model at Root Level
+    \    Wait for Device Degraded    ${Blade_Device}    ${blade_bay}
+    \    Sleep  30    # Wait for event to be logged to audit log and OV activity page
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    : FOR    ${icm_bay}    IN    @{icm_list}
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_Interconnect_Configuration_Fault}    ${ICM_Device}    ${icm_bay}    900
+    \    Verify Fusion Event Sent By EM    ${EL_Interconnect_Configuration_Fault}    ${last_fusion_event_id}
+    Sleep    5
+    # Remove ICM and verify configuraton fault is cleared
+    : FOR    ${icm_bay}    IN    @{icm_list}
+    \    RIS EM Efuse On Interconnect    ${icm_bay}
+    \    Sleep    10
+    \    Insert Into List  ${affected_icm_list}    -1    ${icm_bay}
+    : FOR    ${blade_bay}    IN    @{blade_match_list}
+    \    Update Fru Utility config_data File    ${FLOATING_IP}    False
+    \    Replace Text in FRU INIT FILE    ${GIT_REPO_ROOT}${FRU_UPDATE_ROOT}${FRU_JSON_Init_Filename}    ${quartz_fru}     ${mezz_fru_filename}
+    \    Replace Text in Mezz Update Config Data File    compaq    ${iLO_Admin_Password}
+    \    Perform Mezz FRU Update on Blade in Bay    ${blade_bay}
+    \    Remove Values From List  ${ekey_blade_list}    ${blade_bay}
+    \    FRU_Init_File Cleanup
+    \    Fru_File Cleanup
+    \    RIS EM Efuse On Blade    ${blade_bay}
+    \    sleep    10
+    \    RIS EM Efuse Off Blade No Sleep    ${blade_bay}
+    \    Sleep  5
+    \    Build RIS Object Model at Root Level
+    \    Wait for Device Ok    ${Blade_Device}    ${blade_bay}
+    \    Sleep  10
+    # Insert ICM
+    : FOR    ${icm_bay}    IN    @{icm_list}
+    \    RIS EM Efuse Off Interconnect    ${icm_bay}
+    \    Sleep    10
+    \    Remove Values From List    ${affected_icm_list}    ${icm_bay}
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_Interconnect_Configuration_Fault_Cleared}    ${ICM_Device}    ${icm_bay}    900
+    \    Verify Fusion Event Sent By EM    ${EL_Interconnect_Configuration_Fault_Cleared}    ${last_fusion_event_id}
+    [Teardown]    Run Keyword If Test Failed    Restore Affected Blade and ICM    ${affected_icm_list}    ${ekey_blade_list}    ${quartz_fru}    ${mezz_fru_filename}

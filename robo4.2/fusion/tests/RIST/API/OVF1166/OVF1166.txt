@@ -1,0 +1,146 @@
+*** Settings ***
+Library             RoboGalaxyLibrary
+Library             FusionLibrary
+Library             OperatingSystem
+Library             BuiltIn
+Library             Collections
+Library             XML
+Library             SSHLibrary
+Library             String
+Library             Dialogs
+Resource            ../global_variables.robot
+
+*** Variables ***
+${APPLIANCE_IP}      unknown
+
+*** Keywords ***
+Prepare Environment
+    [Documentation]    Prepare the test case pre condition according to the profile
+    Import AD Server Certificates    ${CERT_BODY}    ${AD_CERTIFICATE}    ${ALIAS_NAME}
+    Prepare SPT For Test    ${server_profile_template_profiles}
+    Prepare Directories For Test   ${directory_profiles}
+    ${scope_uri_list} =    Prepare Scope For Test   ${scope_profiles}
+    ${permission_list} =    Prepare Permissions For Test    ${scope_uri_list}
+    :FOR    ${group_profile}   IN    @{group_profiles}
+    \       Prepare Groups For Test    ${group_profile}    ${permission_list}
+    :FOR    ${user_profile}   IN     @{user_profiles}
+    \       Prepare Users For Test     ${user_profile}     ${permission_list}
+    credential Login     ${credentials_list}
+
+Prepare Directories For Test
+    [Arguments]    ${directory_profiles}
+    [Documentation]    Create directories and check the result
+    ${response} =     Add Active Directory    ${directory_profiles}
+    :FOR    ${resp}    IN    @{response}
+    \       Convert To String     ${resp}
+    \       log To Console       \n- create_directory_result_is_${resp}
+    \       ${status}=    Get From Dictionary    ${resp}    status_code
+    \       Should Be Equal    ${status}    ${201}
+
+Prepare SPT For Test
+    [Arguments]    ${server_profile_template_profiles}
+    [Documentation]    Create a SPT for test usage
+    ${response} =     Add Server Profile Templates from variable     ${server_profile_template_profiles}
+    Wait For Task2    ${response}
+
+Prepare Permissions For Test
+    [Arguments]     ${scope_uri_list}
+    [Documentation]    Create IA role User with None resource Scope permission
+    ${permission_list} =    Create List
+    ${permission} =    Create Dictionary    roleName=Infrastructure administrator    scopeUri=${scope_uri_list[0]}
+    Append To List    ${permission_list}    ${permission}
+    [Return]    ${permission_list}
+
+Prepare Scope For test
+    [Arguments]     ${scope_profiles}
+    [Documentation]    Create Scopes and Check Results
+    ${scope_uri_list} =   Create List
+    ${response} =    Create Scopes    ${scope_profiles}
+    :FOR    ${resp}    IN    @{response}
+    \       Should Be Equal    '${resp["status_code"]}'   '202'    msg= Failed to create scope!
+    \       ${task} =    Wait For Task    ${resp}    20min    5s
+    \       ${taskState} =    Get From Dictionary    ${task}    taskState
+    \       Should Match    ${taskState}    Completed
+    \       ${scope_uri} =    Get From Dictionary    ${task['associatedResource']}    resourceUri
+    \       Append To List    ${scope_uri_list}    ${scope_uri}
+    [Return]    ${scope_uri_list}
+
+Prepare Groups For test
+    [Arguments]     ${group_profile}    ${permission_list}
+    [Documentation]    Create Groups and Check Results
+    ${resp} =    Create Group With Permissions    ${group_profile}    ${permission_list}
+    convert to string    ${resp}
+    ${status} =    Get From Dictionary    ${resp}    status_code
+    Should Be Equal    ${status}    ${201}
+
+Prepare Users For test
+    [Arguments]     ${user_profile}    ${permission_list}
+    [Documentation]    Create Users and Check Results
+    ${resp} =    Create User With Permissions    ${user_profile}    ${permission_list}
+    convert to string    ${resp}
+    ${status} =    Get From Dictionary    ${resp}    status_code
+    Should Be Equal    ${status}    ${200}
+
+Clear Environment
+    [Documentation]    Prepare the test case pre condition according to the profile
+    Remove All Users
+    Remove All Directories Async
+    Remove All Scopes
+    Remove All Server Profile Templates Async
+    Run Keyword And Ignore Error    Remove CA By Allias Name    ${ALIAS_NAME}
+
+Credential Login
+    [Arguments]    ${credentials_list}
+    [Documentation]    Login as each credential, so can switch session for test needs
+    :FOR    ${credential}    IN    @{credentials_list}
+    \       Fusion Api Login Appliance    ${APPLIANCE_IP}    ${credential}
+    [Return]    ${True}
+
+Pre Test
+    [Documentation]    Prepare the test case pre condition according to the profile
+    Fusion Api Login Appliance      ${APPLIANCE_IP}    ${admin_credentials}
+    Clear Environment
+    Prepare Environment
+
+After Test
+    [Documentation]    Clear Environment after test execution
+    Fusion Api Login Appliance      ${APPLIANCE_IP}    ${admin_credentials}
+    Clear Environment
+    # Remove all volumes
+    ${resplist}=    Remove ALL Storage Volumes Async  param=?suppressDeviceUpdates=false
+    Wait For Task2    ${resplist}    timeout=60    interval=5
+    # Remove all volume templates
+    Remove ALL Storage Volume Templates Async
+
+Validate Server Profile Error Message With Scope Limted User Session
+    [Arguments]    ${server_profile_body}
+    [Documentation]    Create Server Profile With Scope Limted User Session
+    ${response} =    Add Server Profiles from variable    profiles=${server_profile_body}   param=?force=true
+    :FOR     ${resp}    IN     @{response}
+    \        Should Be Equal    '${resp["status_code"]}'   '202'    msg= Failed to post the server profile API!
+    \        Wait For Task2    ${resp}    50    5     PASS=Error    errorMessage=ASSOCIATION_FORBIDDEN_BY_SCOPE    VERBOSE=True
+    [Return]     ${true}
+
+Validate Server Profile Template Error Message With Scope Limited User Session
+    [Arguments]    ${server_profile_template_body}
+    [Documentation]    Create Server Profile Template With Scope Limted User Session
+    ${response} =    Add Server Profile Templates from variable    ${server_profile_template_body}
+    :FOR     ${resp}    IN     @{response}
+    \        Should Be Equal    '${resp["status_code"]}'   '202'    msg= Failed to post the server profile template API!
+    \        Wait For Task2    ${resp}    50    5     PASS=Error    errorMessage=ASSOCIATION_FORBIDDEN_BY_SCOPE    VERBOSE=True
+    [Return]     ${true}
+
+Validate Volume Error Message With Scope Limited User Session
+    [Arguments]    ${volume_profile_body}
+    [Documentation]    Create Volume With Scope Limted User Session
+    ${resp} =    Add Storage Volume     ${volume_profile_body}
+    Should Not Be Equal    '${resp["status_code"]}'    '202'    msg= Post volume not failed as expected!
+    Should Match     ${resp['errorCode']}    ASSOCIATION_FORBIDDEN_BY_SCOPE
+
+Validate Error Code
+    [Arguments]    ${task}=${None}
+    [Documentation]    Validate the error code and error message
+    ${taskState} =    Get From Dictionary    ${task}    taskState
+    Should Match    ${taskState}    Error
+    ${error_code} =    Get From Dictionary    ${task}    taskErrors
+    Should Match    ${error_code[0]['errorCode']}    ASSOCIATION_FORBIDDEN_BY_SCOPE

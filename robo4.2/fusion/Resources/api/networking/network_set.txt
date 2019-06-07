@@ -1,0 +1,261 @@
+*** Settings ***
+Library				RoboGalaxyLibrary
+Library				FusionLibrary
+Library				OperatingSystem
+Library				BuiltIn
+Library				Collections
+Library				XML
+Library		        SSHLibrary
+Library				String
+Library				Dialogs
+
+*** Keywords ***
+Add Network Sets from variable
+	[Documentation]	Adds Network sets to an appliance from a variable which contains a list of dicts with the entire payload
+    ...              scope process example:
+    ...                 'initialScopeUris': ['Scope:Test', 'Scope:Production']
+	[Arguments]		${networks}
+	Log  	Adding NETWORK SETS    console=True
+	:FOR	${net}	IN	@{networks}
+	\		${networkUris} = 	Get Ethernet URIs	${net['networkUris']}
+	\		Set to dictionary	${net}	networkUris	${networkUris}
+	\		${nativeNetworkUri} = 	Run Keyword If 	'${net['nativeNetworkUri']}' != 'None'		Get Ethernet URI	${net['nativeNetworkUri']}
+	\		Set To Dictionary 	${net}	nativeNetworkUri	${nativeNetworkUri}
+	# Initial Scope process.
+	\       ${initialScopeUris}=  Pop From Dictionary  ${net}  initialScopeUris  default=${None}
+    \       ${scopeUris}=       Run Keyword If    ${initialScopeUris} != ${None}
+    \       ...                 Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    \       Run Keyword If      ${initialScopeUris} != ${None}
+    \       ...                 Set To Dictionary    ${net}  initialScopeUris  ${scopeUris}
+	\		${resp} = 	Fusion Api Create Network Set		body=${net}
+	\       ${task} =	Wait For Task 	${resp} 	240s	5s
+
+Add Networks Sets from variable async
+    [Documentation]    Adds network sets to an appliance from a variable which contains a list of dicts with the
+    ...  entire payload.  Also supports creating and validating network sets asyncronously.  Does not validate by default
+    ...  scope process example: 'initialScopeUris': ['Scope:Test', 'Scope:Production']
+    [Arguments]     ${network_sets}    ${VERIFY}=${FALSE}  ${expected_network_sets}=@{Empty}  ${status_code}=202
+    ${tasks} =  Create Dictionary
+    ${actualNetworkSets} =  create list
+    Log  Adding NETWORK SETS   console=True
+    :FOR    ${netSet}  IN  @{network_sets}
+    #       -First, if $VERIFY, check if ${netSet} already exists.  Skip if it does
+    \       ${resp} =   Run Keyword If    ${VERIFY}    Get Resource    NS:${netSet['name']}
+    \       Run Keyword If    ${VERIFY}  Run Keyword If    ${resp['status_code']}==200
+            ...     Log  Network ${netSet['name']} exists
+                ...     WARN
+    \       Run Keyword If    ${VERIFY}  Continue For Loop If  ${resp['status_code']}==200
+    #       -Add the network set
+    \       Log  Adding network set ${netSet['name']}  console=yes
+    \        ${networkUris} = 	Get Ethernet URIs	${netSet['networkUris']}
+    \        Set to dictionary	${netSet}	networkUris	${networkUris}
+    \        ${nativeNetworkUri} = 	Run Keyword If 	'${netSet['nativeNetworkUri']}' != 'None'		Get Ethernet URI	${netSet['nativeNetworkUri']}
+    \        Set To Dictionary 	${netSet}	nativeNetworkUri	${nativeNetworkUri}
+    #       -Initial Scope process.
+	\       ${initialScopeUris}=  Pop From Dictionary  ${netSet}  initialScopeUris  default=${None}
+    \       ${scopeUris}=       Run Keyword If    ${initialScopeUris} != ${None}
+    \       ...                 Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    \       Run Keyword If      ${initialScopeUris} != ${None}
+    \       ...                 Set To Dictionary    ${netSet}  initialScopeUris  ${scopeUris}
+    \        ${resp} = 	Fusion Api Create Network Set		body=${netSet}
+    #       -If !$VERIFY, then go to the next network set
+    \       continue for loop if  ${VERIFY}==${FALSE}
+    #       -Check the response code to ensure the network set was created as expected
+    \       Run Keyword If  ${resp['status_code']}!=${status_code}
+            ...   Run Keyword And Continue on Failure  FAIL  Failed to create network ${netSet['name']}
+    \       continue for loop if  ${resp['status_code']}!=${status_code}
+     #       -We need a way to track the responses for later verification.  Add info to a dict, then add the dict to a list
+    \       ${dict} =  create dictionary
+    \       set to dictionary   ${dict}  resp=${resp}
+    \       set to dictionary   ${dict}  name=${netSet['name']}
+    \       append to list  ${actualNetworkSets}  ${dict}
+     # If !{VERIFY}, then we're done
+    Return From Keyword If    ${VERIFY}==${FALSE}
+    Return From Keyword If    ${expected_network_sets}==@{Empty}
+    # Iterate through the list of responses build in the last for loop
+    :FOR    ${netSet}  IN  @{actualNetworkSets}
+    #       -Wait for the network set creation task to finish
+    \       Wait For Task2  ${netSet['resp']}
+    #       -Grab the correct network set from the expected network set list that was passed in
+    \       ${expItem} =  Fusion Api Get Dict From List  ${expected_network_sets}  name  ${netSet['name']}
+    #       -If the network isn't in the list to validate, skip it
+    \       CONTINUE FOR LOOP IF  ${expItem}=={}
+    #       -Get the network resource and do the comparison
+    \       ${actItem} =  Get Resource    NS:${netSet['name']}
+    \       ${result} =  fusion api validate response follow   ${expItem}  ${actItem}  #wordy=${TRUE}
+    \       Run keyword and continue on failure  should be equal  ${result}  ${TRUE}
+
+Create Network Set range
+	[Documentation]	Creates network set range
+	[Arguments]	${range}
+	Set Log Level	TRACE
+	Log  	Adding NETWORK SET RANGES   console=True
+	${body} = 	Copy Dictionary	${range}
+	Remove From Dictionary	${body}	prefix	suffix	start	end
+	${netlist} = 	Create List
+	:FOR	${x}	IN RANGE	${range['start']}	${range['end']}+1
+	\	Append To List	${netlist}	${range['prefix']}${x}${range['suffix']}
+	${networkUris} = 	Get Ethernet URIs	${netlist}
+	Set To Dictionary 	${body}	networkUris	${networkUris}
+	${nativeNetworkUri} = 	Run Keyword If 	'${range['nativeNetworkUri']}' != 'None'  Get Ethernet URI	${range['nativeNetworkUri']}
+	Set To Dictionary 	${body}	nativeNetworkUri	${nativeNetworkUri}
+	${resp} = 	Fusion Api Create Network Set		body=${body}
+	[Return]	${resp}
+
+Remove All Network Sets
+	[Documentation]	Querys the appliance for all Network Sets and then removes them
+	Log  	Removing NETWORK SETS    console=True
+	${networks} = 	Fusion Api Get Network Set
+	:FOR	${net}	IN	@{networks['members']}
+	\		${resp} = 	Fusion Api Delete Network Set		uri=${net['uri']}
+	\		${task} =	Wait For Task 	${resp} 	240s	2s
+
+Remove All Networks Sets Async
+	[Documentation]	Querys the appliance for all network sets and then removes them asyncronously.  As it iterates
+	...  through the list of network sets, it creates a dictionary for each network set containing the network set name, task uri,
+	...  and resource uri.  It then adds these to a list, deleteResources, and uses this list to perform the
+	...  asyncronous task checking and optional validation that the resource uri returns a 404
+	[Arguments]  ${VERIFY}=${FALSE}  ${status_code}=404
+	${deleteNetSets} =  Create List
+    ${response} =       Create List
+	Log  	Removing ETHERNET NETWORKS    console=True
+	#Get a list of all network sets, then iterate through each, making a DELETE call
+	${networkSets} = 	Fusion Api Get Network Set
+    ${count}=    Convert To String  ${networkSets['count']}
+    Run Keyword If  '${count}'=='0'   Log    Network Sets doesn't exists   WARN
+	:FOR	${netSet}	IN	@{networkSets['members']}
+	\		${resp} = 	Fusion Api Delete Network Set		uri=${netSet['uri']}
+	\       Log  ${resp}  TRACE
+	\       Log  Deleting network set ${netSet['name']}    console=True
+	#       -Populate the deleted network set names, and their reponses, into a dictionary and append to a list
+	\       ${deleteInfo} =  Create Dictionary
+	\		Set To Dictionary  ${deleteInfo}  name=${netSet['name']}
+	\		Set To Dictionary  ${deleteInfo}  uri=${netSet['uri']}
+	\		Set To Dictionary  ${deleteInfo}  resp=${resp}
+	\       Append To List  ${deleteNetSets}  ${deleteInfo}
+    \       Append To List  ${response}  ${resp}
+    Wait For Task2  ${response}
+	#       -Iterate through all of the deleted network sets
+	:FOR    ${deleteNetSet}  IN  @{deleteNetSets}
+	\       Continue For Loop If   ${VERIFY}==${FALSE}
+	#       -If ${VERIFY}, validate that the network was deleted
+	\       ${resp} =  Fusion Api Get Resource  ${deleteNetSet['uri']}
+	\       Run Keyword If  ${resp['status_code']}!=${status_code}  Run Keyword And Continue On Failure  FAIL  msg=Network Set ${deleteNetSet['name']} is not Deleted
+
+Get Network Set URI
+    [Documentation]     Fetches the uri of the network set
+    [Arguments]   ${netSet}
+    ${resp} =    Fusion Api Get Network Set    param=?filter="'name'=='${netSet}'"
+    Return From Keyword If  ${resp['count']}==0  /rest/network_set_uri_${netSet}_not_found
+    ${uri} =   Get From Dictionary    ${resp['members'][0]}    uri
+    [Return]    ${uri}
+
+Get Network Set URIs
+    [Documentation]   Fetches the uri of all network sets
+    [Arguments]     ${netlist}
+    ${urilist} =    Create List
+    :FOR    ${net}   IN    @{netlist}
+    \   ${resp} =   Fusion Api Get Network Set    param=?filter="'name'=='${net}'"
+    \   Continue For Loop If     ${resp['members']} == []
+    \   ${uri} =    Get From Dictionary    ${resp['members'][0]}    uri
+    \   Append To List   ${urilist}   ${uri}
+    [Return]    ${urilist}
+
+Update Network Set
+   [Documentation]    Updates the existing network set. Adding and deleting networks from network sets.
+    ...              Further keyword implementation can be enhanced to update other fields.
+    [Arguments]      ${netsets}      ${STATUS_CODE}=202
+    ${NetworkSetResps}=  Create List
+    :FOR    ${netset}   IN    @{netsets}
+    \   ${name_status}   Run keyword and return status   Dictionary Should Contain Key   ${netset}   name
+    \   ${resp}=   Run Keyword If   ${name_status}==True      Fusion Api Get Network Set    param=?filter="'name'=='${netset['name']}'"
+    \   Return From Keyword If  ${resp['count']}==0  ${netset['name']}_not_found
+    \   ${values}=  Run keyword if   ${resp['members'][0]['networkUris']}!=[]   Copy List   ${resp['members'][0]['networkUris']}
+    \   ${status2}  ${return} =  Run Keyword and Ignore Error  Get from Dictionary  ${netset}  nativeNetworkUri
+    \   ${nativeNetworkUri}=   Run Keyword If  "${status2}"=="PASS" and "${return}"!="${None}"
+    \   ...   Get Ethernet URI    ${return}
+    \   ${net_status}    Run keyword and return status    Dictionary Should Contain Key    ${netset}    add_networkUris
+    \   ${del_net_status}=     Run keyword and return status     Dictionary should contain key    ${netset}    delete_networkUris
+    \   ${resp_add_net_list}=   Run Keyword If   ${net_status}==True   Run keyword if   ${net_status}!=[]      Update networks information in Netset to add network   ${resp}    ${netset['add_networkUris']}
+    \   ${resp_del_net_list}=   Run Keyword If   ${del_net_status}==True    Run keyword if   ${del_net_status}!=[]    Update networks information in Netset to delete network    ${resp}    ${netset['delete_networkUris']}
+    \   ${net_list_add}=    Run keyword if  ${resp_add_net_list} is not None   Combine Lists   ${resp['members'][0]['networkUris']}    ${resp_add_net_list}
+    \   Run keyword if  ${resp_add_net_list} is not None    Run keyword if   ${resp_del_net_list} is None      Set to Dictionary    ${resp['members'][0]}    networkUris    ${net_list_add}
+    \   Run keyword if  ${resp_del_net_list} is not None    Run keyword if   ${resp_add_net_list} is None     Check networks to delete from netset    ${values}    ${resp_del_net_list}
+    \   Run keyword if  ${resp_del_net_list} is not None    Run keyword if   ${resp_add_net_list} is None     Set to Dictionary	${resp['members'][0]}    networkUris    ${values}
+    \   Run keyword if  ${resp_add_net_list} is not None    Run keyword if   ${resp_del_net_list} is not None    Check networks to delete from netset    ${net_list_add}    ${resp_del_net_list}
+    \   Run keyword if  ${resp_add_net_list} is not None    Run keyword if   ${resp_del_net_list} is not None    Set to Dictionary   ${resp['members'][0]}   networkUris    ${net_list_add}
+    \   Run Keyword If  "${status2}"=="PASS" and "${return}"!="${None}"
+    \   ...   Set To Dictionary   ${resp['members'][0]}   nativeNetworkUri   ${nativeNetworkUri}
+    \   ${rest_resp}=   Fusion Api Edit Network Set    body=${resp['members'][0]}   uri=${resp['members'][0]['uri']}
+    \   ${status}=   Run Keyword And Return Status   should be equal as integers   ${rest_resp['status_code']}   ${STATUS_CODE}
+    \   ${task}=   Run Keyword If   ${status}==True   Wait For Task  ${rest_resp}   300s   5s
+    \   append to list    ${NetworkSetResps}   ${rest_resp}
+    [Return]   ${NetworkSetResps}
+
+Update networks information in Netset to add network
+    [Documentation]   Builds required networks payload to add networks to netset.
+    [Arguments]     ${resp}      ${networks}
+    :FOR    ${net}    IN     @{networks}
+    \   ${net_add_list}     Create List
+    \   ${resp_net} =   Fusion Api Get Ethernet Networks     param=?filter="'name'=='${net}'"
+    \   Return From Keyword If  ${resp_net['count']}==0   ${net}_not_found
+    \   ${net_uri} =   Get From Dictionary   ${resp_net['members'][0]}   uri
+    \   ${result} =   Run Keyword and Return Status    List Should Not Contain value    ${resp['members'][0]['networkUris']}    ${net_uri}
+    \   Run keyword if   '${result}'=='${True}'   append to list   ${net_add_list}    ${net_uri}
+    [Return]    ${net_add_list}
+
+Update networks information in Netset to delete network
+    [Documentation]   Builds required networks payload to delete networks from netset.
+    [Arguments]   ${resp}     ${delete_networks}
+    :FOR   ${net}   IN   @{delete_networks}
+    \   ${net_del_list}   Create List
+    \   ${resp_net} =   Fusion Api Get Ethernet Networks     param=?filter="'name'=='${net}'"
+    \   Return From Keyword If   ${resp_net['count']}==0   FAIL     ${net}_not_found
+    \   ${net_uri} =   Get From Dictionary     ${resp_net['members'][0]}   uri
+    \   ${result} =   Run Keyword and Return Status   List Should Contain value   ${resp['members'][0]['networkUris']}    ${net_uri}
+    \   Run keyword if    '${result}'=='${True}'    Append to List   ${net_del_list}   ${net_uri}
+    [Return]     ${net_del_list}
+
+Check networks to delete from netset
+    [Documentation]   Filter/identify the networks to be deleted from network set
+    [Arguments]    ${netset_networks}    ${networks_to_delete}
+   :FOR   ${net}   IN   @{networks_to_delete}
+   \   Remove Values from List   ${netset_networks}   ${net}
+    [Return]    ${netset_networks}
+
+Get All Network Set Uris
+    [Documentation]    Get Resources Uris list and return it
+    ${resp} =    Fusion Api Get Network Set
+    ${memb_list} =    Get From Dictionary    ${resp}    members
+    ${uri_list} =    Create List
+    :FOR    ${memb}    IN    @{memb_list}
+    \       ${uri} =    Get From Dictionary    ${memb}    uri
+    \       Append To List    ${uri_list}    ${uri}
+    [Return]      ${uri_list}
+
+Check Network Set Containing A Given Network Exists
+    [Documentation]  Checks if a given ethernet network is part of a network set. Returns the status and the name of the network set if found.
+    [Arguments]    ${nw_uri}
+    ${ns_contains}=    Set Variable    FALSE
+    ${ns_list}=    Create List
+    ${resp}=    Fusion Api Get Resource    /rest/index/trees/${nw_uri}
+    ${status}=    Run Keyword And Return Status    Dictionary Should Contain Key    ${resp['parents']}    NETWORKSET_TO_NETWORK
+    Return From keyword If    '${status}' == 'False'   ${ns_contains}    ${ns_list}
+    :FOR    ${ns}    IN     @{resp['parents']['NETWORKSET_TO_NETWORK']}
+    \    ${ns_contains}=    Set Variable    TRUE
+    \    ${ns_name}=    Set Variable    ${ns['resource']['name']}
+    \    Append To List    ${ns_list}    ${ns_name}
+    [Return]    ${ns_contains}    ${ns_list}
+
+Check If The Network Set Contains A Given Network
+    [Documentation]  Checks if a given network set contains the given network. Returns the status if found.
+    [Arguments]    ${ns_name}    ${nw_name}
+    ${ns_contains}=    Set Variable    FALSE
+    ${ns_uri}=   Get Network Set URI    ${ns_name}
+    ${ns_body}=     Get Resource by URI    ${ns_uri}
+    ${nw_uri}=    Get Ethernet URI    ${nw_name}
+    ${ns_nw_uris}=    Get From Dictionary    ${ns_body}    networkUris
+    :FOR    ${nw}     IN    @{ns_nw_uris}
+    \    Return From Keyword If    '${nw}' == '${nw_uri}'    TRUE
+    [Return]    ${ns_contains}
+

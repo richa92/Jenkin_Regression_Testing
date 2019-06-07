@@ -1,0 +1,199 @@
+*** Settings ***
+Library				RoboGalaxyLibrary
+Library				FusionLibrary
+Library				OperatingSystem
+Library				BuiltIn
+Library				Collections
+Library				XML
+Library		        SSHLibrary
+Library				String
+Library				Dialogs
+
+*** Keywords ***
+Add Users from variable
+    [Documentation]     Adds users to the appliance and remove them
+    [Arguments]     ${users}    ${notFoundStatusCodeList}=404     ${status_code}=200
+    ${users} =  Copy Dictionary  ${users}
+    ${responses} =  create list
+    Log   Adding USERS   console=yes
+    :FOR    ${user}     IN      @{users}
+    \       ${check} =  Fusion Api Get User     param=${user['userName']}
+    \       ${response_status_code}=  Convert To String  ${check['status_code']}
+    \       ${status}=   Run Keyword And Return Status   List Should Contain Value  ${notFoundStatusCodeList}  ${response_status_code}
+    \       Run Keyword If    ${status}==False     Log   User ${user['userName']} Already Exists    WARN
+    \       Continue For Loop If    ${status}==False
+    \       ${status1}  ${permissions}=    Run Keyword And Ignore Error    Get From Dictionary  ${user}  permissions
+    \       ${scopeUris}=       Run Keyword If    '${status1}'=='PASS'    Lookup Scope Uri By Users  ${user}
+    \       ${resp} =   Fusion Api Add User     body=${user}
+    \       Run Keyword If  '${resp['status_code']}'!= '${status_code}'   Run Keyword And Continue On Failure   Fail     Adding User ${user['userName']} Failed
+    \       continue for loop if  '${resp['status_code']}'!= '${status_code}'
+    \       append to list   ${responses}  ${resp}
+    [Return]    ${responses}
+
+Add Users from variable async
+    [Documentation]     Adds users to the appliance async and verify
+    [Arguments]     ${users}    ${VERIFY}=${FALSE}  ${expected_users}=@empty    ${notFoundStatusCodeList}=404     ${status_code}=200
+    ${users} =  Copy Dictionary  ${users}
+    ${responses} =  create list
+    Log   Adding USERS   console=yes
+    :FOR    ${user}     IN      @{users}
+    \       ${check} =  Fusion Api Get User     param=${user['userName']}
+    \       ${response_status_code}=  Convert To String  ${check['status_code']}
+    \       ${status}=   Run Keyword And Return Status   List Should Contain Value  ${notFoundStatusCodeList}  ${response_status_code}
+    \       Run Keyword If    ${status}==False     Log   User ${user['userName']} Already Exists    WARN
+    \       Continue For Loop If    ${status}==False
+    \       ${status1}  ${permissions}=    Run Keyword And Ignore Error    Get From Dictionary  ${user}  permissions
+    \       ${scopeUris}=       Run Keyword If    '${status1}'=='PASS'    Lookup Scope Uri By Users  ${user}
+    \       ${resp} =   Fusion Api Add User     body=${user}
+    \       Run Keyword If  '${resp['status_code']}'!= '${status_code}'   Run Keyword And Continue On Failure   Fail     Adding User ${user['userName']} Failed
+    \       continue for loop if  '${resp['status_code']}'!= '${status_code}'
+    \       append to list   ${responses}  ${resp}
+    Run Keyword If  ${responses} is not ${null}     Wait For Task2   ${responses}
+    # If !{VERIFY}, then we're done
+    Return From Keyword If  ${VERIFY}==${FALSE}
+    Verify Users    ${expected_users}
+    [Return]    ${responses}
+
+Lookup Scope Uri By Users
+    [Documentation]   Processes permissions, and dynamiclly looks up the scope uri.
+    ...                 Expected data example:
+    ...                 users = [{'userName': 'IA',
+    ...                           'password': 'wpsthpvse1',
+    ...                           'fullName': 'IA',
+    ...                           "permissions": [{"roleName": "Infrastructure administrator",
+    ...                                            "scopeUri": "Scope:Test"},
+    ...                                           {"roleName": "Infrastructure administrator",
+    ...                                            "scopeUri": "Scope:Production"},
+    ...                                           ],
+    ...                           'type': 'UserAndPermissions'
+    ...                           }]
+    [Arguments]    ${user}
+    ${permissions} =  Get from Dictionary  ${user}  permissions
+    :FOR    ${permission}    IN    @{permissions}
+    \       ${scope}=        Pop From Dictionary    ${permission}  scopeUri  default=${None}
+    \       ${scopeUri}=     Run Keyword If    '${scope}' != '${None}'    Common URI lookup by name    ${scope}
+    \       Run Keyword If   '${scope}' != '${None}'    Set To Dictionary    ${permission}  scopeUri  ${scopeUri}
+    Set To Dictionary    ${user}    permissions    ${permissions}
+    [Return]    ${user}
+
+Login all users
+	[Documentation]	Login all users
+	[Arguments]     ${users}
+	Set Log Level	TRACE
+	${original_user} =    Fusion Api Get Active User
+	:FOR	${user}	IN	@{users}
+	\	${user_and_pass} = 	Create Dictionary	userName=${user['userName']}	password=${user['password']}
+	\	Fusion Api Login Appliance 		${APPLIANCE_IP}		${user_and_pass}
+	Fusion api switch active user    user=${original_user}
+
+Remove All Users
+	[Documentation]	Querys the appliance for all Users and then removes them
+	[Arguments]    ${VERIFY}=False    ${status_code}=404
+
+	Log    Removing USERS    console=true
+	${users} = 	Fusion Api Get User
+	Log    users:${users}    console=true
+	:FOR	${user}	IN	@{users['members']}
+	\		Continue For Loop If	'${user['userName']}'=='administrator'
+    \       Continue For Loop If    '${user['userName']}'=='HardwareSetup'
+	\		${resp} = 	Fusion Api Remove User		uri=${user['uri']}
+	\		Continue For Loop If	'${VERIFY}'!='True'
+	\		${x} =    Run Keyword If    '${VERIFY}'=='True'    Set Variable    USER:${user['userName']}
+	\		${respuser} =    Run Keyword If    '${VERIFY}'=='True'    Get Resource    ${x}
+	\       ${response_code} =     Run keyword if    '${VERIFY}'=='True'    Convert To String    ${respuser}
+	\       ${matchedValue} =      Run keyword if    '${VERIFY}'=='True'    Get Regexp Matches     ${response_code}     [0-9]+
+	\       Run Keyword If	       '${VERIFY}'=='True' and '${matchedValue[0]}' == '${status_code}'     Log    Delete SUCCESS for USER:${user['userName']} and its Response:${response_code}    console=true
+	\       ...    ELSE IF         '${VERIFY}'=='True' and '${matchedValue[0]}' != '${status_code}'     Log    Deleted FAILED for URI:${user['userName']} and its Response:${response_code}     ERROR    console=true
+
+Get User URI
+	[Documentation]	Querys the appliance for the specified user.
+	[Arguments]		${userName}
+	Log    getting USER URI    console=true
+	${resp} = 	Fusion Api Get User    param=${userName}
+	Return From Keyword If  ${resp['status_code']}==404  /rest/users_${userName}_not_found
+	${uri} = 	Get From Dictionary		${resp}    uri
+	Log    uri:${uri}    console=true
+	[Return]	${uri}
+
+Verify Users
+    [Documentation]  Verify Users
+    ...              Example:
+    ...                Verify Users  ${expected_users}
+    ...              Data Required:
+    ...                Expected Users DTO
+    [Arguments]  ${expected_users}  ${api}=${None}  &{kwargs}
+
+    :FOR    ${user}     IN      @{expected_users}
+    \   ${status}  ${name} =  Run Keyword and Ignore Error  Get From Dictionary  ${user}  userName
+    \   Return from keyword if    '${status}'=='FAIL'    ${user} doesn't contain the key $name
+    \   Log   ${\n}Verifying ${name}   console=yes
+    \   ${new_expected_dto} =  Add Key Value to DTO  ${user}  &{kwargs}
+    \   Remove From Dictionary  ${new_expected_dto}     name
+    \   ${uri} =    Get User URI    ${name}
+    \   ${dto} =    Get Resource by URI     ${uri}
+    \   ${validate_status} =  Run Keyword And Continue On Failure  Fusion api validate response follow  ${new_expected_dto}  ${dto}  wordy=${False}
+    \   Run Keyword If  '${validate_status}'=='False' or '${validate_status}'=='None'
+        ...  Run Keyword And Continue On Failure   Fail       Verify  ${user['userName']} User Failed
+    \   Run Keyword If  '${validate_status}'=='True'  Log   Verify User ${name} succeeded
+
+Update Users
+    [Documentation]     Updates users in the appliance
+    [Arguments]     ${users}    ${status_code}=200
+    ${resp}	Create list
+    ${task_resp}	Create list
+    :FOR    ${user}     IN      @{users}
+    \	${existing_user1}	Fusion Api Get User     param=${user['userName']}
+    \	Run keyword if	${existing_user1['status_code']} != ${status_code}		Return from keyword	${resp}	${task_resp}
+	\	${existing_user1_copy}	Copy Dictionary		${existing_user1}
+	\	${eu_dict}	Populate values in payload	${user}		${existing_user1_copy}
+	\	remove from dictionary	${eu_dict}	headers
+	\	remove from dictionary	${eu_dict}	status_code
+	\	${uri}	Set variable	/rest/users
+    \	${resp}=   Fusion Api Edit User     body=${eu_dict}	uri=${uri}
+	\	${status}=	Run Keyword and Return Status	should be equal as integers		${resp['status_code']}  ${status_code}
+	\	${task_resp}	Run Keyword If		'${status}'=='True'		Wait For Task	${resp}
+    [Return]    ${resp}	${task_resp}
+
+Populate values in payload
+	[Documentation]     Populate values in payload based on user input
+	[Arguments]     ${user_data}    ${existing_user_data}
+	${rr_status}		Run keyword and return status	Dictionary Should Contain Key		${user_data}	replaceRoles
+	${rr}	Run Keyword If	${rr_status}==True	Run Keyword If	${user_data['replaceRoles']} == True	Set variable	True
+	${per_status}		Run keyword and return status	Dictionary Should Contain Key		${user_data}	permissions
+	${items} =    Get Dictionary Items    ${user_data}
+	:FOR	${key}   ${value}	IN 	@{items}
+	\	Run keyword if	'${key}' != 'permissions'	Set to Dictionary	${existing_user_data}	${key}	${value}
+	${new_perms}	Run Keyword If	${per_status}==True	Alter permissions of user	${existing_user_data['permissions']}	${user_data['permissions']}	${rr}
+	Run Keyword If	${per_status}==True	Set to Dictionary	${existing_user_data}	permissions	${new_perms}
+	[Return]	${existing_user_data}
+
+Alter permissions of user
+	[Documentation]     Alter permissions of user
+	[Arguments]     ${existing_per}    ${perms}		${rr_value}
+	${user_per_list}	Run keyword if	${rr_value}==True		Create list
+	:FOR	${perm}		in	@{perms}
+	\	${new_dict}	Create dictionary
+	\	${r_status}		Run keyword and return status	Dictionary Should Contain Key		${perm}	roleName
+	\	Run keyword if	${r_status} == True	Run keyword if	'${perm['roleName']}' != 'None'	Set to Dictionary	${new_dict}		roleName	${perm['roleName']}
+	\	${s_status}		Run keyword and return status	Dictionary Should Contain Key		${perm}	scopeUri
+	\	${scope_uri}	Run keyword if	${s_status} == True and '${perm['scopeUri']}' != 'None'	Get Scope URI By Name	${perm['scopeUri']}
+	\	Run keyword if	'${scope_uri}' != '/bad_scope_uri'	Set to Dictionary	${new_dict}		scopeUri	${scope_uri}
+	\	Run keyword if	${rr_value}==True	Append to list   ${user_per_list}	${new_dict}
+	\	Run keyword if	${rr_value}==False or '${rr_value}'=='None'	Append to list   ${existing_per}	${new_dict}
+	Return from keyword if	${rr_value}==True	${user_per_list}
+	Return from keyword if	${rr_value}==False or '${rr_value}'=='None'	${existing_per}
+
+Create User With Permissions
+    [Arguments]         ${user_profile}    ${permission_list}
+    [Documentation]     Create User And Assign Specify Permissions To This User, Return The Response
+    Set To Dictionary    ${user_profile}     permissions    ${permission_list}
+    ${resps} =    Fusion Api Add User    ${user_profile}
+    [Return]    ${resps}
+
+Get Current SessionID
+    [Arguments]    ${current_username}=Administrator
+    [Documentation]  Get the current sessionID from all active sessionIDs and return it, will get Administrator session by default.
+    ${response} =    Fusion_Api_Get_Active_Sessions
+    ${session_info} =    Get From Dictionary    ${response}    ${current_username}
+    ${sessionID} =    Get From Dictionary    ${session_info}    sessionID
+    [Return]    ${sessionID}

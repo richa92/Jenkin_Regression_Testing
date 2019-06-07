@@ -1,0 +1,124 @@
+*** Settings ***
+Documentation    power_mode.txt - Power Supply Redundancy test
+...    = USAGE =
+...    | pybot | -v ENCLOSURE:dcs |-v FUSION_IP:<IP> | ps_health.txt |
+...    = Variables =
+...    | ENCLOSURE | Required; Enclosure to use |
+...    | FUSION_IP | Required when enclosure is DCS; IP address of the FusionVM to use |
+*** Settings ***
+Variables         ../resources/variables.py    ${ENCLOSURE}
+Resource          ../resources/defaults.txt
+Resource          ../resources/em_api.txt
+Resource          ../resources/fusion_ssh.txt
+Resource          ../resources/enclosure_info.txt
+Force Tags        HW
+Suite Setup       Suite Setup
+
+*** Variables ***
+
+*** Test Case ***
+EFuseOn Power Supplies
+    # Let's turn off some power supplies until we pass minimum Power Supplies For Redundant Power Feed
+    ${RemainingCount}    Get Length    ${BayList}
+    :For    ${Bay}    in    @{BayList}
+    \    Exit For Loop If    ${RemainingCount}<${minimumPowerSuppliesForRedundantPowerFeed}    
+    \    EFuse Power Supply Bay    EFuseOn    ${Bay}
+    \    ${RemainingCount}    Evaluate    ${RemainingCount} - 1
+    # Wait till there powered off
+    Sleep    30
+
+Check For Not Capable Activity Alert
+    ${Alert_list}    ${Last_AlertID}    Fusion Api Get Activity Alerts
+    ...    Starting_AlertID=${${Last_AlertId}}    Resource_Filter=.*Power.*
+
+    ${Expected_Alerts}    Create List    hpris.emRegistry.1.0.PowerSupplyRemoved
+    ...                                  hpris.emRegistry.1.0.PowerSupplyRemoved
+    ...                                  hpris.emRegistry.1.0.PowerSubsystemRedundancyLost
+    :FOR    ${Alert}    IN    @{Alert_List}
+    \    Remove Values From List    ${Expected_Alerts}    ${Alert['alertTypeID']}
+    Should Be Empty    ${Expected_Alerts}    Event(s) not found: ${Expected_Alerts}
+    
+Restore Power Supplies
+    :For    ${Bay}    in    @{BayList}
+    \    EFuse Power Supply Bay    EFuseOff    ${Bay}
+    Sleep    60
+
+Check For Capable Activity Alert
+    ${Alert_list}    ${Last_AlertID}    Fusion Api Get Activity Alerts
+    ...    Starting_AlertID=${${Last_AlertId}}    Resource_Filter=.*Power.*
+
+    ${Expected_Alerts}    Create List    hpris.emRegistry.1.0.PowerSupplyInserted
+    ...                                  hpris.emRegistry.1.0.PowerSupplyInserted
+    ...                                  hpris.emRegistry.1.0.PowerSubsystemRedundancyLostCleared
+    :FOR    ${Alert}    IN    @{Alert_List}
+    \    Remove Values From List    ${Expected_Alerts}    ${Alert['alertTypeID']}
+    Should Be Empty    ${Expected_Alerts}    Event(s) not found: ${Expected_Alerts}
+    
+
+
+    
+*** Keywords ***
+Suite Setup
+    Login to Fusion via REST
+    ${BayList}    Get Present Enclosure powerSupplyBays List
+    Set Suite Variable    ${BayList}
+    Set Suite Variable    ${minimumPowerSuppliesForRedundantPowerFeed}
+    ...                   ${Enclosure_Info['minimumPowerSuppliesForRedundantPowerFeed']}
+    Set Suite Variable    ${powerMode}    ${Enclosure_Info['powerMode']}
+
+    # Find Last Audit Event IDs
+    Run Keyword and Ignore Error    Fusion Api Get Activity Alerts 
+    Log    Last Alert found: ${Last_AlertID}
+
+    # Get EM Session ID
+    Login to Fusion via SSH
+    ${EM_IP}    ${EMSessionID}=    EM Api Create Session
+    Set Suite Variable    ${Header}    "X-Auth-Token":"${EMSessionID}"
+
+EFuse Power Supply Bay
+    [Documentation]    Perform an efuse action on a power supply bay. Action = EFuseOff | EFuseOn
+    [Arguments]    ${Action}    ${BayNumber}
+    ${Data}      Set Variable    {"Action":"${Action}"}
+    ${Output}    Execute SSH Command
+    ...    curl -ikX POST -H ${Header} --data-ascii '${data}' https://${EM_IP}%${fusion_nic}/rest/v1/PowerSupplyBays/${BayNumber}
+    Should Contain    ${Output}    { "Action": "${Action}" }
+    ...    msg=EFuse action failed \n${Output}
+
+###############################################################################
+
+Fusion Api Get Activity Alerts
+    [Documentation]    Fetch recent Fusion Activity Alerts
+    ...    (Assumes a Fusion REST Api connection is open and logged in).
+    ...    Returns a list of Alerts.
+    [Arguments]    ${Starting_AlertID}=1    ${Resource_Filter}=.*
+    ${Alert_List}    Create List
+    # Get the entire list of Alerts
+    ${Response}    Fusion Api Get Alerts    /rest/alerts?sort=created:ascending    
+    ${Count}    Get From Dictionary    ${Response}    count
+    Run Keyword if            '${Count}'=='0'    Console    \nNo alert events found
+    Return From Keyword If    '${Count}'=='0'    msg=No alert events found
+
+    ${Members}    Get From Dictionary    ${Response}    members
+    :FOR    ${Index}    IN RANGE    0    ${Count}
+    \    ${Alert}    Get From List    ${Members}    ${Index}
+
+    \    # Select only the most recent events - skip any before that
+    \    ${uri}    Get From Dictionary    ${Alert}    uri
+    \    ${id}     Fetch From Right    ${uri}    /
+    \    Run Keyword If    ${Starting_AlertID}>=${id}    Continue For Loop
+
+    \    # Remember the last Alert ID encountered
+    \    Set Suite Variable    ${Last_AlertID}    ${id}
+
+    \    # Filter out any unrelated alerts
+    \    ${resourceID}    Get From Dictionary    ${Alert}    resourceID
+    \    ${Found}    Run Keyword And Return Status
+    \    ...    Should Match Regexp    ${resourceID}    ${Resource_Filter}
+    \    Run Keyword If    '${Found}'=='False'    Continue For Loop
+
+    \    # Include this alert into the 'List of Activity Events'
+    \    Append to List    ${Alert_List}    ${Alert}
+    Should Not Be Empty    ${Alert_List}    No Activity Events Found
+    [Return]    ${Alert_List}    ${Last_AlertID}
+
+    

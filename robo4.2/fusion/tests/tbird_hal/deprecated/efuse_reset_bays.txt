@@ -1,0 +1,103 @@
+*** Settings ***
+Documentation     Efuse Reset Various Bays with the HAL Webapp
+...    = USAGE =
+...    | pybot | -v ENCLOSURE:dcs          | FUSION_IP:my_fusion_ip | efuse_reset_bays.txt |
+...    | pybot | -v ENCLOSURE:dcs          | efuse_reset_bays.txt |
+...    = Variables =
+...    | ENCLOSURE | Optional. Dictionary key from variables.py representing the desired enclosure.  Default value is dcs. |
+...    | FUSION_IP | Required if ENCLOSURE is dcs.
+...    Pre-requisite:  CLI for ICM if testing ICM bays
+
+# AM-DVT US35834
+# David Gray
+# 2014, December
+
+Library           RoboGalaxyLibrary   	 	     	 	   # DVTs Robot Framework extensions
+Library           FusionLibrary                        	      	   # DVTs Robot Framework extensions
+Variables         ${CURDIR}/../resources/variables.py    ${ENCLOSURE}    # Variables file
+Resource          ${CURDIR}/../resources/defaults.txt	 	   # AM-DVT default variables
+Resource          ${CURDIR}/../resources/fusion_api.txt            # AM-DVT Fusion API extensions
+Resource          ${CURDIR}/../resources/hal_webapp.txt            # AM-DVT HAL Webapp extensions
+Resource          ${CURDIR}/../resources/system_info.txt           # AM-DVT fusion API extensions
+Suite Setup       Login to Fusion via SSH
+Suite Teardown    Logout of Fusion Via SSH
+Force Tags	  HW
+
+*** Variables ***
+#Not doing blade bays until the iLO situation is sorted and ICM's are supported (F110)
+#@{bays-actions}  InterconnectBays  IcmBayEfuse  FanBays  FanBayEfuse  PowerSupplyBays  PowerSupplyBayEfuse  BladeBays  ladeBayEfuse
+@{bays-actions}	  FanBays  FanBayEfuse  PowerSupplyBays  PowerSupplyBayEfuse
+
+
+*** Testcases ***
+
+Efuse Reset Device Bays
+    :For	${bay} 	${action}	in		@{bays-actions}
+    \	${bayurl}=	Set Variable If		${DCS}==True	/rest/v1/chassis/1/${bay}    /rest/v1/${bay}
+    \	${filled}  	${unfilled}=	Find Filled Bays	${bayurl}
+    \	${bayno}=     	Select Random ELement From List    	${filled}
+    \	${bayno}= 	Convert to Integer		${bayno}
+    \	Run Keyword If  ${DCS}!=True and '${bay}'=='InterconnectBays'
+    \	...   Verify ICM Reset	     ${action}	 ${bayno}
+    \	Run Keyword If  ${DCS}!=True and '${bay}'!='InterconnectBays'
+    \	...   Verify Reset via EM Log	     ${action}	 ${bayno}
+    #
+    #	Negative:  try empty bay if any
+    \	${length}=  	Get Length	${unfilled}
+    \	${status}  ${emptyno}   Run Keyword and Ignore Error
+    \	...   Select Random Element From List    ${unfilled}
+    \	Run Keyword If	${length}>0
+    \	...   HAL Action  	${action}			${emptyno}	invalid
+    #
+    #	Negative:  try invalid bay
+    \	${invalid}= 	Set Variable			${-1}
+    \	HAL Action  	${action}			${invalid}	invalid
+    \	${invalid}= 	Set Variable			${99}
+    \	HAL Action  	${action}			${invalid}	invalid
+    
+*** Keywords ***
+
+Verify ICM Reset
+       [Arguments]     ${action}	  ${bayno}
+       HAL Action      ${action}			${bayno}			  
+       Set Client Configuration    timeout=360
+       Write	       ssh Administrator@${fusion_ip}
+       ${response}     Read Until Regexp        (yes|password)
+       ${line}         Get Line                 ${response.strip()}               -1
+       ${tmp}          Get Substring            ${line.strip()}       -3
+       Run Keyword If  '${tmp}'=='yes'          Write    yes
+       Run Keyword If  '${tmp}'=='yes'          Read Until     password:
+       Write   	       ${CLI_PASSWORD}
+       Sleep   	       9			For login to complete
+       Write   	       console-view
+       Read Until      console-view>
+       Write   	       connect interconnect ${enc_serial_number} ${bayno} force
+       Write	       ${Empty}
+       ${data}         Read Until		Starting...
+       ${data}         Read Until		System is starting...
+       Should Contain X Times      ${data}      Loading file flash    3
+
+Verify Reset via EM Log
+       [Arguments]     ${action}	  ${bayno}
+       #Login to EM from CIM via SSH
+       Write	       ssh root@${em_ip}%${FUSION_NIC}
+       ${response}     Read Until Regexp        root\@em.*#|continue connecting
+       ${status}  ${match}=       Run Keyword and Ignore Error
+       ...	 Should match regexp  ${response}		continue connecting
+       Run Keyword if  "${status}" == "PASS"
+       ...       Write	       yes
+       Run Keyword if  "${status}" == "PASS"
+       ... 	 Read Until Regexp        root\@em.*#
+       Write	       /usr/bin/tail -f /var/log/applications
+
+       Set Client Configuration	      timeout=16 seconds
+       #
+       # HAL is here to capture log in time
+       HAL Action      ${action}			${bayno}			  
+       ${log}	       Read Until	EFUSE RESET
+       ${log}	       Read Until	DeviceInit
+       ${Ctl_C}	       Evaluate		chr(int(3))
+       Write	       ${Ctl_C}
+       ${response}     Read Until Regexp        root\\@em.*#
+       Write	       exit
+       ${log}	       Read Until Regexp	\\[root\\@.*\\]#

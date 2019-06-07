@@ -1,0 +1,279 @@
+*** Settings ***
+Documentation    Testing Applicable PEM Command to CI Mamanger and Frame Link Module (EM)
+...    = USAGE =
+...    | pybot | -v GIT_REPO_ROOT:<repo root path> | -v ENC_SERIAL_NUMBER:<fusion_name> 
+...            | -v APPLIANCE_IP:<ipv4> | -v cim_serial_number:<CIM serial> | CIM_PEM.txt |
+...    = Variables =
+...    | GIT_REPO_ROOT | Optional: Repo root path if NOT defined in environment variable|
+...    | ENC_SERIAL_NUMBER | Required; Enclosure to use |
+...    | APPLIANCE_IP | OneView IPv4 address |
+...    | cim_serial_number | CI Manager serial number under test |
+...
+...    *Note: This suite does NOT include PEM Re-apply iLO Credential test case (6/21/2016)
+
+*** Settings ***
+Library           FusionLibrary
+Library           MgmtFWLibrary
+Library           RoboGalaxyLibrary
+Library           loginPEMClass
+Library           json
+Library           String
+Library           Collections
+Variables         ${GIT_REPO_ROOT}${VARIABLE_ROOT}/dea_variables.py
+Variables         ${GIT_REPO_ROOT}${VARIABLE_ROOT}/data_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource          ${GIT_REPO_ROOT}/fusion/tests/DEA/HAL/resources/hal_webapp.txt
+Suite Setup       Run Keywords    Login to Fusion via REST    AND    Login to Fusion via SSH    AND    Login to EM And Create Session
+Suite Teardown    Run Keywords    Logout of Fusion Via REST
+
+*** Test Case ***
+TC 01 - PEM Command: Validate Read CIManager Fru
+    [Documentation]    Validate PEM's command to Read CIManager Fru
+    [Tags]    Automated    CIM    DEA    API    PEM    OV3.10
+    # Get PEM token and establish session
+    ${auth}=    Get Trusted PEM Token    
+    set_header_to_pem_token    ${APPLIANCE_IP}    ${pem_cred}    ${auth}
+    ${fusion_uuid}=    Check For Single Enclosure and Get UUID
+    ${enc_serial_number}=    Fetch From Right    ${fusion_uuid}    000
+    # Get EM session and get Fusion UUID
+    ${Response}=    Fusion Api Get Enclosures    /rest/enclosures?filter="serialNumber='${enc_serial_number}'"
+    # Make sure CIMs are presence and run ReadFRU PEM command for both CIMs
+    ${cim_length}=    Get Existing CIManager Presence Count
+    #Should Be Equal As Integers    ${cim_length}    1
+    :FOR    ${bay_no}    IN RANGE    1    ${cim_length + 1}
+    \    ${response}=    Run Keyword If    ${cim_length} > 0
+         ...    Read Post Data    ${auth}    {"actionId":"CiManagerFruRead", "actionParams":{"BayNumber":${bay_no}}}    /perm/rest/enclosure-modules/actions/${fusion_uuid}    200    ${auth}
+         ...    ELSE    Log    CIManagers are not present
+    \    ${fru_type}=    Get From Dictionary    ${response}    Name
+    \    Should Be Equal As Strings    '${fru_type}'    'CIManager'
+    \    Sleep    30
+
+TC 02 - PEM Command Negative: Validate Efuse CIManager Using Invalid Bay Parameter
+    [Documentation]    Validate PEM command will NOT work when EFuse CIM in an INVALID BAY
+    [Tags]    Automated    CIM    DEA    API    PEM    OV3.10
+    # Get PEM token and establish session
+    ${auth}=    Get Trusted PEM Token    
+    set_header_to_pem_token    ${APPLIANCE_IP}    ${pem_cred}    ${auth}
+    ${fusion_uuid}=    Check For Single Enclosure and Get UUID
+    ${enc_serial_number}=    Fetch From Right    ${fusion_uuid}    000
+    ${response}    ${emptyno}=   Run Keyword and Ignore Error     PEM Action EFuse CI Manager Bays    ${auth}    ${APPLIANCE_IP}    ${enc_serial_number}    50
+    ${req_result}=    Get From Dictionary    ${emptyno}    CallStatus
+    Should Be Equal As Strings    '${req_result}'    'ERROR'
+
+TC 03 - PEM Command Negative: Validate Efuse CIManager Using Invalid Property
+    [Documentation]    Validate PEM command will NOT work when EFuse CIM using INVALID PROPERTY
+    [Tags]    Automated    CIM    DEA    API    PEM    OV3.10
+    # Get PEM token and establish session
+    ${auth}=    Get Trusted PEM Token    
+    set_header_to_pem_token    ${APPLIANCE_IP}    ${pem_cred}    ${auth}
+    ${parameters}=    Create Dictionary    BayNumber=invaliProperty
+    ${response}=    HAL API Perform Post Action    ${APPLIANCE_IP}    CiManagerBayEfuse    ${parameters}
+    ${req_result}=    Get From Dictionary    ${response}    CallStatus
+    Should Be Equal As Strings    '${req_result}'    'ERROR'
+
+TC 04 - PEM Command: Validate Get CIManager iLO Credentials
+    [Documentation]    Validate PEM command to get CIManager iLO credentials
+    [Tags]    Automated    CIM    DEA    API    PEM    OV3.10
+    # Get PEM token and establish session
+    ${auth}=    Get Trusted PEM Token    
+    set_header_to_pem_token    ${APPLIANCE_IP}    ${pem_cred}    ${auth}
+    ${fusion_uuid}=    Check For Single Enclosure and Get UUID
+    ${enc_serial_number}=    Fetch From Right    ${fusion_uuid}    000
+    # Establish EM session
+    ${Fusion UUID}=    Check For Single Enclosure and Get UUID
+
+    # Get enclosure's CIMs serial number and validate user CIM serial input exist 
+    ${response}=    Fusion Api Get Enclosures
+    ${cim_serial_num_list}=    Get Enclosure CIManager Serial Number    ${response}
+    ${appliance_cnt}=    Get From Dictionary    ${response['members'][0]}    applianceBayCount
+
+    # PEM command to read BOTH CIM's iLO credential
+    ${cim_length}=    Get Length    ${cim_serial_num_list}
+    :FOR    ${index}    IN RANGE    0    ${appliance_cnt} - 1
+    \    ${response}=    Run Keyword If    ${cim_length} > 0
+         ...    Read Post Data    ${auth}    {"actionId":"CiManagerGetIloCredentials", "actionParams":{"CimSerialNumber":"${cim_serial_num_list[${index}]}"}}    /perm/rest/enclosure-modules/actions/${Fusion UUID}    200    ${auth}
+         ...    ELSE    Log    CIManagers are not present
+    \    ${call_status}=    Get From Dictionary    ${response}    status_code
+    \    Should Be Equal As Strings    ${call_status}    200
+    \    Sleep    30
+
+TC 05 - PEM Command: Validate Read EM FRU
+    [Documentation]    Validate PEM command to do EM Fru Read
+    [Tags]    Automated    CIM    DEA    API    PEM    OV3.10
+    # Get PEM's token and establish session
+    ${auth}=    Get Trusted PEM Token
+    set_header_to_pem_token    ${APPLIANCE_IP}    ${pem_cred}    ${auth}
+    ${fusion_uuid}=    Check For Single Enclosure and Get UUID
+    ${enc_serial_number}=    Fetch From Right    ${fusion_uuid}    000
+    ${Fusion UUID}=    Check For Single Enclosure and Get UUID
+
+    # Validate BOTH EMs present
+    ${em_length}=    Get Existing EM Presence Count
+    Should Be Equal As Integers    ${em_length}    2
+    
+    # PEM read EMs FRU
+    :FOR    ${bay_no}    IN RANGE    1   ${em_length + 1}
+    \    ${response}=    Run Keyword If    ${em_length} > 1
+         ...    Read Post Data    ${auth}    {"actionId":"EmFruRead", "actionParams":{"BayNumber":${bay_no}}}    /perm/rest/enclosure-modules/actions/${Fusion UUID}    200    ${auth}
+         ...    ELSE    Log    Enclosure Manager bay is not present
+    \    ${call_status}=    Get From Dictionary    ${response}     status_code
+    \    ${link_ref}=    Get From Dictionary    ${response['links']['Raw']}    extref
+    \    Should Be Equal As Strings    ${call_status}    200
+    \    Should Be Equal As Strings    ${link_ref}    /rest/v1/EnclosureManagerRawFru/${bay_no}
+    \    Sleep    5
+    Sleep    30
+
+TC 06 - PEM Command: Validate Resetting Standby EM
+    [Documentation]    Validate EM Reset Operation via PEM command work properly
+    [Tags]    Automated    CIM    DEA    API    PEM    OV3.10
+    # Get PEM's token and establish session
+    ${auth}=    Get Trusted PEM Token
+    set_header_to_pem_token    ${APPLIANCE_IP}    ${pem_cred}    ${auth}
+
+    # Get and establish EM session
+    Login to EM And Create Session
+    ${Fusion UUID}=    Check For Single Enclosure and Get UUID
+
+    # Getting session to identify the STANDBY IPv6
+    ${stndby_em_ip}=    Get Standby EM IP
+
+    # Validate BOTH EMs present
+    ${em_length}=    Get Existing EM Presence Count
+    Should Be Equal As Integers    ${em_length}    2
+
+    # Get OneView session and Standby EM to be reset
+    ${response}=    Fusion Api Get Enclosures
+    ${enclosures}=    Get From Dictionary    ${response}    members
+    ${first_encl}=    Get From List    ${enclosures}    0
+    ${mgmt_bays}=    Get From Dictionary    ${first_encl}    managerBays
+    ${em1}=    Get From List    ${mgmt_bays}    0
+    ${role}=    Get From Dictionary    ${em1}    role
+    ${stdby_em_bay}=    Run Keyword If    '${role}' == 'Standby'    Get From Dictionary    ${mgmt_bays[0]}    bayNumber
+    ...    ELSE    Get From Dictionary    ${mgmt_bays[1]}    bayNumber
+    Log    ${stdby_em_bay}
+    
+    # Execute PEM command to RESET STANDBY EM using EM bay number
+    ${response}=    Run Keyword If    ${em_length} > 1
+    ...    Read Post Data    ${auth}    {"actionId":"EmReset", "actionParams":{"BayNumber":${stdby_em_bay}}}    /perm/rest/enclosure-modules/actions/${Fusion UUID}    200    ${auth}
+    ...    ELSE    Log    Standby Enclosure Managers (EM) is NOT present
+    ${call_status}=    Get From Dictionary    ${response}    status_code
+    Should Be Equal As Strings    ${call_status}    200
+    Sleep    30
+
+    # Validate Standby EM is DOWNED due to reset using ping6 session to Standby EM IPv6
+    ${ping_result}=    Diags Ping EM IPv6     ${stndby_em_ip}
+    Log    ${ping_result}
+    Sleep    120
+    Should Be Equal As Strings    ${ping_result}    100% packet loss
+
+TC 07 - PEM Command: Validate Force Failover To EM
+    [Documentation]    Validate EM Force FailOver via PEM command work properly
+    [Tags]    Automated    CIM    DEA    API    PEM    OV3.10
+    ${auth}=    Get Trusted PEM Token
+    set_header_to_pem_token    ${APPLIANCE_IP}    ${pem_cred}    ${auth}
+    
+    # Get EM session
+    Login to EM And Create Session
+    ${Fusion UUID}=    Check For Single Enclosure and Get UUID
+
+    # Validate BOTH EMs present
+    ${em_length}=    Get Existing EM Presence Count
+    Should Be Equal As Integers    ${em_length}    2
+
+    # Find STANDBY EM in the enclosure
+    ${response}=    Fusion Api Get Enclosures
+    ${mgmt_bays}=    Get From Dictionary    ${response['members'][0]}    managerBays
+    ${role}=    Get From Dictionary    ${mgmt_bays[0]}    role
+    ${stdby_em_bay}=    Run Keyword If    '${role}' == 'Standby'    Get From Dictionary    ${mgmt_bays[0]}    bayNumber
+    ...    ELSE    Get From Dictionary    ${mgmt_bays[1]}    bayNumber
+
+    # Send force EM Failover PEM command to STANDBY EM
+    ${response}=    Run Keyword If    ${em_length} > 1
+    ...    Read Post Data    ${auth}    {"actionId":"EmForceFailover", "actionParams":{"BayNumber":${stdby_em_bay}}}    /perm/rest/enclosure-modules/actions/${Fusion UUID}    200    ${auth}
+    ...    ELSE    Log    Standby Enclosure Managers are not present
+    ${call_status}=    Get From Dictionary    ${response}    status_code
+    Should Be Equal As Strings    ${call_status}    200
+    Sleep    180
+
+    # Validate Standby EM slot is diff AFTER failover occurred
+    ${response}=    Fusion Api Get Enclosures
+    ${mgmt_bays}=    Get From Dictionary    ${response['members'][0]}    managerBays
+    ${role}=    Get From Dictionary    ${mgmt_bays[0]}    role
+    ${stdby_em_bay_after}=    Run Keyword If    '${role}' == 'Standby'    Get From Dictionary    ${mgmt_bays[0]}    bayNumber
+    ...    ELSE    Get From Dictionary    ${mgmt_bays[1]}    bayNumber
+    Should Not Be Equal    ${stdby_em_bay}    ${stdby_em_bay_after}
+
+TC 08 - PEM Command: Validate EFuse Operation To Standby EM
+    [Documentation]    Validate EM Efuse via PEM command work properly for STANDBY EM
+    [Tags]    Automated    CIM    DEA    API    PEM    OV3.10
+    ${auth}=    Get Trusted PEM Token
+    set_header_to_pem_token    ${APPLIANCE_IP}    ${pem_cred}    ${auth}
+    ${fusion_uuid}=    Check For Single Enclosure and Get UUID
+    ${enc_serial_number}=    Fetch From Right    ${fusion_uuid}    000
+    # Validate BOTH EMs present and identify the STANDBY IPv6
+    Login to EM And Create Session
+    ${em_length}=    Get Existing EM Presence Count
+    Should Be Equal As Integers    ${em_length}    2
+    ${stndby_em_ip}=    Get Standby EM IP
+
+    # Find STANDBY EM in the enclosure 
+    ${response}=    Fusion Api Get Enclosures
+    ${mgmt_bays}=    Get From Dictionary    ${response['members'][0]}    managerBays
+    ${role}=    Get From Dictionary    ${mgmt_bays[0]}    role
+    ${stdby_em_bay}=    Run Keyword If    '${role}' == 'Standby'    Get From Dictionary    ${mgmt_bays[0]}    bayNumber
+    ...    ELSE    Get From Dictionary    ${mgmt_bays[1]}    bayNumber
+
+    # Send PEM's EFUSE command to Standby EM 
+    ${response}=    Run Keyword If    ${em_length} > 1
+    ...    PEM Action EFuse EM Bays    ${auth}    ${APPLIANCE_IP}    ${enc_serial_number}    ${stdby_em_bay}
+    ...    ELSE     Log    Redundant EM should be available
+    Sleep    30
+
+    # Validate Standby EM is DOWNED due to efuse using ping6 session to Standby EM IPv6
+    ${ping_result}=    Diags Ping EM IPv6     ${stndby_em_ip}
+    Sleep    120
+    ${call_status}=    Get From Dictionary    ${response}    CallStatus
+    Should Be Equal As Strings    ${call_status}    SUCCESS
+    Should Be Equal As Strings    ${ping_result}    100% packet loss
+
+TC 09 - PEM Command Negative: Efuse EM Using Invalid Bay Number
+    [Documentation]    Negative scenario to validate CIManager EFuse for Invalid bay using PEM command
+    [Tags]    Automated    CIM    DEA    API    PEM    OV3.10
+    ${auth}=    Get Trusted PEM Token
+    set_header_to_pem_token    ${APPLIANCE_IP}    ${pem_cred}    ${auth}
+    ${fusion_uuid}=    Check For Single Enclosure and Get UUID
+    ${enc_serial_number}=    Fetch From Right    ${fusion_uuid}    000
+    ${status}    ${emptyno}=   Run Keyword and Ignore Error     PEM Action EFuse EM Bays    ${auth}    ${APPLIANCE_IP}    ${enc_serial_number}    50
+    ${req_result}=    Get From Dictionary    ${emptyno}    CallStatus
+    Should Be Equal As Strings    '${req_result}'    'ERROR'
+
+TC 10 - PEM Command Negative: Efuse EM Using Invalid Property Value
+    [Documentation]    Negative scenario to validate CIManager EFuse for Invalid property using PEM command
+    [Tags]    Automated    CIM    DEA    API    PEM    OV3.10
+    ${auth}=    Get Trusted PEM Token
+    set_header_to_pem_token    ${APPLIANCE_IP}    ${pem_cred}    ${auth}
+    ${response}=    HAL API Perform Post Action    ${APPLIANCE_IP}    EmBayEfuse    ${None}
+    ${req_result}=    Get From Dictionary    ${response}    CallStatus
+    Should Be Equal As Strings    '${req_result}'    'ERROR'
+
+TC 11 - PEM Command: Verify Efuse CIManager Operation
+    [Documentation]    Test script to Validate CIManager Efuse
+    [Tags]    Automated    CIM    DEA    API    PEM    OV3.10
+    # Get and establish PEM token
+    ${auth}=    Get Trusted PEM Token
+    set_header_to_pem_token    ${APPLIANCE_IP}    ${pem_cred}    ${auth}
+    ${fusion_uuid}=    Check For Single Enclosure and Get UUID
+    ${enc_serial_number}=    Fetch From Right    ${fusion_uuid}    000
+    # Make sure CIMs are presence and run ReadFRU PEM command for both CIMs
+    ${cim_cnt}=    Get Existing CIManager Presence Count
+    Should Be Equal As Integers    ${cim_cnt}    2
+
+    # PEM Request to Efuse CIM
+    ${response}=    Run Keyword If    ${cim_cnt} > 1
+    ...    PEM Action EFuse CI Manager Bays    ${auth}    ${APPLIANCE_IP}    ${enc_serial_number}    2
+    ...    ELSE    Log    Redundant CIManager should be available
+    ${call_status}=    Get From Dictionary    ${response}    CallStatus
+    Should Be Equal As Strings    ${call_status}    SUCCESS
+    Sleep    240        # this sleep will not be enough for a FULL working CIM/OV
+    [Teardown]    Run Keyword If Test Failed    RIS EM Efuse Off CIM    2 

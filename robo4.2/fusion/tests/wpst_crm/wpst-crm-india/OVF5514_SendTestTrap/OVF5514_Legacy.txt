@@ -1,0 +1,1197 @@
+*** Settings ** *
+Documentation        Feature Test:  OVF5515 Send Test Trap Feature
+...                  This set of test cases is to verify Send Test Trap Feature In Syneregy Module
+...
+Variables               data_variables.py
+Resource               ../../../resource/fusion_api_all_resource_files.txt
+Library                data_variables
+Library                Collections
+Library                json
+Library                OperatingSystem
+Library                Selenium2Library
+Library         FusionLibrary
+Library         RoboGalaxyLibrary
+Library         SSHLibrary
+
+
+*** Variables ***
+${APPLIANCE_IP}                  192.168.145.60
+${li}                           LE-LIG1
+${LIG1}                          LIG1
+${Inconsistent_State}           NOT_CONSISTENT
+${consistent_State}             CONSISTENT
+${State_Configured}             Configured
+${ICM_1}                     SGH734VBE6, interconnect 2
+${ICM_2}                     SGH734VBE6, interconnect 5
+${TRAP}                      True
+${Def_Port}                  11650
+${State_Power_Off}             Maintenance
+${State_Power_On}              Configured
+${MIB_OID}    11.5.7.5.9.1.4030.5.1
+${ICM_IP1}           192.168.146.3
+${ICM_IP2}           192.168.150.236
+${SPP_Path_new}             ${CURDIR}/SPP/HF_supported/${latest_SPP_bundle}
+
+
+***Test Cases***
+
+Login to Appliance and Setup
+    [Documentation]    Creating initial setup
+    Set Log Level    TRACE
+    Fusion Api Login Appliance         ${APPLIANCE_IP}        ${admin_credentials}
+
+    Clean OV
+
+OVF5514_API_1 PreConditions with Create LIG,EG,LE
+    [Documentation]    Creating initial setup
+    Fusion Api Login Appliance         ${APPLIANCE_IP}        ${admin_credentials}
+    ${users} =    Get Variable Value   ${users}
+    Run Keyword If  ${users} is not ${null}    Add Users from variable              ${users}
+    ${ethernet_networks} =    Get Variable Value    ${ethernet_networks1}
+    Log to console        \nEnet is:${ethernet_networks}
+    Run Keyword If    ${ethernet_networks} is not ${null}    Add Ethernet Networks from variable    ${ethernet_networks}
+
+    #Create Logical Interconnect group -LIG
+    [Tags]  14
+    Log to console    Create LIG group
+    #LIG with Ethernet Modules
+    ${task} =   Add LIG from variable    ${ligs_tbird_SE_Multi_LIG_All_Users}
+    Run Keyword If  '${task['status_code']}' != '200'   fail    ELSE    Log to console and logfile  \n-LIG created successfully
+
+    ${lig_edit}    Get LIG member    ${LIG1}
+    ${lig_uri}    Get Variable Value    ${lig_edit['uri']}
+    Set Global Variable    ${LIG_URI}    ${lig_uri}
+    Log to console  \nStatus Code: ${LIG_URI}
+
+    ${lig_snmp}    Edit LIG body for SNMP    ${LIG1}    ${add_snmp_users_six_combinations['snmpUsers']}    ${add_snmp_users_six_combinations['trapDestinations']}
+    Log to console and logfile    \n\nLIG body:${lig_snmp}
+    Set To Dictionary    ${lig_edit}    eTag=
+    Set To Dictionary    ${lig_edit}    snmpConfiguration=${lig_snmp}
+    Log to console and logfile    \n\nLIG body:${lig_edit}
+
+    ${resp}    fusion_api_edit_lig    body=${lig_edit}    uri=${LIG_URI}
+    Log to console and logfile    \n\nLIG Created Successfully:${resp}
+    Run Keyword If  '${resp['status_code']}' == '202'    Log to console  \nStatus Code: ${resp['status_code']} \nSuccessfully!! Edited the LIG for snmpV3 single user with auth & priv protocols and trap details\n
+    ...    ELSE    FAIL
+    ${task} =    Wait For Task     ${resp}     180 s    10 s
+    ${valDict} =     Create Dictionary    status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response    ${task}    ${valDict}
+
+    #Create EG
+    Fusion Api Login Appliance         ${APPLIANCE_IP}        ${admin_credentials}
+    ${enc_body} =        Add Enclosure Group from variable     ${enc_grp[0]}
+
+    #Create LE
+    Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+    ${les} =    Get Variable Value    ${les_tbird_SE_Multi_LIG}
+    Log to console    \n LE Creation:${les}
+    Run Keyword If    ${les} is not ${null}                    Run Keyword for List    ${les}      Add Logical Enclosure from variable
+
+
+OVF5514_API_TC_1 Poweron Both ICM
+    [Documentation]    Poweron Both ICM and initiate Send Test trap
+    Verify Interconnect State    ${ICM_1}    ${State_Power_On}
+    Verify Interconnect State    ${ICM_2}    ${State_Power_On}
+
+    #Kill Existing Trap Demon
+    Kill snmptrapd demon
+
+    #Initiate trap daemon
+    Initiate trapd
+    Sleep    30
+
+    #SendTestTrap for SNMP for Auth User
+    ${resp} =    SendTestTrap for SNMP    ${li_body}
+
+
+    #Validate Trap received
+    ${trapoutput1} =    Validate Trap received
+    ${string}=          Should contain          ${trapoutput1}          ${MIB_OID}
+    ${string}=          Should contain          ${trapoutput1}          ${ICM_IP1}
+    ${string}=          Should contain          ${trapoutput1}          ${ICM_IP2}
+
+    #Validate trap activity
+    ${task} =     Wait For Task        ${resp}   700s    10s
+    Run Keyword If  '${task['taskState']}' !='Completed' or '${task['name']}' !='Send test trap' or '${task['status_code']}' !='200'   fail    msg=\nLI Send Test Traps Failed.
+    ...         ELSE    Log to console and logfile  \n\nBoth ICM is powered on and LI Send Test Traps from both ICM is generated successfully
+
+
+OVF5514_API_TC_2 Poweroff ICM
+    [Documentation]    Poweroff Both ICM and initiate Send Test trap
+    Verify Interconnect State    ${ICM_1}    ${State_Power_On}
+    Verify Interconnect State    ${ICM_2}    ${State_Power_On}
+
+    #poweroff interconnect
+    Edit interconnects Power State    ${INTERCONNECTS}    ${POWER_OFF}    ${POWER_STATE}    ${IC_MAINTENANCE_STATE}
+
+    #Kill Existing Trap Demon
+    Kill snmptrapd demon
+
+    #Initiate trap daemon
+    Initiate trapd
+    Sleep    30
+
+    #SendTestTrap for SNMP for Auth User
+    ${resp} =    SendTestTrap for SNMP    ${li_body}
+
+
+    #Validate Trap received
+    ${trapoutput1} =    Validate Trap received
+    ${string}=          Should contain          ${trapoutput1}          ${MIB_OID}
+    ${string}=          Should contain          ${trapoutput1}          ${ICM_IP2}
+
+    #Validate trap activity
+    ${task} =     Wait For Task        ${resp}   700s    10s
+    Run Keyword If  '${task['taskState']}' !='Warning' or '${task['name']}' !='Send test trap' or '${task['status_code']}' !='200'    fail    msg=\nLI Send Test Traps Failed.
+    ...         ELSE    Log to console and logfile  \n\nPoweroff of one ICM and in LI Test Trap from other ICM is generated successfully
+
+    #Poweron Interconnect
+    Edit interconnects Power State    ${INTERCONNECTS}    ${POWER_ON}    ${POWER_STATE}    ${IC_CONFIG_STATE}
+
+    Wait Until Keyword Succeeds    1200 s    10 s    Verify Interconnect State    ${ICM_1}    ${State_Power_On}
+
+OVF5514_API_TC_3 Reset ICM
+    [Documentation]    Reset ICM and initiate Send Test trap
+    Validate Interconnect state    ${INTERCONNECTS}    ${IC_CONFIG_STATE}
+
+    #Reset interconnect
+    Reset interconnects        ${INTERCONNECTS}    ${RESET}    ${RESET_STATE}    ${IC_CONFIG_STATE}     ${POWER_ON}
+
+    #Kill Existing Trap Demon
+    Kill snmptrapd demon
+
+    #Initiate trap daemon
+    Initiate trapd
+    Sleep    30
+
+    #SendTestTrap for SNMP for Auth User
+    ${resp} =    SendTestTrap for SNMP    ${li_body}
+
+
+    #Validate Trap received
+    ${trapoutput1} =    Validate Trap received
+    ${string}=          Should contain          ${trapoutput1}          ${MIB_OID}
+    ${string}=          Should contain          ${trapoutput1}          ${ICM_IP2}
+
+    #Validate trap activity
+    ${task} =     Wait For Task        ${resp}   700s    10s
+    Run Keyword If  '${task['taskState']}' !='Warning' or '${task['name']}' !='Send test trap' or '${task['status_code']}' !='200'    fail    msg=\nLI Send Test Traps Failed.
+    ...         ELSE    Log to console and logfile  \n\nReset of ICM is done and Trap from other ICM is generated successfully
+
+    Wait Until Keyword Succeeds    1200 s    10 s    Verify Interconnect State    ${ICM_1}    ${State_Power_On}
+
+OVF5514_API_TC_4 Incorrect Path value
+    [Documentation]    Incorrect Path value should give invalid patch request error
+    ${li_uri} =     Get LI URI   ${LI}
+    ${li_snmp} =   Fusion Api Patch Li   uri=${li_uri}    body=${li_body1}
+    Log to console and logfile  \n\nLI : ${li_snmp}
+    # Error Verification
+    ${message} =    Get Variable Value    ${error_path_value['message']}
+    ${errorCode} =    Get Variable Value  ${error_path_value['errorCode']}
+    Log to console and logfile    \nMessage:${message}
+    ${valDict} =     Create Dictionary    status_code=${400}
+    ...                                 message=${message}
+    ...                                 errorCode=${errorCode}
+    Validate Response    ${li_snmp}    ${valDict}
+    Log to console and logfile  \n\nSuccessfully verified invalid Patch request is obtained when path value is sent as False.
+
+OVF5514_API_TC_5 No trap destination configured on requested logical Interconnect
+    [Documentation]    No trap destination configured on LI should give appropriate error message
+
+    ${li_uri} =     Get LI URI   ${LI}
+    ${respl} =    Fusion Api Update snmp configuration    body=${edit_li_add_trap_destination_tbird}    uri=${li_uri}
+    log to console  Editing Li with snmp ${respl}
+    # Error Verification
+    ${message} =    Get Variable Value    ${error_trapdestination_missing['message']}
+    ${errorCode} =    Get Variable Value  ${error_trapdestination_missing['errorCode']}
+    Log to console and logfile    \nMessage:${message}
+    ${valDict} =     Create Dictionary    status_code=${400}
+    ...                                 message=${message}
+    ...                                 errorCode=${errorCode}
+    Validate Response    ${respl}    ${valDict}
+    Log to console and logfile  \n\nSuccessfully verified traps are not generated while trap destination is missing.
+
+OVF5514_API_TC_6 SendTest Trap with Auth PrivUser
+    [Documentation]    Edit LI with Auth Priv User
+   ${resp}=    Edit LI             ${li}    ${edit_li_with_auth_priv_users}
+   Log to console and logfile    \nResp is : ${resp}
+   ${task} =    Wait For Task   ${resp}    300s    2s
+   Log to console and logfile    \nTask is : ${task}
+   Run Keyword If  '${task['status_code']}' !='200'    fail    ELSE    Log to Console  \n-LI  Edited successfully
+   Wait Until Keyword Succeeds    1200 s    10 s    Verify Interconnect State    ${ICM_1}    ${State_Power_On}
+   Wait Until Keyword Succeeds    1200 s    10 s    Verify Interconnect State    ${ICM_2}    ${State_Power_On}
+
+
+OVF5514_API_TC_7 Poweron Both ICM
+    [Documentation]    Poweron Both ICM and initiate Send Test trap
+    Verify Interconnect State    ${ICM_1}    ${State_Power_On}
+    Verify Interconnect State    ${ICM_2}    ${State_Power_On}
+
+    #Kill Existing Trap Demon
+    Kill snmptrapd demon
+
+    #Initiate trap daemon
+    Initiate trapd
+    Sleep    30
+
+    #SendTestTrap for SNMP for Auth User
+    ${resp} =    SendTestTrap for SNMP    ${li_body}
+
+
+    #Validate Trap received
+    ${trapoutput1} =    Validate Trap received
+    ${string}=          Should contain          ${trapoutput1}          ${MIB_OID}
+    ${string}=          Should contain          ${trapoutput1}          ${ICM_IP1}
+    ${string}=          Should contain          ${trapoutput1}          ${ICM_IP2}
+
+    #Validate trap activity
+    ${task} =     Wait For Task        ${resp}   700s    10s
+    Run Keyword If  '${task['taskState']}' !='Completed' or '${task['name']}' !='Send test trap' or '${task['status_code']}' !='200'   fail    msg=\nLI Send Test Traps Failed.
+    ...         ELSE    Log to console and logfile  \n\nBoth ICM is powered on and LI Send Test Traps from both ICM is generated successfully
+
+
+
+OVF5514_API_TC_8 Poweroff ICM
+    [Documentation]    Poweroff Both ICM and initiate Send Test trap
+    Verify Interconnect State    ${ICM_1}    ${State_Power_On}
+    Verify Interconnect State    ${ICM_2}    ${State_Power_On}
+
+    #poweroff interconnect
+    Edit interconnects Power State    ${INTERCONNECTS}    ${POWER_OFF}    ${POWER_STATE}    ${IC_MAINTENANCE_STATE}
+
+    #Kill Existing Trap Demon
+    Kill snmptrapd demon
+
+    #Initiate trap daemon
+    Initiate trapd
+    Sleep    30
+
+    #SendTestTrap for SNMP for Auth User
+    ${resp} =    SendTestTrap for SNMP    ${li_body}
+
+
+    #Validate Trap received
+    ${trapoutput1} =    Validate Trap received
+    ${string}=          Should contain          ${trapoutput1}          ${MIB_OID}
+    ${string}=          Should contain          ${trapoutput1}          ${ICM_IP2}
+
+    #Validate trap activity
+    ${task} =     Wait For Task        ${resp}   700s    10s
+    Run Keyword If  '${task['taskState']}' !='Warning' or '${task['name']}' !='Send test trap' or '${task['status_code']}' !='200'    fail    msg=\nLI Send Test Traps Failed.
+    ...         ELSE    Log to console and logfile  \n\nPoweroff of one ICM and in LI Test Trap from other ICM is generated successfully
+
+    #Poweron Interconnect
+    Edit interconnects Power State    ${INTERCONNECTS}    ${POWER_ON}    ${POWER_STATE}    ${IC_CONFIG_STATE}
+
+    Wait Until Keyword Succeeds    1200 s    10 s    Verify Interconnect State    ${ICM_1}    ${State_Power_On}
+
+
+OVF5514_API_TC_9 Reset ICM
+    [Documentation]    Reset ICM and initiate Send Test trap
+    Validate Interconnect state    ${INTERCONNECTS}    ${IC_CONFIG_STATE}
+
+    #Reset interconnect
+    Reset interconnects        ${INTERCONNECTS}    ${RESET}    ${RESET_STATE}    ${IC_CONFIG_STATE}     ${POWER_ON}
+
+    #Kill Existing Trap Demon
+    Kill snmptrapd demon
+
+    #Initiate trap daemon
+    Initiate trapd
+    Sleep    30
+
+    #SendTestTrap for SNMP for Auth User
+    ${resp} =    SendTestTrap for SNMP    ${li_body}
+
+
+    #Validate Trap received
+    ${trapoutput1} =    Validate Trap received
+    ${string}=          Should contain          ${trapoutput1}          ${MIB_OID}
+    ${string}=          Should contain          ${trapoutput1}          ${ICM_IP2}
+
+    #Validate trap activity
+    ${task} =     Wait For Task        ${resp}   700s    10s
+    Run Keyword If  '${task['taskState']}' !='Warning' or '${task['name']}' !='Send test trap' or '${task['status_code']}' !='200'    fail    msg=\nLI Send Test Traps Failed.
+    ...         ELSE    Log to console and logfile  \n\nReset of ICM is done and Trap from other ICM is generated successfully
+
+    Wait Until Keyword Succeeds    1200 s    10 s    Verify Interconnect State    ${ICM_1}    ${State_Power_On}
+
+OVF5514_API_TC_10 Incorrect Path value
+    [Documentation]    Incorrect Path value should give invalid patch request error
+    ${li_uri} =     Get LI URI   ${LI}
+    ${li_snmp} =   Fusion Api Patch Li   uri=${li_uri}    body=${li_body1}
+    Log to console and logfile  \n\nLI : ${li_snmp}
+    # Error Verification
+    ${message} =    Get Variable Value    ${error_path_value['message']}
+    ${errorCode} =    Get Variable Value  ${error_path_value['errorCode']}
+    Log to console and logfile    \nMessage:${message}
+    ${valDict} =     Create Dictionary    status_code=${400}
+    ...                                 message=${message}
+    ...                                 errorCode=${errorCode}
+    Validate Response    ${li_snmp}    ${valDict}
+    Log to console and logfile  \n\nSuccessfully verified invalid Patch request is obtained when path value is sent as False.
+
+OVF5514_API_TC_11 No trap destination configured on requested logical Interconnect
+    [Documentation]    No trap destination configured on LI should give appropriate error message
+
+    ${li_uri} =     Get LI URI   ${LI}
+    ${respl} =    Fusion Api Update snmp configuration    body=${edit_li_add_trap_destination_tbird}    uri=${li_uri}
+    log to console  Editing Li with snmp ${respl}
+    # Error Verification
+    ${message} =    Get Variable Value    ${error_trapdestination_missing['message']}
+    ${errorCode} =    Get Variable Value  ${error_trapdestination_missing['errorCode']}
+    Log to console and logfile    \nMessage:${message}
+    ${valDict} =     Create Dictionary    status_code=${400}
+    ...                                 message=${message}
+    ...                                 errorCode=${errorCode}
+    Validate Response    ${respl}    ${valDict}
+    Log to console and logfile  \n\nSuccessfully verified traps are not generated while trap destination is missing.
+
+OVF5514_API_TC_12 Firmware Upgrade
+    [Documentation]    Perform Firmware upgrade and initiate send test trap
+    #upload firmware bundle
+    Firmware bundle upload    ${SPP_Path_new}
+    Sleep    120s
+
+    #upgrading firmware
+    Validate Interconnect firmware version    ${INTERCONNECTS}    ${ic_firmwareVersion_old}
+    Interconnect Firmware Update in LI    ${latest_SPP_bundle}    ${LI}    @{INTERCONNECTS}    ${ic_firmwareVersion_new}
+    Validate Interconnect firmware version         ${INTERCONNECTS}    ${ic_firmwareVersion_new}
+    Wait Until Keyword Succeeds    1200 s    10 s    Verify Interconnect State    ${ICM_1}    ${State_Power_On}
+    Wait Until Keyword Succeeds    1200 s    10 s    Verify Interconnect State    ${ICM_2}    ${State_Power_On}
+    #${resp}=   Fusion Api Remove Firmware Driver     uri=/rest/firmware-drivers/${latest_SPP_bundle_name}   api=${600}
+
+    #Kill Existing Trap Demon
+    Kill snmptrapd demon
+
+    #Initiate trap daemon
+    Initiate trapd
+    Sleep    30
+
+    #SendTestTrap for SNMP for Auth User
+    ${resp} =    SendTestTrap for SNMP    ${li_body}
+
+
+
+    #Validate Trap received
+    ${trapoutput1} =    Validate Trap received
+    ${string}=          Should contain          ${trapoutput1}          ${MIB_OID}
+    ${string}=          Should contain          ${trapoutput1}          ${ICM_IP1}
+    ${string}=          Should contain          ${trapoutput1}          ${ICM_IP2}
+
+    #Validate trap activity
+    ${task} =     Wait For Task        ${resp}   700s    10s
+    Run Keyword If  '${task['taskState']}' !='Completed' or '${task['name']}' !='Send test trap'    fail    msg=\nLI Send Test Traps Failed.
+    ...         ELSE    Log to console and logfile  \n\nLI Send Test Traps completed successfully
+
+OVF5514_API_TC_13 Efuse On
+    [Documentation]    Perform Efuse On and initiate send test trap
+    Validate Interconnect state    ${INTERCONNECTS}    ${IC_CONFIG_STATE}
+
+#Efuse inerconnect
+    Efuse Interconnect         ${HOST}    ${EM_SN}    ${Efuse_Action[0]}    ${Bay_No}
+    Wait Until Keyword Succeeds    5 min   15s    Validate Interconnect state    ${INTERCONNECTS}   ${IC_ABSENT_STATE}
+
+    #Kill Existing Trap Demon
+    Kill snmptrapd demon
+
+    #Initiate trap daemon
+    Initiate trapd
+    Sleep    30
+
+    #SendTestTrap for SNMP for Auth User
+    ${resp} =    SendTestTrap for SNMP    ${li_body}
+
+
+    #Validate Trap received
+    ${trapoutput1} =    Validate Trap received
+    ${string}=          Should contain          ${trapoutput1}          ${MIB_OID}
+    ${string}=          Should contain          ${trapoutput1}          ${ICM_IP2}
+
+    #Validate trap activity
+    ${task} =     Wait For Task        ${resp}   700s    10s
+    Run Keyword If  '${task['taskState']}' !='Completed' or '${task['name']}' !='Send test trap'    fail    msg=\nLI Send Test Traps Failed.
+    ...         ELSE    Log to console and logfile  \n\nLI Send Test Traps completed successfully
+
+OVF5514_API_TC_14 Efuse Off
+    [Documentation]    Perform Efuse Off and initiate send test trap
+    Validate Interconnect state    ${INTERCONNECTS}    ${IC_CONFIG_STATE}
+
+#Efuse inerconnect
+    Efuse Interconnect         ${HOST}    ${EM_SN}    ${Efuse_Action[1]}    ${Bay_No}
+    Wait Until Keyword Succeeds    5 min   15s    Validate Interconnect state    ${INTERCONNECTS}   ${IC_CONFIG_STATE}
+
+    #Kill Existing Trap Demon
+    Kill snmptrapd demon
+
+    #Initiate trap daemon
+    Initiate trapd
+    Sleep    30
+
+    #SendTestTrap for SNMP for Auth User
+    ${resp} =    SendTestTrap for SNMP    ${li_body}
+
+
+    #Validate Trap received
+    ${trapoutput1} =    Validate Trap received
+    ${string}=          Should contain          ${trapoutput1}          ${MIB_OID}
+    ${string}=          Should contain          ${trapoutput1}          ${ICM_IP1}
+    ${string}=          Should contain          ${trapoutput1}          ${ICM_IP2}
+
+    #Validate trap activity
+    ${task} =     Wait For Task        ${resp}   700s    10s
+    Run Keyword If  '${task['taskState']}' !='Completed' or '${task['name']}' !='Send test trap'    fail    msg=\nLI Send Test Traps Failed.
+    ...         ELSE    Log to console and logfile  \n\nLI Send Test Traps completed successfully
+
+
+
+
+
+*** Keywords ***
+Validate Error Code
+    [Documentation]    Error Code Validations
+    [Arguments]        ${task_output}        ${Actual_Error}
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    ${Err_message} =    Get From Dictionary  ${task_output}    message
+    ${Err_Code} =    Get From Dictionary  ${task_output}       errorCode
+    Log to console and logfile    \n\nValdict Error Message:${Err_message}:${Err_Code}
+    Lists Should Be Equal    ${Err_message}    ${Actual_Error['message']}
+    Lists Should Be Equal    ${Err_Code}    ${Actual_Error['errorCode']}
+    Log to console and logfile    \n Error Message successfully compared with errorcode:${Err_message}:${Err_Code}
+
+Interconnect Firmware Update in LI
+    [Documentation]    Performing IC firmware upgrade
+    ...             Example:
+    ...             Interconnect Firmware Update in LI    ${old_SPP_bundle}    ${LI}    @{INTERCONNECTS}    ${ic_firmwareVersion_old}
+    [Arguments]         ${SPP_bundle}    ${LI}    ${INTERCONNECTS}    ${ic_firmwareVersion}
+    ${resp}=   Fusion Api Get Firmware Driver    param=?filter="name='${SPP_bundle}'"    api=500
+    Run Keyword If   ${resp['count']} == 0   Fail    msg=\n No SPP bundle found!!.Please upload the correct SPP bundle
+    ${fw_uri_old}=   Get From Dictionary  ${resp['members'][0]}    uri
+    ${li_uri} =     Get LI URI   ${LI}
+    Set to dictionary     ${liupdate_body}     sppUri    ${fw_uri_old}
+    ${response}=    Fusion Api Li Upgrade Firmware    ${liupdate_body}    ${li_uri}
+    ${task} =     Wait For Task        ${response}   30min    1min
+    Run Keyword If  '${task['taskState']}' !='Completed' or ${task['status_code']} !=200   fail    msg=\nLI Firmware update Failed.
+    ...         ELSE    Log to console and logfile  \n\nLI FW Upgrade completed successfully
+
+SendTestTrap for SNMP
+    [Documentation]    SendTestTrap for SNMP
+    [Arguments]    ${body}
+    Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+    ${li_uri} =     Get LI URI   ${li}
+    ${li_snmp} =   Fusion Api Patch Li   uri=${li_uri}    body=${body}
+    [Return]    ${li_snmp}
+
+Validate Trap received
+    [Documentation]    Validate Trap Received
+
+    Open Connection             192.168.144.167
+    Login               root        hpvse1
+    Sleep   2
+    Set Client Configuration          timeout=16 seconds
+    Write       resize
+    ${trapoutput}=          Write       cd /etc
+    ${trapoutput}=          Read Until       etc]#
+    Sleep    60
+    ${trapoutput2}=         Write    tail -n 100 messages
+    ${trapoutput1}=         Read Until       etc]#
+    Log to console and logfile    \n\ntrapoutput1:${trapoutput1}
+    [Return]    ${trapoutput1}
+
+Create LIG
+    [Documentation]    Suite Setup Tasks
+    [Arguments]        ${body1}
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    ${body}    Build LIG body    ${body1}
+    Log to console and logfile    \n-Creating LIG ${body}
+    ${resp}    Fusion Api Create LIG    ${body}
+    ${task} =   Wait For Task   ${resp}    60s  2s
+    [Return]    ${resp}
+
+Get LIG member
+    [Documentation]    Get LIG member
+    [Arguments]    ${LIG1}
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    ${lig_get}    Fusion Api Get Lig    param=?filter=name=${LIG1}
+    ${lig_edit}    Get Variable Value    ${lig_get['members'][0]}
+    [Return]    ${lig_edit}
+
+
+Edit LIG body for SNMP
+    [Documentation]    Edit LIG for SNMPv3
+    [Arguments]    ${LIG1}    ${snmpusers}    ${trapdestination}
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    ${lig_get}    Fusion Api Get Lig    param=?filter=name=${LIG1}
+    ${lig_snmp}    Get Variable Value    ${lig_get['members'][0]['snmpConfiguration']}
+    Set To Dictionary    ${lig_snmp}    v3Enabled=true
+    Set To Dictionary    ${lig_snmp}    snmpUsers=${snmpusers}
+    Set To Dictionary    ${lig_snmp}    trapDestinations=${trapdestination}
+    [Return]    ${lig_snmp}
+
+
+Get SNMPUSers from Data
+    [Documentation]    Getting SNMPUSers from Data
+    [Arguments]    ${li_body}
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    ${li_snmp_configuration} =           Get Variable Value  ${li_body}
+    Log to console and logfile    \n\nResp Content Is: ${li_snmp_configuration}
+    ${li_snmp_users} =           Get Variable Value  ${li_snmp_configuration['snmpUsers']}
+    Log to console and logfile    \n\nResp Content Is: ${li_snmp_users}
+    ${len1} =     Get Length    ${li_snmp_users}
+    ${li_Create_user}=    Create List
+    #${li_Create_user_Sec_Level}=    Create List
+    :FOR    ${x}    IN RANGE    0    ${len1}
+    \    ${users1} =     Get From Dictionary    ${li_snmp_users}    ${x}
+    \    ${list_user_1}=    Get From Dictionary    ${users1}    snmpV3UserName
+    \    Append To List    ${li_Create_user}    ${list_user_1}
+    Log to console and logfile    \n\nUsers are: ${li_Create_user}
+    [Return]   ${li_Create_user}
+
+
+Verify SNMP Users Edit LI
+    [Documentation]   Verifying SNMPUSersafter Edit LI
+    [Arguments]        ${li}        ${data_users}
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    Log to console and logfile    Validating Interconnects for SNMP
+    ${li_uri} =     Get LI URI   ${li}
+    log to console    LI URI is ${li_uri}
+    ${resp_li} =    Fusion Api Get Li    ${li_uri}
+    log to console  Editing Li with snmp ${resp_li}
+
+    #For Single & Multiple users
+    ${snmp_config} =     Get From Dictionary        ${resp_li}    snmpConfiguration
+    Log to console and logfile    SNMP Config..${snmp_config}
+    ${snmp_users} =     Get From Dictionary       ${snmp_config}    snmpUsers
+    Log to console and logfile    SNMP Users...${snmp_users}
+    ${len} =     Get Length    ${snmp_users}
+    Log to console and logfile    Length..${len}
+    ${Create_user}=    Create List
+    ${Level}=    Create List
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    ${users} =     Get From Dictionary    ${snmp_users}    ${x}
+    \    ${list_user}=    Get From Dictionary    ${users}    snmpV3UserName
+    \    Append To List    ${Create_user}    ${list_user}
+    \    ${users} =     Get From Dictionary    ${snmp_users}    ${x}
+    #User Names
+    ${len}    Get Length    ${data_users}
+    :For    ${x}    In Range    0    ${len}
+    \    List Should Contain Value    ${Create_user}    ${data_users[${x}]}
+
+
+Retrieve username and AuthProto from MIB output
+    [Documentation]    Retrieving username and AuthProto from MIB output
+    [Arguments]     ${output}
+    ${lines}=    Split to Lines                ${output}
+    ${lines1}=    Convert To List    ${lines}
+    ${UserProto_list}=              Create List
+      :For     ${line}  IN  @{lines1}
+    \       ${words}=               Split String            ${line}                 =
+    \       ${word_username}=             Get from List        ${words}       0
+    \       ${word_uname}=                      Split String            ${word_username}                  .
+    \       ${user_name1}=                      Get from List           ${word_uname}            -1
+    \       ${user_name}=                       Remove String           ${user_name1}            "
+    \       ${user_name}=           Strip String            ${user_name}
+    \       ${word_proto}=                Get from List        ${words}       1
+    \       ${word_proto1}=               Split String            ${word_proto}           ::
+    \       ${word_protocol}=             Get from List           ${word_proto1}          1
+    \       ${auth_protocol}=             Set Variable If
+    \       ...                                                   '${word_protocol}'=='usmHMACSHAAuthProtocol'                      SHA1
+    \       ...                                                   '${word_protocol}'=='usmHMACMD5AuthProtocol'                      MD5
+    \       ...                                                   '${word_protocol}'=='usmNoAuthProtocol'                     None
+    \       ${user_proto} =         Create Dictionary   user=${user_name}
+    ...                             auth=${auth_protocol}
+    \       Append to List                ${UserProto_list}             ${user_proto}
+    [Return]                  ${UserProto_list}
+
+
+Create UserProto Data
+      [Documentation]    Creating UserProto Data
+      [Arguments]     ${user_proto_priv}
+      ${user_proto}                 Create List
+      ${l} =  Get Length            ${user_proto_priv}
+      :FOR    ${x}    IN RANGE    0   ${l}
+      \           ${user_name}=                 Get from Dictionary           ${user_proto_priv[${x}]}            user
+      \           ${auth_protocol}=             Get from Dictionary           ${user_proto_priv[${x}]}            auth
+      \           ${user_auth_proto} =   Create Dictionary   user=${user_name}
+      ...                             auth=${auth_protocol}
+      \       Append to List                ${user_proto}                 ${user_auth_proto}
+      [Return]                        ${user_proto}
+
+Create UserPriv Data
+      [Documentation]    Creating UserPriv Data
+      [Arguments]     ${user_proto_priv}
+      ${user_priv}                  Create List
+      ${l} =  Get Length            ${user_proto_priv}
+      :FOR    ${x}    IN RANGE    0   ${l}
+      \           ${user_name}=                 Get from Dictionary           ${user_proto_priv[${x}]}            user
+      \           ${priv_protocol}=             Get from Dictionary           ${user_proto_priv[${x}]}            priv
+      \           ${user_priv_proto} =   Create Dictionary   user=${user_name}
+      ...                             priv=${priv_protocol}
+      \       Append to List                ${user_priv}                  ${user_priv_proto}
+      [Return]                        ${user_priv}
+
+
+Validate UserName and AuthProtoMIB output
+    [Documentation]    Validating UserName and AuthProtoMIB output
+    [Arguments]     ${expected_UserAuthProto}               ${actual_UserAuthProto}
+
+    Sort List       ${actual_UserAuthProto}
+    ${expected_UserAuthProto}=          Create UserProto Data       ${expected_UserAuthProto}
+    ${expected_UserAuthProto}=          Convert to List             ${expected_UserAuthProto}
+    Sort List       ${expected_UserAuthProto}
+    Log to console          \nExpected UserAuthProto is '${expected_UserAuthProto}'
+    Log to console          \nActual UserAuthProto is '${actual_UserAuthProto}'
+    ${status}=      Run Keyword And Return Status           Lists Should Be Equal           ${expected_UserAuthProto}           ${actual_UserAuthProto}
+    [Return]        ${status}
+
+Retrieve username and PrivProto from MIB output
+    [Documentation]   Retrieving username and PrivProto from MIB output
+    [Arguments]     ${output}
+    ${lines}=    Split to Lines                ${output}
+    ${lines1}=     Convert to List               ${lines}
+    #${user_list}=            Create List
+    ${UserPriv_list}=         Create List
+      :For     ${line}  IN  @{lines1}
+    \       ${words}=               Split String            ${line}                 =
+    \       ${word_username}=             Get from List        ${words}       0
+    \       ${word_uname}=                      Split String            ${word_username}                  .
+    \       ${user_name1}=                      Get from List           ${word_uname}            -1
+    \       ${user_name}=                       Remove String           ${user_name1}            "
+    \       ${user_name}=           Strip String            ${user_name}
+    \       ${word_priv}=                 Get from List        ${words}       1
+    \       ${word_priv1}=                Split String            ${word_priv}            ::
+    \       ${word_privilege}=                  Get from List           ${word_priv1}            1
+    \       ${priv_protocol}=             Set Variable If
+    \       ...                                                   '${word_privilege}'=='usmDESPrivProtocol'                   DES
+    \       ...                                                   '${wford_privilege}'=='usmNoPrivProtocol'                          None
+    \       ...                                                   '${word_privilege}'=='snmpPrivProtocols.4'                              AES-128
+    \       ${priv_protocol} =      Create Dictionary   user=${user_name}
+    ...                             priv=${priv_protocol}
+    \       Append to List                ${UserPriv_list}              ${priv_protocol}
+    [Return]                  ${UserPriv_list}
+
+
+Validate UserName and AuthPrivMIB output
+    [Documentation]   Validation of UserName and AuthPrivMIB output
+    [Arguments]     ${expected_UserPrivProto}               ${actual_UserPrivProto}
+    Sort List       ${actual_UserPrivProto}
+    ${expected_UserPrivProto}=          Create UserPriv Data        ${expected_UserPrivProto}
+    ${expected_UserPrivProto}=          Convert to List             ${expected_UserPrivProto}
+    Sort List       ${expected_UserPrivProto}
+    Log to console          \nExpected UserPrivProto is '${expected_UserPrivProto}'
+    Log to console          \nActual UserAuthProto is '${actual_UserPrivProto}'
+
+    ${status}=      Run Keyword And Return Status           Lists Should Be Equal           ${expected_UserPrivProto}           ${actual_UserPrivProto}
+    [Return]        ${status}
+
+Tbird Retrieve User Name and AuthPro from MIB output and validate
+      [Documentation]   Tbird Retrieving User Name and AuthPro from MIB output and validate
+      Open Connection               192.168.144.167
+      Login                   root        hpvse1
+      Log to Console                \n Executing snmpBulkWalk on Authproto MIB
+    ${output}=                Execute Command                           snmpbulkwalk -v 3 -u potashuser -a SHA -A qwer1234 -t 30 -l authNoPriv -c public 192.168.146.72 .1.3.6.1.6.3.15.1.2.2.1.5
+    ${output1} =              filter_default_users                ${output}
+    ${user_AuthProto}=        Tbird Retrieve username and AuthProto from MIB output                         ${output1}
+    ${Status}=                Validate UserName and AuthProtoMIB output       ${tbird_user_proto_priv}                  ${user_AuthProto}
+    #Log to Console                       ${status}
+      #Run Keyword And Continue On Failure   Should Be Equal   '${Status}'   'True'   ${Status}
+    Close All Snmp Connections
+    Close All Connections
+
+Tbird Retrieve User Name and PrivProto from MIB output and validate
+      [Documentation]   Tbird Retrieving User Name and PrivProto from MIB output and validate
+      Open Connection               192.168.144.167
+      Login                   root        hpvse1
+      Log to Console                \n Executing snmpBulkWalk on Authproto MIB
+    ${output}=                Execute Command                           snmpbulkwalk -v 3 -u potashuser -a SHA -A qwer1234 -t 30 -l authNoPriv -c public 192.168.146.72 .1.3.6.1.6.3.15.1.2.2.1.8
+    ${output1} =              filter_default_users                ${output}
+    ${user_AuthProto}=        Tbird Retrieve username and PrivProto from MIB output                         ${output1}
+    ${Status}=                Validate UserName and AuthProtoMIB output       ${tbird_user_proto_priv}                  ${user_AuthProto}
+    #Log to Console                       ${status}
+      #Run Keyword And Continue On Failure   Should Be Equal   '${Status}'   'True'   ${Status}
+    Close All Snmp Connections
+    Close All Connections
+
+
+Tbird Retrieve username and AuthProto from MIB output
+      [Documentation]   Tbird Retrieving username and AuthProto from MIB output
+      [Arguments]     ${output}
+    #${lines}=                Split to Lines                ${output}
+    #${lines1}=               Convert to List               ${output}
+    #${user_list}=            Create List
+    ${UserProto_list}=              Create List
+      :For     ${line}  IN  @{output}
+    \       ${words}=               Split String            ${line}                 =
+    \       ${word_username}=             Get from List        ${words}       0
+    \       ${word_uname}=                      Split String            ${word_username}                  .
+    \       ${user_name1}=                      Get from List           ${word_uname}            -1
+    \       ${user_name}=                       Remove String           ${user_name1}            "
+    \       ${user_name}=           Strip String            ${user_name}
+    \       ${word_proto}=                Get from List        ${words}       1
+    \       ${word_proto1}=               Split String            ${word_proto}           ::
+    \       ${word_protocol}=             Get from List           ${word_proto1}          1
+    \       ${auth_protocol}=             Set Variable If
+    \       ...                                                   '${word_protocol}'=='usmHMACSHAAuthProtocol'                      SHA1
+    \       ...                                                   '${word_protocol}'=='snmpAuthProtocols.5'                   SHA256
+    \       ...                                                   '${word_protocol}'=='snmpAuthProtocols.6'                   SHA384
+    \       ...                                                   '${word_protocol}'=='snmpAuthProtocols.7'                   SHA512
+    \       ...                                                   '${word_protocol}'=='usmNoAuthProtocol'                           None
+    \       ${user_proto} =         Create Dictionary   user=${user_name}
+    ...                             auth=${auth_protocol}
+    \       Append to List                ${UserProto_list}             ${user_proto}
+    [Return]                  ${UserProto_list}
+
+Tbird Retrieve username and PrivProto from MIB output
+      [Documentation]   Tbird Retrieving username and PrivProto from MIB output
+      [Arguments]     ${output}
+    ${UserPriv_list }=              Create List
+      :For     ${line}  IN  @{output}
+    \       ${words}=               Split String            ${line}                 =
+    \       ${word_username}=             Get from List        ${words}       0
+    \       ${word_uname}=                      Split String            ${word_username}                  .
+    \       ${user_name1}=                      Get from List           ${word_uname}            -1
+    \       ${user_name}=                       Remove String           ${user_name1}            "
+    \       ${user_name}=           Strip String            ${user_name}
+    \       ${word_priv}=                 Get from List        ${words}       1
+    \       ${word_priv1}=                Split String            ${word_priv}            ::
+    \       ${word_privilege}=                  Get from List           ${word_priv1}            1
+    \       ${priv_protocol}=             Set Variable If
+    \       ...                                                   '${word_privilege}'=='snmpPrivProtocols.3'                        3DES
+    \       ...                                                   '${word_privilege}'=='snmpPrivProtocols.4'                              AES128
+    \       ...                                                   '${word_privilege}'=='snmpPrivProtocols.5'                              AES192
+    \       ...                                                   '${word_privilege}'=='snmpPrivProtocols.6'                              AES256
+    \       ...                                                   '${word_privilege}'=='usmNoPrivProtocol'                          None
+    \       ${priv_protocol} =      Create Dictionary   user=${user_name}
+    ...                             priv=${priv_protocol}
+    \       Append to List                ${UserPriv_list}              ${priv_protocol}
+    [Return]                  ${UserPriv_list}
+
+
+
+Verify Interconnect State
+    [Documentation]   Verifying Interconnect State
+    [Arguments]        ${ICM_Name}    ${POWER_STATE}
+    Fusion Api Login Appliance         ${APPLIANCE_IP}        ${admin_credentials}
+    ${ic} =    Get IC    ${ICM_Name}
+    ${State} =    Get From IC        ${ic}    state
+    Log to console and logfile        \tICM state is ${ICM_Name}:${State}
+    Should Be Equal As Strings    ${State}    ${POWER_STATE}
+
+
+Execute snmpbulkwalk Command and validate for Authentication Protocols
+      [Documentation]   Executing snmpbulkwalk Command and validate for Authentication Protocols
+      [Arguments]     ${user_proto_priv}        ${ICM_IP}    ${OID}
+      Log to console          \nDatas are ${OID}
+      Open Connection               ${snmp_utils_ip}
+      Login                   ${snmp_utils_userid}          ${snmp_utils_password}
+      ${l} =  Get Length            ${user_proto_priv}
+      :FOR    ${x}    IN RANGE    0   ${l}
+      \           ${user_name}=                 Get from Dictionary           ${user_proto_priv[${x}]}            user
+      \           ${auth_protocol}=             Get from Dictionary           ${user_proto_priv[${x}]}            auth
+      \           ${auth_protocol}=             Get Substring           ${auth_protocol}            0                 3
+      \           ${priv_protocol}=             Get from Dictionary           ${user_proto_priv[${x}]}            priv
+      \           ${priv_protocol2}=                  Get Substring           ${priv_protocol}        0                 3
+      \           ${priv_protocol}=             Set Variable if
+      \           ...                                 '${priv_protocol}'=='None'                None
+      \           ...                                 '${priv_protocol}'!='None'                ${priv_protocol2}
+
+      \           ${auth_password}=             Get from Dictionary           ${user_proto_priv[${x}]}            auth_pass
+      \           ${priv_password}=             Get from Dictionary           ${user_proto_priv[${x}]}            priv_pass
+      \           ${sec_level}=                 Set Variable if
+      \           ...                                 '${priv_protocol}'=='None'                authNoPriv
+      \           ...                                 '${priv_protocol}'!='None'                authPriv
+      \           Log to Console                Performing MIB walk for '${user_name}' with SecurityLevel '${sec_level}' AuthProtocol '${auth_protocol}' PrivacyProtocol '${priv_protocol}'
+      \           ${command}=             Set Variable if
+      \           ...                           '${priv_protocol}'=='None'                snmpbulkwalk -v 3 -u ${user_name} -a ${auth_protocol} -A ${auth_password} -t 30 -l ${sec_level} -c public ${ICM_IP} ${OID}
+      \           ...                           '${priv_protocol}'!='None'                snmpbulkwalk -v 3 -u ${user_name} -a ${auth_protocol} -A ${auth_password} -x ${priv_protocol} -X ${priv_password} -t 30 -l ${sec_level} -c public ${ICM_IP} ${OID}
+      \           Log to Console          Executing Command                   ${command}
+      \           ${output}=              Execute Command                           ${command}
+    \       ${user_AuthProto}=            Retrieve username and AuthProto from MIB output                              ${output}
+    \       ${Status}=              Validate UserName and AuthProtoMIB output       ${user_proto_priv}                  ${user_AuthProto}
+    \       Log to Console                      ${status}
+      \           Run Keyword And Continue On Failure   Should Be Equal   '${Status}'   'True'   ${Status}
+    #Close All Snmp Connections
+    Close All Connections
+
+
+
+Get SNMPTrap IP from Data
+    [Documentation]   Getting SNMPTrap IP from Data
+    [Arguments]    ${li_body}
+    Log to console and logfile    \n\nResp Content Is: ${li_body}
+    ${len1} =     Get Length    ${li_body}
+    ${li_Create_traps_ip}=    Create List
+    :FOR    ${x}    IN RANGE    0    ${len1}
+    \    ${trapips} =     Get From Dictionary    ${li_body}    ${x}
+    \    ${list_trapips}=    Get From Dictionary    ${trapips}    trapDestination
+    \    Append To List    ${li_Create_traps_ip}    ${list_trapips}
+    Log to console and logfile    \n\nTrap Ips are are: ${li_Create_traps_ip}
+    [Return]    ${li_Create_traps_ip}
+
+Get SNMPUser name from Data
+    [Documentation]   Getting SNMPUser name from Data
+    [Arguments]    ${li_body}
+    Log to console and logfile    \n\nResp Content Is: ${li_body}
+    ${len1} =     Get Length    ${li_body}
+    ${li_Create_traps_user}=    Create List
+    :FOR    ${x}    IN RANGE    0    ${len1}
+    \    ${trap_user} =     Get From Dictionary    ${li_body}    ${x}
+    \    ${list_trap_users}=    Get From Dictionary    ${trap_user}    userName
+    \    Append To List    ${li_Create_traps_user}    ${list_trap_users}
+    Log to console and logfile    \n\nTrap Ips are are: ${li_Create_traps_user}
+    [Return]    ${li_Create_traps_user}
+
+
+Edit LI
+    [Documentation]    Performing edit LI
+    [Arguments]        ${li}        ${li_body}
+    ${li_uri} =     Get LI URI   ${li}
+    log to console    \n\n\nLI URI is ${li_uri}
+    log to console    \n\n\n\nLI Body is ${li_body}
+    ${resp} =    Fusion Api Get Li    ${li_uri}
+    log to console  Editing Li with snmp ${resp}
+    ${respl} =    Fusion Api Update snmp configuration    body=${li_body}    uri=${li_uri}
+    log to console  Editing Li with snmp ${respl}
+    ${task} =  Wait For Task   ${respl}    300s    2s
+    #Run Keyword If '${respl['status_code']}' != '202'   Fail    ELSE    Log to Console  \n-LI  Edited successfully
+    [Return]    ${respl}
+
+Verify trap details
+    [Documentation]   Verifying trap details
+    [Arguments]    ${li}        ${data_users}    ${Security_Level}
+    ${li_uri} =     Get LI URI   ${li}
+    log to console          LI URI is ${li_uri}
+    ${resp_li} =    Fusion Api Get Li    ${li_uri}
+    ${snmp_config} =     Get From Dictionary        ${resp_li}    snmpConfiguration
+    ${snmp_users} =     Get From Dictionary       ${snmp_config}    snmpUsers
+    ${len} =     Get Length    ${snmp_users}
+
+Initiate trapd
+    [Documentation]    Initiating Trap
+    Open Connection             192.168.144.167
+    Login               root        hpvse1
+    Sleep   2
+    Set Client Configuration          timeout=16 seconds
+    Write       resize
+    ${output}=          Start Command                   snmptrapd -f -C -c /etc/snmp/snmptrapd.conf -Le -L f /etc/messages
+    Close All Connections
+
+Verify SNMP Trap Destination Edit LI
+    [Documentation]    Verifying SNMP Trap Destination Edit LI
+    [Arguments]        ${li}        ${data_users}    ${Actual_trap_destinations}
+    Log to console and logfile    Validating Interconnects for SNMP
+    ${li_uri} =     Get LI URI   ${li}
+    ${resp_li} =    Fusion Api Get Li    ${li_uri}
+    ${snmp_config} =     Get From Dictionary        ${resp_li}    snmpConfiguration
+    ${snmp_trap_details} =     Get From Dictionary       ${snmp_config}    trapDestinations
+    Log to console and logfile    SNMP TRap Destinations...${snmp_trap_details}
+    ${len} =     Get Length    ${snmp_trap_details}
+    ${Expcted_trap_dest}=    Create List
+    ${inform}=    Create List
+    ${traps}=    Create List
+    ${user_trap_list}=    Create List
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    ${traps} =     Get From Dictionary    ${snmp_trap_details}    ${x}
+    \    ${list_trap}=    Get From Dictionary    ${traps}    trapDestination
+    \    Append To List    ${Expcted_trap_dest}    ${list_trap}
+    \    Log to console and logfile    trap is..${Expcted_trap_dest}
+    \    ${traps} =     Get From Dictionary    ${snmp_trap_details}    ${x}
+    \    ${Trap_type}=    Get From Dictionary    ${traps}    inform
+    \    Append To List    ${inform}    ${Trap_type}
+    \    ${user_trap}=    Get From Dictionary    ${traps}    userName
+    \    Append To List    ${user_trap_list}    ${user_trap}
+    #Trap IP Details
+    ${len}    Get Length    ${Actual_trap_destinations}
+    :For    ${x}    In Range    0    ${len}
+    \    List Should Contain Value    ${Expcted_trap_dest}    ${Actual_trap_destinations[${x}]}
+    #User name
+    ${len}    Get Length    ${data_users}
+    :For    ${x}    In Range    0    ${len}
+    \    List Should Contain Value    ${user_trap_list}    ${data_users[${x}]}
+
+
+Validate SNMP Trap Destinations Edit LI
+
+    [Documentation]    Validating SNMP Trap Destinations Edit LI
+    [Arguments]  ${li}      ${edit_li_body}
+    ${li_trap_ip} =    Get SNMPTrap IP from Data   ${edit_li_body['trapDestinations']}
+    ${trap_user} =    Get SNMPUser name from Data   ${edit_li_body['user']}
+    Log to console and logfile        \tTrap IP is ${li_trap_ip}
+    Log to console and logfile        \tTrap User is ${trap_user}
+    Verify SNMP Trap Destination Edit LI    ${li}    ${trap_user}    ${li_trap_ip}
+
+
+Edit LIG
+    [Documentation]    Editing LIG
+    [Arguments]        ${lig_body}    ${lig}
+    ${body} =    Build LIG body      ${lig_body}
+    Log to console and logfile    \n\nBody is: ${body}
+    ${lig_uri} =    Get LIG URI    ${lig}
+    Log to console and logfile    \n\nuri Is: ${lig_uri}
+    ${resp1} =    Fusion Api Edit LIG    body=${body}    uri=${lig_uri}
+    Log to console and logfile    \n\nOutput Is: ${resp1}
+
+Verify LI Consistency State
+    [Documentation]    Verifying LI Consistency State
+    [Arguments]        ${li}    ${State}
+    ${li_uri} =     Get LI URI   ${li}
+    ${resp} =     Fusion Api Get Li    ${li_uri}
+    ${LI_Consistent_state} =     Get From Dictionary        ${resp}    consistencyStatus
+    Should Be Equal As Strings    ${LI_Consistent_state}    ${State}
+    Log to console and logfile    \n\nConsistent state Is: ${LI_Consistent_state}
+
+Get IC
+    [Documentation]    Interconnect Details
+    [Arguments]        ${ICM_NAME}
+    ${resp} =   fusion api get interconnect
+    Log        ${resp}
+    ${ics} =     Get From Dictionary     ${resp}    members
+    ${l} =     Get Length    ${ics}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \   ${ic} =     Get From List   ${ics}    ${x}
+    \     Exit For Loop If     '${ic['name']}' == '${ICM_NAME}'
+    [Return]    ${ic}
+    Log        ${ic}
+
+Validate Interconnects
+    [Documentation]    Validate Interconnect Details
+    [Arguments]        ${ICM_NAME}        ${ltlv}        ${rtlv}        ${LLDPIP}
+    Log to console and logfile    Validating Interconnects for LLDP and taggedTLV and RichTLV flags
+    ${ic} =     Get IC        ${ICM_NAME}
+    ${enableRichTLV} =             Get From IC    ${ic}   enableRichTLV
+    ${enableTaggedLldp} =         Get From IC    ${ic}   enableTaggedLldp
+    ${lldpip} =                Get from IC     ${ic}        lldpIpv4Address
+    Should be Equal as Strings    ${enableRichTLV}        ${rtlv}
+    Should be Equal as Strings    ${enableTaggedLldp}        ${ltlv}
+    Should be Equal as Strings    ${lldpip}        ${LLDPIP}
+
+Perform an Update From Group
+    [Documentation]    Performing an Update From Group
+    [Arguments]        ${li}=${li}    ${timeout}=5 min     ${interval}=15s
+    ${li_uri} =    Get LI URI    ${li}
+    ${resp} =         Fusion Api Update from group    ${li_uri}
+    ${task} =        Wait For Task     ${resp}     ${timeout}        ${interval}
+    ${valDict} =     Create Dictionary    status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response    ${task}    ${valDict}
+
+
+Get PortId from Ports
+    [Documentation]   Port Details
+    [Arguments]     ${port_edit}
+    #Port number Eg: d2
+    ${ic} =     Get IC          ${port_edit['interconnectName']}
+    ${uri} =     Get From IC    ${ic}   uri
+    Log             ${uri}
+    ${interconnect} =           fusion_api_get_interconnect           uri=${uri}
+    ${ports} =  Get From Dictionary     ${interconnect}     ports
+    ${port_number} =           Get Variable Value  ${port_edit['portName']}
+    Log         ${ports}
+    ${l} =  Get Length  ${ports}
+    Log     ${l}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${port_list} =   Get From List   ${ports}    ${x}
+    \   Log         ${port_list}
+    \   ${portName} =   Get From Dictionary     ${port_list}        portName
+    \   Run Keyword If  '${portName}' != '${port_number}'       Continue For Loop
+    \   ${port_id} =    Get From Dictionary     ${port_list}        portId
+
+    [Return]    ${port_id}
+    Log         ${port_id}
+
+Build Ports Edit Body
+    [Documentation]   Port Details with edit body
+    [Arguments]     ${port_id}          ${port_edit}
+    ${interconnectName} =           Get Variable Value  ${port_edit['interconnectName']}
+    ${enabled} =           Get Variable Value  ${port_edit['enabled']}
+    ${portName} =           Get Variable Value  ${port_edit['portName']}
+    ${type} =           Get Variable Value  ${port_edit['type']}
+    ${edit_body} =  Create Dictionary   interconnectName=${interconnectName}
+    ...                             enabled=${enabled}
+    ...                             portName=${portName}
+    ...                             portId=${port_id}
+    ...                             type=${type}
+    ${edit_body} =   Create list     ${edit_body}
+    [Return]    ${edit_body}
+    Log         ${edit_body}
+
+
+Verify SNMP Users
+    [Documentation]   verify SNMP Users details
+    [Arguments]        ${lig}        ${data_users}
+    Log to console and logfile    Validating Interconnects for SNMP
+    ${lig_uri} =    Get LIG URI    ${lig}
+    ${Resp_Lig} =     fusion_api_get_lig    ${lig_uri}
+    #For Single & Multiple users
+    ${snmp_config} =     Get From Dictionary        ${Resp_Lig}    snmpConfiguration
+    Log to console and logfile    SNMP Config..${snmp_config}
+    ${snmp_users} =     Get From Dictionary       ${snmp_config}    snmpUsers
+    Log to console and logfile    SNMP Users...${snmp_users}
+    ${len} =     Get Length    ${snmp_users}
+    Log to console and logfile    Length..${len}
+    ${Create_user}=    Create List
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    ${users} =     Get From Dictionary    ${snmp_users}    ${x}
+    \    ${list_user}=    Get From Dictionary    ${users}    snmpV3UserName
+    \    Append To List    ${Create_user}    ${list_user}
+
+    ${len}    Get Length    ${data_users}
+    :For    ${x}    In Range    0    ${len}
+    \    List Should Contain Value    ${Create_user}    ${data_users[${x}]}
+
+    #\    List Should Contain Value    ${Create_user}    ${data_users}
+    #Log to console and logfile    list of SNMP User Name List..${Create_user}
+    #List Should Contain Value    ${Create_user}    ${data_users}
+    Log to console and logfile    SNMP Users are successfully Verified
+
+Kill snmptrapd demon
+    [Documentation]  snmtrapd killing
+    Open Connection             192.168.144.167
+    Login               root        hpvse1
+    ${output}=          Execute Command                 ps -e | grep snmptrapd
+    ${status}=          Run Keyword If          '${output}'!=''         Kill Process Id     ${output}
+    ...                 ELSE            Log to Console          'Trapd daemon not running'
+
+Kill Process Id
+    [Documentation]  Kill Process ID
+    [Arguments]     ${output}
+    ${pid1}=                Split String        ${output}
+    ${pid}=             Get from List       ${pid1}     0
+    Log to Console                snmptrapd pid is '${pid}'
+    ${output}=          Execute Command                 kill -9 ${pid}
+    ${output1}=         Execute Command                 ps -e | grep snmptrapd
+    Log to Console                ${output1}
+    Run Keyword and Continue on Failure    Should Be Equal  '${output1}'        ''    snmptrapd demon not killed
+    Close All Connections
+
+Efuse Interconnect
+    [Documentation]    Performing Efuse of Interconnect
+    ...             Example:
+    ...             Efuse Interconnect   ${HOST}    ${EM_SN}    ${Efuse_Action[0]}    ${Bay_No[0]}
+    [Arguments]         ${HOST}    ${EM_SN}    ${Action}    ${Bay_No}
+    Open Connection And Log In      ${HOST}   root   hpvse1
+    ${EM1}=  Execute Command   /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${EM_SN}
+    ${EM}=  catenate   SEPARATOR=   ${EM1}%bond0
+    ${XAUTH}=  Execute Command  /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${EM_SN} -o t
+    ${efuse_operation}=   Execute Command   curl -i -X POST https://[${EM}]/rest/v1/InterconnectBays/${Bay_No} -k -H "X-Auth-Token: ${XAUTH}" -d '{"Action":"${Action}"}'
+    Close All Connections
+    should contain   ${efuse_operation}  Accepted
+
+Edit interconnects Power State
+    [Documentation]    Editing Interconnect power state
+    ...             Example:
+    ...             Edit interconnects Power State    ${INTERCONNECTS}    ${Power_edit}    ${Powerstate}    ${IC_CONFIG_STATE}
+    [Arguments]        ${INTERCONNECTS}    ${Power_edit}    ${Powerstate}    ${State}
+    :FOR     ${interconnect}   IN   @{INTERCONNECTS}
+    \   ${ic_uri} =    Get IC URI    ${interconnect}
+    \   ${body} =   Create Dictionary   op=replace
+    \   ...                             path=${Powerstate}
+    \   ...                             value=${Power_edit}
+    \   ${body} =   Create list     ${body}
+    \   ${resp} =   fusion api patch interconnect   body=${body}    uri=${ic_uri}
+    \   ${task} =   Wait for Task   ${resp}   5min    10s
+    \   ${valDict} =    Create Dictionary   status_code=${200}
+    \   ...                                 taskState=Completed
+    \   Validate Response   ${task}    ${valDict}
+    \   Wait Until Keyword Succeeds    30 min   15s     Validate Interconnect Power State     ${interconnect}        ${Power_edit}
+    \   Wait Until Keyword Succeeds    30 min   15s     Validate Interconnect state    ${INTERCONNECTS}    ${State}
+
+Validate Alert Message
+    [Documentation]    Validating the 'Active' alert message with a variable which contains the expected alert message
+    ...             Example:
+    ...             Validate Alert Message    ${UPLINK_MSG}    ${varTrue}    ${Alert[0]}    ${alert_type}
+    [Arguments]     ${msg}    ${flag}    ${Alerts}    ${alert_type}
+    ${Response}    Fusion Api Get Alerts    /rest/alerts?filter="alertState EQ '${Alerts}'"
+    ${Count}    Get From Dictionary    ${Response}    count
+    Run Keyword If    '${Count}'=='0'    Fail    "Failed as alert message is not found"
+    ${Members}    Get From Dictionary    ${Response}    members
+    :FOR    ${Index}    IN RANGE    0    ${Count}
+    \    ${Alert}        Get From List    ${Members}    ${Index}
+    \    ${AlertID}    Get From Dictionary    ${Alert}    alertTypeID
+    \    ${AlertDesc}    Get From Dictionary    ${Alert}    description
+    \    Run Keyword If    '${AlertID}' != '${alert_type}'   Continue For Loop
+    #\    Run Keyword If    '${AlertID}' != '${uplink_alert_type}' AND '${AlertID}' != '${downlink_alert_type}'   Continue For Loop
+    #\    Run Keyword If    '${AlertID}' != 'swmon.pauseFloodDetected' AND '${AlertID}' != 'profilemgr.Connections.CONNECTION_SCMB_ERROR'   Continue For Loop
+    \    ${AlertDesc}    Get From Dictionary    ${Alert}    description
+    \    Exit For Loop If     '${AlertDesc}' == '${msg}'
+    run keyword if    '${flag}'=='True'   Should Be Equal As Strings     ${AlertDesc}    ${msg}    ELSE   Should Not Be Equal As Strings     ${AlertDesc}    ${msg}
+
+
+Reset interconnects
+    [Documentation]    Resetting the Interconnect
+    ...             Example:
+    ...             Reset interconnects    ${INTERCONNECTS}    ${Power_edit}    ${Powerstate}    ${IC_CONFIG_STATE}    ${IC_PowerState}
+    [Arguments]        ${INTERCONNECTS}    ${Power_edit}    ${Powerstate}    ${State}    ${IC_PowerState}
+    :FOR     ${interconnect}   IN   @{INTERCONNECTS}
+    \   ${ic_uri} =    Get IC URI    ${interconnect}
+    \   ${body} =   Create Dictionary   op=replace
+    \   ...                             path=${Powerstate}
+    \   ...                             value=${Power_edit}
+    \   ${body} =   Create list     ${body}
+    \   ${resp} =   fusion api patch interconnect   body=${body}    uri=${ic_uri}
+    \   ${task} =   Wait for Task   ${resp}   5min    10s
+    \   ${valDict} =    Create Dictionary   status_code=${200}
+    \   ...                                 taskState=Completed
+    \   Validate Response   ${task}   ${valDict}
+    \   Log to console and logfile  \nVerify ${interconnect} is ${Power_edit}
+    \   Wait Until Keyword Succeeds    30 min   15s     Validate Interconnect Power State     ${interconnect}        ${IC_PowerState}
+    \   Wait Until Keyword Succeeds    30 min   15s     Validate Interconnect state    ${INTERCONNECTS}    ${State}
+
+Validate Interconnect Power State
+    [Documentation]    Validating the power state of Interconnect
+    ...             Example:
+    ...             Validate Interconnect Power State    ${ICM_1}    ${POWER_STATE}
+    [Arguments]        ${ICM_NAME}        ${POWER_STATE}
+
+    ${IC}=    Fusion Api Get Interconnect    param=?filter="'name'=='${ICM_NAME}'"
+    ${powerState} =     Get From dictionary    ${IC['members'][0]}   powerState
+    Should Be Equal As Strings    ${powerState}    ${POWER_STATE}
+
+Validate Interconnect state
+    [Documentation]    Validate state of Interconnect module with the expected state
+    ...             Example:
+    ...             Validate Interconnect state    ${ICM_1}    ${IC_CONFIG_STATE}
+    [Arguments]        ${ICM_NAME}    ${State}
+    ${len_ic} =   Get Length   ${ICM_NAME}
+    :FOR    ${x}    IN RANGE    0  ${len_ic}
+    \    ${IC}=    Fusion Api Get Interconnect    param=?filter="'name'=='${ICM_NAME[${x}]}'"
+    \    ${ic_uri} =     Get From Dictionary     ${IC['members'][0]}     uri
+    \    ${resp} =   fusion api get resource     ${ic_uri}
+    \    ${resp_state}    convert_unicode_to_string    ${resp['state']}
+    \    Should Be Equal As Strings     ${resp_state}    ${State}
+
+Firmware bundle upload
+    [Documentation]    Uploading a firmware bundle
+    ...             Example:
+    ...             Firmware bundle upload    ${SPP_Path}
+    [Arguments]         ${SPP_Path}
+    ${resp} =     Fusion Api Upload Firmware Bundle    api=${300}    localfile=${SPP_Path}
+    #Log to console and logfile    Upload spp details ${resp}
+
+Validate Interconnect firmware version
+    [Documentation]    Verifying the interconnect firmware version
+    ...             Example:
+    ...             Validate Interconnect firmware version    ${INTERCONNECTS}    ${ic_firmwareVersion_new}
+    [Arguments]         ${INTERCONNECTS}    ${ic_firmwareVersion}
+    #Log to console and logfile    \nValidating the interconnect firmware before update
+    :FOR     ${IC}     IN   @{INTERCONNECTS}
+    \     ${resp} =   Fusion Api Get Interconnect    param=?filter="'name' = '${IC}'"
+    \     ${current_ic_fw_version} =  Get From Dictionary  ${resp['members'][0]}    firmwareVersion
+    \     Run keyword unless    '${current_ic_fw_version}' == '${ic_firmwareVersion}'    Fail    "Firmware version mismatch"
+    \     ...   ELSE     Log to console and logfile    \nFirmware version is verified for ${IC}
+
+Clean OV
+    [Documentation]    Clean Up the Appliance
+    Log to console and logfile    \nCleaning the OV
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    Power off ALL Servers
+    Remove All Server Profiles
+    Remove All Logical Enclosures
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove ALL Ethernet Networks
+    Remove ALL FC Networks
+    Remove ALL FCoE Networks
+    Remove ALL Network Sets
+    Remove ALL Users

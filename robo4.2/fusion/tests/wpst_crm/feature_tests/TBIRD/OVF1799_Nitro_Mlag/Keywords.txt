@@ -1,0 +1,353 @@
+***Settings***
+Library         json
+Library         FusionLibrary
+Library         RoboGalaxyLibrary
+Library         Collections
+Library         SSHLibrary
+Library         String
+Resource        ../../../../resource/fusion_api_all_resource_files.txt
+Resource        Keywords.txt
+Library         Telnet
+Library         data_variables_NITRO_RIG
+Library         backping.py
+Library         Dialogs
+Library         stats
+
+
+***Keywords***
+Get Server Ip Windows
+    [Documentation]    Gets the valid ip of the server.
+    [Arguments]    ${ilo_details}
+    ${serverip_List}    Create List
+    ${serverip_List1}    Create List
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=20s
+    ${login}    SSHLibrary.Login    ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Read Until    SAC>
+    Sleep    5sec
+    SSHLibrary.Write    i
+    Sleep    5sec
+    ${stdout}    SSHLibrary.Read
+    Log to Console    \nstdout is ${stdout}
+    ${out_string}    Convert To String    ${stdout}
+    ${ip_list}=    Get Regexp Matches    ${out_string}    Ip=(172\\.\\d+\\.\\d+\\.\\d+)    1
+    ${gateway_ip}=    Get Regexp Matches    ${out_string}    Gateway=(172\\.\\d+\\.\\d+\\.\\d+)    1
+    SSHLibrary.Close All Connections
+    [Return]    ${ip_list}    ${gateway_ip}
+
+Get Profile Details
+    [Documentation]    Get Profile Details
+    [Arguments]    ${resp}    ${profile_name}
+    ${profile_len} =    Get Length    ${resp['members']}
+    :FOR    ${x}    IN RANGE   ${profile_len}
+    \   ${y} =    Set Variable    ${resp['members'][${x}]['connectionSettings']}
+    \   ${mac_address} =    Run Keyword If  '${resp['members'][${x}]['name']}' == '${profile_name}'
+    \   ...    Get Mac address Of Server Profile    ${y['connections']}
+    \   ...    ELSE
+    \   ...    Continue For Loop
+    [return]            ${mac_address}
+
+Get Mac address Of Server Profile
+    [Documentation]    Get Mac address Of Server Profile
+    [Arguments]    ${connections}
+    ${mac_address} =    Create List
+    ${connection_length} =    Get Length    ${connections}
+    :FOR    ${x}    IN RANGE    ${connection_length}
+    \   Append To List   ${mac_address}    ${connections[${x}]['mac']}
+    [return]            ${mac_address}
+
+Create Windows Teaming
+    [Documentation]    Create Windows Teaming
+    [Arguments]    ${server_ip}    ${server_details}    ${team_cmd}
+    Telnet.Open Connection     ${server_ip}     prompt=>     timeout=20s
+    Log to console  \nSuccessfully opened connection to the server
+    Telnet.Write    a
+    ${login}    Telnet.Login               ${server_details['username']}     ${server_details['password']}    login_prompt=login:    password_prompt=password:
+    Log to console  \nSuccessfully logged into the server
+    Sleep    10sec
+    Telnet.Write    powershell
+    Log to console  \n${team_cmd}
+    Telnet.Write    ${team_cmd}
+    Sleep    30sec
+    Telnet.Write    y
+    Sleep    30sec
+    Telnet.Close Connection
+    Telnet.Close All Connections
+    Log to Console    \nteaming completed successfully
+
+Create Teaming windows
+    [Documentation]    Create Teaming windows
+    [Arguments]    ${adapter_name_1}   ${adapter_name_2}    ${Powershell_get_mac1}    ${server_details}    ${serverip_List1_global[0]}
+    ${tmp}    Remove Whitespace    ${adapter_name_1}
+    ${tmp1}    Remove Whitespace    ${adapter_name_2}
+    ${replaced_cmd1}    Replace String Using Regexp    ${Powershell_get_mac1}    pppp    ${tmp}
+    Log to Console  \nstrafter strip is${tmp}
+    Log to Console  \nreplaced_cmd1 is${replaced_cmd1}
+    ${replaced_cmd2}    Replace String Using Regexp    ${replaced_cmd1}    qqq    ${tmp1}
+    Log to Console  \nstr is${replaced_cmd2}
+    Create Windows Teaming   ${serverip_List1_global[0]}    ${server_details}    ${replaced_cmd2}
+
+Add ethernet Networks
+    [Documentation]    Add ethernet Networks
+    [Arguments]    @{enets}
+    Log to console and logfile    \n-Adding enet Networks
+    :FOR   ${enet}   IN   @{enets}
+    \       ${resp} =    fusion api create ethernet network   body=${enet}
+    \       ${task} =   Wait For Task   ${resp}     60s    2s
+
+Get Server profile Alerts
+    [Documentation]    Get Server profile Alerts
+    ${y} =    Set Variable    0
+    ${Alert_msg} =    Create List
+    ${resp} =    Fusion Api Get Alerts   /rest/alerts?filter="alertState EQ 'Active'"
+    ${mem_resp} =    Get From Dictionary    ${resp}    members
+    ${len} =     Get Length    ${mem_resp}
+    :FOR   ${x}    IN RANGE    0    ${len}
+    \   Run Keyword If  '${mem_resp[${x}]['alertTypeID']}' !='crm.connectionStateChange'    Continue For Loop
+    \   ${desc}=    Get From Dictionary    ${mem_resp[${x}]}    description
+    \   Log to console and logfile  description'${desc}'
+    \    ${match}   ${status}    Should Match Regexp    ${desc}    (Connection\\s+on\\s+downlink\\s+port\\s+\\d+\\,.*LAG\\d+.)
+    \  Append To List    ${Alert_msg}    ${desc}
+    \  ${y} =    Evaluate    ${y} + 1
+    \   Log to console    ${status}
+    Log to console and logfile   ${Alert_msg}
+    [Return]    ${Alert_msg}
+
+Clean up for Suite
+    [Documentation]    Cleans the appliance
+    Log to console and logfile    \nCleaning the OV
+    Set Log Level    TRACE
+    Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+    Power off ALL Servers
+    Remove All Server Profiles
+    Remove All Logical Enclosures
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove ALL Ethernet Networks
+    Remove ALL FC Networks
+    Remove ALL FCoE Networks
+    Remove ALL Network Sets
+    ${resp}    Fusion Api Delete Alert
+    ${task}    Wait For Task    ${resp}    60s    20s
+
+Get IP For All Servers
+    [Documentation]    Fetching server IP's for multiple servers that captures IP in separate list for different interconnects
+    [Arguments]     ${ilo_details}    ${server_details}
+
+    ${IP}    ${gateway}    Run Keyword If    '${ilo_details['OS']}' == 'esxi'    Get Server IP Esxi    ${ilo_details}    ${server_details}
+    ...    ELSE IF    '${ilo_details['OS']}' == 'windows'    Get Server Ip Windows    ${ilo_details}
+    ...    ELSE IF    '${ilo_details['OS']}' == 'linux'    Get Server Ip Linux    ${ilo_details}    ${server_details}
+    Set to Dictionary   ${server_details}   ip    ${IP}
+    Set to Dictionary   ${server_details}   gateway_ip    ${gateway}
+    [Return]    ${server_details}
+
+
+Clear Port Counters
+    [Documentation]    Clear Port Counters
+    [Arguments]     ${IC}
+    ${IC_uri}    Get IC URI    ${IC}
+    log    ${IC_uri}
+    ${body}    Create Dictionary
+    ${Resp}    Fusion Api clear Interconnect Ports    ${body}    ${IC_uri}
+    Run Keyword If  '${Resp['status_code']}' != '202'  Fail    ELSE  log   \n-Port counters cleared Successfully
+    Sleep    30sec
+
+Edit Server Profiles from variable
+    [Documentation]    Edits Server Profiles
+    [Arguments]     ${profiles}
+    Log to console and logfile      Adding SERVER PROFILES
+    :FOR    ${profile}  IN  @{profiles}
+    \   ${profile} =    Copy Dictionary     ${profile}
+    \   Log to console  \n${profile}
+    \   ${shuri} =  Get from Dictionary    ${profile}  serverHardwareUri
+    \   Log to console  \nshuri ${shuri}
+    \   ${uri_harware} =    Get Server Hardware URI     ${shuri}
+    \   Set to Dictionary   ${profile}  serverHardwareUri   ${uri_harware}
+    \   Log to console  \nuri_harware ${uri_harware}
+    \   Log to console  \nprofile ${profile}
+    \   ${eg} =     Get from Dictionary    ${profile}  enclosureGroupUri
+    \   @{words} =  Split String    ${eg}   :
+    \   ${type} =   Get From List   ${words}    0
+    \   ${eg} =     Get From List   ${words}    1
+    \   ${uri} =    Get Enclosure Group URI    ${eg}
+    \   Log to console  \neguri ${uri}
+    \   Set to Dictionary   ${profile}  enclosureGroupUri   ${uri}
+    \   ${enc} =    Get from Dictionary    ${profile}  enclosureUri
+    \   @{words} =  Split String    ${enc}  :
+    \   ${type} =   Get From List   ${words}    0
+    \   ${enc} =    Get From List   ${words}    1
+    \   ${uri} =    Get Enclosure URI   ${enc}
+    \   Set to Dictionary   ${profile}  enclosureUri    ${uri}
+    \   ${profile} =    Update connections in profile    ${profile}
+    \   ${profiles} =     Fusion Api Get Server Profiles    param=?filter="'name'=='${profile['name']}'"
+    \   ${uri}      Get From Dictionary      ${profiles['members'][0]}    uri
+    \   Set to Dictionary   ${profile}  uri     ${uri}
+    \   Log to console  \nprofile ${profiles}
+    \   ${etag} =   Get From Dictionary    ${profiles['members'][0]}   eTag
+    \   Log to console  \netag ${etag}
+    \   Set to Dictionary   ${profile}  eTag     ${etag}
+    \   Log to console  \nprof ${profile}
+    \   ${resp} =   Fusion Api Edit Server Profile      body=${profile}     uri=${uri}
+    \   Log to console and logfile  ${resp}
+    \   ${task} =   Wait For Task   ${resp}     timeout=13 mins     interval=10s
+    \   ${task_state} =     Get From dictionary     ${task}     taskState
+    \   Log to console and logfile  ${task}
+    \   Should Match Regexp    ${task_state}   ((?i)Warning|Completed|Error)
+    [Return]    ${task}
+
+Ping Test
+    [Documentation]    Geting server ip and checking if IP's are pinging
+    [Arguments]    ${ilo_details}    ${server_details}    ${ping_duration}
+    ${server}    Get IP For All Servers    ${ilo_details}    ${server_details}
+    ${server_ip}    Get From Dictionary    ${server}    ip
+    Set Global Variable    ${Team_ip}    ${server_ip[0]}
+    log to console  \n pinging started
+    startthread    ${Team_ip}    ${team0}    ${flag}
+    Sleep    ${ping_duration}
+    execute_command_in_tcs    ${kill_cmd}
+
+Update LI telemetry
+    [Documentation]    Update LI Telemetry
+    [Arguments]    ${LI}    ${diff_sample_interval}
+    ${li_uri}    Get LI URI    ${LI}
+    Log to console    ${li_uri}
+
+    ${li_resp} =    Fusion Api Get Li   ${li_uri}
+    Log to console    ${li_resp}
+    ${telemetry_1_uri}    Get From Dictionary    ${li_resp['telemetryConfiguration']}    uri
+    ${telemetry_1_name}    Get From Dictionary    ${li_resp['telemetryConfiguration']}    name
+    Set To Dictionary     ${Li_body_telemetry}    uri   ${telemetry_1_uri}
+    Set To Dictionary     ${Li_body_telemetry}   name    ${telemetry_1_name}
+    set to dictionary    ${Li_body_telemetry}    sampleCount    ${diff_sample_count[0]}
+    set to dictionary    ${Li_body_telemetry}    sampleInterval    ${diff_sample_interval}
+    ${resp}    Fusion Api Update LI Telemetry Configuration    ${Li_body_telemetry}    ${telemetry_1_uri}
+    ${task}    Wait For Task   ${resp}     200s    2s
+    Log to console    Telemetry configuration edited in LI successfully
+
+Get MAC Address of the server and team
+    [Documentation]    Get MAC Address of the server & Windows Teaming
+    [Arguments]    ${ilo_details}    ${server_details}
+    ${server}    Get IP For All Servers    ${ilo_details}    ${server_details}
+    ${server_ip}    Get From Dictionary    ${server}    ip
+    ${server_username}    Get From Dictionary    ${server}    username
+    ${server_password}    Get From Dictionary    ${server}    password
+    ${server_hw_type}    Get From Dictionary    ${server}    type
+    ${resp} =    Fusion Api Get Server Profiles
+    ${mac_addr_list}=   Create List
+    ${mac} =    Get Profile Details    ${resp}    ${Server_profile1[0]['name']}
+    ${mac_length} =    Get Length    ${mac}
+    :FOR    ${x}    IN RANGE    ${mac_length}
+    \   ${mac_address} =    Replace String Using Regexp    ${mac[${x}]}    :    -
+    \   Append To List   ${mac_addr_list}    ${mac_address}
+    Log to Console    \n mac address ${mac_addr_list}
+
+    #Compare mac address with server
+    ${adapter_name_list}=   Create List
+    :FOR    ${x}    IN RANGE    ${mac_length}
+    \   ${replaced_cmd} =   Replace String Using Regexp    ${Powershell_get_mac}    pppppppp      ${mac_addr_list[${x}]}
+    \    ${output}    execute_windows_commands    ${server_ip[0]}    ${server_username}    ${server_password}    ${replaced_cmd}
+    \    ${contents}    OperatingSystem.Get File    ${file1}
+    \    Log    cont is ${contents}    console=True
+    \    ${adapter_name}    Run Keyword If    '${server_hw_type}' == 'Gen10'    Get Lines Containing String    ${contents}    PCIe    ELSE IF    '${server_hw_type}' == 'Gen9'    Get Lines Containing String    ${contents}    Ethernet    ELSE    Fail    Log    adapter name is not match    console=True
+    \   Append to List   ${adapter_name_list}   ${adapter_name}
+    Log  \nadapter names list${adapter_name_list}    console=True
+    Create Teaming windows     ${adapter_name_list[0]}    ${adapter_name_list[1]}   ${team_cmd}    ${server_details_enc1_bay11}    ${server_ip[0]}
+
+Validate Common and Advanced Statistics
+    [Documentation]    Fetching the common, advanced and the lag statistics of the interconnects
+    [Arguments]    ${ports}    ${stats_flag}    ${stats_lag_flag}    ${stat}    ${subport_no}
+    ${Stat_IC}    Create List
+    ${Lag_Stat_IC}    Create List
+    ${len}    Get Length    ${ports}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    ${uri}    Get IC URI    ${INTERCONNECTS[${x}]}
+    \    Log to console and logfile    \nFetching ${stat} Port Statistics for ${INTERCONNECTS[${x}]} : Port ${ports[${x}]}...
+    \    ${Fetch_stat}    ${msg}    fetch_statistics    ${uri}    ${ports[${x}]}    None    None    ${stats_flag}    ${subport_no}    ${stat}
+    \    Run Keyword If    ${Fetch_stat} == False    FAIL    msg = ${msg}
+    \    ...    ELSE    Append to List    ${Stat_IC}    ${Fetch_stat}
+    \    Log to console and logfile    \nFetching ${stat} Lag Port Statistics for ${INTERCONNECTS[${x}]} : Port ${ports[${x}]}...
+    \    ${Lag_Stat}    ${msg}    fetch_statistics    ${uri}    ${ports[${x}]}    None    None    ${stats_lag_flag}    ${subport_no}    ${stat}
+    \    Run Keyword If    ${Lag_Stat} == False    FAIL    msg = ${msg}
+    \    ...    ELSE    Append to List    ${Lag_Stat_IC}    ${Lag_Stat}
+    Log to console and logfile    \nAggregating the Stats for Port ${ports[${x}]} : ${stat} statistics
+    ${Aggregate_Stat}    ${msg}    aggregate_stat    ${Stat_IC[0]}    ${Stat_IC[1]}    ${stat}
+    Log to console and logfile    \nValidating the Statistics for Port ${ports[${x}]} : ${stat} statistics
+    Validate Aggregate Statistics    ${Aggregate_Stat}    ${Lag_Stat_IC}    ${stat}
+
+Validate Aggregate Statistics
+    [Documentation]    Verifying the lag statistics with the aggregate statistics of the interconnects
+    [Arguments]    ${Agg_stat}    ${Lag_stat}    ${stat}
+    ${len}    Get Length    ${INTERCONNECTS}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    ${Aggregate_validity}    ${msg}    validate_aggregate_stat    ${Agg_stat}    ${Lag_stat[${x}]}    ${stat}
+    \    Run Keyword If    ${Aggregate_validity} != True    FAIL    msg = ${msg}    ELSE    Log to console and logfile    \nSuccessfully Validated ${stat} Statistics Aggregation for ${INTERCONNECTS[${x}]}
+
+Clear Port counter and verify for reduced values
+    [Documentation]    Clearing port counters and verifying for the reduced statistics values
+    [Arguments]    ${ports}    ${stats_flag}    ${stat}    ${subport_no}
+    ${len}    Get Length    ${ports}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    ${uri}    Get IC URI    ${INTERCONNECTS[${x}]}
+    \    Log to console and logfile    \nFetching Port Statistics for ${INTERCONNECTS[${x}]} : Port ${ports[${x}]}...
+    \    ${Initial_Commstat}    ${msg}    fetch_statistics    ${uri}    ${ports[${x}]}    None    None    ${stats_flag}    ${subport_no}    ${stat}
+    \    Clear Port Counters    ${INTERCONNECTS[${x}]}
+    \    ${Final_Commstat}    ${msg}    fetch_statistics    ${uri}    ${ports[${x}]}    None    None    ${stats_flag}    ${subport_no}    ${stat}
+    \    Verify Reduced statistics   ${Initial_Commstat}    ${Final_Commstat}    ${stat}
+
+Verify Reduced statistics
+    [Documentation]    Verifying the statistics for reduced values
+    [Arguments]    ${Initial_stat}    ${Final_stat}    ${stat}
+    ${Flag}    ${msg}    validate_decrease_statistics    ${Initial_stat}    ${Final_stat}    ${stat}
+    Run Keyword If    ${Flag} == False    FAIL    msg = ${msg}    ELSE    Log to console and logfile    \nSuccessfully validated decreased value in Port Statistics
+
+Fetch Interconnect Statistics
+    [Documentation]    Fetching Common and Advanced Statistics of the Interconnects
+    [Arguments]    ${ports}    ${stats_flag}    ${stats_lag_flag}    ${stat}    ${subport_no}
+    ${Initial_Commstat}    Create List
+    ${len}    Get Length    ${ports}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    ${uri}    Get IC URI    ${INTERCONNECTS[${x}]}
+    \    Log to console and logfile    \nFetching Port Statistics for ${INTERCONNECTS[${x}]} : Port ${ports[${x}]}...
+    \    ${Commstat}    ${msg}    fetch_statistics    ${uri}    ${ports[${x}]}    None    None    ${stats_flag}    ${subport_no}    ${stat}
+    \    Append to List    ${Initial_Commstat}    ${Commstat}
+    \    ${Lag_CommStat}    ${msg}    fetch_statistics    ${uri}    ${ports[${x}]}    None    None    ${stats_lag_flag}    ${subport_no}    ${stat}
+    \    Append to List    ${Initial_Commstat}    ${Lag_CommStat}
+    [Return]    ${Initial_Commstat}
+
+Edit Server profile
+    [Documentation]    Verifying if existing LAG'd connections can be edited by PUT method
+    [Arguments]    ${profile}
+    Power off ALL Servers
+    ${task}    Edit Server Profiles from variable    ${profile}
+    Run Keyword If  '${task['status_code']}' == '200'    Log to console  \n Server profile updated successfully \nStatus Code: ${task['status_code']}    ELSE    FAIL
+
+Remove Teaming
+    [Documentation]    Removing Teaming on server profile1 and deleting the profile
+    Delete Windows Teaming    ${Team_ip}    ${server_details_enc1_bay11}    ${delete_team_cmd}
+    Sleep    120sec
+
+Delete Windows Teaming
+    [Documentation]    Delete Windows Teaming
+    [Arguments]         ${team_ip}    ${server_details}    ${delete_team_cmd}
+    Telnet.Open Connection     ${team_ip}     prompt=>     timeout=20s
+    Log      \nSuccessfully opened connection to the server    console=True
+    Telnet.Write    a
+    ${login}    Telnet.Login    ${server_details['username']}     ${server_details['password']}    login_prompt=login:    password_prompt=password:
+    Log      \nSuccessfully logged into the server    console=True
+    Sleep    10sec
+    Telnet.Write    powershell
+    Sleep    10sec
+    Telnet.Write    ${delete_team_cmd}
+    Log      \n${delete_team_cmd}    console=True
+    Sleep    30sec
+    Telnet.Write    y
+    Sleep    30sec
+    ${stdout}    Telnet.Read
+    Log       \nout is ${stdout}    console=True
+    Telnet.Close Connection
+    Telnet.Close All Connections
+    Log        \nteaming deleted    console=True

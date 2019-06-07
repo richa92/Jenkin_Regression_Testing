@@ -1,0 +1,247 @@
+*** Settings ***
+Documentation
+...     Regression test work flow after changing cryptographic mode.
+Resource                        ../../../../Resources/api/fusion_api_resource.txt
+Variables                       ./data_variables.py
+
+*** Variables ***
+${APPLIANCE_IP}                 192.168.144.142
+${ICM}                          FVTVP30012, interconnect 2
+${ICM_SSH_USER}                 admin
+${ICM_SSH_PASS}                 hpvse123
+${ICM_Prompt}                   Switch#
+${old_hostname}                 testuser.ind.hp.com
+${new_hostname}                 fvtuser.in.rdlabs.hpecorp.net
+
+
+*** Keywords ***
+Verify ICM hostname
+    [Documentation]  Verify if both hostname is same  
+    [Arguments]       ${ICM_name}    ${exp_hostname}
+    ${resp} =  Get Interconnect    ${ICM_name}
+    ${host_name} =  Get From Dictionary    ${resp}    hostName
+    Log to console and logfile   \nHostname is ${host_name}
+    Should Be Equal    ${host_name}    ${exp_hostname}
+
+Efuse ICM
+    [Documentation]  ICM remove or insert from CIM CLI
+    [Arguments]     ${ic}   ${action}
+    ${temp1}=  Split String    ${ic}    ,
+    ${enc_name}=  Get From List    ${temp1}     0
+    ${temp2}=  Get From List    ${temp1}     1
+    ${temp3}=  Split String    ${temp2}
+    ${bayno}=  Get From List    ${temp3}  -1
+    Open Connection And Log In      ${APPLIANCE_IP}
+    ${em_ip}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}"
+    ${xauth}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}" -o t
+    ${ret}=  Execute Command    curl -g -x "" -k -i -H "x-auth-token:${xauth}" -X POST https://[${em_ip}%bond0]/rest/v1/InterconnectBays/${bayno} -d '{"Action":"${action}"}'
+    Should Contain    ${ret}    { "Action": "${action}" }
+    ...    msg=EFuse action failed \n${ret}
+    Close All Connections
+
+Getting ICM Data from FRU
+    [Documentation]  Retrieve ICM data from FRU
+    [Arguments]     ${ic}
+    ${temp1}=  Split String    ${ic}    ,
+    ${enc_name}=  Get From List    ${temp1}     0
+    ${temp2}=  Get From List    ${temp1}     1
+    ${temp3}=  Split String    ${temp2}
+    ${bayno}=  Get From List    ${temp3}  -1
+    Open Connection And Log In      ${APPLIANCE_IP}
+    ${em_ip}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}"
+    ${xauth}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}" -o t
+    ${ret}=  Execute Command      curl --globoff -ki -x "" --header "x-auth-token:${xauth}" https://[${em_ip}%bond0]/rest/v1/InterconnectFru/${bayno} | grep } | python -mjson.tool
+    Close All Connections
+    [Return]    ${ret}
+
+ Set HostName from ICM CLI
+     [Documentation]  Setting hostname from ICM CLI
+     [Arguments]     ${icm_ipv6}   ${name}
+     #Open Connection And Log In      ${APPLIANCE_IP}
+     Open Connection     ${icm_ipv6}
+     Login               ${ICM_SSH_USER}     ${ICM_SSH_PASS}
+     sleep    3s
+     Write    ${\n}
+     ${out1}=    Read Until    ${ICM_Prompt}
+     sleep    2s
+     Write   set host-name ${name}
+     Write    ${\n}
+     Write    ${\n}
+     ${cmdoutput}=    Read Until    ${ICM_Prompt}
+     Close Connection
+     Should Contain    ${cmdoutput}    ${name}
+
+
+ Set DomainName from ICM CLI
+     [Documentation]  Setting domainname from ICM CLI
+     [Arguments]     ${icm_ipv6}   ${name}
+     #Open Connection And Log In      ${APPLIANCE_IP}
+     Open Connection     ${icm_ipv6}
+     Login               ${ICM_SSH_USER}     ${ICM_SSH_PASS}
+     sleep    3s
+     Write    ${\n}
+     ${out1}=    Read Until    ${ICM_Prompt}
+     sleep    2s
+     Write   set domain-name ${name}
+     Write    ${\n}
+     Write    ${\n}
+     ${cmdoutput}=    Read Until    ${ICM_Prompt}
+     Close Connection
+     Should Contain    ${cmdoutput}    ${name}
+
+ Get ICM IPv6 address
+     [Documentation]  Getting ICM ipv6 address from get 
+     [Arguments]     ${icm_input}
+     ${ICM_out} =  Get Interconnect    ${icm_input}
+     ${ip_list} =  Get From Dictionary   ${ICM_out}   ipAddressList
+     ${ipv6_dict} =  Get From List  ${ip_list}  0
+     ${ipv6addr} =  Get From Dictionary   ${ipv6_dict}  ipAddress
+     [Return]    ${ipv6addr}
+
+ Get IC
+    [Documentation]  Doing get on ICM
+    [Arguments]                   ${ICM_NAME}
+    ${resp} =   fusion api get interconnect
+    Log           ${resp}
+    ${ics} =     Get From Dictionary     ${resp}    members
+    ${l} =      Get Length  ${ics}
+    :FOR  ${x}  IN RANGE    0     ${l}
+    \    ${ic} =     Get From List   ${ics}    ${x}
+    \    Exit For Loop If     '${ic['name']}' == '${ICM_NAME}'
+    [Return]    ${ic}
+
+*** Test Cases ***
+Login
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+
+
+Verification of hostname after DDImage
+   Verify ICM hostname    ${ICM}    ${old_hostname}
+
+
+New Hostname Verification
+    ${ipv6_addr}=  Get ICM IPv6 address  ${ICM}
+    Log to console and logfile      \n Setting Hostname to fvtuser
+    ${var_host}=  Set Variable   fvtuser
+    Set HostName from ICM CLI   ${ipv6_addr}   ${var_host}
+    Log to console and logfile      \n Setting Domain name to in.rdlabs.hpecorp.net
+    ${var_domain}=  Set Variable   in.rdlabs.hpecorp.net
+    Set DomainName from ICM CLI   ${ipv6_addr}   ${var_domain}
+    sleep  10s
+    Verify ICM hostname    ${ICM}    ${new_hostname}
+
+Deleting Hostname and verifying FRU
+     ${ipv6_addr}=  Get ICM IPv6 address  ${ICM}
+
+     Log to console and logfile      \n Setting Hostname to ""
+     ${name}=  Set Variable   ""
+     Open Connection     ${ipv6_addr}
+     Login               ${ICM_SSH_USER}     ${ICM_SSH_PASS}
+     sleep    3s
+     Write    ${\n}
+     ${out1}=    Read Until    ${ICM_Prompt}
+     sleep    2s
+     Write   set host-name ${name}
+     Write    ${\n}
+     Write    ${\n}
+     ${cmdoutput}=    Read Until    ${ICM_Prompt}
+     Close Connection
+     Log to console and logfile      \n ${cmdoutput}
+
+     Log to console and logfile      \n Setting Domain name to ""
+     Open Connection     ${ipv6_addr}
+     Login               ${ICM_SSH_USER}     ${ICM_SSH_PASS}
+     sleep    3s
+     Write    ${\n}
+     ${out1}=    Read Until    ${ICM_Prompt}
+     sleep    2s
+     Write   set domain-name ${name}
+     Write    ${\n}
+     Write    ${\n}
+     ${cmdoutput}=    Read Until    ${ICM_Prompt}
+     Close Connection
+     Log to console and logfile      \n ${cmdoutput}
+     Sleep  5s
+
+    Log to console and logfile      \n Removing Interconnect ${ICM}
+    Efuse ICM  ${ICM}  EFuseOn
+    Sleep  2m
+    Log to console and logfile      \n Inserting Interconnect ${ICM}
+    Efuse ICM  ${ICM}  EFuseOff
+    Sleep  5m
+
+    Log to console and logfile      \n Reading FRU data
+    ${out}=  Getting ICM Data from FRU    ${ICM}
+    ${out1}=  json.loads  ${out}
+    ${temp1}=  Get From Dictionary    ${out1}    Parsed
+    ${temp2}=  Get From Dictionary    ${temp1}    IcmInfo
+    ${hostname_fru}=  Get From Dictionary    ${temp2}    DnsName
+    Log to console and logfile      \n Checking if ICM hostname is ${hostname_fru}
+    Verify ICM hostname    ${ICM}    ${hostname_fru}
+
+Writing New Hostname
+    ${ipv6_addr}=  Get ICM IPv6 address  ${ICM}
+    Log to console and logfile      \n Setting Hostname to fvtuser
+    ${var_host}=  Set Variable   fvtuser
+    Set HostName from ICM CLI   ${ipv6_addr}   ${var_host}
+    Log to console and logfile      \n Setting Domain name to in.rdlabs.hpecorp.net
+    ${var_domain}=  Set Variable   in.rdlabs.hpecorp.net
+    Set DomainName from ICM CLI   ${ipv6_addr}   ${var_domain}
+    sleep  10s
+    Verify ICM hostname    ${ICM}    ${new_hostname}
+
+Remove and Insert to verify CANMIC
+    Verify ICM hostname    ${ICM}    ${new_hostname}
+    Log to console and logfile      \n Removing Interconnect ${ICM}
+    Efuse ICM  ${ICM}  EFuseOn
+    Sleep  2m
+    Log to console and logfile      \n Inserting Interconnect ${ICM}
+    Efuse ICM  ${ICM}  EFuseOff
+    Sleep  5m
+    Verify ICM hostname    ${ICM}    ${new_hostname}
+
+Power cycle and verify hostname
+    Verify ICM hostname    ${ICM}    ${new_hostname}
+    Log to console and logfile      \n Powering Off ${ICM}
+    ${Unmanaged_IC} =    Create Dictionary    name=${ICM}
+    Patch Interconnect  ${Unmanaged_IC}  op=replace  path=/powerState  value=Off  timeout=60  interval=5
+    Sleep   5m
+    Log to console and logfile      \n Checking ICM Power State after Power Off
+    ${ic_resp} =     Get IC    ${ICM}
+    ${ic_powerState} =     Get From IC    ${ic_resp}   powerState
+    Should Be Equal  ${ic_powerState}    Off
+    Log to console and logfile      \n Powering On ${ICM}
+    Patch Interconnect  ${Unmanaged_IC}  op=replace  path=/powerState  value=On  timeout=60  interval=5
+    Sleep  5m
+    Verify ICM hostname    ${ICM}    ${new_hostname}
+
+ICM reset and verify hostname
+    Verify ICM hostname    ${ICM}    ${new_hostname}
+    Log to console and logfile      \nResetting Interconnect ${ICM}
+    ${Unmanaged_IC} =    Create Dictionary    name=${ICM}
+    Patch Interconnect  ${Unmanaged_IC}  op=replace  path=/deviceResetState  value=Reset  timeout=60  interval=5
+    Sleep  5m
+    Verify ICM hostname    ${ICM}    ${new_hostname}
+
+Testing hostname with special characters
+    ${ipv6_addr}=  Get ICM IPv6 address  ${ICM}
+    Log to console and logfile      \n Setting Hostname to infra_user^(12iso*help)
+    ${var_host}=  Set Variable   infra_user^(12iso*help)
+    Set HostName from ICM CLI   ${ipv6_addr}   ${var_host}
+    Log to console and logfile      \n Setting Domain name to @ind.hp.com
+    ${var_domain}=  Set Variable   @ind.hp.com
+    Set DomainName from ICM CLI   ${ipv6_addr}   ${var_domain}
+    sleep  10s
+    ${hn}=  Set Variable   infra_user^(12iso*help).@ind.hp.com
+    Verify ICM hostname    ${ICM}    ${hn}
+
+Restoring old hostname
+    ${ipv6_addr}=  Get ICM IPv6 address  ${ICM}
+    Log to console and logfile      \n Setting Hostname to testuser
+    ${var_host}=  Set Variable   testuser
+    Set HostName from ICM CLI   ${ipv6_addr}   ${var_host}
+    Log to console and logfile      \n Setting Domain name to ind.hp.com
+    ${var_domain}=  Set Variable   ind.hp.com
+    Set DomainName from ICM CLI   ${ipv6_addr}   ${var_domain}
+    sleep  10s
+    Verify ICM hostname    ${ICM}    ${old_hostname}

@@ -1,0 +1,783 @@
+*** Settings ***
+Documentation      F118 UI Test Case
+Resource           F118-OVAConfig.txt
+Force Tags         Buildup
+Suite Setup         Load Test Data and Open Browser
+Suite Teardown      Logout and Close All Browsers
+Library             FusionLibrary
+Library             RoboGalaxyLibrary
+Library            ServerOperations
+Library            Collections
+Library            SSHLibrary
+Library            OperatingSystem
+Library            Dialogs
+Library            String
+Library            Process
+Library            BuiltIn
+Variables                 data_variables.py
+Resource            ../../../../resource/fusion_api_all_resource_files.txt
+
+*** Variables ***
+${validate}    fcClass2RxFrames 0
+module_file_path = "${CURDIR}\\PerformIO.py"
+module_file_path1 = "${CURDIR}\\GetDisk.py"
+module_file_path2 = "${CURDIR}\\FetchIO.py"
+${APPLIANCE_IP}    15.245.131.132
+${ICM_1}    CN7545061V, interconnect 3
+${ICM_2}    CN7545085D, interconnect 6
+${State_Maintenance}    Maintenance
+${State_Configured}    Configured
+
+*** Test Cases ***
+Open Browser and Login
+    Set Log Level    TRACE
+    Log Variables
+
+Step : 1 Log into Fusion as Administrator
+
+    ${user} =    Get Data By Property  ${TestData.users}  name  Administrator
+    log to console  \n the value in users:${user[0].name}
+    Fusion UI Login to Appliance   ${user[0].name}
+
+Initial cleanup
+    Fusion UI Power Off All Servers
+    Fusion UI Delete Server Profile    @{TestData.Profiles}
+    Fusion UI Delete All Appliance Server Profiles
+    Fusion UI Delete Logical Enclosure    @{TestData.le_Tbird}
+    Fusion UI Remove All Enclosure Groups
+    Fusion UI Remove All Logical Interconnect Groups
+    Fusion UI Delete All Appliance Networks
+
+Step : 2 Creating Networks
+    Fusion UI Create Ethernet Network   @{TestData.Ethernet_Networks}
+    Fusion UI Create FC Network   @{TestData.fcnetworks}
+
+Step 3 : Create LIG
+    ${Return}   Fusion UI Create Tbird Logical Interconnect Group       @{TestData.ligs_Tbird}
+    Run Keyword If  '${Return}' == 'True'   Log to console  \nLIG is Created Successfully     ELSE    Fail
+    Log to Console  Test Step - 3 Completed
+
+Step 4 : Edit LIG and Create Uplink sets
+    ${Return}    Fusion UI Edit Logical Interconnect Group Tbird       @{TestData.ligs_Tbird_adduplinkset}
+    Run Keyword If  '${Return}' == 'True'   Log to console  \nSuccessfully added the uplinksets     ELSE    Fail
+    Log to Console  Test Step - 4 Completed
+
+Step 5 : Create EG and LE
+    ${Return}    Fusion UI Create TBird Enclosure Group    @{TestData.encgroups_Tbird}
+    Run Keyword If  '${Return}' == 'True'   Log to console  \nSuccessfully created EG     ELSE    Fail
+    ${Return}    Fusion UI Create Logical Enclosure      @{TestData.le_Tbird}
+    Run Keyword If  '${Return}' == 'True'   Log to console  \nSuccessfully created LE     ELSE    Fail
+    Log to Console  Test Step - 5 Completed
+
+Step 6 : Server profile
+    Fusion UI Power Off All Servers
+    ${status}=  Fusion UI create Server Profile  @{TestData.Profiles}
+    Run Keyword If  '${status}' == 'True'   Log to console  \nSuccessfully created server profiles     ELSE    Fail
+    ${Status}=    fusion_ui_power_on_server_profile     @{TestData.Profiles}
+    Log to Console   Server profile power on status: ${Status}
+    :For    ${i}    IN Range    0    ${ilo_details}
+    \    Log to Console    \nPinging the server to check the server state
+    \    Wait For Appliance To Become Pingable    ${server_ip_static}    ${os_type}
+    Log to Console  Test Step - 6 Completed
+##################################################################################################################################
+Step 7 : Disable Enable port
+   ####Discovering Lun Enc1_bay1####
+   ${server_ip}=    Get Server Ip    ${ilo_details[0]}    ${server_details1[0]}
+   Set To Dictionary    ${server_details1[0]}    linux_ip   ${server_ip}
+   ${lun_disk} =        discover_lun_linux      ${server_details1[0]}    ${lsscsi_cmd}
+   ${lun_disk_count} =         Get Length      ${lun_disk}
+   Run keyword If    '${lun_disk_count}' == '6'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+   Log to Console    \nPerforming write to lun
+   :For    ${i}    IN Range    0    ${lun_disk_count}
+   \    ${dd_cmd}    Replace String    ${dd_cmd}    lun_disk    ${lun_disk[${i}]}
+   \    ${Return}    ${Return2}   write_to_lun      ${server_details1[0]}    ${dd_cmd}
+   \    Should Contain Match    ${Return2}    regexp=.*bytes.*copied
+
+    #####Discovering Lun in Enc1_bay10####
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[1]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '8'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+    ${cmd}    ${out_file}    ${msg} =       executes        ${linux_details}    ${ilo_details[1]}   ${server_details1[1]}   ${module_file_path} "${diskspd_cmd_60s}"
+    Run keyword If    '${msg}' == 'PASS'     Log to console  \nSucccessfully started IO     ELSE    Fail
+    Log to Console    \nVerifying IO traffic\n
+    ${cmd}  ${exeout}   ${msg} =        ioresults       ${linux_details}    ${ilo_details[1]}   ${server_details1[1]}   ${module_file_path2}    "${out_file}"
+    Run keyword unless  '${msg}'== 'PASS'   Fail    "Unable to Finish the IO Traffic"   Log To Console   \nThe IO Traffic Details are as follows:\n
+    Log to Console   \nIO traffic Success!!\nCommand--${cmd}\nOutput--${exeout}\n
+
+    #####Discovering Lun Enc2_bay4####
+    ${server_ip}=    Get Server Ip    ${ilo_details[2]}    ${server_details1[0]}
+    Set To Dictionary    ${server_details1[0]}    linux_ip   ${server_ip}
+    ${lun_disk} =       discover_lun_linux      ${server_details1[0]}    ${lsscsi_cmd}
+    ${lun_disk_count} =         Get Length      ${lun_disk}
+    Run keyword If    '${lun_disk_count}' == '8'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+    Log to Console    \nPerforming write to lun
+    :For    ${i}    IN Range    0    ${lun_disk_count}
+    \    ${dd_cmd}    Replace String    ${dd_cmd}    lun_disk    ${lun_disk[${i}]}
+    \    ${Return}    ${Return2}   write_to_lun     ${server_details1[0]}    ${dd_cmd}
+    \    Should Contain Match    ${Return2}    regexp=.*bytes.*copied
+
+    #####Discovering Lun in Enc2_bay7####
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[3]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '6'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+    ${cmd}    ${out_file}    ${msg} =       executes        ${linux_details}    ${ilo_details[3]}   ${server_details1[1]}   ${module_file_path} "${diskspd_cmd_60s}"
+    Run keyword If    '${msg}' == 'PASS'     Log to console  \nSucccessfully started IO     ELSE    Fail
+
+    #####Disablig the uplink port and verifying the LUN#####
+    fusion_ui_edit_interconnect    @{TestData.interconnects_disable}
+    Wait Until Keyword Succeeds    120 s   10 s    Verify Interconnect State   ${ICM_1}    ${State_Configured}
+    Wait Until Keyword Succeeds    120 s   10 s    Verify Interconnect State   ${ICM_2}    ${State_Configured}
+
+    ####Discovering Lun Enc1_bay1####
+    ${server_ip}=    Get Server Ip    ${ilo_details[0]}    ${server_details1[0]}
+    Set To Dictionary    ${server_details1[0]}    linux_ip   ${server_ip}
+    ${lun_disk} =       discover_lun_linux      ${server_details1[0]}    ${lsscsi_cmd}
+    ${lun_disk_count} =         Get Length      ${lun_disk}
+    Run keyword If    '${lun_disk_count}' == '0'     Log to console  \nSuccessfully verified the lun disks are not available     ELSE    Fail
+
+    #####Discovering Lun in Enc1_bay10####
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[1]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '0'     Log to console  \nSuccessfully verified the lun disks are not available      ELSE    Fail
+
+   #####Discovering Lun Enc2_bay4####
+    ${server_ip}=    Get Server Ip    ${ilo_details[2]}    ${server_details1[0]}
+    Set To Dictionary    ${server_details1[0]}    linux_ip   ${server_ip}
+    ${lun_disk} =       discover_lun_linux      ${server_details1[0]}    ${lsscsi_cmd}
+    ${lun_disk_count} =         Get Length      ${lun_disk}
+    Run keyword If    '${lun_disk_count}' == '0'     Log to console  \nSuccessfully verified the lun disks are not available      ELSE    Fail
+
+    #####Discovering Lun in Enc2_bay7####
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[3]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '0'     Log to console  \nSuccessfully verified the lun disks are not available      ELSE    Fail
+
+    ####Enabling the port and checking the LUN
+    fusion_ui_edit_interconnect    @{TestData.interconnects_enable}
+    Wait Until Keyword Succeeds    120 s   10 s    Verify Interconnect State   ${ICM_1}    ${State_Configured}
+    Wait Until Keyword Succeeds    120 s   10 s    Verify Interconnect State   ${ICM_2}    ${State_Configured}
+
+    ####Discovering Lun Enc1_bay1####
+    ${server_ip}=    Get Server Ip    ${ilo_details[0]}    ${server_details1[0]}
+    Set To Dictionary    ${server_details1[0]}    linux_ip   ${server_ip}
+    ${lun_disk} =       discover_lun_linux      ${server_details1[0]}    ${lsscsi_cmd}
+    ${lun_disk_count} =         Get Length      ${lun_disk}
+    Run keyword If    '${lun_disk_count}' == '6'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+    Log to Console    \nPerforming write to lun
+    :For    ${i}    IN Range    0    ${lun_disk_count}
+    \    ${dd_cmd}    Replace String    ${dd_cmd}    lun_disk    ${lun_disk[${i}]}
+    \    ${Return}    ${Return2}   write_to_lun     ${server_details1[0]}    ${dd_cmd}
+    \    Should Contain Match    ${Return2}    regexp=.*bytes.*copied
+
+    #####Discovering Lun in Enc1_bay10####
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[1]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '8'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+    ${cmd}    ${out_file}    ${msg} =       executes        ${linux_details}    ${ilo_details[1]}   ${server_details1[1]}   ${module_file_path} "${diskspd_cmd_60s}"
+    Run keyword If    '${msg}' == 'PASS'     Log to console  \nSucccessfully started IO     ELSE    Fail
+
+    Log to Console    \nVerifying IO traffic\n
+    ${cmd}  ${exeout}   ${msg} =        ioresults       ${linux_details}    ${ilo_details[1]}   ${server_details1[1]}   ${module_file_path2}    "${out_file}"
+    Run keyword unless  '${msg}'== 'PASS'   Fail    "Unable to Finish the IO Traffic"   Log To Console   \nThe IO Traffic Details are as follows:\n
+    Log to Console   \nIO traffic Success!!\nCommand--${cmd}\nOutput--${exeout}\n
+
+    #####Discovering Lun Enc2_bay4####
+    ${server_ip}=    Get Server Ip    ${ilo_details[2]}    ${server_details1[0]}
+    Set To Dictionary    ${server_details1[0]}    linux_ip   ${server_ip}
+    ${lun_disk} =       discover_lun_linux      ${server_details1[0]}    ${lsscsi_cmd}
+    ${lun_disk_count} =         Get Length      ${lun_disk}
+    Run keyword If    '${lun_disk_count}' == '8'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+    Log to Console    \nPerforming write to lun
+    :For    ${i}    IN Range    0    ${lun_disk_count}
+    \    ${dd_cmd}    Replace String    ${dd_cmd}    lun_disk    ${lun_disk[${i}]}
+    \    ${Return}    ${Return2}   write_to_lun     ${server_details1[0]}    ${dd_cmd}
+    \    Should Contain Match    ${Return2}    regexp=.*bytes.*copied
+
+    #####Discovering Lun in Enc2_bay7####
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[3]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '6'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+    ${cmd}    ${out_file}    ${msg} =       executes        ${linux_details}    ${ilo_details[3]}   ${server_details1[1]}   ${module_file_path} "${diskspd_cmd_60s}"
+    Run keyword If    '${msg}' == 'PASS'     Log to console  \nSucccessfully started IO     ELSE    Fail
+    Log to Console    \nVerifying IO traffic\n
+    ${cmd}  ${exeout}   ${msg} =        ioresults       ${linux_details}    ${ilo_details[3]}   ${server_details1[1]}   ${module_file_path2}    "${out_file}"
+    Run keyword unless  '${msg}'== 'PASS'   Fail    "Unable to Finish the IO Traffic"   Log To Console   \nThe IO Traffic Details are as follows:\n
+    Log to Console   \nIO traffic Success!!\nCommand--${cmd}\nOutput--${exeout}\n
+#########################################################################################################################################
+Step 8 : FA Connections - Remove/Re-add Networks
+    ${Return}    Fusion UI Delete FC Network   @{TestData.fcnetworks}
+    Run keyword If    '${Return}' == 'True'     Log to console  \nSuccessfully Deleted the FC netoworks     ELSE    Fail
+    #verify error in profile page
+    ${len}    Get Length    ${TestData.Profiles_conn_error}
+    :For    ${i}    IN Range    0    ${len}
+    \    ${alert_msg}    fusion_ui_get_server_profile_error_message    ${TestData.Profiles_conn_error[${i}].name}
+    \    Log to Console    \nalert msg is ${alert_msg}
+    \    Should Contain    ${alert_msg}    ${TestData.Profiles_conn_error[${i}].error_msg}
+    #verify interconnect error
+    ${len}    Get Length    ${TestData.interconnect_error_details}
+    :For    ${i}    IN Range    0    ${len}
+    \    ${alert_msg}    fusion_ui_get_interconnect_error_message    ${TestData.interconnect_error_details[${i}].name}
+    \    Log to Console    \nalert msg is ${alert_msg}
+    \    Should Contain    ${alert_msg}    ${TestData.interconnect_error_details[${i}].error_msg}
+
+    ####Discovering Lun Enc1_bay1####
+    ${server_ip}=    Get Server Ip    ${ilo_details[0]}    ${server_details1[0]}
+    Set To Dictionary    ${server_details1[0]}    linux_ip   ${server_ip}
+    ${lun_disk} =       discover_lun_linux      ${server_details1[0]}    ${lsscsi_cmd}
+    ${lun_disk_count} =         Get Length      ${lun_disk}
+    Run keyword If    '${lun_disk_count}' == '0'     Log to console  \nSuccessfully verified the lun disks are not available     ELSE    Fail
+
+    #####Discovering Lun in Enc1_bay10####
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[1]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '0'     Log to console  \nSuccessfully verified the lun disks are not available      ELSE    Fail
+
+   #####Discovering Lun Enc2_bay4####
+    ${server_ip}=    Get Server Ip    ${ilo_details[2]}    ${server_details1[0]}
+    Set To Dictionary    ${server_details1[0]}    linux_ip   ${server_ip}
+    ${lun_disk} =       discover_lun_linux      ${server_details1[0]}    ${lsscsi_cmd}
+    ${lun_disk_count} =         Get Length      ${lun_disk}
+    Run keyword If    '${lun_disk_count}' == '0'     Log to console  \nSuccessfully verified the lun disks are not available      ELSE    Fail
+
+    #####Discovering Lun in Enc2_bay7####
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[3]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '0'     Log to console  \nSuccessfully verified the lun disks are not available      ELSE    Fail
+
+    Fusion UI Create FC Network   @{TestData.fcnetworks}
+    fusion_ui_edit_logical_interconnect_group_tbird    @{TestData.ligs_Tbird_addnet}
+    ${Return}    fusion_ui_update_logical_interconnect_from_group    @{TestData.LI_update}
+    Wait Until Keyword Succeeds    120 s   10 s    Verify Interconnect State   ${ICM_1}    ${State_Configured}
+    Wait Until Keyword Succeeds    120 s   10 s    Verify Interconnect State   ${ICM_2}    ${State_Configured}
+    Run Keyword If  '${Return}' == 'True'   Log to console  \nUpdate from group is successful     ELSE    Fail
+    ${len}    Get Length    ${TestData.Profiles_delete}
+    :For    ${i}    IN Range    0    ${len}
+    \    fusion_ui_power_off_server_profile    ${TestData.Profiles_add[${i}]}
+    \    fusion_ui_edit_server_profile    ${TestData.Profiles_add[${i}]}
+    \    fusion_ui_power_on_server_profile    ${TestData.Profiles_add[${i}]}
+    :For    ${i}    IN Range    0    ${ilo_details}
+    \    Log to Console    \nPinging the server to check the server state
+    \    Wait For Appliance To Become Pingable    ${server_ip_static}    ${os_type}
+    Log to Console    \nCheckin lun availability after adding the connection
+    ####Discovering Lun Enc1_bay1####
+    ${server_ip}=    Get Server Ip    ${ilo_details[0]}    ${server_details1[0]}
+    Set To Dictionary    ${server_details1[0]}    linux_ip   ${server_ip}
+    ${lun_disk} =       discover_lun_linux      ${server_details1[0]}    ${lsscsi_cmd}
+    ${lun_disk_count} =         Get Length      ${lun_disk}
+    Run keyword If    '${lun_disk_count}' == '6'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+
+    #####Discovering Lun in Enc1_bay10####
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[1]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '8'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+
+    #####Discovering Lun Enc2_bay4####
+    ${server_ip}=    Get Server Ip    ${ilo_details[2]}    ${server_details1[0]}
+    Set To Dictionary    ${server_details1[0]}    linux_ip   ${server_ip}
+    ${lun_disk} =       discover_lun_linux      ${server_details1[0]}    ${lsscsi_cmd}
+    ${lun_disk_count} =         Get Length      ${lun_disk}
+    Run keyword If    '${lun_disk_count}' == '8'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+
+    #####Discovering Lun in Enc2_bay7####
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[3]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '6'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+###############################################################################################################################################
+Step 9 : Remove / Add Uplint set
+    fusion_ui_edit_logical_interconnect_group_tbird    @{TestData.ligs_Tbird_remove_uplinkset}
+    ${Return}    fusion_ui_update_logical_interconnect_from_group    @{TestData.LI_update}
+    Run Keyword If  '${Return}' == 'True'   Log to console  \nUpdate from group is successful    ELSE    Fail
+    Wait Until Keyword Succeeds    120 s   10 s    Verify Interconnect State   ${ICM_1}    ${State_Configured}
+    Wait Until Keyword Succeeds    120 s   10 s    Verify Interconnect State   ${ICM_2}    ${State_Configured}
+    #verify error in profile page
+    ${len}    Get Length    ${TestData.Profiles_conn_error2}
+    :For    ${i}    IN Range    0    ${len}
+    \    ${alert_msg}    fusion_ui_get_server_profile_error_message    ${TestData.Profiles_conn_error2[${i}].name}
+    \    Log to Console    \nslert msg is ${alert_msg}
+    \    Should Contain    ${alert_msg}    ${TestData.Profiles_conn_error2[${i}].error_msg}
+    ####Discovering Lun Enc1_bay1####
+    ${server_ip}=    Get Server Ip    ${ilo_details[0]}    ${server_details1[0]}
+    Set To Dictionary    ${server_details1[0]}    linux_ip   ${server_ip}
+    ${lun_disk} =       discover_lun_linux      ${server_details1[0]}    ${lsscsi_cmd}
+    ${lun_disk_count} =         Get Length      ${lun_disk}
+    Run keyword If    '${lun_disk_count}' == '0'     Log to console  \nSuccessfully verified the lun disks are not available     ELSE    Fail
+
+    #####Discovering Lun in Enc1_bay10####
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[1]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '0'     Log to console  \nSuccessfully verified the lun disks are not available      ELSE    Fail
+
+   #####Discovering Lun Enc2_bay4####
+    ${server_ip}=    Get Server Ip    ${ilo_details[2]}    ${server_details1[0]}
+    Set To Dictionary    ${server_details1[0]}    linux_ip   ${server_ip}
+    ${lun_disk} =       discover_lun_linux      ${server_details1[0]}    ${lsscsi_cmd}
+    ${lun_disk_count} =         Get Length      ${lun_disk}
+    Run keyword If    '${lun_disk_count}' == '0'     Log to console  \nSuccessfully verified the lun disks are not available      ELSE    Fail
+
+    #####Discovering Lun in Enc2_bay7####
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[3]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '0'     Log to console  \nSuccessfully verified the lun disks are not available      ELSE    Fail
+
+    fusion_ui_edit_logical_interconnect_group_tbird    @{TestData.ligs_Tbird_add_uplinks}
+    ${Return}    fusion_ui_update_logical_interconnect_from_group    @{TestData.LI_update}
+    Run Keyword If  '${Return}' == 'True'   Log to console  \nUpdate from group is successful    ELSE    Fail
+    Wait Until Keyword Succeeds    600 s   10 s    Verify Interconnect State   ${ICM_1}    ${State_Configured}
+    Wait Until Keyword Succeeds    600 s   10 s    Verify Interconnect State   ${ICM_2}    ${State_Configured}
+    Log to Console    \nVerifying LUN after adding uplinkset
+
+    ####Discovering Lun Enc1_bay1####
+    ${server_ip}=    Get Server Ip    ${ilo_details[0]}    ${server_details1[0]}
+    Set To Dictionary    ${server_details1[0]}    linux_ip   ${server_ip}
+    ${lun_disk} =       discover_lun_linux      ${server_details1[0]}    ${lsscsi_cmd}
+    ${lun_disk_count} =         Get Length      ${lun_disk}
+    Run keyword If    '${lun_disk_count}' == '6'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+
+    #####Discovering Lun in Enc1_bay10####
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[1]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '8'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+
+    #####Discovering Lun Enc2_bay4####
+    ${server_ip}=    Get Server Ip    ${ilo_details[2]}    ${server_details1[0]}
+    Set To Dictionary    ${server_details1[0]}    linux_ip   ${server_ip}
+    ${lun_disk} =       discover_lun_linux      ${server_details1[0]}    ${lsscsi_cmd}
+    ${lun_disk_count} =         Get Length      ${lun_disk}
+    Run keyword If    '${lun_disk_count}' == '8'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+
+    #####Discovering Lun in Enc2_bay7####
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[3]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '6'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+
+#############################################################################################################################################
+Step 10:Manual Login Re-distribution Not Supported on Potash
+    #Verify login in LI
+    ${len}    Get Length    ${TestData.logical_interconnect_login}
+    :FOR    ${i}    IN RANGE    0    ${len}
+    \    ${resp}    fusion_ui_get_logical_interconnect_uplinkset_ports_info    ${TestData.logical_interconnect_login[${i}]}
+    \    ${x}    Get Variable Value   ${TestData.logical_interconnect_login[${i}]}
+    \    ${string}    Convert To String    ${x}
+    \    ${match}   ${login}    Should Match Regexp    ${string}    initial_login:\\s+(\\d+)
+    \    List Should Contain Value    ${resp[0]}    ${login}
+    ###Verify NPIV in SAN Switch
+    ${Return}    Get FC Switch Details    ${san_switch_details}    ${switch_cmd[0]}
+    ${string}    Convert To String    ${Return}
+    ${Return}    Verify NPIV In San Switch    ${string}    ${port_list['npiv_port']}    ${login_dist[0]}
+    Run keyword If    '${Return}' == 'True'     Log to console  \nSuccessfully verified NPIV login     ELSE    Fail
+
+    #####Disablig the uplink port and verifying the LUN#####
+    fusion_ui_edit_interconnect    @{TestData.interconnects_disable1}
+    Wait Until Keyword Succeeds    300 s   10 s    Verify Interconnect State   ${ICM_1}    ${State_Configured}
+    Wait Until Keyword Succeeds    300 s   10 s    Verify Interconnect State   ${ICM_2}    ${State_Configured}
+    #Verify login in LI after port disable
+    ${len}    Get Length    ${TestData.logical_interconnect_login}
+    :FOR    ${i}    IN RANGE    0    ${len}
+    \    ${resp}    fusion_ui_get_logical_interconnect_uplinkset_ports_info    ${TestData.logical_interconnect_login[${i}]}
+    \    ${x}    Get Variable Value   ${TestData.logical_interconnect_login[${i}]}
+    \    Log to Console    \n${x}
+    \    ${string}    Convert To String    ${x}
+    \    ${match}   ${login}    Should Match Regexp    ${string}    final_login:\\s+(\\d+)
+    \    log to console    \nget element is :${login}
+    \    List Should Contain Value    ${resp[0]}    ${login}
+    ###Verify NPIV
+    ${Return}    Get FC Switch Details    ${san_switch_details}    ${switch_cmd[0]}
+    ${string}    Convert To String    ${Return}
+    ${Return}    Verify NPIV In San Switch    ${string}    ${port_list['npiv_final']}    ${login_dist[1]}
+    Run keyword If    '${Return}' == 'True'     Log to console  \nSuccessfully verified NPIV login     ELSE    Fail
+
+    ###Editing FC network
+    ${Return}    Fusion UI Edit FC Network    @{TestData.edit_fcnetworks}
+    Run keyword If    '${Return}' == 'True'     Log to console  \nSuccessfully Edited the FC network with login distrubion as manual     ELSE    Fail
+
+    ###Enabling uplink Ports
+    fusion_ui_edit_interconnect    @{TestData.interconnects_enable}
+    Wait Until Keyword Succeeds    300 s   10 s    Verify Interconnect State   ${ICM_1}    ${State_Configured}
+    Wait Until Keyword Succeeds    300 s   10 s    Verify Interconnect State   ${ICM_2}    ${State_Configured}
+    #Verify login in LI
+    ${len}    Get Length    ${TestData.logical_interconnect_login}
+    :FOR    ${i}    IN RANGE    0    ${len}
+    \    ${resp}    fusion_ui_get_logical_interconnect_uplinkset_ports_info    ${TestData.logical_interconnect_login[${i}]}
+    \    ${x}    Get Variable Value   ${TestData.logical_interconnect_login[${i}]}
+    \    ${string}    Convert To String    ${x}
+    \    ${match}   ${login}    Should Match Regexp    ${string}    initial_login:\\s+(\\d+)
+    \    List Should Contain Value    ${resp[0]}    ${login}
+    ###Verify NPIV
+    ${Return}    Get FC Switch Details    ${san_switch_details}    ${switch_cmd[0]}
+    ${string}    Convert To String    ${Return}
+    ${Return}    Verify NPIV In San Switch    ${string}    ${port_list['npiv_port']}    ${login_dist[0]}
+    Run keyword If    '${Return}' == 'True'     Log to console  \nALR is successful     ELSE    Fail
+################################################################################################################################################
+Step 11: Verify port speed on fa connection
+    Fusion UI Edit Logical Interconnect Group Tbird       @{TestData.ligs_Tbird_edituplinkset}
+    ${Return}    fusion_ui_update_logical_interconnect_from_group    @{TestData.LI_update}
+    Run Keyword If  '${Return}' == 'True'   Log to console  \nUpdate from group is successful     ELSE    Fail
+    Wait Until Keyword Succeeds    120 s   10 s    Verify Interconnect State   ${ICM_1}    ${State_Configured}
+    Wait Until Keyword Succeeds    120 s   10 s    Verify Interconnect State   ${ICM_2}    ${State_Configured}
+    #verify port speed in LI page
+    ${len}    Get Length    ${TestData.logical_interconnect}
+    :FOR    ${i}    IN RANGE    0    ${len}
+    \    ${Resp}    fusion_ui_get_logical_interconnect_uplinkset_ports_info   ${TestData.logical_interconnect_portspeed[${i}]}
+    \    Log to Console    \n output is ${Resp}
+    \    ${x}    Get Variable Value   ${TestData.validate_portspeed[${i}]}
+    \    log to console    \nx is ${x}
+    \    ${string}    Convert To String    ${x}
+    \    ${match}   ${portspeed}    Should Match Regexp    ${string}    speed:\\s+(.*Gb/s)
+    \    log to console    \nget element is :${portspeed}
+    \    List Should Contain Value    ${Resp[0]}    ${portspeed}
+
+    #Verify port speed in Interconnect page
+    ${len}    Get Length    ${TestData.validate_portspeed}
+    :FOR    ${i}    IN RANGE    0    ${len}
+    \    ${Resp}    fusion_ui_get_tbird_interconnect_uplink_port_speed    ${TestData.interconnects_port[${i}]}
+    \    Log to Console    \n output is ${Resp}
+    \    ${x}    Get Variable Value   ${TestData.validate_portspeed[${i}]}
+    \    log to console    \nx is ${x}
+    \    ${string}    Convert To String    ${x}
+    \    ${match}   ${portspeed}    Should Match Regexp    ${string}    speed:\\s+(\\d+).*Gb/s
+    \    log to console    \nget element is :${portspeed}
+    \    List Should Contain Value    ${Resp}    ${portspeed}
+
+    #Verifying switch port speed
+    ${speed}    Create Dictionary
+    ${len}    Get Length    ${port_list['port_number']}
+    :FOR    ${i}    IN Range    0    ${len}
+    \    ${command}    Catenate    ${switch_cmd[1]}    ${port_list['port_number'][${i}]}
+    \    ${port_details}    Get FC Switch Details    ${san_switch_details}    ${command}
+    \    ${string}    Convert To String    ${port_details}
+    \    ${match}   ${output}    Should Match Regexp    ${string}    portSpeed:\\s+(.*ps)
+    \    Log to Console    \nouttt is ${output}
+    \    Set To Dictionary    ${speed}    ${port_list['port_number'][${i}]}    ${output}
+    Log to Console    \noutput_speed in data ${speed}
+    Dictionaries Should Be Equal    ${speed}    ${switch_port_speed}
+
+    ####Discovering Lun Enc1_bay1####
+    ${server_ip}=    Get Server Ip    ${ilo_details[0]}    ${server_details1[0]}
+    Set To Dictionary    ${server_details1[0]}    linux_ip   ${server_ip}
+    ${lun_disk} =       discover_lun_linux      ${server_details1[0]}    ${lsscsi_cmd}
+    ${lun_disk_count} =         Get Length      ${lun_disk}
+    Run keyword If    '${lun_disk_count}' == '6'     Log to console  \nSuccessfully verified the lun disk ${lun_disk}     ELSE    Fail
+
+    #####Discovering Lun in Enc1_bay10####
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[1]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '8'     Log to console  \nSuccessfully verified the lun disk ${lun_disk}     ELSE    Fail
+
+   #####Discovering Lun Enc2_bay4####
+    ${server_ip}=    Get Server Ip    ${ilo_details[2]}    ${server_details1[0]}
+    Set To Dictionary    ${server_details1[0]}    linux_ip   ${server_ip}
+    ${lun_disk} =       discover_lun_linux      ${server_details1[0]}    ${lsscsi_cmd}
+    ${lun_disk_count} =         Get Length      ${lun_disk}
+    Run keyword If    '${lun_disk_count}' == '8'     Log to console  \nSuccessfully verified the lun disk ${lun_disk}     ELSE    Fail
+
+    #####Discovering Lun in Enc2_bay7####
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[3]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '6'     Log to console  \nSuccessfully verified the lun disk ${lun_disk}     ELSE    Fail
+
+#####################################################################################################################
+#Step 12 : Power off / Power on scenario
+    #Power off/ Power on server and check for LUN availability
+    Fusion UI Power Off All Servers
+    ${Return}=    fusion_ui_power_on_server_profile     @{TestData.Profiles}
+    Run Keyword If  '${Return}' == 'True'   Log to console  \nServers are powered on successfully     ELSE    Fail
+    :For    ${i}    IN Range    0    ${ilo_details}
+    \    Log to Console    \nPinging the server to check the server state
+    \    Wait For Appliance To Become Pingable    ${server_ip_static}    ${os_type}
+    ####Discovering Lun Enc1_bay1####
+    ${server_ip}=    Get Server Ip    ${ilo_details[0]}    ${server_details1[0]}
+    Set To Dictionary    ${server_details1[0]}    linux_ip   ${server_ip}
+    ${lun_disk} =       discover_lun_linux      ${server_details1[0]}    ${lsscsi_cmd}
+    ${lun_disk_count} =         Get Length      ${lun_disk}
+    Run keyword If    '${lun_disk_count}' == '6'     Log to console  \nSuccessfully verified the lun disk ${lun_disk}     ELSE    Fail
+
+    #####Discovering Lun in Enc1_bay10####
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[1]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '8'     Log to console  \nSuccessfully verified the lun disk ${lun_disk}     ELSE    Fail
+
+   #####Discovering Lun Enc2_bay4####
+    ${server_ip}=    Get Server Ip    ${ilo_details[2]}    ${server_details1[0]}
+    Set To Dictionary    ${server_details1[0]}    linux_ip   ${server_ip}
+    ${lun_disk} =       discover_lun_linux      ${server_details1[0]}    ${lsscsi_cmd}
+    ${lun_disk_count} =         Get Length      ${lun_disk}
+    Run keyword If    '${lun_disk_count}' == '8'     Log to console  \nSuccessfully verified the lun disk ${lun_disk}     ELSE    Fail
+
+    #####Discovering Lun in Enc2_bay7####
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[3]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '6'     Log to console  \nSuccessfully verified the lun disk ${lun_disk}     ELSE    Fail
+
+    #Power off/ Power on Interconnects and check for LUN availability
+    Fusion UI Interconnect Power Off    @{TestData.interconnect_details}
+    Wait Until Keyword Succeeds    120 s   10 s    Verify Interconnect State   ${ICM_1}    ${State_Maintenance}
+    Wait Until Keyword Succeeds    120 s   10 s    Verify Interconnect State   ${ICM_2}    ${State_Maintenance}
+    ${Return}    Fusion Ui Interconnect Power On        @{TestData.interconnect_details}
+    Run Keyword If  '${Return}' == 'True'   Log to console  \nInterconnects are powered on successfully     ELSE    Fail
+    Wait Until Keyword Succeeds    720 s   10 s    Verify Interconnect State   ${ICM_1}    ${State_Configured}
+    Wait Until Keyword Succeeds    720 s   10 s    Verify Interconnect State   ${ICM_2}    ${State_Configured}
+
+    ####Discovering Lun Enc1_bay1####
+    ${server_ip}=    Get Server Ip    ${ilo_details[0]}    ${server_details1[0]}
+    Set To Dictionary    ${server_details1[0]}    linux_ip   ${server_ip}
+    ${lun_disk} =       discover_lun_linux      ${server_details1[0]}    ${lsscsi_cmd}
+    ${lun_disk_count} =         Get Length      ${lun_disk}
+    Run keyword If    '${lun_disk_count}' == '6'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+
+    #####Discovering Lun in Enc1_bay10####
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[1]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '8'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+
+    #####Discovering Lun Enc2_bay4####
+    ${server_ip}=    Get Server Ip    ${ilo_details[2]}    ${server_details1[0]}
+    Set To Dictionary    ${server_details1[0]}    linux_ip   ${server_ip}
+    ${lun_disk} =       discover_lun_linux      ${server_details1[0]}    ${lsscsi_cmd}
+    ${lun_disk_count} =         Get Length      ${lun_disk}
+    Run keyword If    '${lun_disk_count}' == '8'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+
+    #####Discovering Lun in Enc2_bay7####
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[3]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '6'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+########################################################################################################################
+Step 13 : Restart Appliance
+    Fusion UI Power Off All Servers
+    ${Return}    Fusion UI Restart
+    Log to Console    \nrestart apliance ${Return}
+    #Run keyword If    '${Return}' == 'True'     Log to console  \nSuccessfully restarted appliance     ELSE    Fail
+    ${user} =    Get Data By Property  ${TestData.users}  name  Administrator
+    log to console  \n the value in users:${user[0].name}
+    Fusion UI Login to Appliance   ${user[0].name}
+    Wait Until Keyword Succeeds    600 s   10 s    Verify Interconnect State   ${ICM_1}    ${State_Configured}
+    Wait Until Keyword Succeeds    600 s   10 s    Verify Interconnect State   ${ICM_2}    ${State_Configured}
+    fusion_ui_power_on_server_profile     @{TestData.Profiles}
+    :For    ${i}    IN Range    0    ${ilo_details}
+    \    Log to Console    \nPinging the server to check the server state
+    \    Wait For Appliance To Become Pingable    ${server_ip}    ${os_type}
+    ####Discovering Lun Enc1_bay1####
+    ${server_ip}=    Get Server Ip    ${ilo_details[0]}    ${server_details1[0]}
+    Set To Dictionary    ${server_details1[0]}    linux_ip   ${server_ip}
+    ${lun_disk} =       discover_lun_linux      ${server_details1[0]}    ${lsscsi_cmd}
+    ${lun_disk_count} =         Get Length      ${lun_disk}
+    Run keyword If    '${lun_disk_count}' == '6'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+
+    #####Verifying BFS####
+    ${lun_volume} =     get_lun_volume      ${linux_details}    ${ilo_details[1]}   ${BFS_server_details}   ${module_file_path1}    "${GetVolume_cmd}"
+    ${length}    Get Length   ${lun_volume}
+    :For    ${i}    IN Range    0    ${length}
+    \    ${Status}    Evaluate    ${lun_volume[${i}]['Size']}<=${volume_size}
+    \    Run Keyword If    '${Status}' == 'True'    Log to Console    \nSuccessfully verfied the BFS lun volume ${lun_volume[${i}]}
+    \    Run Keyword If    '${Status}' == 'True'    Exit For Loop
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[1]}   ${BFS_server_details}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '8'     Log to console  \nSuccessfully verified BFS and lun disk ${lun_disk}     ELSE    Fail
+
+    #####Discovering Lun Enc2_bay4####
+    ${server_ip}=    Get Server Ip    ${ilo_details[2]}    ${server_details1[0]}
+    Set To Dictionary    ${server_details1[0]}    linux_ip   ${server_ip}
+    ${lun_disk} =       discover_lun_linux      ${server_details1[0]}    ${lsscsi_cmd}
+    ${lun_disk_count} =         Get Length      ${lun_disk}
+    Run keyword If    '${lun_disk_count}' == '8'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+
+    #####Discovering Lun in Enc2_bay7####
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[3]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '6'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+
+##################################################################################################################################
+Step 14: Display ICM FC Uplink port Statistics
+    ${len}    Get Length    ${TestData.interconnects_list}
+    :For    ${x}    IN Range    0    ${len}
+    \   ${user} =    Get Data By Property  ${TestData.users}  name  Administrator
+    \   log to console  \n the value in users:${user[0].name}
+    \   Fusion UI Login to Appliance   ${user[0].name}
+    \   ${resp}    fusion_ui_get_tbird_interconnect_fc_port_statistics    ${TestData.interconnects_list[${x}]}
+    \   @{words} =  Split String    ${resp[0]}    \n
+    \   Should Contain    ${words[0]}    ${validate}
+    \   Log to console    \nThe Advanced Statistics data is present
+###############################################################################################################################################
+Step 15 : Verifying BFS
+    fusion_ui_power_off_server_profile    @{TestData.Delete_Profile}
+    Fusion UI Delete Server Profile    @{TestData.Delete_Profile}
+    ${status}=  Fusion UI create Server Profile  @{TestData.Profile_Bfs}
+    Run Keyword If  '${status}' == 'True'   Log to console  \nSuccessfully created server profiles     ELSE    Fail
+    ${Status}=    fusion_ui_power_on_server_profile     @{TestData.Profile_Bfs}
+    :For    ${i}    IN Range    0    ${ilo_details}
+    \    Log to Console    \nPinging the server to check the server state
+    \    Wait For Appliance To Become Pingable    ${server_ip_static}    ${os_type}
+    #####Verifying BFS####
+    ${lun_volume} =     get_lun_volume      ${linux_details}    ${ilo_details[1]}   ${BFS_server_details}   ${module_file_path1}    "${GetVolume_cmd}"
+    ${length}    Get Length   ${lun_volume}
+    :For    ${i}    IN Range    0    ${length}
+    \    ${Status}    Evaluate    ${lun_volume[${i}]['Size']}<=${volume_size}
+    \    Run Keyword If    '${Status}' == 'True'    Log to Console    \nSuccessfully verfied the BFS lun volume ${lun_volume[${i}]}
+    \    Run Keyword If    '${Status}' == 'True'    Exit For Loop
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[1]}   ${BFS_server_details}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '8'     Log to console  \nSuccessfully verified BFS and lun disk ${lun_disk}     ELSE    Fail
+##################################################################################################################################################
+Step 16 : Backup and Restore
+    Fusion UI Power Off All Servers
+    Log to Console    \nCreating Backup
+    Fusion UI Create Backup
+    ${user} =    Get Data By Property  ${TestData.users}  name  Administrator
+    log to console  \n the value in users:${user[0].name}
+    Fusion UI Login to Appliance   ${user[0].name}
+    fusion_ui_restore_from_backup
+    ${user} =    Get Data By Property  ${TestData.users}  name  Administrator
+    log to console  \n the value in users:${user[0].name}
+    Fusion UI Login to Appliance   ${user[0].name}
+    Wait Until Keyword Succeeds    600 s   10 s    Verify Interconnect State   ${ICM_1}    ${State_Configured}
+    Wait Until Keyword Succeeds    600 s   10 s    Verify Interconnect State   ${ICM_2}    ${State_Configured}
+    fusion_ui_power_on_server_profile     @{TestData.Profiles}
+    :For    ${i}    IN Range    0    ${ilo_details}
+    \    Log to Console    \nPinging the server to check the server state
+    \    Wait For Appliance To Become Pingable    ${server_ip_static}    ${os_type}
+
+    ####Discovering Lun Enc1_bay1####
+    ${server_ip}=    Get Server Ip    ${ilo_details[0]}    ${server_details1[0]}
+    Set To Dictionary    ${server_details1[0]}    linux_ip   ${server_ip}
+    ${lun_disk} =       discover_lun_linux      ${server_details1[0]}    ${lsscsi_cmd}
+    ${lun_disk_count} =         Get Length      ${lun_disk}
+    Run keyword If    '${lun_disk_count}' == '6'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+
+    #####Verifying BFS####
+    ${lun_volume} =     get_lun_volume      ${linux_details}    ${ilo_details[1]}   ${BFS_server_details}   ${module_file_path1}    "${GetVolume_cmd}"
+    ${length}    Get Length   ${lun_volume}
+    :For    ${i}    IN Range    0    ${length}
+    \    ${Status}    Evaluate    ${lun_volume[${i}]['Size']}<=${volume_size}
+    \    Run Keyword If    '${Status}' == 'True'    Log to Console    \nSuccessfully verfied the BFS lun volume ${lun_volume[${i}]}
+    \    Run Keyword If    '${Status}' == 'True'    Exit For Loop
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[1]}   ${BFS_server_details}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '8'     Log to console  \nSuccessfully verified BFS and lun disk ${lun_disk}     ELSE    Fail
+
+    #####Discovering Lun Enc2_bay4####
+    ${server_ip}=    Get Server Ip    ${ilo_details[2]}    ${server_details1[0]}
+    Set To Dictionary    ${server_details1[0]}    linux_ip   ${server_ip}
+    ${lun_disk} =       discover_lun_linux      ${server_details1[0]}    ${lsscsi_cmd}
+    ${lun_disk_count} =         Get Length      ${lun_disk}
+    Run keyword If    '${lun_disk_count}' == '8'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+
+    #####Discovering Lun in Enc2_bay7####
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[3]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '6'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+
+##################################################################################################################################################
+Step 17 : LIG - A side and B side - Verify Uplinks through chloride 20
+
+    Fusion UI Power Off All Servers
+    Fusion UI Delete Server Profile    @{TestData.Profiles}
+    Fusion UI Delete All Appliance Server Profiles
+    Fusion UI Delete Logical Enclosure    @{TestData.le_Tbird}
+    Fusion UI Remove All Enclosure Groups
+    Fusion UI Remove All Logical Interconnect Groups
+    Fusion UI Delete All Appliance Networks
+
+    #Creating Networks
+    Fusion UI Create Ethernet Network   @{TestData.Ethernet_Networks}
+    Fusion UI Create FC Network   @{TestData.fcnetworks}
+    #Create LIG
+    ${Return}   Fusion UI Create Tbird Logical Interconnect Group       @{TestData.ligs_Tbird_1}
+    Run Keyword If  '${Return}' == 'True'   Log to console  \nLIG is Created Successfully     ELSE    Fail
+    Log to Console  Test Step - 3 Completed
+    #Create EG and LE
+    ${Return}    Fusion UI Create TBird Enclosure Group  @{TestData.encgroups_Tbird_1}
+    Run Keyword If  '${Return}' == 'True'   Log to console  \nSuccessfully created EG     ELSE    Fail
+    ${Return}    Fusion UI Create Logical Enclosure      @{TestData.le_Tbird}
+    Run Keyword If  '${Return}' == 'True'   Log to console  \nSuccessfully created LE     ELSE    Fail
+    Log to Console  Test Step - 5 Completed
+    #Server profile
+    ${status}=  Fusion UI create Server Profile  @{TestData.Profiles_1}
+    Run Keyword If  '${status}' == 'True'   Log to console  \nSuccessfully created server profiles     ELSE    Fail
+    ${Status}=    fusion_ui_power_on_server_profile     @{TestData.Profiles}
+    Log to Console   Server profile power on status: ${Status}
+    :For    ${i}    IN Range    0    ${ilo_details}
+    \    Log to Console    \nPinging the server to check the server state
+    \    Wait For Appliance To Become Pingable    ${server_ip_static}    ${os_type}
+    Log to Console  Test Step - 6 Completed
+    ####Discovering Lun Enc1_bay1####
+    ${server_ip}=    Get Server Ip    ${ilo_details[0]}    ${server_details1[0]}
+    Set To Dictionary    ${server_details1[0]}    linux_ip   ${server_ip}
+    ${lun_disk} =       discover_lun_linux      ${server_details1[0]}    ${lsscsi_cmd}
+    ${lun_disk_count} =         Get Length      ${lun_disk}
+    Run keyword If    '${lun_disk_count}' == '4'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+
+    #####Discovering Lun in Enc1_bay10####
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[1]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '4'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+
+    #####Discovering Lun Enc2_bay4####
+    ${server_ip}=    Get Server Ip    ${ilo_details[2]}    ${server_details1[0]}
+    Set To Dictionary    ${server_details1[0]}    linux_ip   ${server_ip}
+    ${lun_disk} =       discover_lun_linux      ${server_details1[0]}    ${lsscsi_cmd}
+    ${lun_disk_count} =         Get Length      ${lun_disk}
+    Run keyword If    '${lun_disk_count}' == '4'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+
+    #####Discovering Lun in Enc2_bay7####
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[3]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '2'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+###############################################################################################################################################
+**Keywords***
+Get Server Ip
+    [Arguments]         ${ilo_details}    ${server_details1}
+    Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=20s
+    ${login}    Login               ${ilo_details['username']}     ${ilo_details['password']}
+    Read Until Prompt
+    Write     stop /system1/oemhp_VSP1
+    Read Until Prompt
+    Write     vsp
+    Sleep    5sec
+    Write    ${server_details1['username']}
+    Sleep    5sec
+    Write    ${server_details1['password']}
+    Write    ifconfig | grep Bcast
+    Sleep    60sec
+    ${stdout} =  Read
+    ${string}    Convert To String    ${stdout}
+    ${match}   ${ip}    Should Match Regexp    ${string}    addr:(\\d+.\\d+.\\d+.\\d+)
+    Close All Connections
+    [Return]    ${ip}
+
+Get FC Switch Details
+    [Arguments]         ${san_switch_details}    ${switch_cmd}
+    Open Connection     ${san_switch_details['ip']}     prompt=admin>      timeout=20s
+    ${login}    Login               ${san_switch_details['username']}     ${san_switch_details['password']}
+    Sleep    5sec
+    Write    ${switch_cmd}
+    Sleep    60sec
+    ${stdout} =  Read
+    Close All Connections
+    [Return]    ${stdout}
+
+Verify NPIV In San Switch
+    [Arguments]         ${string}    ${port_list}    ${login_dist}
+    ${var}    Create List
+    :FOR    ${port} in  @{port_list}
+    \    ${match}   ${ret}    Should Match Regexp    ${string}    (${port}\\s+${port}\\s+.*)
+    \    Append To List    ${var}    ${ret}
+    ${len}    Get Length    ${var}
+    :For    ${i}    IN Range    0    ${len}
+    \    Log to Console    \n${i}
+    \  Should Contain    ${var[${i}]}     ${login_dist}
+    [Return]    True
+
+Wait For Appliance To Become Pingable
+    [Arguments]    ${appliance}    ${os_type}    ${timeout}=1 min    ${interval}=5 s
+    Log to console and logfile    Pinging: ${appliance} ...
+    Wait Until Keyword Succeeds    ${timeout}    ${interval}    Appliance is pingable    ${appliance}    ${os_type}
+
+Appliance is pingable
+    [Arguments]    ${appliance}    ${os_type}
+    Set Log Level    TRACE
+    Run keyword if    ${os_type} == "windows"   Windows ping    ${appliance}
+    ... ELSE    Unix ping   ${appliance}
+
+Unix ping
+    [Arguments]     ${host}
+    ${Output}=    Run    ping -c 4 ${host}
+    Log to console and logfile    ${Output}
+    Should Contain    ${Output}    ttl=
+    [Return]    ${Output}
+
+Windows ping
+    [Arguments]     ${host}
+    ${Output}=    Run    ping -n 4 ${host}
+    Log to console and logfile    ${Output}
+    Should Contain    ${Output}    TTL=
+    [Return]    ${Output}
+
+Verify Interconnect State
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    [Arguments]    ${ICM_NAME}    ${POWER_STATE}
+    ${ic}    Get IC    ${ICM_NAME}
+    ${State}    Get From IC    ${ic}    state
+    Log to console and logfile        \tICM state is ${ICM_1}:${State}
+    Should Be Equal As Strings    ${State}    ${POWER_STATE}
+
+Get IC
+    [Arguments]    ${ICM_NAME}
+    ${resp}    fusion api get interconnect
+    ${ics}    Get From Dictionary    ${resp}    members
+    ${l}     Get Length    ${ics}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    ${ic}    Get From List    ${ics}    ${x}
+    \    Exit For Loop If    '${ic['name']}' == '${ICM_NAME}'
+    [Return]    ${ic}

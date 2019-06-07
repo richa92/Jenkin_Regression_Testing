@@ -1,0 +1,868 @@
+*** Settings ***
+Documentation		Feature Test: F100 - FCoE on C7000
+
+Variables 		    data_variables.py
+
+
+Suite Setup   		Run FTS and test-specific setup
+Suite Teardown		Suite Teardown   	
+
+Resource            ../../../../resource/fusion_api_all_resource_files.txt
+
+Library				Collections
+
+*** Variables ***
+${SSH_PASS}                     hpvse1
+${VM}
+
+*** Test Cases ***
+Create FCoE network using VLAN 1
+    [Tags]  1
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	${resp} = 	Fusion Api Create Fcoe Network	body=${fcoe_networks['fcoe-1']}	
+	${valDict} = 	Create Dictionary	status_code=${400}
+	...									errorCode=CRM_NETWORK_VLAN_ID_NOT_VALID_NO_RANGE
+	...									message=The VLAN ID must be between 2 and 4094.
+	Validate Response	${resp}	${valDict}	
+
+Create 257 FCoE networks (max is 256)
+    [Tags]  2
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	Create Fcoe Range	${fcoe_ranges['fcoe-range32a']}
+	Create Fcoe Range	${fcoe_ranges['fcoe-range32b']}
+	Create Fcoe Range	${fcoe_ranges['fcoe-range32c']}
+	Create Fcoe Range	${fcoe_ranges['fcoe-range32d']}
+	Create Fcoe Range	${fcoe_ranges['fcoe-range128']}
+	${resp} = 	Fusion Api Create Fcoe Network	body=${fcoe_networks['fcoe-100']}	
+	# Task is not created in this case - Wait For Task	${resp}
+	${valDict} = 	Create Dictionary	status_code=${400}
+	...									errorCode=CRM_MAX_FCOE_NETWORKS_REACHED
+	...									message=FCoE network fcoe-100 cannot be created because the maximum number of FCoE networks (256) exists.
+	Validate Response	${resp}	${valDict}	
+
+Delete 20 FCoE Networks
+    [Tags]  3
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	Delete Fcoe Range	${fcoe_ranges['fcoe-range-delete-20']}
+
+Create a new FCoE network (name+vlan doesn't already exist)
+    [Tags]  4
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	${resp} = 	Fusion Api Create Fcoe Network	body=${fcoe_networks['fcoe-100']}
+	Wait For Task	${resp}
+
+Create a new FCoE network (fcoe network with same vlan already exists, but name is different)
+    [Tags]  5
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	${resp} = 	Fusion Api Create Fcoe Network	body=${fcoe_networks['fcoe-100b']}
+	Wait For Task	${resp}
+
+Create a new FCoE network (name+vlan already exists)
+    [Tags]  6
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	${resp} = 	Fusion Api Create Fcoe Network	body=${fcoe_networks['fcoe-100b']}
+	# Task is not created in this case - Wait For Task	${resp}
+	${valDict} = 	Create Dictionary	status_code=${400}
+	...									errorCode=CRM_DUPLICATE_NETWORK_NAME
+	Validate Response	${resp}	${valDict}
+
+Create a new FCoE network without supplying a vlanId
+    [Tags]  7
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	${resp} = 	Fusion Api Create Fcoe Network	body=${fcoe_networks['no-vlanId']}
+	${valDict} = 	Create Dictionary	status_code=${400}
+	...									errorCode=CRM_MISSING_VLAN_ID_IN_NETWORK
+	Validate Response	${resp}	${valDict}
+
+Create a new FCoE network with same name as existing ETHERNET and FibreChannel network
+    [Tags]  8
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	${resp} = 	Fusion Api Create Fcoe Network	body=${fcoe_networks['network-a']}
+	#Wait For Task	${resp}
+	${valDict} = 	Create Dictionary	status_code=${400}
+	...									errorCode=CRM_DUPLICATE_NETWORK_NAME
+	Validate Response	${resp}	${valDict}
+	${resp} = 	Fusion Api Create Fcoe Network	body=${fcoe_networks['fcnetwork-a']}	
+	#Wait For Task	${resp}
+	${valDict} = 	Create Dictionary	status_code=${400}
+	...									errorCode=CRM_DUPLICATE_NETWORK_NAME
+	Validate Response	${resp}	${valDict}
+	
+Create a new FCoE network with vlanId 4095 (max is 4094)
+    [Tags]  9
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	${resp} = 	Fusion Api Create Fcoe Network	body=${fcoe_networks['fcoe-4095']}
+	${valDict} = 	Create Dictionary	status_code=${400}
+	...									errorCode=CRM_NETWORK_VLAN_ID_NOT_VALID_NO_RANGE
+	...									message=The VLAN ID must be between 2 and 4094.
+	Validate Response	${resp}	${valDict}
+
+Try to change the vlanId of an FCoE network
+    [Tags]  10
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	${net} = 	Fusion Api Get Fcoe Networks	param=?filter="'name'=='fcoe-100b'"
+	${body} = 	Get From Dictionary		${net}	members
+	Set to Dictionary 	${body[0]}	vlanId	3999
+	${resp} = 	Fusion Api Edit Fcoe Network	body=${body[0]}	uri=${body[0]['uri']}
+	${valDict} = 	Create Dictionary	status_code=${400}
+	...									errorCode=CRM_CHANGING_VLAN_ID
+	...									message=VLAN ID can NOT be changed.
+	Validate Response	${resp}	${valDict}	
+
+Try to add an FCoE network to a Network Set
+    [Tags]  11
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	${net} = 	Fusion Api Get Fcoe Networks	param=?filter="'name'=='fcoe-100'"
+	${fcoe_uri} = 		Get From Dictionary		${net['members'][0]}	uri
+	${networkUris} = 	Create List
+	Append To List		${networkUris}	${fcoe_uri}
+	Set to Dictionary 	${network_sets[0]}	networkUris	${networkUris}
+	${resp} = 	Fusion Api Create Network Set	body=${network_sets[0]}
+	${valDict} = 	Create Dictionary	status_code=${400}
+	...									errorCode=CRM_INVALID_NETWORK_URI
+	...									message=The type of the network URI passed is not valid. This call requires ethernet-networks URI. Please provide a valid ethernet-networks URI.
+	Validate Response	${resp}	${valDict}	
+
+Try to change Default Connection Template to Max BW of 21gb (20gb is max supported)
+    [Tags]  12
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	${dct} = 	Fusion Api Get Default Connection Template
+	${bw} = 	Create Dictionary		maximumBandwidth=21000	typicalBandwidth=2500
+	Set to Dictionary	${dct}		bandwidth=${bw}
+	Remove From Dictionary	${dct}	status_code    headers
+	${resp} = 	Fusion Api Update Default Connection Template	${dct}
+	${valDict} = 	Create Dictionary	status_code=${400}
+	...									errorCode=CRM_DEFAULT_INVALID_ARGUMENT
+	...									message=Updating connection-template: Invalid bandwidth: Maximum bandwidth exceeds 20 GBits/s
+	Validate Response	${resp}	${valDict}	
+	
+Try to change FCoE networks Connection Template to Max BW of 21gb (20gb is max supported)
+    [Tags]  13
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	${nets} = 	Fusion Api Get Fcoe Networks	param=?filter="'name'=='fcoe-100'"
+	${net} = 	Get From Dictionary		${nets}	members	
+	${ct} = 	Fusion Api Get Connection Templates	${net[0]['connectionTemplateUri']}
+	${bw} = 	Create Dictionary		maximumBandwidth=21000	typicalBandwidth=2500
+	Set to Dictionary	${ct}		bandwidth=${bw}
+	Remove From Dictionary	${ct}	status_code    headers
+	${resp} = 	Fusion Api Update Connection Template	${ct}	${net[0]['connectionTemplateUri']}
+	${valDict} = 	Create Dictionary	status_code=${400}
+	...									errorCode=CRM_DEFAULT_INVALID_ARGUMENT
+	...									message=Updating connection-template: Invalid bandwidth: Maximum bandwidth exceeds 20 GBits/s
+	Validate Response	${resp}	${valDict}	
+		
+Create LIG, create enclosure group and then import enclosure
+    [Tags]  14
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+    ${body} =   Build LIG body      ${ligs['BFS']}
+	Log to console and logfile	\n-Create LIG
+	${resp} = 	Fusion Api Create LIG	${body}
+	${task} =	Wait For Task	${resp} 	60s	2s
+	${liguri} = 	Get From Dictionary	${task['associatedResource']}	resourceUri
+		
+	# Update logicalInterconnectGroupUri in ${enc_group}
+	${l} = 	Get Length	${enc_group['interconnectBayMappings']}
+	:FOR 	${x}	IN RANGE	0	${l}
+	\	${liguri} = 	Get From Dictionary	${enc_group['interconnectBayMappings'][${x}]}	logicalInterconnectGroupUri
+	\   Continue For Loop If    '${liguri}' == 'None'
+	\	Set to dictionary	${enc_group['interconnectBayMappings'][${x}]}	logicalInterconnectGroupUri		${liguri}	
+
+	Log to console and logfile	\n-Create EG
+	Add Enclosure Group from variable		${enc_group}
+	Add Enclosures from variable    ${encs}
+
+Create server profile and ping blade
+    [Tags]  15
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	Power off ALL servers
+    ${profiles} =     Copy List     ${server_profiles}
+    Add Server Profiles from variable   ${profiles}
+    Power on server     ${ENC1}, bay 1
+	Log to console and logfile  	Waiting 20 minutes for server to boot...
+    Sleep   20min
+    Wait For Appliance To Become Pingable   192.169.0.75
+
+Change Bandwidth settings for an existing FCoE network that is used in an active SP
+    [Tags]  16
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	${net} = 		Fusion Api Get FCoE Networks	param=?filter="'name'=='fcoe-1002'"
+	${fcoe_uri} =   Get From Dictionary     ${net['members'][0]}    uri
+    ${ct_uri} =     Get From Dictionary     ${net['members'][0]}    connectionTemplateUri
+    ${ct} =         Fusion Api Get connection templates  uri=${ct_uri}
+    # change max bandwidth from 10000 to 8000
+    ${body} =       Create dictionary   type=connection-template
+    Set to Dictionary   ${body}     name        ${ct['name']}
+    Set to Dictionary   ${body}     bandwidth   ${ct['bandwidth']}
+    Set to Dictionary   ${body['bandwidth']}     maximumBandwidth  ${8000}
+    ${resp} =       Fusion Api Update connection template   body=${body}  uri=${ct_uri}
+    Sleep   1min
+    ${resp} =       Fusion Api Get Connections
+    # check that the bandwidth is updated in the connection
+	${l} = 	Get Length	${resp['members']}
+	:FOR	${x}	IN RANGE	0	${l}
+	\	${networkResourceUri} = 	Get From Dictionary		${resp['members'][${x}]}	networkResourceUri
+	\	${conn} =   Run Keyword If      '${networkResourceUri}' == '${fcoe_uri}'      Get From List     ${resp['members']}  ${x}
+	\   Exit For Loop If	${conn} is not ${null}
+	${max} =    Get From dictionary     ${conn['connectionBandwidth']}  maximum
+    ${result} =         Should Be Equal As Integers     ${max}      ${8000}
+    Log     Sleeping for 2 minutes while profile is in Updating status...cannot power off\remove until status = Normal
+    Sleep   2min
+
+Power Off All Servers and Remove all server profiles
+    [Tags]  17
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	Power off ALL servers
+    Remove All Server Profiles
+
+Update LIG to LIG1
+    [Tags]  18
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+    ${body} =   Build LIG body      ${ligs['lig1']}
+    # Get info from the current LIG to apply edits to
+    ${lig} = 	    Get LIG Member     BFS
+    ${lig_uri} =    Get From Dictionary     ${lig}  uri
+    ${ethernetSettings} =   Get From Dictionary   ${lig}  ethernetSettings
+	Set to dictionary	${body}     ethernetSettings    ${ethernetSettings}
+
+	${resp} = 	    Fusion Api Edit LIG	body=${body}	uri=${lig_uri}
+	${task} =       Wait for task   ${resp}     1min    3s
+	${valDict} = 	Create Dictionary	status_code=${200}
+    Validate Response	${task}	${valDict}
+
+Edit LIG and try to add a new US with 33 FCoE networks (max is 32)
+    [Tags]  19
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+    ${body} =   Build LIG body      ${ligs['lig2']}
+    # Get info from the current LIG to apply edits to
+    ${lig} = 	    Get LIG Member     ${LIG1}
+    ${ethernetSettings} =   Get From Dictionary   ${lig}  ethernetSettings
+	Set to dictionary	${body}     ethernetSettings    ${ethernetSettings}
+	${lig_uri} =    Get LIG Uri     ${LIG1}
+	${resp} = 	Fusion Api Edit LIG	    body=${body}	uri=${lig_uri}
+	${valDict} = 	Create Dictionary	taskState=Error
+	...									taskStatus=Too many FCoE networks have been specified for the uplink set.
+	${task} =       Wait for task   ${resp}     2min    3s
+#	${valDict} = 	Create Dictionary	status_code=${400}
+#	...									errorCode=CRM_EXCEEDS_MAX_ALLOWED_FCOE_NETWORKS_PER_UPLINKSET
+#	...									message=Too many FCoE networks have been specified for the uplink set.
+	Validate Response	${task}	${valDict}
+
+
+Edit LIG and try to edit a US that has 32 FCoE networks with 33 FCoE networks (max is 32)
+    [Tags]  20
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	${net} = 	Fusion Api Get Fcoe Networks	param=?filter="'name'=='fcoe-100'"
+	${uri} = 	Get From Dictionary		${net['members'][0]}	uri	
+    ${lig} = 	    Get LIG Member     ${LIG1}
+	${lig_uri} =    Get LIG Uri     ${LIG1}
+	${networkUris} = 	Get From Dictionary		${lig['uplinkSets'][0]}	networkUris
+	Append To List	${networkUris}	${uri}
+	Set To Dictionary	${lig['uplinkSets'][0]}	networkUris	${networkUris}	
+	${resp} = 	Fusion Api Edit LIG	body=${lig}	uri=${lig_uri}	
+	${task} =       Wait for task   ${resp}     2min    3s
+	${valDict} = 	Create Dictionary	taskState=Error
+	...									taskStatus=Too many FCoE networks have been specified for the uplink set.
+
+#	${valDict} = 	Create Dictionary	status_code=${400}
+#	...									errorCode=CRM_EXCEEDS_MAX_ALLOWED_FCOE_NETWORKS_PER_UPLINKSET
+#	...									message=Too many FCoE networks have been specified for the uplink set.
+	Validate Response	${task}	${valDict}
+
+Edit LIG and remove two FCoE networks from an US with 32 FCoE networks
+    [Tags]  21
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+    ${body} =   Build LIG body      ${ligs['lig2b']}
+    # Get info from the current LIG to apply edits to
+    ${lig} = 	    Get LIG Member      ${LIG1}
+	${lig_uri} =    Get LIG Uri         ${LIG1}
+    ${ethernetSettings} =   Get From Dictionary   ${lig}  ethernetSettings
+	Set to dictionary	${body}     ethernetSettings    ${ethernetSettings}
+	${resp} = 	Fusion Api Edit LIG	body=${body}	uri=${lig_uri}
+	${task} =	Wait For Task 	${resp} 	120s	2s
+
+Edit LIG and add a US with 3 FCoE networks on an IC already has a US with 30 FCoE networks (max is 32)
+    [Tags]  22
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+    ${body} =   Build LIG body      ${ligs['lig3']}
+    # Get info from the current LIG to apply edits to
+    ${lig} = 	    Get LIG Member      ${LIG1}
+	${lig_uri} =    Get LIG Uri         ${LIG1}
+    ${ethernetSettings} =   Get From Dictionary   ${lig}  ethernetSettings
+	Set to dictionary	${body}     ethernetSettings    ${ethernetSettings}
+	${resp} = 	Fusion Api Edit LIG	body=${body}	uri=${lig_uri}
+	${task} =	Wait For Task 	${resp} 	120s	2s
+	#${valDict} = 	Create Dictionary	status_code=${200}
+	#...									errorCode=CRM_EXCEEDS_MAX_ALLOWED_FCOE_NETWORKS_PER_BAY
+	#...									message=The interconnect in bay 1 has exceeded the maximum number of allowed FCoE networks.
+	${valDict} = 	Create Dictionary	taskState=Error
+	...                                 taskStatus=The interconnect in bay 1 has exceeded the maximum number of allowed FCoE networks.
+	#...									taskStatus=The interconnect in bay 1 has exceeded the maximum number of allowed FCoE and FC networks.
+	Validate Response	${task}	${valDict}
+
+Edit the LIG from the previous test, and change US for Biggs to (X1-X4), Sheppard (X1-X2), SuperShaw (X1-X4)
+    [Tags]  23
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+    ${l} =     Copy Dictionary      ${ligs['lig4']}
+    Set Test Variable    ${lig}  ${l}
+    ${body} =   Build LIG body      ${lig}
+
+    ${l2} =     Copy Dictionary      ${ligs['lig4']}
+
+
+    # Get info from the current LIG to apply edits to
+    ${lig} = 	    Get LIG Member      ${LIG1}
+	${lig_uri} =    Get LIG Uri         ${LIG1}
+    ${ethernetSettings} =   Get From Dictionary   ${lig}  ethernetSettings
+	Set to dictionary	${body}     ethernetSettings    ${ethernetSettings}
+	${resp} = 	Fusion Api Edit LIG	body=${body}	uri=${lig_uri}
+	${task} =	Wait For Task 	${resp} 	120s	2s
+
+Edit the LIG from the previous test, and add an ETHERNET network to all of the existing US
+    [Tags]  24
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+    ${lig} = 	    Get LIG Member      ${LIG1}
+	${lig_uri} =    Get LIG Uri         ${LIG1}
+	${eths} =	Fusion Api Get Ethernet Networks	param=?filter="'name'=='network-a'"
+	${uri} = 	Get From Dictionary	${eths['members'][0]}	uri	
+	Append To List 	${lig['uplinkSets'][0]['networkUris']}	${uri}				
+	${eths} =	Fusion Api Get Ethernet Networks	param=?filter="'name'=='network-b'"
+	${uri} = 	Get From Dictionary	${eths['members'][0]}	uri	
+	Append To List 	${lig['uplinkSets'][1]['networkUris']}	${uri}
+	${eths} =	Fusion Api Get Ethernet Networks	param=?filter="'name'=='network-c'"
+	${uri} = 	Get From Dictionary	${eths['members'][0]}	uri	
+	Append To List 	${lig['uplinkSets'][2]['networkUris']}	${uri}		
+	${resp} = 	Fusion Api Edit LIG	body=${lig}	uri=${lig_uri}	
+	${task} =	Wait For Task 	${resp} 	120s	2s	
+
+Edit the LIG from the previous test, and add a new ETHERNET US for Biggs to (X5-X6), FC US for Sheppard (X3-X4), and ETHERNET US SuperShaw (X5-X8)
+    [Tags]  25
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+    ${body} =   Build LIG body      ${ligs['lig5']}
+    # Get info from the current LIG to apply edits to
+    ${lig} = 	    Get LIG Member      ${LIG1}
+	${lig_uri} =    Get LIG Uri         ${LIG1}
+    ${ethernetSettings} =   Get From Dictionary   ${lig}  ethernetSettings
+	Set to dictionary	${body}     ethernetSettings    ${ethernetSettings}
+	${resp} = 	Fusion Api Edit LIG	body=${body}	uri=${lig_uri}
+	${task} =	Wait For Task 	${resp} 	120s	2s
+
+Create a new LIG with an FCoE US that spans multiple interconnects
+    [Tags]  26
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+    ${body} =   Build LIG body      ${ligs['lig6']}
+	Log to console and logfile	\n-Create LIG
+	${resp} = 	Fusion Api Create LIG	${body}
+	${task} =	Wait For Task 	${resp} 	120s	2s
+	${valDict} = 	Create Dictionary	status_code=${200}
+	#...									errorCode=CRM_LUT_FCOE_PORTS_DO_NOT_ALL_BELONG_TO_SAME_SWITCH
+	...                                 taskState=Error
+	...									taskStatus=When FCoE networks are present in an uplink set, the uplink ports must be selected from a single FCoE capable interconnect module.
+	Validate Response	${task}	${valDict}
+
+Edit the LIG from the previous tests and change a IC Bay with FCoE US,networks from a supported type to an unsupported type
+    [Tags]  27
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+    ${body} =   Build LIG body      ${ligs['lig10']}
+    # Get info from the current LIG to apply edits to
+    ${lig} = 	    Get LIG Member      ${LIG1}
+	${lig_uri} =    Get LIG Uri         ${LIG1}
+    ${ethernetSettings} =   Get From Dictionary   ${lig}  ethernetSettings
+	Set to dictionary	${body}     ethernetSettings    ${ethernetSettings}
+	${resp} = 	Fusion Api Edit LIG	body=${body}	uri=${lig_uri}
+	${task} =	Wait For Task 	${resp} 	120s	2s
+	${valDict} = 	Create Dictionary	taskState=Error
+	...									taskStatus=FCoE networks are specified for the uplink set us2, but some uplink ports do not support FCoE.
+	#${valDict} = 	Create Dictionary	status_code=${400}
+	#...									errorCode=CRM_INVALID_UPLINK_SET_PORT_FCOE
+	#...									message=FCoE networks are specified for the uplink set us2, but some uplink ports do not support FCoE.
+	Validate Response	${task}	${valDict}
+
+Create a new LIG with an FCoE US on a Bergstrom or other unsupported IC 
+    [Tags]  28
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	#Log to console and logfile	\n-BUG - errorCode and taskStatus are not being populated correctly
+    ${body} =   Build LIG body      ${ligs['lig7']}
+	${resp} = 	Fusion Api Create LIG	${body}
+	${task} =	Wait For Task 	${resp} 	120s	2s
+	${valDict} = 	Create Dictionary	taskState=Error
+	...									taskStatus=FCoE networks are specified for the uplink set unsupported-ics, but some uplink ports do not support FCoE.
+	#${valDict} = 	Create Dictionary	status_code=${400}
+	#...									errorCode=CRM_UNSUPPORTED_INTERCONNECT_TYPE_FOR_BAY
+	#...									message=Interconnect type: HP VC 8Gb 20-Port FC Module, part number: 572018-B21 is not valid for C7000 enclosure bay 1.
+	Validate Response	${task}	${valDict}
+
+	# HP VC 8Gb 20-Port FC Module
+    ${body} =   Build LIG body      ${ligs['lig8']}
+	Log to console and logfile	\n-Create LIG
+	${resp} = 	Fusion Api Create LIG	${body}
+	#${task} =	Wait For Task 	${resp} 	120s	2s
+	${valDict} = 	Create Dictionary	status_code=${400}
+	...									errorCode=CRM_UNSUPPORTED_INTERCONNECT_TYPE_FOR_BAY
+	...									message=Interconnect type: HP VC 8Gb 20-Port FC Module, part number: 572018-B21 is not valid for C7000 enclosure bay 1.
+	Validate Response	${resp}	${valDict}
+	#${valDict} = 	Create Dictionary	status_code=${200}
+	#...									errorCode=CRM_INVALID_UPLINK_SET_PORT_FCOE
+	#...                                 taskState=Error
+	#...									taskStatus=FCoE networks are specified for the uplink set unsupported-ics2, but some uplink ports do not support FCoE.
+	#Validate Response	${task}	${valDict}
+
+Create a new LIG with an US with an ETHERNET network vlanId 100 and FCoE network vlanId 100 
+    [Tags]  29
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+    ${body} =   Build LIG body      ${ligs['lig9']}
+	${resp} = 	Fusion Api Create LIG	${body}
+	${task} =	Wait For Task 	${resp} 	120s	2s
+	${valDict} = 	Create Dictionary	status_code=${200}
+	#...									errorCode=CRM_DUPLICATE_VLAN_IDS_UPLINK_SET_GROUP
+	...                                 taskState=Error
+	...									taskStatus=Duplicate VLAN IDs are not allowed in the same uplink set.
+	Validate Response	${task}	${valDict}
+
+Revert to a clean LIG for LI tests
+    [Tags]  30
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+    ${body} =   Build LIG body      ${ligs['lig4b']}
+    # Get info from the current LIG to apply edits to
+    ${lig} = 	    Get LIG Member      ${LIG1}
+	${lig_uri} =    Get LIG Uri         ${LIG1}
+    ${ethernetSettings} =   Get From Dictionary   ${lig}  ethernetSettings
+	Set to dictionary	${body}     ethernetSettings    ${ethernetSettings}
+	${resp} = 	Fusion Api Edit LIG	body=${body}	uri=${lig_uri}
+	${task} =	Wait For Task 	${resp} 	120s	2s
+	${valDict} = 	Create Dictionary	status_code=${200}
+	...                                 taskState=Completed
+	Validate Response	${task}	${valDict}
+	Perform an Update From Group
+
+Edit the LI from previous tests using Biggs (ports X1-X10), Sheppard (X1-X4) and SuperShaw (X1-X7) with 2 US with 32 FCoE networks, each on a separate interconnect
+    [Tags]  32
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	${li_uri} = 	    Get LI URI          ${ENC1}-${LIG1}
+	${enc_uri} = 	    Get Enclosure URI   ${ENC1}
+	${uplinksets} = 	Fusion Api Get Uplink Set
+	${l} = 	Get Length	${uplinksets['members']}
+	:FOR	${x}	IN RANGE	0	${l}
+	\	${us_uri} = 	Get From Dictionary	${uplinksets['members'][${x}]}	uri
+	\	${us_name} = 	Get From Dictionary	${uplinksets['members'][${x}]}	name
+	\	${us} = 		Get From Dictionary	${li_uplink_sets}	${us_name}	
+	\	${body} = 	    Build US body 	${us}	${li_uri}	${enc_uri}
+	\	${resp} = 	    Fusion Api Edit Uplink Set	body=${body}	uri=${us_uri}
+
+Edit LI and try to add a new US with 33 FCoE networks (max is 32)
+    [Tags]  33
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	${li_uri} = 	    Get LI URI      ${ENC1}-${LIG1}
+	${enc_uri} =    Get Enclosure URI   ${ENC1}
+	${us} = 		Copy Dictionary	${li_uplink_sets['us33']}
+	${body} = 		Build US body 	${us}	${li_uri}	${enc_uri}
+	${resp} = 		Fusion Api Create Uplink Set	body=${body}
+	${valDict} = 	Create Dictionary	status_code=${400}
+	...									errorCode=CRM_EXCEEDS_MAX_ALLOWED_FCOE_NETWORKS_PER_UPLINKSET
+	...									message=Too many FCoE networks have been specified for the uplink set.
+	Validate Response	${resp}	${valDict}
+
+Edit LI and try to add 1 FCoE network to an existing US that already has 32 FCoE networks
+    [Tags]  34
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	${net} = 				Fusion Api Get Fcoe Networks	param=?filter="'name'=='fcoe-100'"
+	${net_uri}= 			Get From Dictionary	${net['members'][0]}	uri
+	${uplinksets} =			Fusion Api Get Uplink Set	param=?filter="'name'=='us1'"
+	${us} = 				Get From List	${uplinksets['members']}	0
+	${us_uri} = 			Get From Dictionary	${us}	uri
+	${fcoeNetworkUris} = 	Get From Dictionary		${us}	fcoeNetworkUris
+	Append To List			${fcoeNetworkUris}	${net_uri}
+	Set To Dictionary		${us}	fcoeNetworkUris	${fcoeNetworkUris}
+	${resp} = 				Fusion Api Edit Uplink Set	body=${us}	uri=${us_uri}
+	${valDict} = 			Create Dictionary	status_code=${400}
+	...											errorCode=CRM_EXCEEDS_MAX_ALLOWED_FCOE_NETWORKS_PER_UPLINKSET
+	...											message=Too many FCoE networks have been specified for the uplink set.
+	Validate Response	${resp}	${valDict}
+
+Edit the LI and remove two FCoE networks from US that has 32
+    [Tags]  35
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	${li_uri} = 	Get LI URI   ${ENC1}-${LIG1}
+	${enc_uri} =    Get Enclosure URI   ${ENC1}
+	${us} = 		Copy Dictionary	${li_uplink_sets['us3-30']}
+	${body} = 		Build US body 	${us}	${li_uri}	${enc_uri}
+
+	${uplinksets} =			Fusion Api Get Uplink Set	param=?filter="'name'=='us3'"
+	${us} = 				Get From List	${uplinksets['members']}	0
+	${us_uri} = 			Get From Dictionary	${us}	uri
+	${resp} = 				Fusion Api Edit Uplink Set	body=${body}	uri=${us_uri}
+	${task} =               Wait For Task 	${resp} 	10 min	5s
+	${valDict} = 			Create Dictionary	status_code=${200}
+	Validate Response	${task}	${valDict}
+
+#Edit the LI from the previous test, on the IC with a US with 30 FCoE networks, create a new US on the same IC with 3 FCoE networks
+#Expected result – The update should fail: 32 networks limit per IC exceeded
+
+
+Edit the LI and remove an uplink port from US that has 30 FCoE networks
+    [Tags]  36
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	${li_uri} = 	Get LI URI   ${ENC1}-${LIG1}
+	${enc_uri} =	Get Enclosure URI   ${ENC1}
+	${us} = 		Copy Dictionary	${li_uplink_sets['us3-30-x1-x7']}
+	${body} = 		Build US body 	${us}	${li_uri}	${enc_uri}
+
+	${uplinksets} =			Fusion Api Get Uplink Set	param=?filter="'name'=='us3'"
+	${us} = 				Get From List	${uplinksets['members']}	0
+	${us_uri} = 			Get From Dictionary	${us}	uri
+	${resp} = 				Fusion Api Edit Uplink Set	body=${body}	uri=${us_uri}
+	${task} =               Wait For Task 	${resp} 	10 min	5s
+	${valDict} = 			Create Dictionary	status_code=${200}
+	Validate Response	${task}	${valDict}
+
+Edit the LI from the previous test and change US for Biggs to (X1-X4), Sheppard (X1-X2), SuperShaw (X1-X4)
+    [Tags]  37
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	${li_uri} = 	    Get LI URI   ${ENC1}-${LIG1}
+	${enc_uri} = 	    Get Enclosure URI   ${ENC1}
+
+	${uplinksets} =		Fusion Api Get Uplink Set	param=?filter="'name'=='us1'"
+	${us} = 			Get From List	${uplinksets['members']}	0
+	${us_uri} = 		Get From Dictionary	${us}	uri
+
+	${us} = 		    Copy Dictionary	${li_uplink_sets['us1-b']}
+	${body} = 		    Build US body 	${us}	${li_uri}	${enc_uri}
+	${resp} = 			Fusion Api Edit Uplink Set	body=${body}	uri=${us_uri}
+	${task} =           Wait For Task 	${resp} 	10 min	5s
+	${valDict} = 		Create Dictionary	status_code=${200}
+	Validate Response	${task}	${valDict}
+
+	${uplinksets} =		Fusion Api Get Uplink Set	param=?filter="'name'=='us2'"
+	${us} = 			Get From List	${uplinksets['members']}	0
+	${us_uri} = 		Get From Dictionary	${us}	uri
+
+	${us} = 		    Copy Dictionary	${li_uplink_sets['us2-b']}
+	${body} = 		    Build US body 	${us}	${li_uri}	${enc_uri}
+	${resp} = 			Fusion Api Edit Uplink Set	body=${body}	uri=${us_uri}
+	${task} =           Wait For Task 	${resp} 	10 min	5s
+	${valDict} = 		Create Dictionary	status_code=${200}
+	Validate Response	${task}	${valDict}
+
+	${uplinksets} =		Fusion Api Get Uplink Set	param=?filter="'name'=='us3'"
+	${us} = 			Get From List	${uplinksets['members']}	0
+	${us_uri} = 		Get From Dictionary	${us}	uri
+
+	${us} = 		    Copy Dictionary	${li_uplink_sets['us3-b']}
+	${body} = 		    Build US body 	${us}	${li_uri}	${enc_uri}
+	${resp} = 			Fusion Api Edit Uplink Set	body=${body}	uri=${us_uri}
+	${task} =           Wait For Task 	${resp} 	10 min	5s
+	${valDict} = 		Create Dictionary	status_code=${200}
+	Validate Response	${task}	${valDict}
+
+On the IC with a US with 30 FCoE networks create a new US on the same IC with 3 FCoE networks
+    [Tags]  38
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	${li_uri} = 	Get LI URI   ${ENC1}-${LIG1}
+	${enc_uri} = 	Get Enclosure URI   ${ENC1}
+	${us} = 		Copy Dictionary	${li_uplink_sets['us-3-networks']}
+	${body} = 		Build US body 	${us}	${li_uri}	${enc_uri}
+	${resp} = 		Fusion Api Create Uplink Set	body=${body}
+	${valDict} = 	Create Dictionary	status_code=${400}
+	...                                 errorCode=CRM_EXCEEDS_MAX_ALLOWED_FCOE_NETWORKS_PER_BAY
+	...                                 message=The interconnect in bay 5 has exceeded the maximum number of allowed FCoE networks.
+	#...									errorCode=CRM_EXCEEDS_MAX_ALLOWED_FCOE_AND_FC_NETWORKS_PER_BAY
+	#...									message=The interconnect in bay 5 has exceeded the maximum number of allowed FCoE and FC networks.
+	Validate Response	${resp}	${valDict}
+
+
+Edit the LI from the previous test, and add an ETHERNET networks to all of the existing US
+    [Tags]  39
+	Run Keyword and Ignore Error    Write To ciDebug Log
+    #sleep   1min
+	${net} = 				Fusion Api Get Ethernet Networks	param=?filter="'name'=='eth-102'"
+	${net_uri}= 			Get From Dictionary	${net['members'][0]}	uri
+	${uplinksets} =			Fusion Api Get Uplink Set	param=?filter="'name'=='us1'"
+	${us} = 				Get From List	${uplinksets['members']}	0
+	${us_uri} = 			Get From Dictionary	${us}	uri
+	Append To List		    ${us['networkUris']}	${net_uri}
+	${resp} = 				Fusion Api Edit Uplink Set	body=${us}	uri=${us_uri}
+	${task} =               Wait For Task 	${resp} 	10 min	5s
+	${valDict} = 			Create Dictionary	status_code=${200}
+	Validate Response	${task}	${valDict}
+
+	${net} = 				Fusion Api Get Ethernet Networks	param=?filter="'name'=='eth-101'"
+	${net_uri}= 			Get From Dictionary	${net['members'][0]}	uri
+	${uplinksets} =			Fusion Api Get Uplink Set	param=?filter="'name'=='us2'"
+	${us} = 				Get From List	${uplinksets['members']}	0
+	${us_uri} = 			Get From Dictionary	${us}	uri
+	Append To List		    ${us['networkUris']}	${net_uri}
+	${resp} = 				Fusion Api Edit Uplink Set	body=${us}	uri=${us_uri}
+	${task} =               Wait For Task 	${resp} 	10 min	5s
+	${valDict} = 			Create Dictionary	status_code=${200}
+	Validate Response	${task}	${valDict}
+
+	${net} = 				Fusion Api Get Ethernet Networks	param=?filter="'name'=='eth-100'"
+	${net_uri}= 			Get From Dictionary	${net['members'][0]}	uri
+	${uplinksets} =			Fusion Api Get Uplink Set	param=?filter="'name'=='us3'"
+	${us} = 				Get From List	${uplinksets['members']}	0
+	${us_uri} = 			Get From Dictionary	${us}	uri
+	Append To List		    ${us['networkUris']}	${net_uri}
+	${resp} = 				Fusion Api Edit Uplink Set	body=${us}	uri=${us_uri}
+	${task} =               Wait For Task 	${resp} 	10 min	5s
+	${valDict} = 			Create Dictionary	status_code=${200}
+	Validate Response	${task}	${valDict}
+
+Edit the LI from the previous test, and add a new ETHERNET US for Biggs to (X5-X6), FC US for Sheppard (X3-X4), and ETHERNET US SuperShaw (X5-X8)
+    [Tags]  40
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	${li_uri} =     Get LI URI   ${ENC1}-${LIG1}
+	${enc_uri} = 	Get Enclosure URI   ${ENC1}
+	${us} = 		Copy Dictionary	${li_uplink_sets['us-eth']}
+	${body} = 		Build US body 	${us}	${li_uri}	${enc_uri}
+	${resp} = 		Fusion Api Create Uplink Set	body=${body}
+	${task} =       Wait For Task 	${resp} 	10 min	5s
+	${valDict} = 	Create Dictionary	status_code=${200}
+	Validate Response	${task}	${valDict}
+
+Edit the LI from the previous test and create a new FCoE US that spans multiple interconnects
+    [Tags]  41
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	${li_uri} = 	Get LI URI   ${ENC1}-${LIG1}
+	${enc_uri} =    Get Enclosure URI   ${ENC1}
+	${us} = 		Copy Dictionary	${li_uplink_sets['us-spans-2-ics']}
+	${body} = 		Build US body 	${us}	${li_uri}	${enc_uri}
+	${resp} = 		Fusion Api Create Uplink Set	body=${body}
+	${valDict} = 	Create Dictionary	status_code=${400}
+	...									errorCode=CRM_LU_FCOE_PORTS_DO_NOT_ALL_BELONG_TO_SAME_SWITCH
+	...									message=When FCoE networks are present in an uplink set, the uplink ports must be selected from a single FCoE capable interconnect module.
+	Validate Response	${resp}	${valDict}
+
+Edit the LI from the previous test and create a new US with an ETHERNET network vlanId 100 and FCoE network vlanId 100
+    [Tags]  42
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	${li_uri} = 	Get LI URI   ${ENC1}-${LIG1}
+	${enc_uri} =    Get Enclosure URI   ${ENC1}
+	${us} = 		Copy Dictionary	${li_uplink_sets['us-dup-vlanId']}
+	${body} = 		Build US body 	${us}	${li_uri}	${enc_uri}
+	${resp} = 		Fusion Api Create Uplink Set	body=${body}
+	${valDict} = 	Create Dictionary	status_code=${400}
+	...									errorCode=CRM_DUPLICATE_VLAN_IDS_UPLINK_SET
+	...									message=Duplicate VLAN IDs are not allowed in the same uplink set.
+	Validate Response	${resp}	${valDict}
+
+Edit the LI and change US1 to Bay1 (X1,X2) to have Eth-102 and fcoe-1002 for BFS
+    [Tags]  43
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	${li_uri} = 	    Get LI URI   ${ENC1}-${LIG1}
+	${enc_uri} = 	    Get Enclosure URI   ${ENC1}
+	${uplinksets} =		Fusion Api Get Uplink Set	param=?filter="'name'=='us1'"
+	${us} = 			Get From List	${uplinksets['members']}	0
+	${us_uri} = 		Get From Dictionary	${us}	uri
+	${us} = 		    Copy Dictionary	${li_uplink_sets['BFS']}
+	${body} = 		    Build US body 	${us}	${li_uri}	${enc_uri}
+	${resp} = 			Fusion Api Edit Uplink Set	body=${body}	uri=${us_uri}
+	${task} =           Wait For Task 	${resp} 	10 min	5s
+	${valDict} = 		Create Dictionary	status_code=${200}
+	Validate Response	${task}	${valDict}
+
+Edit the LIG and create BFS US on Biggs Bay1 (port X2) only, update from group, create server profile, ping blade
+    [Tags]  44
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+    ${body} =   Build LIG body      ${ligs['BFS']}
+    # Get info from the current LIG to apply edits to
+    ${lig} = 	    Get LIG Member      ${LIG1}
+	${lig_uri} =    Get LIG Uri         ${LIG1}
+    ${ethernetSettings} =   Get From Dictionary   ${lig}  ethernetSettings
+	Set to dictionary	${body}     ethernetSettings    ${ethernetSettings}
+	${resp} = 	Fusion Api Edit LIG	body=${body}	uri=${lig_uri}
+	${task} =	Wait For Task 	${resp} 	120s	2s
+    # wait for LITM processing... LI name is not changing immediately...
+    Sleep   5min
+
+	Perform an Update From Group    ${LE}-${LIG2}	120 min		1 min
+	# Todo: the previous copy list for server_profiles doesn't seem to be working... dict values are being updated...
+	${profiles} =     Copy List     ${server_profiles}
+    Add Server Profiles from variable   ${profiles}
+    Power on server     ${ENC1}, bay 1
+	Log to console and logfile  	Waiting 20 minutes for server to boot...
+    Sleep   20min
+    Wait For Appliance To Become Pingable   192.169.0.75
+
+Delete an FCoE network that is used in an US but not a SP
+    [Tags]  45
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+    ${resp} =   Fusion Api Delete Fcoe network  name=fcoe-1032b
+    ${task} =   Wait For Task   ${resp}
+	${valDict} = 	Create Dictionary	status_code=${200}
+	Validate Response	${task}	${valDict}
+
+*** Keywords ***
+Perform an Update From Group
+    [Documentation]     UFG
+	[Arguments]		${li}=${LE}-${LIG1}	${timeout}=10 min 	${interval}=15s
+	${li_uri} =     Get LI URI   ${li}
+	${resp} = 	    Fusion Api Update from group	${li_uri}
+	${task} =	    Wait For Task 	${resp} 	${timeout}		${interval}
+    Should Match Regexp     ${task['taskState']}    ((?i)Warning|Completed)
+
+Build LIG body
+    [Documentation]     ...
+	[Arguments]		${lig}
+	${lig} = 	Copy Dictionary	${lig}
+	${uplinkSets} = 	Copy List	${lig['uplinkSets']}
+	${l} = 	Get Length	${uplinkSets}
+
+	:FOR	${x}	IN RANGE	0	${l}
+	\	${networkType} = 	Get From Dictionary 	${uplinkSets[${x}]}	networkType
+	\	${networks} = 		Get From Dictionary		${uplinkSets[${x}]}	networkUris
+	\ 	Run Keyword If 	'${networkType}' == 'Ethernet'		Continue For Loop
+	\	${networkUris} = 	Get FC Uris	${networks}
+	\	Set to dictionary	${uplinkSets[${x}]}	networkUris	${networkUris}
+
+	:FOR	${x}	IN RANGE	0	${l}
+	\	${networkType} = 	Get From Dictionary 	${uplinkSets[${x}]}	networkType
+	\	${networks} = 		Get From Dictionary		${uplinkSets[${x}]}	networkUris
+	\ 	Run Keyword If 	'${networkType}' == 'FibreChannel'	Continue For Loop
+	\	${networkUris} = 	Get FCoE Uris	${networks}
+	\   ${ethernetUris} =   Get Ethernet URIs   ${networks}
+    \   ${networkUris} =    combine lists   ${networkUris}  ${ethernetUris}
+	\	Set to dictionary	${uplinkSets[${x}]}	networkUris	${networkUris}
+
+	${name} =                       Get Variable Value  ${lig['name']}
+	${enclosureIndexes} =           Get Variable Value  ${lig['enclosureIndexes']}
+	${enclosureType} =              Get Variable Value  ${lig['enclosureType']}
+	${ethernetSettings} =           Get Variable Value  ${lig['ethernetSettings']}
+	${fcoeSettings} =               Get Variable Value  ${lig['fcoeSettings']}
+	${interconnectBaySet} =         Get Variable Value  ${lig['interconnectBaySet']}
+	${interconnectMapTemplate} =    Get Variable Value  ${lig['interconnectMapTemplate']}
+	${redundancyType} =             Get Variable Value  ${lig['redundancyType']}
+	${stackingMode} =               Get Variable Value  ${lig['stackingMode']}
+	${telemetryConfiguration} =     Get Variable Value  ${lig['telemetryConfiguration']}
+	${snmpConfiguration} =          Get Variable Value  ${lig['snmpConfiguration']}
+	${enclosureIndexes} =           Get Variable Value  ${lig['enclosureIndexes']}
+	${uplinkSets} =                 Get Variable Value  ${lig['uplinkSets']}
+
+	${body} = 	Fusion Api Create LIG Payload	name=${name}
+	...                                         enclosureIndexes=${enclosureIndexes}
+	...                                         enclosureType=${enclosureType}
+	...                                         ethernetSettings=${ethernetSettings}
+	...                                         fcoeSettings=${fcoeSettings}
+	...                                         interconnectBaySet=${interconnectBaySet}
+	...											interconnectMapTemplate=${interconnectMapTemplate}
+	...                                         redundancyType=${redundancyType}
+	...                                         stackingMode=${stackingMode}
+	...                                         telemetryConfiguration=${telemetryConfiguration}
+	...                                         snmpConfiguration=${snmpConfiguration}
+	...											uplinkSets=${uplinkSets}
+    [Return]    ${body}
+
+Build US body
+    [Documentation]     ...
+	[Arguments]		${us}	${li_uri}	${enc_uri}
+	Set to dictionary	${us}	logicalInterconnectUri	${li_uri}
+	${l} = 	Get Length	${us['portConfigInfos']}
+	:FOR	${x}	IN RANGE	0	${l}
+	\	Set To Dictionary		${us['portConfigInfos'][${x}]}	enclosure	${enc_uri}
+
+	# process eth
+	${networks} = 		Get From Dictionary		${us}	networkUris
+	${networkUris} = 	Get Ethernet Uris	${networks}
+	Set to dictionary	${us}	networkUris	${networkUris}	
+	# process fc
+	${networks} = 		Get From Dictionary		${us}	fcNetworkUris
+	${networkUris} = 	Get FC Uris	${networks}
+	Set to dictionary	${us}	fcNetworkUris	${networkUris}
+	# process fcoe
+	${networks} = 		Get From Dictionary		${us}	fcoeNetworkUris
+	${networkUris} = 	Get FCoE Uris	${networks}
+	Set to dictionary	${us}	fcoeNetworkUris	${networkUris}
+		
+	${body} = 		Fusion Api Create Uplink Set Payload	${us}
+	[Return]	${body}	
+
+Create fcoe range
+    [Documentation]     ...
+	[Arguments]	${range}
+	#Set Log Level	TRACE
+	:FOR	${x}	IN RANGE	${range['start']}	${range['end']}+1
+	\	${body} = 	Create Dictionary	name=${range['prefix']}${x}${range['suffix']}	vlanId=${x}	 type=fcoe-networkV4
+	\	${resp} = 	Fusion Api Create Fcoe Network	body=${body}
+	#\	Wait For Task	${resp}
+	
+Delete fcoe range
+    [Documentation]     ...
+	[Arguments]	${range}
+	#Set Log Level	TRACE
+	:FOR	${x}	IN RANGE	${range['start']}	${range['end']}+1
+	\	${resp} = 	Fusion Api Delete Fcoe Network	name=${range['prefix']}${x}${range['suffix']}
+
+Run FTS and test-specific setup
+    [Documentation]     ...
+	Set Log Level	TRACE
+    FTS
+    Test Specific Setup
+
+FTS
+    [Documentation]     ...
+#    [Tags]  FTS
+	Set Log Level	DEBUG
+    Get VM IP   ${VM}
+	First Time Setup					password=hpvse123
+
+#Login
+#    [Tags]  Setup   TSS     1   2   3   4   5   6   7   8   9   10  11  12  13  14  15  16  17  18  19  20  21  22  23  24  25
+#    ...                     26  27  28  29  30  31  32  33  34  35  36  37  38  39  40  41  42  43  44  45  46  test
+#	Set Log Level	DEBUG
+#    Get VM IP   ${VM}
+#	Fusion Api Login Appliance 		${APPLIANCE_IP}		${admin_credentials}
+
+Test Specific Setup
+    [Documentation]     ...
+#    [Tags]  TSS     Setup
+	Set Log Level	TRACE
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	Log to console and logfile	[TEST-SPECIFIC SETUP]
+	${users} =	Get Variable Value	${users}
+	Run Keyword If	${users} is not ${null}	Add Users from variable				${users}
+	${ethernet_networks} =	Get Variable Value	${ethernet_networks}
+	Run Keyword If	${ethernet_networks} is not ${null}	Add Ethernet Networks from variable	${ethernet_networks}
+	${network_sets} =	Get Variable Value	${network_sets}
+	Run Keyword If	${network_sets} is not ${null}	Add Network Sets from variable		${network_sets}
+	${fc_networks} =	Get Variable Value	${fc_networks}
+	Run Keyword If	${fc_networks} is not ${null}	Add FC Networks from variable		${fc_networks}

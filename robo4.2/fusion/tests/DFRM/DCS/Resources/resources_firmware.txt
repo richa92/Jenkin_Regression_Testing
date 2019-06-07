@@ -1,0 +1,312 @@
+*** Settings ***
+Library     RoboGalaxyLibrary
+Library     FusionLibrary
+Library     Collections
+Library     String
+Library     OperatingSystem
+Library     BuiltIn
+Library     SSHLibrary
+Library     XML
+Library     Dialogs
+Library     ../UserInputs/functions.py
+Variables   ../UserInputs/variables.py
+Resource    resources.txt
+Resource    ../../../../Resources/api/fusion_api_resource.txt
+
+
+*** Keywords ***
+DFRM REMOVE FIRMWARE REPOSITORY
+    [Documentation]     DFRM Keyword to Remove firmware Repository from Oneview
+    [Tags]              REPO_DELETE
+    ${repositories}=    Fusion Api Get Repository
+    ${count}=           Get From Dictionary             ${repositories}         count
+    :FOR                ${repo}                         IN RANGE                0       ${count}
+    \                   ${rep_name}=                    Get from Dictionary     ${repositories['members'][${repo}]}     name
+    \                   continue for loop if            '${rep_name}'!='${FW_REPO_NAME}'
+    \                   ${rem_repo_resp}=               Run Keyword if          '${rep_name}'=='${FW_REPO_NAME}'
+    ...                 Remove Repository By Name       ${rep_name}
+    \                   ${headers}=                     Run Keyword IF          '${rem_repo_resp['status_code']}'=='202'
+    ...                 Get From Dictionary             ${rem_repo_resp}        headers
+    \                   ${location}=                    Run Keyword IF          '${rem_repo_resp['status_code']}'=='202'
+    ...                 get from dictionary             ${headers}              Location
+    \                   Run Keyword IF                  '${rem_repo_resp['status_code']}'=='202'
+    ...                 wait until keyword succeeds     120s                    10s     Running State Again
+    ...                 ${location}
+    \                   Exit For Loop If                '${rep_name}'=='${FW_REPO_NAME}'
+
+DFRM ADD FIMWARE REPOSITORY
+    [Documentation]         DFRM Keyword to add firmware Repository to Oneview
+    [Tags]                  REPO_ADD
+    ${dfrm_repo_exist}=     set variable                0
+    ${repositories}=        Fusion Api Get Repository
+    ${count}=               Get From Dictionary         ${repositories}         count
+    :FOR                    ${repo}                     IN RANGE                0                   ${count}
+    \                       ${rep_name}=                Get from Dictionary     ${repositories['members'][${repo}]}     name
+    \                       ${dfrm_repo_exist}=         Run Keyword if          '${rep_name}'=='${FW_REPO_NAME}'
+    ...                     Set Variable                1
+    \                       Exit For Loop If            '${dfrm_repo_exist}'=='1'
+    # Print if Firmware Repository already exists
+    ${repo_resp}=           Run Keyword if              '${dfrm_repo_exist}'=='1'
+    ...                     Log                         'DFRM FIRMWARE REPOSITORY ALREADY EXISTS'   console=true
+    ...                     ELSE
+    ...                     Add Repository              ${FW_REPOSITORY_PAYLOAD}
+    sleep                   5s
+    ${fwrepouri}=           Get Repository URI By Name                          ${FW_REPO_NAME}
+    Run Keyword if          '${fwrepouri}'!='None'      log                     "DFRM FIRMWARE REPO ADDED Successfully"
+    wait until keyword succeeds                         300s                    120s                DFRM FIRMWARE BUNDLES ADDED
+
+DFRM GET DFRM REPO FIRMWARE INVENTORY
+    [Documentation]     DFRM Keyword to get the firmware bundles inventory details from Added DFRM Firmware Repo.
+    [Tags]              DFRMREPO_INV
+    ${repositories}=    Fusion Api Get Repository
+    ${count}=           Get From Dictionary         ${repositories}     count
+    :FOR                ${repo}                     IN RANGE            0                   ${count}
+    \                   Run Keyword If              '${repositories['members'][${repo}]['name']}'!='${FW_REPO_NAME}'
+    \                   ...                         continue for loop
+    \                   ${dfrm_repo_uri}=           Run Keyword If
+    \                   ...                         '${repositories['members'][${repo}]['name']}'=='${FW_REPO_NAME}'
+    ...                 Get from Dictionary         ${repositories['members'][${repo}]}     uri
+    Run Keyword if      '${dfrm_repo_uri}'==''      FAIL                msg=DFRM inventory URI is null.
+    Refresh Repository By Name                      ${FW_REPO_NAME}
+    ${resp}=            Fusion Api Get Resource     uri=${dfrm_repo_uri}
+
+DFRM GET REQUIRED FIRMWARE BUNDLE SPP NAME
+    [Documentation]     DFRM Keyword to get the firmaware bundle spp name based on the user arguments.
+    ...                 old/latest fimrware bundle name will be returned from the keyword
+    [Arguments]         ${firmwaretypeisoname}
+    ${fwresp}=          Fusion Api Get Resource     uri=/rest/firmware-drivers/
+    ${count}=           get length                  ${fwresp['members']}
+    :FOR                ${fw}                       IN RANGE                        0   ${count}
+    \                   ${isoname}=                 Get from Dictionary             ${fwresp['members'][ ${fw}]}    isoFileName
+    \                   ${sppname}=                 run keyword if                  '${firmwaretypeisoname}'=='${isoname}'
+    ...                 Get from dictionary         ${fwresp['members'][ ${fw}]}    name
+    \                   exit for loop if            '${firmwaretypeisoname}'=='${isoname}'
+    [return]            ${sppname}
+
+DFRM FIRMWARE BUNDLES ADDED
+    [documentation]     TO check and wait till all the DFRM Automation required firmware bundles are added to OV
+    ${resp} =           Fusion Api Get Firmware Driver
+    Run Keyword If      ${resp['count']}!=2     FAIL    msg=DFRM Auto required Firmware Bundles upload still in progress.
+
+###################
+DFRM UPDATE LOGICAL INTERCONNECT FIRMWARE FOR EACH LI
+    [Documentation]     DFRM Keyword to updadte Logical Interconnect firmware in ring topology ( or for N-Enclosure)
+    ...                 for each LI.
+    [Arguments]         ${fw_iso_name}     ${fW_act_mode}      ${force}    ${command}      ${wait_time}
+
+    ${spp_name}=    DFRM GET REQUIRED FIRMWARE BUNDLE SPP NAME      ${fw_iso_name}
+    ${li_list}=     GET LOGICAL INTERCONNECT LIST
+    ${licount}=     get length          ${li_list}
+    :FOR            ${li}               IN RANGE                        0                   ${licount}
+    \               ${LI_resp}=         Fusion Api Get Resource         uri=${li_list[${li}]}
+    \               ${sas_li_Name}=     Get From Dictionary             ${LI_resp}          name
+    \               log to console      Updating firmware to            ${sas_li_Name}
+    \               ${fw_updt_resp}     ${fwupdtaskuri}=                DFRM UPDATE SAS LI Firmware     ${sas_li_Name}
+    \               ...                 ${spp_name}
+    \               ...                 ${fW_act_mode}
+    ...             ${command}          ${FW_VALIDATE_TYPE}             ${force}            ${wait_time}
+    ...             ${FW_UPDT_WAIT_INTRVL}
+    \               Run Keyword if      '${fW_act_mode}'=='${FW_PARALLEL_UPDT}'
+    ...             DFRM VALIDATE PARALLEL FIRMWARE UPDATE TASKS        ${fwupdtaskuri}     ${command}
+    \               Run Keyword if      '${fW_act_mode}'=='${FW_ORCHESTRATE_UPDT}'
+    ...             DFRM VALIDATE ORCHESTRATED FIRMWARE UPDATE TASKS    ${fwupdtaskuri}     ${command}
+    \               ${sasicmuris}=      Get From Dictionary         ${LI_resp}      sasInterconnectUris
+    \               ${deuris}=      Get From Dictionary             ${LI_resp}      driveEnclosureUris
+    \               continue for loop if    '${command}'=='${FW_UPDT_STAGE}'
+    \               VALIDATE FW VERSION POST FIRMWARE UPDATE    ${fw_iso_name}   ${sasicmuris}   ${deuris}
+
+DFRM VALIDATE PARALLEL FIRMWARE UPDATE TASKS
+    [Documentation]     DFRM Keyword to Validate Parallel Firmware update Tasks based on the firmware activation
+    ...                 mode provided
+    [Arguments]         ${fwupdtaskuri}     ${command}
+
+    ${fwtaskresp}=              Fusion Api Get Resource                     uri=${fwupdtaskuri}
+    ${taskstate}=               Get from Dictionary                         ${fwtaskresp}   taskState
+    ${progressupdates}=         Get from Dictionary                         ${fwtaskresp}   progressUpdates
+    return from keyword if      '${taskstate}'=='Error'
+    Run keyword if              '${command}'=='${FW_UPDT_STAGE}'            DFRM VALIDATE FIRMWARE STAGE ONLY TASKS
+    ...                         ${progressupdates}                          ${fwtaskresp}   ${taskstate}
+    ...                         ${EXP_PAR_STAGE_TASKS}
+    Run keyword if              '${command}'=='${FW_UPDT_ACTIVATE}'         DFRM VALIDATE FIRMWARE ACTIVATE ONLY TASKS
+    ...                         ${progressupdates}                          ${fwtaskresp}   ${taskstate}
+    ...                         ${EXP_PAR_ACTIVATE_TASKS}
+    Run keyword if              '${command}'=='${FW_UPDT_STAGE_ACTIVATE}'   DFRM VALIDATE FIRMWARE STAGE AND ACTIVATE TASKS
+    ...                         ${progressupdates}                          ${fwtaskresp}   ${taskstate}
+    ...                         ${EXP_PAR_STAGE_ACT_TASKS}
+
+DFRM VALIDATE ORCHESTRATED FIRMWARE UPDATE TASKS
+    [Documentation]     DFRM Keyword to Validate Orchestrated Firmware update Tasks based on the firmware activation
+    ...                 mode provided
+    [Arguments]         ${fwupdtaskuri}     ${command}
+
+    ${fwtaskresp}=              Fusion Api Get Resource                     uri=${fwupdtaskuri}
+    ${taskstate}=               Get from Dictionary                         ${fwtaskresp}   taskState
+    ${progressupdates}=         Get from Dictionary                         ${fwtaskresp}   progressUpdates
+    return from keyword if      '${taskstate}'=='Error'
+    Run keyword if              '${command}'=='${FW_UPDT_STAGE}'            DFRM VALIDATE FIRMWARE STAGE ONLY TASKS
+    ...                         ${progressupdates}                          ${fwtaskresp}   ${taskstate}
+    ...                         ${EXP_ORCH_STAGE_TASKS}
+    Run keyword if              '${command}'=='${FW_UPDT_ACTIVATE}'         DFRM VALIDATE FIRMWARE ACTIVATE ONLY TASKS
+    ...                         ${progressupdates}                          ${fwtaskresp}   ${taskstate}
+    ...                         ${EXP_ORCH_ACTIVATE_TASKS}
+    Run keyword if              '${command}'=='${FW_UPDT_STAGE_ACTIVATE}'   DFRM VALIDATE FIRMWARE STAGE AND ACTIVATE TASKS
+    ...                         ${progressupdates}                          ${fwtaskresp}   ${taskstate}
+    ...                         ${EXP_ORCH_STAGE_ACT_TASKS}
+
+DFRM VALIDATE FIRMWARE STAGE AND ACTIVATE TASKS
+    [Documentation]     DFRM Keyword to Validate firmware Stage and Activate Tasks
+    [Arguments]         ${progressupdates}          ${fwtaskresp}   ${taskstate}            ${exp_stage_act_tasks}
+    ${progresslen}=     get length                  ${progressupdates}
+    :FOR                ${cnt}                      IN RANGE        0                       ${progresslen}
+    \                   ${prgupdt}=                 Get from List   ${progressupdates}      ${cnt}
+    \                   Run Keyword if              '${prgupdt['statusUpdate']}'=='${exp_stage_act_tasks[${cnt}]}'
+    ...                 log                         msg="Got Expected Task... ${prgupdt['statusUpdate']}"
+    ...                 ELSE
+    ...                 DFRM GET FAILURE DUMPS      ${fwtaskresp}   ${taskstate}
+
+DFRM VALIDATE FIRMWARE STAGE ONLY TASKS
+    [Documentation]     DFRM Keyword to Validate firmware Stage Tasks
+    [Arguments]         ${progressupdates}          ${fwtaskresp}   ${taskstate}            ${exp_stage_tasks}
+    ${progresslen}=     get length                  ${progressupdates}
+    :FOR                ${cnt}                      IN RANGE        0                       ${progresslen}
+    \                   ${prgupdt}=                 Get from List   ${progressupdates}      ${cnt}
+    \                   Run Keyword if              '${prgupdt['statusUpdate']}'=='${exp_stage_tasks[${cnt}]}'
+    ...                 log                         msg="Got Expected Task ... ${prgupdt['statusUpdate']}"
+    ...                 ELSE
+    ...                 DFRM GET FAILURE DUMPS      ${fwtaskresp}   ${taskstate}
+
+DFRM VALIDATE FIRMWARE ACTIVATE ONLY TASKS
+    [Documentation]     DFRM Keyword to Validate firmware Stage Tasks
+    [Arguments]         ${progressupdates}          ${fwtaskresp}   ${taskstate}            ${exp_act_tasks}
+    ${progresslen}=     get length                  ${progressupdates}
+    :FOR                ${cnt}                      IN RANGE        0                       ${progresslen}
+    \                   ${prgupdt}=                 Get from List   ${progressupdates}      ${cnt}
+    \                   Run Keyword if              '${prgupdt['statusUpdate']}==${exp_act_tasks[${cnt}]}'
+    ...                 log                         msg="Got Expected Task... ${prgupdt['statusUpdate']}"
+    ...                 ELSE
+    ...                 DFRM GET FAILURE DUMPS      ${fwtaskresp}   ${taskstate}
+
+DFRM GET FIRMWARE BUNDLE SPP NAMES
+    [Documentation]     DFRM Specific Keyword to Get firmware bundle names depending on Interanal or exteranal repo and
+    ...                 and returnm list of name list
+    [Arguments]         ${repo_type}    ${spp_names_list}
+
+    ${fw_resp}=     Fusion Api Get Resource     uri=/rest/firmware-drivers/
+    ${fw_len}=      Get Length                  ${fw_resp['members']}
+    :FOR            ${x}                        IN RANGE                        0                   ${fw_len}
+    \               ${uri}=                     Get From Dictionary             ${fw_resp['members'][${x}]}     uri
+    \               ${mem_resp}=                Fusion Api Get Resource         uri=${uri}
+    \               ${temp}=                    Get from Dictionary             ${mem_resp}         locations
+    \               ${loc}=                     Get from Dictionary             ${temp}             0
+    \               ${split}=                   split string                    ${loc}              :
+    \               ${spp_name}=                Get from Dictionary             ${mem_resp}         name
+    \               Run Keyword if              '${repo_type}'=='${split}'      Append to List      ${spp_names_list}
+    \               ...                         ${spp_name}
+
+DFRM UPDATE SAS LI Firmware
+    [Documentation]     Update SAS Logical Interconnect Firmware
+    [Arguments]         ${sasli_name}
+    ...                 ${spp_name}
+    ...                 ${fwActivationMode}
+    ...                 ${fwcommand}
+    ...                 ${validationType}=ValidateFailFast
+    ...                 ${force}=${True}
+    ...                 ${timeout}=30min
+    ...                 ${interval}=15sec
+
+    Log                 Updating ${spp_name} firmware for ${sasli_name}
+    ${sasli_uri} =      Get SAS LI URI              ${sasli_name}
+    ${spp_uri} =        Get Firmware Bundle URI     ${spp_name}
+
+    # Create Dictionary for firmware Update
+    ${request_body} =   Create Dictionary                   command=${fwcommand}
+    ...                 fwActivationMode=${fwActivationMode}
+    ...                 validationType=${validationType}
+    ...                 force=${force}
+    ...                 sppUri=${spp_uri}
+    ${resp} =           Fusion Api Update SAS LI Firmware   uri=${sasli_uri}    body=${request_body}
+    Should Be Equal     '${resp["status_code"]}'            '202'
+    ...                 msg=Update SAS LI Firmware did not return task. Request Failed.
+
+    ${headers}=         Get From Dictionary     ${resp}         headers
+    ${fwupdttaskuri}=   Get From Dictionary     ${headers}      Location
+    Wait Until Keyword Succeeds                 ${timeout}      ${interval}
+    ...                 Running State Again
+    ...                 ${fwupdttaskuri}
+    [Return]            ${resp}                 ${fwupdttaskuri}
+
+VALIDATE FW VERSION POST FIRMWARE UPDATE
+    [Documentation]     DFRM Keyword to validate the firmware version for both D3940 and SAS Interconnects.
+    [Arguments]         ${fwisoname}    ${sasicmuris}   ${deuris}
+    ${fwD3940fileve}=   set variable    0
+    ${fwicmfilever}=   set variable    0
+    ${fwD3940fileve}    ${fwicmfilever}=    DFRM GET FIRMWARE FILE VERSIONS   ${fwisoname}  ${fwD3940fileve}
+    ...            ${fwicmfilever}
+    log     ${fwD3940fileve}
+    log     ${fwicmfilever}
+    VALIDATE INTERCONNECT FIRMWARE VERSIONS      ${sasicmuris}   ${fwicmfilever}
+    VALIDATE DRIVE ENCLOSURE FIRMWARE VERSIONS   ${deuris}   ${fwD3940fileve}
+
+DFRM GET FIRMWARE FILE VERSIONS
+    [Documentation]     DFRM Keyword to validate the firmware version for both D3940 and SAS Interconnects.
+    [Arguments]         ${fwisoname}    ${fwD3940fileve}    ${fwicmfilever}
+    ${fwresp}=      Fusion Api Get Resource     uri=/rest/firmware-drivers/
+    ${count}=       Get Length      ${fwresp['members']}
+    ${fwurilist}=   Create List
+    :FOR    ${fwuri}   IN RANGE      0     ${count}
+    \   ${uri}=     Get from Dictionary    ${fwresp['members'][${fwuri}]}     uri
+    \   Append to list     ${fwurilist}        ${uri}
+
+    :FOR    ${fwcomp}   IN RANGE    0       ${count}
+    \   ${resp}=    Fusion Api Get Resource    uri=${fwurilist[${fwcomp}]}
+    \   ${isoname}=     Get From Dictionary     ${resp}     isoFileName
+    \   continue for loop if    '${isoname}'!='${fwisoname}'
+    \   ${fwD3940fileve}    ${fwicmfilever}=    GET FIRMWARE COMPONENT VERSIONS
+    ...             ${resp}     ${fwisoname}    ${fwD3940fileve}    ${fwicmfilever}
+    [return]    ${fwD3940fileve}    ${fwicmfilever}
+
+GET FIRMWARE COMPONENT VERSIONS
+    [Documentation]  DFRM Keyword to return D3940 Drive enclosure firmware file version and
+    ...              12GB SAS ICM Interconnect module firmware file version.
+    [Arguments]     ${resp}     ${fwisoname}    ${fwD3940fileve}    ${fwicmfilever}
+
+    ${fwcomp}=      Get from Dictionary    ${resp}   fwComponents
+    ${fwcomplen}=   get length   ${fwcomp}
+    :FOR    ${len}   IN RANGE   0     ${fwcomplen}
+    \   ${fwstorlistcomp}=   Get from List    ${fwcomp}      ${len}
+    \   continue for loop if    '${fwstorlistcomp['name']}'!='${FW_COMP_D3940_STOR_MODULE_NAME}'
+    \   ${fwD3940fileve}=   Run Keyword if   '${fwstorlistcomp['name']}'=='${FW_COMP_D3940_STOR_MODULE_NAME}'
+    ...     set variable    ${fwstorlistcomp['componentVersion']}
+    \   exit for loop if    '${fwstorlistcomp['name']}'=='${FW_COMP_D3940_STOR_MODULE_NAME}'
+
+    :FOR    ${len}   IN RANGE   0     ${fwcomplen}
+    \   ${fwicmlistcomp}=   Get from List     ${fwcomp}      ${len}
+    \   continue for loop if    '${fwicmlistcomp['name']}'!='${FW_COMP_12GBSAS_MODULE_FW_NAME}'
+    \   ${fwicmfilever}=   Run Keyword if   '${fwicmlistcomp['name']}'=='${FW_COMP_12GBSAS_MODULE_FW_NAME}'
+    ...     set variable    ${fwicmlistcomp['componentVersion']}
+    \   exit for loop if    '${fwicmlistcomp['name']}'=='${FW_COMP_12GBSAS_MODULE_FW_NAME}'
+    [return]    ${fwD3940fileve}    ${fwicmfilever}
+
+VALIDATE INTERCONNECT FIRMWARE VERSIONS
+    [Documentation]   DFRM Keyword to validate SAS Interconnect firmware version post LI firmware Update.
+    [Arguments]       ${sasicmuris}   ${fwicmfilever}
+    ${icmlen}=      Get Length       ${sasicmuris}
+    :FOR    ${icm}    IN RANGE    0     ${icmlen}
+    \   ${icmuri}=      Get from List   ${sasicmuris}    ${icm}
+    \   ${respicm}=     Fusion Api Get Resource    uri=${icmuri}
+    \   ${fwver}=       Get from Dictionary    ${respicm}      firmwareVersion
+    \   run keyword if    '${fwver}'!='${fwicmfilever}'
+    ...                   fatal error     msg=SAS Interconnect firmware Versions doesnot match after LI firmware update
+    log   "SAS Interconnet fimrware version validation Successful post LI firmware Updates"     console=true
+
+VALIDATE DRIVE ENCLOSURE FIRMWARE VERSIONS
+    [Documentation]   DFRM Keyword to validate SAS Interconnect firmware version post LI firmware Update.
+    [Arguments]       ${deuris}   ${fwD3940fileve}
+    ${delen}=      Get Length       ${deuris}
+    :FOR    ${icm}    IN RANGE    0     ${delen}
+    \   ${deuri}=      Get from List   ${deuris}    ${icm}
+    \   ${respde}=     Fusion Api Get Resource    uri=${deuri}
+    \   ${defwver}=       Get from Dictionary    ${respde}      firmwareVersion
+    \   run keyword if    '${defwver}'!='${fwD3940fileve}'
+    ...                   fatal error     msg=Drive Enclosure firmware Versions doesnot match after LI firmware update
+    log   "Drive Enclosure fimrware version validation Successful post LI firmware Updates"     console=true

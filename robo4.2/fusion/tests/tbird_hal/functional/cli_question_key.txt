@@ -1,0 +1,150 @@
+*** Settings ***
+Documentation   Verify '?' behavior on Fusion CLI
+...             = USAGE =
+...             | pybot | -L DEBUG | -v ENCLOSURE:tesla | cli_question_key.txt |
+...             = Variables =
+...             | ENCLOSURE     | Required; Enclosure name to run on (dcs, tesla, etc) |
+...             | FUSION IP     | Required; IP address of the FusionVM to use |
+
+Library         RoboGalaxyLibrary           # DVTs Robot Framework extensions
+Library         FusionLibrary               # DVTs Fusion extensions
+Library         String
+Library         json
+Library         robot.api.logger
+Variables       ../resources/variables.py   ${ENCLOSURE}
+Resource        ../resources/fusion_cli.txt
+Resource        ../resources/defaults.txt
+Force Tags      CLI                         HW
+
+Suite Setup         Run Keywords
+...                 Login to Fusion CLI
+...                 Enter CLI Console View
+Suite Teardown      Logout of Fusion CLI
+
+
+*** Variables ***
+${QUESTION}             ?
+${COMMAND END}          <enter>
+${Initial Command}      ${EMPTY}    # Command to define top level command for tree. This can be updated for Debugging.
+${INVALID ARG}          X
+
+
+*** Test Cases ***
+Verify argument display with question mark
+    Verify Question Mark Behavior   ${Initial Command}
+
+Verify argument display with partial command and question mark
+    Verify Question Mark Behavior   ${Initial Command}      verifyPartial=${TRUE}
+
+(-) Verify invalid partial argument with question mark
+    Verify Question Mark Behavior   ${Initial Command}      verifyInvalid=${TRUE}
+
+
+*** Keywords ***
+Verify Question Mark Behavior
+    [Documentation]     This function executes the '?' function on the given command and
+    ...                 recursively verifies subcommand arguments until no subcommands exist.
+    ...                 verifyPartial   -   This option enables verification of partial argument with '?'.
+    ...                 verifyInvalid   -   This option enables verification of invalid argument with '?'.
+    [Arguments]         ${command}      ${verifyPartial}=${FALSE}   ${verifyInvalid}=${FALSE}
+
+    # Run Command with Question Mark
+    ${output}=      Execute Bare CLI Command    ${command}${QUESTION}
+    Log             ${output}
+
+    # Check for error
+    Should Not Contain      ${output}   Unrecognized command    msg=Unknown command '${command}${QUESTION}'.
+
+    # Parse output command list
+    ${args}=    Parse Question Mark output      ${output}
+    ${args}=    Get Dictionary Keys             ${args}
+
+    # Verify Top level contains commands.
+    ${size}=            Get Length          ${args}
+    Run Keyword If      '${command}'=='${EMPTY}'
+    ...                 Should Be True      ${size} > 0     msg=Top Level command list is empty!
+
+    # TODO: Verify against Known CLI command list.
+
+    # TODO: Verify Help messages displayed
+
+    # Test partial commands if verifyInvalid is true.
+    Run Keyword If      '${verifyInvalid}'=='${TRUE}'
+    ...                 Verify Invalid Command      ${Command}
+
+    # Test partial commands if verifyPartial is true.
+    Run Keyword If      '${verifyPartial}'=='${TRUE}'
+    ...                 Run Keyword If      '${command}'!='${EMPTY}'    Verify Partial Command      ${Command}
+
+    # Get sub arguments and process
+    :FOR    ${arg}          IN                  @{args}
+    \       ${next cmd}=    Set Variable If     '${command}'=='${EMPTY}'    ${arg}
+    \       ...             ${command.strip()} ${arg}
+    \       Verify Question Mark Behavior       ${next cmd}${SPACE}         ${verifyPartial}    ${verifyInvalid}
+
+Verify Partial Command
+    [Documentation]     Verify the expected argument is listed in the returned list of arguments when partial
+    ...                 argument is given with Question Mark.
+    [Arguments]         ${Command}
+
+    # Get Last argument in the command
+    ${words}=       Split String        ${Command}
+    ${last arg}     Remove From List    ${words}    -1
+
+    # Randomly determine partial argument of last argument
+    ${size}=            Get Length      ${last arg}
+    ${random size}=     Evaluate        random.randint(1, ${size}-1)    random
+    ${partial arg}=     Get Substring   ${last arg}                     0   ${random size}
+
+    # Build full command with partial argument
+    Append to list      ${words}            ${partial arg}
+    ${size}=            Get Length          ${words}
+    ${cmd}=             Run Keyword If      ${size}>1       Catenate    @{words}
+    ...                 ELSE                Set Variable    ${partial arg}
+
+    # Execute command with Question Mark
+    ${output}=      Execute Bare CLI Command    ${cmd}${QUESTION}
+    Log             ${output}
+
+    # Verify the argument expected is displayed as one of the options
+    ${args}=                    Parse Question Mark output      ${output}
+    ${retuned args}=            Get Dictionary Keys             ${args}
+    List Should Contain Value   ${retuned args}                 ${last arg}
+    ...                         msg=Argument '${last arg}' was not displayed when executing '${cmd}'.
+
+    # Verify help message not displayed
+    ${help messages}=   Get Dictionary Values   ${args}
+    :FOR                ${help message}         IN      @{help messages}
+    \                   Should be Equal As Strings      ${help message}     ${EMPTY}
+    \                   ...                     msg='${cmd}${QUESTION}' displayed '${help message}' help message.
+
+    Log To Console      Verified: '${cmd}${QUESTION}'.
+
+Verify Invalid Command
+    [Documentation]     Verifies error message when '?' command is used with an invalid argument in the given command.
+    [Arguments]         ${Command}
+
+    # Get Last argument in the command
+    ${words}=   Split String    ${Command}
+
+    # Build full command with invalid argument
+    Append to list      ${words}            ${INVALID ARG}
+    ${size}=            Get Length          ${words}
+    ${cmd}=             Run Keyword If      ${size}>1       Catenate    @{words}
+    ...                 ELSE                Set Variable    ${INVALID ARG}
+
+    # Execute command with Question Mark
+    Read
+    Set Client Configuration    newline=NNN
+    ${Output}=                  SSHLibrary.Write    ${cmd}${QUESTION}
+    Set Client Configuration    newline=CRLF
+
+    ${size}=            Get Length      ${cmd}
+    ${size}=            Set Variable    ${size+2}
+    Repeat Keyword      ${size} times   SSHLibrary.Write Bare   ${BACKSPACE}
+    Read
+
+    # Verify the error is displayed
+    Should Contain      ${output}   Unrecognized command    msg=Failed to see error for '${cmd}${QUESTION}' command.
+    Log To Console      Verified: '${cmd}${QUESTION}'.
+

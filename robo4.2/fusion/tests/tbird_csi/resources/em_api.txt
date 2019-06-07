@@ -1,0 +1,222 @@
+*** Settings ***
+Documentation     EM RIS keywords
+...               = Usage =
+...               | Library | ../resources/em_api.txt |
+...
+...       -- EM API Get Support Dump
+...       -- EM Factory Reset
+...       -- Unclaim EM
+...       -- EM API Remove Credentials File
+...       -- Get Fusion IP Claim Through EM RIS
+...
+Library           Collections
+Library           String
+Library           RoboGalaxyLibrary            # DVTs Robot Framework extensions
+#Library          MgmtFWLibrary
+Library           FusionLibrary                # DVTs Robot Framework extensions
+Library           OperatingSystem
+Library           SSHLibrary
+Resource          ../resources/fusion_api.txt  # DVT fusion API extensions
+Resource          ../../tbird_hal/resources/defaults.txt
+Resource          ../../tbird_hal/resources/em_cli.txt
+Resource          ../../tbird_hal/resources/fusion_cli.txt
+Resource          ../../tbird_hal/resources/hal_webapp.txt
+
+*** Variables ***
+${EM_REBOOT_TIMEOUT}=     300
+${EM_SHUTDOWN_TIMEOUT}=    60
+
+*** Keywords ***
+
+Get Active EM Resource
+    [Arguments]    ${Fusion_IP}=${FUSION_IP}    ${EM_IP}=${EM_IP}
+
+    ${response}=    HAL API Get EM RIS    ${FUSION_IP}    ${EM_IP}    /rest/v1
+    ${result}=    Get Resource From Response    ${response}
+    ${result}=    Get From Dictionary    ${result['Oem']}    Hp
+    ${Active EM}=    Get From Dictionary    ${result['links']}    ThisEnclosureManager
+    [Return]    ${Active EM['href']}
+
+Get EM Version
+    [Arguments]    ${Fusion_IP}=${FUSION_IP}    ${EM_IP}=${EM_IP}
+
+    ${Active EM Resource}=    Get Active EM Resource
+    ${response}=    HAL API Get EM RIS    ${FUSION_IP}    ${EM_IP}    ${Active EM Resource}
+
+    Log Dictionary    ${response}
+    ${response}=    Get Resource From Response    ${response}
+    ${Firmware}=    Get From Dictionary    ${response['Firmware']}    Current
+
+    [Return]    ${Firmware['VersionString']}
+
+EM API Get Support Dump
+    [Documentation]    Use EM RIS to get an EM support dump
+    [Arguments]    ${Log_Dir}=.
+
+    # Create a session on the EM
+    Login to Fusion via SSH
+    ${EM_IP}    ${EMSessionID}    EM Api Create Session
+    ${Auth_Header}    Set Variable    "X-Auth-Token":"${EMSessionID}"
+
+    ${response}=    HAL API Get EM RIS    ${FUSION_IP}    ${EM_IP}    /rest/v1/CreateSupportDump
+    ...    option=-o /tmp/em_support.dmp    -H ${Auth_Header}
+    ${result}=    Get Resource From Response    ${response}
+
+    SSHLibrary.Get File    /tmp/em_support.dmp
+    ${Count}=    OperatingSystem.Count Files In Directory       path=.     pattern=em_support.dmp
+    Run Keyword If    ${Count}==0    Warn    Did not find a support dump
+    Pass Execution If    ${Count}==0    Did not find a support dump
+
+    @{Files}    OperatingSystem.List Files In Directory    path=.    pattern=em_support.dmp
+    Should Not Be Empty    ${Files}    msg=Did not find any ciDebug logs
+    # Prefix files with date/time stamp
+    ${yyyy}    ${mmon}    ${dd}    ${hh}    ${mmin}    ${ss}    Get Time    year,month,day,hour,min,sec
+    ${Prefix}    Set Variable    ${yyyy}${mmon}${dd}-${hh}${mmin}${ss}-
+    ${File}=    Set Variable    @{Files}[0]
+    Move File    ${File}    ${Log_Dir}/${Prefix}${File}
+
+EM Factory Reset
+    [Documentation]    Perform a "Factory Reset" Action in RIS. Resetting the EM to
+    ...                default settings and thereby releasing the enclosure claim.
+
+    # Release the Kraken!
+    Login to Fusion via SSH
+    ${Output}    ${rc}=    Execute Command
+    ...    /ci/bin/tbird/appliance-hal.sh factory-reset-enclosures    return_rc=True
+    Run Keyword If    ${rc}!=0
+    ...    Log    Failed to factory-reset-enclosures using appliance-hal.sh    level=WARN
+    Sleep    240
+
+    Login to Fusion via SSH
+    ${iter}=    Evaluate    ${EM_REBOOT_TIMEOUT} / 10
+    :FOR    ${INDEX}    IN RANGE    1    ${iter}
+    \    Sleep       10
+    \    # Find 'MgmtIP' followed by the (updated) floating IPv6 address.
+    \    ${stdout}    ${rc}=    Execute Command    lldpcli show neighbor    return_rc=True
+    \    Run Keyword If    ${rc}!=0    Continue For Loop
+
+    \    ${Status}    ${Match}=    Run Keyword and Ignore Error
+    \    ...    Should Match Regexp    ${stdout}    (?m)MgmtIP:\\s*(\\S*:\\S*:\\S*:\\S*:\\S*:\\S*)
+    \    Run Keyword If    '${Status}'!='PASS'    Continue For Loop
+    \    ${EM_IP}    Get From List    ${Match}    1
+    \    Log    EM_IP: ${EM_IP}
+    \    Set Suite Variable    ${EM_IP}
+
+    \    # Now, wait for ping to succeed
+    \    ${stdout}    ${rc}=    Execute Command    ping6 -c 5 ${EM_IP}%${FUSION_NIC}    return_rc=True
+    \    Log    ${stdout}
+    \    Run Keyword If    ${rc}==0    Exit For Loop
+    Logout of Fusion via SSH
+
+    # Print Warning message if no success return code is seen after for loop ends.
+    Run Keyword If    ${rc}!=0
+    ...    Log    Failed to Successfully Ping EM within timeout period (${EM_REBOOT_TIMEOUT}s) after Factory Reset.    level=WARN
+
+Unclaim EM
+    [Documentation]    Force an unclaim action through the EM
+
+    Login to Fusion Via SSH
+    Run Keyword If        ${DCS}    Restart DCS
+    Logout of Fusion Via SSH
+
+    Run Keyword Unless    ${DCS}    EM Factory Reset
+
+    EM API Remove Credentials File
+
+EM API Remove Credentials File
+    Login to Fusion Via SSH
+    ${Buffer}=    Execute Command    rm -rf ${EM Credentials File}
+    Logout of Fusion Via SSH
+
+Get Fusion IP Claim Through EM RIS
+    [Documentation]    Call RIS GET to obtain the IP address of Fusion that has claimed an EM
+
+    ${Response}=    Get EM Account Service Resource    ${FUSION_IP}    ${EM_IP}
+    Log    ${Response}
+
+    ${Resource}=    Get Resource from Response    ${Response}
+    Log    ${Resource}
+
+    ${status}    ${OEM Resource}=               Run Keyword and Ignore Error    Get From Dictionary    ${Resource}              Oem
+    ${status}    ${HP Resource}=                Run Keyword and Ignore Error    Get From Dictionary    ${OEM Resource}          Hp
+    ${status}    ${ClaimInfo Resource}=         Run Keyword and Ignore Error    Get From Dictionary    ${HP Resource}           ClaimInformation
+    ${status}    ${IP Address}=                 Run Keyword And Ignore Error    Get From Dictionary    ${ClaimInfo Resource}    IpAddress
+    ${ip}=    Set Variable If    '${status}'=='PASS'    ${IP Address}    ${EMPTY}
+    Log                       ${ip}
+    [Return]                  ${ip}
+
+
+EM Api Create Session
+    [Documentation]
+    ...    Create a new session to the EM Api.  Returns the X-Auth-Token
+    ...    header string for subsequent use other curl commands.
+    ...    Usage:
+    ...      ${EM_IP}    ${Auth_Header}=    EM Api Create Session
+    ...    Depends on either ${ENC_SERIAL_NUMBER} being set or a supplied Enclosure Name.
+    ...    Also, expects an open SSH connection to the CI Manager.
+    [Arguments]    ${Enclosure_Name}=${ENC_SERIAL_NUMBER}
+
+    # For multi-enclosure environments, get the correct enclosure credentials
+    ${Enclosure_Credentials}    Get Enclosure Manager Credentials
+    ${Enclosure_Credential}     Get From Dictionary    ${Enclosure_Credentials}    ${Enclosure_Name}
+    ${EM_IP}       Get From Dictionary    ${Enclosure_Credential}    IP
+    ${Username}    Get From Dictionary    ${Enclosure_Credential}    username
+    ${Password}    Get From Dictionary    ${Enclosure_Credential}    password
+
+    # Finally, Create the Auth-Token
+    ${Data}        Set Variable    '{"UserName":"${Username}","Password":"${Password}"}'
+    ${Output}    Execute Command
+    ...    curl -ik -X POST -d ${Data} -H "Content-type: application/json" https://${EM_IP}${FUSION_NIC_SUFFIX}/rest/v1/Sessions
+
+    # Parse it, and return it to the caller.  You're logged into the EM.
+    ${Match}    ${EMSessionID}    Should Match Regexp    ${Output}    X-Auth-Token: (\\S+)
+    Set Suite Variable   ${EMSessionID}
+    [Return]    ${EM_IP}    ${EMSessionID}
+
+
+Get Enclosure Manager Credentials
+    [Documentation]
+    ...    Fetches the Enclosure Manager Credentials for each Enclosure manager listed.
+    ...    Depends on an open SSH connection to the CI Manager.
+
+    # If Enclosure Credentials already exist, use it. Otherwise create from scratch
+    ${Exists}    Run Keyword and Return Status
+    ...    Variable Should Exist    ${Enclosure_Credentials}    msg=Enclosure credentials are present
+    Run Keyword If    ${Exists}==${True}    Return from Keyword    ${Enclosure_Credentials}
+
+    # Get the list of enclosure managers
+    ${Output}    ${rc}=    Execute Command
+    ...    /ci/bin/tbird/appliance-hal.sh list-enclosures    return_rc=True
+    Run Keyword If    ${rc}!=0    Log    Failed to get enclosure list from appliance-hal.sh
+
+    # Create a dictionary of dictionaries; One for each Enclosure listed
+    @{Lines}    Split To Lines    ${Output}
+    ${Enclosure_Credentials}    Create Dictionary
+    :FOR    ${EnclosureSN}    IN    @{Lines}
+    \    # Create another (empty) dictionary using the name of the enclosure
+    \    ${Tmp}=    Create Dictionary
+    \    Set To Dictionary    ${Enclosure_Credentials}    ${EnclosureSN}    ${Tmp}
+
+    # Fetch the IP address, username and password for each enclosure
+    ${Keys}    Get Dictionary Keys    ${Enclosure_Credentials}
+    :FOR    ${EnclosureSN}    IN    @{Keys}
+    \    ${Output}    ${rc}=    Execute Command
+    \    ...    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${EnclosureSN} -o ipaddress
+    \    ...    return_rc=True
+    \    Run Keyword If    ${rc}!=0    Log    Failed to get IP address from appliance-hal.sh
+    \    ${Enclosure}    Get From Dictionary    ${Enclosure_Credentials}    ${EnclosureSN}
+    \    Set to Dictionary    ${Enclosure}    IP    ${Output}
+    \
+    \    ${Output}    ${rc}=    Execute Command
+    \    ...    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${EnclosureSN} -o user
+    \    ...    return_rc=True
+    \    Run Keyword If    ${rc}!=0    Log    Failed to get username from appliance-hal.sh
+    \    Set to Dictionary    ${Enclosure}    username    ${Output}
+    \
+    \    ${Output}    ${rc}=    Execute Command
+    \    ...    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${EnclosureSN} -o password
+    \    ...    return_rc=True
+    \    Run Keyword If    ${rc}!=0    Log    Failed to get password from appliance-hal.sh
+    \    Set to Dictionary    ${Enclosure}    password    ${Output}
+    Set Global Variable    ${Enclosure_Credentials}
+    [Return]    ${Enclosure_Credentials}

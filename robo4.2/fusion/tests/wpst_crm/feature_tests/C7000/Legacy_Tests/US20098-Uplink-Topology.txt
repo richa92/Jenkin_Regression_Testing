@@ -1,0 +1,232 @@
+*** Settings ***
+
+Documentation     Feature Test: US20098-Reporting of the topology analysis of uplinks
+
+Resource            ../../../../resource/fusion_api_all_resource_files.txt
+
+Library                   FusionLibrary
+Library                   RoboGalaxyLibrary
+Library                   Collections
+Library                   OperatingSystem
+Library                   Process
+Variables                 data_variables.py
+
+Suite Setup       Cleanup For Suite
+Suite Teardown    Suite Teardown
+
+*** Variables ***
+${APPLIANCE_IP}            15.199.234.35
+
+*** Test Cases ***
+
+US20098
+
+#### Step-1-Creating Ethernet Networks   ####
+    Set Log Level      TRACE
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    Log to console and logfile     \n Creating Ethernet networks
+    :FOR  ${x}    IN RANGE  0  3
+    \   ${resp} =   Fusion Api Create Ethernet Bulk Networks    ${Bulk_enet[${x}]}
+    \   ${task} =    Wait For Task   ${resp}   120s    5s
+
+####  Step-2-Creating FC Networks  ####
+    ${fc_networks} =    Get Variable Value    ${fcnets}
+    Run Keyword If    ${fc_networks} is not ${null}    Add FC Networks from variable    ${fc_networks}
+
+####  Step-3-Create LIG-topo-1  ####
+	${lig} =   Get Variable Value    ${ligs['lig_topo']}
+	Run Keyword If   ${lig} is not ${null}    Add LIG from variable    ${lig}
+    Log to console and logfile   \n Created LIG successfully
+
+####  Step-4-Create eGroup-topo-1 and import enclosure ####
+
+     Log to console and logfile    \n Creating EG
+    ${enc_groups} =  Get Variable Value   ${eg_body1['EG_1']}
+    Run Keyword If   ${enc_groups} is not ${null}   Add Enclosure Group from variable   ${enc_groups}
+    ${EG_uri}=    Get Enclosure Group URI    ${EG1}
+    Log to console and logfile    EG created successfully
+
+    Log to console and logfile     \n Importing the enclosure
+    Set To Dictionary    ${enc_body1}    enclosureGroupUri    ${EG_uri}
+    ${resp_enc}=    Fusion Api Add Enclosure    ${enc_body1}
+    Run keyword unless	${resp_enc['status_code']}== 202    Fail    ${resp_lig['message']}
+	${task} =   Wait For Task    ${resp_enc}    500s   30s
+	Log to console and logfile    Enclosure imported successfully
+
+####  Step-5-Verify In LI  ####
+   Set Log Level      TRACE
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    Log to console and logfile     \n Verifying in LI the count of internal networks created.
+    ${ltest}=    Get Length    ${test_nets}
+    ${li_uri} =     Get LI URI          ${ENC1}-${LIG1}
+    ${resp}=      Fusion Api Get LI    ${li_uri}
+    ${int_nw}=    Get From Dictionary    ${resp}    internalNetworkUris
+    ${lresp}=    Get Length    ${int_nw}
+    Run Keyword If    '${lresp}' != '${ltest}'     Fail     msg="The networks are not shown correctly in the LI".
+    ...         ELSE     Log to console and logfile    \nThe internal networks are shown correctly in LI
+
+    Log to console and logfile    \nVerifying in LI the created Ethernet and FC networks
+    ${uplinksets} =    Fusion Api Get Uplink Set  
+    ${count}=    Get From Dictionary    ${uplinksets}    count
+    ${fc}=   Create List
+    ${leth}=   Set Variable  0
+    :FOR   ${x}   IN RANGE    0    ${count}
+    \   ${net}=    Get From Dictionary   ${uplinksets['members'][${x}]}     networkType
+    \   Run Keyword If       '${net}' != 'Ethernet'    Continue For Loop 
+    \   ${nwu}=    Get Length    ${uplinksets['members'][${x}]['networkUris']}
+    \   ${leth}=    Evaluate   ${leth} + ${nwu}
+    :FOR   ${x}   IN RANGE    0    ${count}
+    \   Run Keyword If       '${uplinksets['members'][${x}]['networkType']}' != 'FibreChannel'    Continue For Loop 
+    \   ...       ELSE     Append To List     ${fc}    ${uplinksets['members'][${x}]['fcNetworkUris']}
+    ${lfc}=    Get Length    ${fc}
+    ${ld}=    Get Length   ${dev_prod}
+    ${lsan}=   Get Length    ${san}
+    Run Keyword If     ${leth} != ${ld} or ${lfc} != ${lsan}     Fail    msg="The Eth and FC networks are not shown correctly in LI"
+    ...      ELSE      Log to console and logfile     \n The Eth and FC networks are correctly shown in the LI
+
+####  Step-6-validate transitions for Ethernet Networks  ####
+    Log to console and logfile    \n Editing LIG to validate the transitions for ethernet networks
+    ${lig} =     Get LIG Member     ${LIG1}
+    ${li_uri}=    Get LI Uri   ${ENC1}-${LIG1}
+    ${body} =   Build LIG body      ${ligs['lig_topo1']}
+    ${ethernetSettings} =   Get From Dictionary   ${lig}  ethernetSettings
+    Set to dictionary    ${body}     ethernetSettings    ${ethernetSettings}
+    ${lig_uri} =    Get LIG Uri     ${LIG1}
+    ${resp} =    Fusion Api Edit LIG     body=${body}    uri=${lig_uri}
+    Run keyword unless   ${resp['status_code']}== 202    Fail    ${resp['message']}
+    ${task} =    Wait For Task   ${resp}   120s   2s
+    Perform an Update From Group LI    ${li_uri}   15min    15s
+    
+    Log to console and logfile     \n Verifying in LI the count of internal networks changed to 0
+    ${li_uri} =     Get LI URI          ${ENC1}-${LIG1}
+    ${resp}=      Fusion Api Get LI    ${li_uri}
+    ${int_nw}=    Get From Dictionary    ${resp}    internalNetworkUris
+    ${lresp}=    Get Length    ${int_nw}
+    Run Keyword If    '${lresp}' != '0'     Fail     msg="The networks are not updated correctly in the LI".
+    ...         ELSE     Log to console and logfile    \nThe internal networks are shown correctly in LI
+
+    Log to console and logfile    \nVerifying in LI the count of Ethernet networks is changed correctly
+    ${uplinksets} =    Fusion Api Get Uplink Set  
+    ${count}=    Get From Dictionary    ${uplinksets}    count
+    ${leth}=   Set Variable  0
+    :FOR   ${x}   IN RANGE    0    ${count}
+    \   ${net}=    Get From Dictionary   ${uplinksets['members'][${x}]}     networkType
+    \   Run Keyword If       '${net}' != 'Ethernet'    Continue For Loop 
+    \   ${nwu}=    Get Length    ${uplinksets['members'][${x}]['networkUris']}
+    \   ${leth}=    Evaluate   ${leth} + ${nwu}
+    ${resp}=     Fusion Api Get Ethernet Networks
+    ${ld}=    Get Length   ${resp['members']}
+    Run Keyword If     ${leth} != ${ld}      Fail    msg="The Eth networks are not shown correctly in LI after editing"
+    ...      ELSE      Log to console and logfile     \n The Eth networks are correctly shown in the LI after editing
+
+*** Keywords ***
+Add LIG from variable
+	[Documentation]	Adds an LIG to an appliance from a variable which contains a list of dicts with the entire payload
+	[Arguments]		${ligx}
+	#Log to console and logfile  	Adding LIG ${ligx['name']}
+	
+	${ligx} = 	Copy Dictionary	${ligx}
+	#Log to console and logfile	${ligx}
+    ${name} =                       Get Variable Value  ${ligx['name']}
+    #Log to console and logfile	${name}
+	${enclosureIndexes} =           Get Variable Value  ${ligx['enclosureIndexes']}
+	${enclosureType} =              Get Variable Value  ${ligx['enclosureType']}
+	${ethernetSettings} =           Get Variable Value  ${ligx['ethernetSettings']}
+	${internalNetworkUris} =        Get Variable Value  ${ligx['internalNetworkUris']}
+	${interconnectBaySet} =         Get Variable Value  ${ligx['interconnectBaySet']}
+	${interconnectMapTemplate} =    Get Variable Value  ${ligx['interconnectMapTemplate']}
+	${qosConfiguration} =           Get Variable Value  ${ligx['qosConfiguration']}
+    ${redundancyType} =             Get Variable Value  ${ligx['redundancyType']}
+	${stackingMode} =               Get Variable Value  ${ligx['stackingMode']}
+	${telemetryConfiguration} =     Get Variable Value  ${ligx['telemetryConfiguration']}
+	${snmpConfiguration} =          Get Variable Value  ${ligx['snmpConfiguration']}
+	${uplinkSets} =                 Get Variable Value  ${ligx['uplinkSets']}
+	#${uplinkSets} = 	Copy List	${ligx['uplinkSets']}
+	#Log to console and logfile	${uplinkSets}
+	${l} = 	Get Length	${uplinkSets}
+	#Log to console and logfile	${l}
+	:FOR	${x}	IN RANGE	0	${l}
+	\	${networkType} = 	Get From Dictionary 	${uplinkSets[${x}]}	networkType
+	\	${networks} = 		Get From Dictionary		${uplinkSets[${x}]}	networkUris
+	\ 	Run Keyword If 	'${networkType}' == 'Ethernet'		Continue For Loop
+	\	${networkUris} = 	Get FC Uris	${networks}
+	\	Set to dictionary	${uplinkSets[${x}]}	networkUris	${networkUris}
+	
+	:FOR	${x}	IN RANGE	0	${l}
+	\	${networkType} = 	Get From Dictionary 	${uplinkSets[${x}]}	networkType
+	\	${networks} = 		Get From Dictionary		${uplinkSets[${x}]}	networkUris
+	\   ${nativeNetworkUri} =   Get Variable Value     ${uplinkSets[${x}]['nativeNetworkUri']}
+	\ 	Run Keyword If 	'${networkType}' == 'FibreChannel'	Continue For Loop
+	\	${networkUris} = 	Get FCoE Uris	${networks}
+	\   ${ethernetUris} =   Get Ethernet URIs   ${networks}
+    \   ${networkUris} =    combine lists   ${networkUris}  ${ethernetUris}
+	\	Set to dictionary	${uplinkSets[${x}]}	networkUris	    ${networkUris}
+	\   ${nativeNetworkUri} = 	Run Keyword If   '${nativeNetworkUri}' != 'None'    Get Ethernet Uri	${nativeNetworkUri}
+    \   Set to dictionary   ${uplinkSets[${x}]}	nativeNetworkUri     ${nativeNetworkUri}
+	#Log to console and logfile	${ethernetUris}
+    # Process Internal URIs
+	${internalNetworkUris} = 	Run Keyword If   ${internalNetworkUris} is not ${null}    Get Ethernet Uris	${internalNetworkUris}
+	#Log to console and logfile	${internalNetworkUris}
+	${body} = 	Fusion Api Create LIG Payload	name=${name}
+	...                                         enclosureIndexes=${enclosureIndexes}
+	...                                         enclosureType=${enclosureType}
+	...                                         ethernetSettings=${ethernetSettings}
+	...                                         interconnectBaySet=${interconnectBaySet}
+	...											interconnectMapTemplate=${interconnectMapTemplate}
+	...                                         internalNetworkUris=${internalNetworkUris}
+	...                                         qosConfiguration=${qosConfiguration}
+	...                                         redundancyType=${redundancyType}
+	...                                         stackingMode=${stackingMode}
+	...                                         telemetryConfiguration=${telemetryConfiguration}
+	...                                         snmpConfiguration=${snmpConfiguration}
+	...											uplinkSets=${uplinkSets}
+	#Log to console and logfile	${body}
+	${resp} = 	Fusion Api Create LIG	${body}
+	# to console and logfile	${resp}
+	${task} =	Wait For Task	${resp} 	60s	20s
+	#Log to console and logfile	${task}
+	${liguri} = 	Get From Dictionary	${task['associatedResource']}	resourceUri		
+	[Return]	${resp}
+
+
+Perform an Update From Group LI
+	[Arguments]		${liuri}	${timeout}=5 min 	${interval}=15s
+	${resp} = 	    Fusion Api Update From Group   uri=${li_uri}
+	Run Keyword If  ${resp['status_code']} !=202    fail    Update from group
+	${task} =	    Wait For Task 	${resp} 	${timeout}		${interval}
+	
+Login to OneView via REST	
+	[Documentation]		Login to the appliance with the cred
+	[Tags]  add   POSITIVE
+	Set Log Level    TRACE
+	${resp}     Fusion Api Login Appliance    ${appliance_IP}        ${admin_credentials}
+
+Suite Teardown
+	[Documentation]	Returns appliance to a 'clean' state by removing all resources\enclosures
+	Log to console and logfile	[TEARDOWN]
+	#
+	Run Keyword If All Tests Passed    Power off ALL Servers
+	Run Keyword If All Tests Passed    Remove All Server Profiles
+	Run Keyword If All Tests Passed    Remove ALL Enclosures
+	Run Keyword If All Tests Passed    Remove ALL Enclosure Groups
+	Run Keyword If All Tests Passed    Remove ALL LIGs
+	Run Keyword If All Tests Passed    Remove ALL LS
+	Run Keyword If All Tests Passed    Remove ALL LSGs
+	Run Keyword If All Tests Passed    Remove ALL Ethernet Networks
+	Run Keyword If All Tests Passed    Remove ALL FC Networks
+	Run Keyword If All Tests Passed    Remove ALL FCoE Networks
+	Run Keyword If All Tests Passed    Remove ALL Network Sets
+	Run Keyword If All Tests Passed    Remove ALL Users
+
+Cleanup For Suite	
+	[Documentation]	Returns appliance to a 'clean' state by removing all resources\enclosures
+	Log to console and logfile	[Cleanup]
+	Login to OneView via REST
+	Power off ALL Servers
+	Remove All Server Profiles
+	Remove ALL Enclosures
+	Remove ALL Enclosure Groups
+	Remove ALL LIGs
+	Remove ALL Ethernet Networks
+	Remove ALL FC Networks    
+	Remove ALL Users

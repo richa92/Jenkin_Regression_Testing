@@ -1,0 +1,153 @@
+*** Settings ***
+Documentation    fan_alert_event.txt - Validate Fan Alert events on OneView
+...    = GENERIC USAGE =
+...    | pybot | -v GIT_REPO_ROOT:<repo root path> | -v APPLIANCE_IP:<ipv4> | fan_alert_event.txt |
+...    = Variables =
+...    | GIT_REPO_ROOT |      Required: Repo root path if NOT defined in environment variable|
+...    | APPLIANCE_IP |       Required: OneView IPv4 address |
+
+Library           MgmtFWLibrary
+Library           json
+Library           robot.api.logger
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Suite Setup       Configure Events Test Environment
+Suite Teardown    Run Keywords    Logout of Fusion Via REST    AND    Logout of EM RIS
+
+*** Test Case ***
+TC 01: Fan Event - Validate Fan Removed and Insert Alerts
+    [Documentation]    Validate EM/OneView Fan Events EXIST AFTER EFUSED ON and OFF occurred
+    ...    OneView Alert Events Covered:
+    ...        - hpris.emRegistry.x.xFanRemoved
+    ...        - hpris.emRegistry.x.x.FanInserted
+    [Tags]    Fan    Automated    FLM1.01
+    ${fan_list}    ${fan_count}=    Get Current Fan List
+    #${AvailableFan}=   Get List of Occupied Fan Bays
+    Should Not Be Empty    ${fan_list}    msg=No Fans present in the enlcosure
+    :FOR    ${bay}   IN   @{fan_list}
+    \    Log    message=Removing and inserting Fan from bay:${bay} and verify resource removed\inserted event    console=True
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    RIS EM Efuse On Fan    ${bay}
+    \    Sleep    10
+    \    RIS EM Efuse Off Fan    ${bay}
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Resource Removed Event    ${Fan_Device}     ${Fan_Removed_Message_ID}    ${bay}    250
+    \    Verify Audit Log Resource Added Event    ${Fan_Device}     ${Fan_Inserted_Message_ID}    ${bay}    250
+    \    Verify Fusion Event Sent By EM    ${Fan_Removed_Message_ID}    ${last_fusion_event_id}    ${Enclosure_category}
+    \    Verify Fusion Event Sent By EM     ${Fan_Inserted_Message_ID}    ${last_fusion_event_id}    ${Enclosure_category}
+    \    Exit For Loop
+    [Teardown]    Run Keywords    RIS EM Efuse Off Fan    ${bay}    AND    Wait for Device OK    ${Fan_Device}    ${bay}
+
+TC 02: Fan Events - Validate FanRotor1Fault Failure and Cleared Alerts
+    [Documentation]    Validate OneView Fan Event EXIST AFTER FanFaultInjection occurred
+    ...   For EM firmware version v2.00, the test will inject the following fan failures:
+    ...      1. Fan1 -- simulate fan #1 motor died
+    ...   OneView Events covered:
+    ...      - FanRotor1Fault
+    ...      - FanRotor1FaultCleared
+    [Tags]    Fan    Automated    FLM2.00
+    ${fan_list}    ${fan_count}=    Get Current Fan List
+    #${AvailableFan}=   Get List of Occupied Fan Bays
+    Should Not Be Empty    ${fan_list}    msg=No Fans present in the enlcosure
+    :FOR    ${bay}   IN   @{fan_list}
+    \    Log    message=Failing the Fan for bay:${bay} and verify FanRotor1Fault & FanRotor1FaultCleared alert events    console=True
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${Fan_Fault_Status}=    Set EM RIS Faults    FanFaultInjection    ${bay}    Fan1    true
+    \    Should Be Equal As Strings    ${Fan_Fault_Status}    <Response [200]>
+    \    Sleep    8
+    \    Wait for Device Critical    ${Fan_Device}    ${bay}
+    \    #Verifying alert event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_FAN_CRITICAL}    ${Fan_Device}    ${bay}    250
+    \    Verify Audit Log Alert Event    ${EL_Fan1_Fault}    ${Fan_Device}    ${bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Fan1_Fault}    ${last_fusion_event_id}    ${Enclosure_category}
+    \    Log    message=Clearing Fan1 fault for bay:${bay} and verify ok status/alert event in diags audit log    console=True
+    \    ${Fan_Fault_Status}=    Set EM RIS Faults    FanFaultInjection    ${bay}    Fan1    false
+    \    Should Be Equal As Strings    ${Fan_Fault_Status}    <Response [200]>
+    \    Sleep    5
+    \    Wait for Device OK    ${Fan_Device}    ${bay}
+    \    #Verifying alert event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_Fan_OK}    ${Fan_Device}    ${bay}    250
+    \    Verify Audit Log Alert Event    ${EL_Fan1_Fault_Cleared}    ${Fan_Device}    ${bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Fan1_Fault_Cleared}    ${last_fusion_event_id}    ${Enclosure_category}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Set EM RIS Faults    FanFaultInjection    ${bay}    Fan1    false    AND
+    ...    Wait for Device OK    ${Fan_Device}    ${bay}
+
+TC 03: Fan Events - Validate FanRotor2Fault Failure and Cleared Alerts
+    [Documentation]    Validate OneView Fan Event EXIST AFTER FanFaultInjection occurred
+    ...   For EM firmware version v2.00, the test will inject the following fan failures:
+    ...      2. Fan2 -- simulate fan #2 motor died
+    ...   OneView Events covered:
+    ...      FanRotor2Fault
+    ...      FanRotor2FaultCleared
+    [Tags]    Fan    Automated    FLM2.00
+    ${fan_list}    ${fan_count}=    Get Current Fan List
+    #${AvailableFan}=   Get List of Occupied Fan Bays
+    Should Not Be Empty    ${fan_list}    msg=No Fans present in the enlcosure
+    :FOR    ${bay}   IN   @{fan_list}
+    \    Log    message=Failing the Fan for bay:${bay} and verify FanRotor2Fault & FanRotor2FaultCleared alert events    console=True
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${Fan_Fault_Status}=    Set EM RIS Faults    FanFaultInjection    ${bay}    Fan2    true
+    \    Should Be Equal As Strings    ${Fan_Fault_Status}    <Response [200]>
+    \    Sleep    8
+    \    Wait for Device Critical    ${Fan_Device}    ${bay}
+    \    #Verifying alert event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_FAN_CRITICAL}    ${Fan_Device}    ${bay}    250
+    \    Verify Audit Log Alert Event    ${EL_Fan2_Fault}    ${Fan_Device}    ${bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Fan2_Fault}    ${last_fusion_event_id}    ${Enclosure_category}
+    \    Log    message=Clearing Fan1 fault for bay:${bay} and verify ok status/alert event in diags audit log    console=True
+    \    ${Fan_Fault_Status}=    Set EM RIS Faults    FanFaultInjection    ${bay}    Fan2    false
+    \    Should Be Equal As Strings    ${Fan_Fault_Status}    <Response [200]>
+    \    Sleep    5
+    \    Wait for Device OK    ${Fan_Device}    ${bay}
+    \    #Verifying alert event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_Fan_OK}    ${Fan_Device}    ${bay}    250
+    \    Verify Audit Log Alert Event    ${EL_Fan2_Fault_Cleared}    ${Fan_Device}    ${bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Fan2_Fault_Cleared}    ${last_fusion_event_id}    ${Enclosure_category}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Set EM RIS Faults    FanFaultInjection    ${bay}    Fan2    false    AND
+    ...    Wait for Device OK    ${Fan_Device}    ${bay}
+
+TC 04: Verify FanFru FanCommFault and FanCommFaultCleared
+    [Documentation]    This test will verify the FAN Fru ManufacturedForInvalidFault events
+    ...                FanCommFault
+    ...                FanCommFaultCleared
+    [Tags]    Fan     Automated    FLM2.00    OVD21304
+    ${fan_list}    ${fan_count}=    Get Current Fan List
+    #${AvailableFan}=   Get List of Occupied Fan Bays
+    Should Not Be Empty    ${fan_list}    msg=No Fans present in the enlcosure
+    :FOR    ${bay}   IN   @{fan_list}
+    \    Log    message=Failing the Fan for bay:${bay} and verify FanCommFault & FanCommFaultCleared alert events    console=True
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${Fan_Fault_Status}=    Set EM RIS CANmic Faults    ${Fan_Device}    ${bay}    true
+    \    Should Be Equal As Strings    ${Fan_Fault_Status}    <Response [200]>
+    \    Sleep    8
+    \    Wait for Device Critical    ${Fan_Device}    ${bay}
+    \    #Verifying alert event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_FAN_CRITICAL}    ${Fan_Device}    ${bay}    250
+    \    Verify Audit Log Alert Event    ${EL_Fan_CommFault}    ${Fan_Device}    ${bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Fan_CommFault}    ${last_fusion_event_id}    ${Enclosure_category}
+    \    Log    message=Clearing Fan commfault injection for bay:${bay} and verify ok status/alert event in diags audit log    console=True
+    \    ${Fan_Fault_Status}=    Set EM RIS CANmic Faults    ${Fan_Device}    ${bay}    false
+    \    Should Be Equal As Strings    ${Fan_Fault_Status}    <Response [200]>
+    \    Sleep    5
+    \    Wait for Device OK    ${Fan_Device}    ${bay}
+    \    #Verifying alert event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_Fan_OK}    ${Fan_Device}    ${bay}    250
+    \    Verify Audit Log Alert Event    ${EL_Fan_CommFault_Cleared}    ${Fan_Device}    ${bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Fan_CommFault_Cleared}    ${last_fusion_event_id}    ${Enclosure_category}
+    [Teardown]    Run Keyword If Test Failed    Run keywords    Set EM RIS CANmic Faults    ${Fan_Device}    ${bay}    false    AND
+    ...    Wait for Device OK    ${Fan_Device}    ${bay}

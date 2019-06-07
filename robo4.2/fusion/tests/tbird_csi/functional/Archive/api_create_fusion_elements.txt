@@ -1,0 +1,222 @@
+*** Settings ***
+Documentation
+...    = Usage =
+...    | pybot | -L DEBUG | api_create_fusion_elements.txt |
+...    = Variables =
+...    | ENCLOSURE | Required. Dictionary key from variables.py representing the desired enclosure. |
+
+Library           Collections
+Library           RoboGalaxyLibrary            # DVTs Robot Framework extensions
+Library           FusionLibrary                # DVTs Robot Framework extensions
+Variables         ../resources/variables.py    ${ENCLOSURE}
+Variables	  ../resources/configFile.py
+Resource          ../resources/constants.txt
+Resource          ../../tbird_hal/resources/em_api.txt
+Resource          ../../tbird_hal/resources/fusion_ssh.txt  # DVT fusion API extensions
+Resource          ../../tbird_hal/resources/fusion_api.txt  # DVT fusion API extensions
+Resource          ../../tbird_hal/resources/system_info.txt
+Resource          ../../tbird_hal/resources/enclosure_info.txt
+Force Tags        API    HW
+
+Suite Setup       Run Keywords
+...          Login To Fusion Via REST
+...          Login To Fusion Via SSH
+...          EM Api Create Session
+Suite Teardown    Logout Of Fusion Via REST
+
+*** Variables ***
+${Bay}           ${None}
+${UplinkSets}    ${None}
+${ICM Port}      Q1.2
+
+${ICM Bay}	3
+
+*** Test Cases ***
+Verify Enclosure in Monitored State
+    [Tags]    Monitored
+    Verify Enclosure in Monitored State
+
+Create FCoe Network
+    [Tags]	FCoeNetwork
+    Make Networks	${FCoe_Network1_Name}	${FCoe_Network1_VLAN}	FCoe
+    Make Networks	${FCoe_Network2_Name}	${FCoe_Network2_VLAN}	FCoe
+
+Create Ethernet Networks
+    [Tags]    Network
+    Make Networks	${Eth_Network1_Name}	${Eth_Network1_VLAN}	Ethernet
+    Make Networks	${Eth_Network2_Name}	${Eth_Network2_VLAN}	Ethernet
+    Verify Enclosure in Monitored State
+
+Add Uplink Set to LIG
+#hard coded for ethernet network for now
+     [Tags]    UplinkSet
+     #${ICM Bay}=       Select Random Present Enclosure interconnectBays
+     ${ICM Bay}=	Select Bay	interconnectBays	${ICM Bay}
+     ${UplinkSets}=    Create Uplink Set Payload    ${ICM Port}    ${ICM Bay}
+     Set Suite Variable    ${UplinkSets}
+
+Create Logical Interconnect Group
+   [Tags]    LIG
+    Create LIG		NAME=${LIG Name}	UPLINK_SETS=${UplinkSets}    REDUNDANCY_TYPE=NonRedundantASide   ICM_BAY_SET=3
+    # Verify Enclosure in Monitored State
+
+Create Enclosure Group
+    [Tags]    EG
+    Create Enclosure Group	EG Name=EG1	LIG Name=LIG1		Bay=3
+    #Verify Enclosure in Monitored State
+
+Create Logical Enclosure
+    [Tags]    LE
+    Create Logical Enclosure
+    #Verify Enclosure in Configured State
+
+Create Server Profile
+    [Tags]    SP
+    # Get Server Hardware for Profile
+    ${ServerHardwareBay}=    Select Server Hardware Bay    ${Bay}
+    ${ServerHardware}=       Get Server Hardware    ${ServerHardwareBay}
+
+    # Poweroff Server Hardware if powered on.
+    Run Keyword If    "${ServerHardware['powerState']}"=="On"
+    ...    Power Off Server Hardware ${ServerHardware['uuid']}
+
+    # Create Server Profile
+    ${Response}=    Create Server Profile    ${SP_NAME}    ${ServerHardware['name']}
+    ${Errors}=    Get Length    ${Response['taskErrors']}
+    Should Be Equal as Integers    ${Errors}    0    msg=Errors encountered when creating Server Profile ${SP_NAME}.
+
+    Verify Enclosure in Configured State
+
+*** Keywords ***
+Make Networks
+    [Arguments]		${Network_Name}		${Network_VLAN}		${Network_Type}
+    [Documentation]	Creates networks based on the the number of VLAN IDs and the Network Type
+    Run Keyword If	',' in '${Network_VLAN}' or '-' in '${Network_VLAN}'
+    ...			Create Multiple Networks	${Network_Name}
+    ...			${Network_VLAN}		${Network_Type}
+    ...	ELSE IF		'${Network_Type}'=='Ethernet'	Create Ethernet Network
+    ...			${Network_Name}		${Network_VLAN}
+    ...	ELSE IF		'${Network_Type}'=='FCoe'	Create FCoe Network
+    ...			${Network_Name}		${Network_VLAN}
+
+Create Multiple Networks
+    [Arguments]		${Name}		${VLAN}		${Network_Type}
+    [Documentation]	Creates multiple networks depending on the range and amount of VLAN IDs.
+    @{VLAN_IDs}		Split String	${VLAN}		,
+
+    :FOR	${index}	IN	@{VLAN_IDs}
+	\	@{Nums}		Run Keyword If		'-' in '${index}'	Split String
+	\	...					${index}		-
+	\	${Network_Name}	Run Keyword If		'-' not in '${index}'	Catenate
+	\	...		SEPARATOR=_		${Name}			${index}
+	\	Run Keyword If		'-' in '${index}'	Loop Through Range
+	\	...		@{Nums}[0]	@{Nums}[1]	${Name}		${Network_Type}
+	\	...	ELSE IF 	'${Network_Type}'=='Ethernet'	Create Ethernet Network
+	\	...			${Network_Name}		${index}
+	\	...	ELSE IF 	'${Network_Type}'=='FCoe'	Create FCoe Network
+	\	...			${Network_Name}		${index}
+
+Loop Through Range
+    [Arguments]		${Num1}		${Num2}		${Name}		${Network_Type}
+    [Documentation]	Adds a Network for each VLAN ID in the given range.
+    ${Num2}=	Evaluate	${Num2}+1
+    :FOR	${index}	IN RANGE	${Num1}		${Num2}
+	\	${Network_Name}		Catenate	SEPARATOR=_	${Name}		${index}
+	\	Run Keyword If 	'${Network_Type}'=='Ethernet'	Create Ethernet Network
+	\	...			${Network_Name}		${index}
+	\	Run Keyword If 	'${Network_Type}'=='FCoe'	Create FCoe Network
+	\	...			${Network_Name}		${index}
+
+Select Bay
+    [Arguments]    ${DeviceBayType}    ${Bay}=${None}
+    [Documentation]    Select random bay if Bay variable is 'None'.
+    ${Bay}=    Run Keyword If    "${Bay}"=="${None}"
+    ...    Select Random Present Enclosure ${DeviceBayType}
+    ...    ELSE    Set Variable    ${Bay}
+    [Return]    ${Bay}
+
+Select Server Hardware Bay
+    [Arguments]    ${Bay}
+    [Documentation]     Determine which Server Hardware Bay to use when creating Server Profile based on ${Bay} variable.
+
+    # Use specified bay if not None
+    Return From Keyword If    '${Bay}'!='${None}'    ${Bay}
+
+    # Randomly select bay from available bays
+    ${Available Blades}    ${Empty Bays}=    Find Filled Bays    /rest/v1/BladeBays
+    ${Bay}=    Select Random Element from List    ${Available Blades}
+
+    [Return]    ${Bay}
+
+Create FCoe Network
+    [Documentation]    Creates a Network using the supplied Name and vlanId.
+    [Arguments]    ${Name}    ${vlanId}
+
+
+    ${Payload}=    Create Dictionary    vlanId=${vlanId}
+    ...                                 name=${Name}
+    ...                                 type=fcoe-network
+    #pjs line below gives error
+    #...                                 connectionTemplateUri=/rest/connection-templates/defaultConnectionTemplate
+
+    ${Response}=    Fusion API Create FCoe Network    ${Payload}
+    Should Be Equal as Strings    ${Response['status_code']}          202	msg=Failed to initiate Create Network.
+
+    # Wait for task to complete
+    ${Response}    Fusion API Wait For Task To Complete    ${Response['uri']}
+
+    # Check for errors
+    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    ${Errors}=    Get Length    ${Errors}
+    Should be True    ${Errors} == 0    msg=Errors encountered while creating FCoe Network.
+
+    [Return]    ${Response}
+
+# NOT YET WORKING
+Create Server Profile With Managed Firmware
+    [Arguments]    ${Name}    ${ServerHardwareName}    ${Connections}=${None}
+
+    # Get Server Hardware Information
+    ${ServerHardware}=    Fusion API Get Server Hardware    param=?filter="name='${ServerHardwareName}'"
+    ${ServerHardwareData}=    Get From List    ${ServerHardware['members']}    0
+    ${FirmwareDrivers}=	  Fusion API Get Firmware Drivers
+
+    ${ForceInstall}=	false
+    ${fwuri}=		SPPGen9Snap4_2015_0520_27
+    ${Firmware}=	Create Dictionary	manageFirmware=true
+    ...						firmwareBaselineUri=/rest/firmware-drivers/${fwuri}
+    ...						firmwareInstallType=FirmwareOnlyOfflineMode
+    ...						forceInstallFirmware=${ForceInstall}
+
+    # Check PowerState
+    Should Not Be Equal As Strings    ${ServerHardwareData['powerState']}    On    msg=Server Hardware ${ServerHardwareName} is powered on. Must be powered off for Server Profile creation.
+
+    ${Server Profile Payload}=    Create Dictionary
+    ...                           type=ServerProfileV5
+    ...                           name=${Name}
+    ...                           serverHardwareTypeUri=${ServerHardwareData['serverHardwareTypeUri']}
+    ...                           enclosureGroupUri=${ServerHardwareData['serverGroupUri']}
+    ...                           enclosureBay=${ServerHardwareData['position']}
+    ...                           enclosureUri=${ServerHardwareData['locationUri']}
+    ...				  firmware=${Firmware}
+
+    # Include Connections if specified
+    Run Keyword If    "${Connections}"!="${None}"
+    ...    Set To Dictionary    ${Server Profile Payload}    connections    ${Connections}
+
+    ${Response}=    Fusion API Create Server Profile    ${Server Profile Payload}
+    Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to initiate Create SP.
+
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number     60
+    ${Retries}           Convert To Integer    15
+    ${Response}=    Fusion API Wait For Task To Complete    ${Response['uri']}    sleep_time=${Retry Interval}    retries=${Retries}
+
+    # Check for errors
+    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    ${Errors}=    Get Length    ${Errors}
+    Run Keyword If    ${Errors} != 0
+    ...    Log    Errors encountered while creating Server Profile.    level=WARN
+
+    [Return]    ${Response}
+

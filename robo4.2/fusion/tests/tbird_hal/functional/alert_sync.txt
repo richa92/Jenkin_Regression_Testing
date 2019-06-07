@@ -1,0 +1,209 @@
+*** Settings ***
+Documentation    alert_sync.txt - Fusion Activity Alert Sync Test
+...    = USAGE =
+...    | pybot | -v ENCLOSURE:dcs |-v FUSION_IP:<IP> | alert_sync.txt |
+...    = Variables =
+...    | ENCLOSURE | Required; Enclosure to use |
+...    | FUSION_IP | Required when enclosure is DCS; IP address of the FusionVM to use |
+*** Settings ***
+Library           json
+Library           robot.api.logger
+Variables         ../resources/variables.py    ${ENCLOSURE}
+Resource          ../resources/defaults.txt
+Resource          ../resources/fusion_api.txt
+Resource          ../resources/em_api.txt
+Resource          ../resources/fusion_ssh.txt
+Force Tags        HW
+Suite Setup       Suite Setup
+Suite Teardown    Suite Teardown
+
+*** Variables ***
+${EFuse_Sleep}    30
+
+*** Test Case ***
+###############################################################################
+Reduce CI run-level
+    [Tags]    run-level
+    # Reducing the run-level emulates the CI becoming inactive/unresponsive.
+    ${Output}    Execute SSH Command    /ci/bin/cic-run-level database
+    Should Contain    ${Output}    Run level changed to
+    ...    msg=CI run level change failed \n${Output}
+    Sleep    ${EFuse_Sleep}
+
+EFuseOn Power Supply Bay
+    EFuse Power Supply Bay    EFuseOn    ${bayNumber}
+    Sleep    ${EFuse_Sleep}
+
+Verify EM Events
+    [Tags]    EFuseOn    EM
+    ${Event_List}    ${Last_EventID}=    EM Diags Get Audit Log Events
+    ...    Starting_EventID=${Last_EventID}    Origin_Filter=.*Power.*
+    ${Expected_Events}    Create List    emRegistry.1.0.PowerSubsystemChanged
+    ...                                  emRegistry.1.0.PowerSupplyRemoved
+    :FOR    ${Event}    IN    @{Event_List}
+    \    Log    ${Event['MessageID']}    console=True
+    \    Remove Values From List    ${Expected_Events}    ${Event['MessageID']}
+    Should Be Empty    ${Expected_Events}    Event(s) not found: ${Expected_Events}
+
+Verify No New Activity Alerts
+    ${Alert_list}    ${Last_AlertID}    Fusion Api Get Activity Alerts
+    ...    Starting_AlertID=${${Last_AlertId}}    Resource_Filter=.*Power.*
+    Should Be Empty    ${Alert_list}    Unexpected alert(s) found: ${Alert_list}
+    
+EFuseOff Power Supply Bay
+    EFuse Power Supply Bay    EFuseOff    ${bayNumber}
+    Sleep    ${EFuse_Sleep}
+
+Verify EM Events again
+    ${Event_List}    ${Last_EventID}=    EM Diags Get Audit Log Events
+    ...    Starting_EventID=${Last_EventID}    Origin_Filter=.*Power.*    
+    ${Expected_Events}    Create List    emRegistry.1.0.PowerSubsystemChanged
+    ...                                  emRegistry.1.0.PowerSupplyInserted
+    ...                                  emRegistry.1.0.PowerSupplyOk
+    :FOR    ${Event}    IN    @{Event_List}
+    \    Log    ${Event['MessageID']}    console=True
+    \    Remove Values From List    ${Expected_Events}    ${Event['MessageID']}
+    Should Be Empty    ${Expected_Events}    Event(s) not found: ${Expected_Events}
+
+Verify Still no New Activity Alerts
+    ${Alert_List}    ${Last_AlertID}    Fusion Api Get Activity Alerts
+    ...    Starting_AlertID=${${Last_AlertId}}    Resource_Filter=.*Power.*
+    Should Be Empty    ${Alert_list}    Unexpected alert(s) found: ${Alert_list}
+
+Restore CI Run-Level
+    [Tags]    run-level
+    ${Output}    Execute SSH Command    /ci/bin/cic-run-level normal    ]\#
+    Should Contain    ${Output}    Run level changed to
+    ...    msg=CI run level change failed \n${Output}
+    Sleep    ${EFuse_Sleep}
+
+Verify Synchronized Activity Alerts
+    ${Alert_list}    ${Last_AlertID}    Fusion Api Get Activity Alerts
+    ...    Starting_AlertID=${${Last_AlertId}}    Resource_Filter=.*Power.*
+    ${Expected_Alerts}    Create List    hpris.emRegistry.1.0.PowerSupplyInserted
+    #...                                  hpris.emRegistry.1.0.PowerSupplyRemoved  This event if OVERRUN and not seen
+    :FOR    ${Alert}    IN    @{Alert_List}
+    \    Log    ${Alert['alertTypeID']}    console=True
+    \    Remove Values From List    ${Expected_Alerts}    ${Alert['alertTypeID']}
+    Should Be Empty    ${Expected_Alerts}    Event(s) not found: ${Expected_Alerts}
+
+*** Keywords ***
+Suite Setup
+    Login to Fusion via REST
+    Login to Fusion via SSH    ${FUSION IP}    ${FUSION_SSH_USERNAME}    
+    ...                        ${FUSION_SSH_PASSWORD}    ]\#    600
+
+    # Get EM Session ID
+    ${EM_IP}    ${EMSessionID}=    EM Api Create Session
+    Set Suite Variable    ${Header}    "X-Auth-Token":"${EMSessionID}"
+
+    # Select a random Power Supply Bay
+    ${bayNumber}    Evaluate    random.randint(1, 6)    random
+    Set Suite Variable    ${bayNumber}    1
+
+    # Find Last Audit Event IDs
+    Run Keyword and Ignore Error    EM Diags Get Audit Log Events
+    Console    Last EM Event found: ${Last_EventID}
+    Run Keyword and Ignore Error    Fusion Api Get Activity Alerts 
+    Console    Last Alert found: ${Last_AlertID}
+    
+Suite Teardown
+    Logout of Fusion via REST
+    Logout of Fusion via SSH
+
+###############################################################################
+
+EFuse Power Supply Bay
+    [Documentation]    Perform an efuse action on a power supply bay. Action = EFuseOff | EFuseOn
+    [Arguments]    ${Action}    ${BayNumber}
+    ${Data}      Set Variable    {"Action":"${Action}"}
+    ${Output}    Execute SSH Command
+    ...    curl -ikX POST -H ${Header} --data-ascii '${data}' https://${EM_IP}%${fusion_nic}/rest/v1/PowerSupplyBays/${BayNumber}
+    Should Contain    ${Output}    { "Action": "${Action}" }
+    ...    msg=EFuse action failed \n${Output}
+
+
+###############################################################################
+
+EM Diags Get Audit Log Events
+    [Documentation]    Fetch Diag Audit Log Events.
+    ...    (Assumes an SSH connection with curl is currently open)
+    ...    Returns a list of (dictionary) entries and EventID of the latest event encountered.
+    [Arguments]    ${IP}=${EM_IP}    ${Nic}=${FUSION_NIC}
+    ...            ${Origin_Filter}=/rest/v1    ${Starting_EventID}=1-1
+    Set Suite Variable    ${Last_EventID}    ${Starting_EventID}
+    ${EM_Audit_Events_List}    Create List
+
+    # Get the most recent entries from the audit (RIS events) log.
+    ${Output}    Execute SSH Command
+    ...       curl -ksS -H ${Header} https://${EM_IP}%${FUSION_NIC}/rest/v1/Diags/AuditLog/50
+    # Remove CLI prompt from buffer.  It messes up loads.
+    ${Output}    String.Fetch From Left    ${Output}    [root@
+
+    # Break the output into an (easier to handle) list of lines. One line per event.
+    @{Lines}    Split To Lines    ${Output}
+    : FOR    ${Line}    IN    @{Lines}
+    \    # Reformat event/line (string) into a json dictionary    
+    \    ${Event}    json.loads    ${Line}    
+
+    \    # Select only the most recent events - skip any before that.
+    \    ${EventID}    Get From Dictionary    ${Event}    EventID
+    \    # EventID's are of the form n-nnn.  Only compare at the portion after the dash.
+    \    ${tmpEventID}             Fetch From Right    ${EventID}    -
+    \    ${tmpStarting_EventID}    Fetch From Right    ${Starting_EventID}    -
+    \    Run Keyword If    ${${tmpStarting_EventID}}>=${${tmpEventID}}    Continue For Loop
+
+    \    # Remember the last EventID encountered
+    \    ${tmpLast_EventID}    Fetch From Right    ${Last_EventID}    -
+    \    Run Keyword If    ${${tmpEventID}}>=${${tmpLast_EventID}}    Set Suite Variable    ${Last_EventID}    ${EventID}
+
+    \    # Filter out any unrelated events (e.g., I'm only interested in power supply events)
+    \    # Example: ${Origin_Filter} = '/rest/v1/PowerSupplyBays/${bayNumber}'
+    \    ${OriginOfCondition}    Get From Dictionary    ${Event}    OriginOfCondition
+    \    ${Found}    Run Keyword And Return Status
+    \    ...    Should Match Regexp    ${OriginOfCondition}    ${Origin_Filter}
+    \    Run Keyword If    '${Found}'=='False'    Continue For Loop
+
+    \    # Add event (dictionary) into 'List of EM Audit Events'
+    \    Append to List    ${EM_Audit_Events_list}    ${Event}
+    [Return]    ${EM_Audit_Events_List}    ${Last_EventID}
+
+###############################################################################
+
+Fusion Api Get Activity Alerts
+    [Documentation]    Fetch recent Fusion Activity Alerts
+    ...    (Assumes a Fusion REST Api connection is open and logged in).
+    ...    Returns a list of Alerts.
+    [Arguments]    ${Starting_AlertID}=1    ${Resource_Filter}=.*
+    ${Alert_List}    Create List
+    # Get the entire list of Alerts
+    ${Response}    Fusion Api Get Alerts    /rest/alerts?sort=created:ascending 
+    
+    #${Count}    Get From Dictionary    ${Response}    count
+    ${Count}    Get Variable Value    ${Response['count']}    0
+    Run Keyword if            '${Count}'=='0'    Console    \nNo alert events found
+    Return From Keyword If    '${Count}'=='0'    ${Alert_List}    ${Starting_AlertID}
+
+    ${Members}    Get From Dictionary    ${Response}    members
+    :FOR    ${Index}    IN RANGE    0    ${Count}
+    \    ${Alert}    Get From List    ${Members}    ${Index}
+
+    \    # Select only the most recent events - skip any before that
+    \    ${uri}    Get From Dictionary    ${Alert}    uri
+    \    ${id}     Fetch From Right    ${uri}    /
+    \    Run Keyword If    ${Starting_AlertID}>=${id}    Continue For Loop
+
+    \    # Remember the last Alert ID encountered
+    \    Set Suite Variable    ${Last_AlertID}    ${id}
+
+    \    # Filter out any unrelated alerts
+    \    ${resourceID}    Get From Dictionary    ${Alert}    resourceID
+    \    ${Found}    Run Keyword And Return Status
+    \    ...    Should Match Regexp    ${resourceID}    ${Resource_Filter}
+    \    Run Keyword If    '${Found}'=='False'    Continue For Loop
+
+    \    # Include this alert into the 'List of Activity Events'
+    \    Append to List    ${Alert_List}    ${Alert}
+    Should Not Be Empty    ${Alert_List}    No Activity Events Found
+    [Return]    ${Alert_List}    ${Last_AlertID}
+

@@ -1,0 +1,397 @@
+*** Settings ***
+Documentation      Configures an appliance with resources found in supplied data file. Pass in specific tags with pybot -i <tag(s)> to limit processing
+Library            FusionLibrary
+Library            AltairLibrary
+Library            RoboGalaxyLibrary
+Library            OperatingSystem
+Library            BuiltIn
+Library            Collections
+Library            XML
+Library            String
+Library            json
+Library            DateTime
+Library            Dialogs
+Library            SSHLibrary
+Library            String
+
+Resource           ../../../../Resources/api/fusion_api_resource.txt
+Variables          cho_data.py
+
+*** Variables ***
+${X-API-VERSION}			    300
+${APPLIANCE_IP}                 10.16.12.8
+${DATAFILE}                     cho_data.xml
+${WINUSER}						Administrator
+${LINUSER}						root
+${PASSWORD}						ChangeMe123!
+${DHCP_IP}						10.35.0.11
+${DHCP_PASSWORD}				Cosmos123
+${DHCP_FILE}					C:\\Get-DHCPAddress.ps1
+${ALTAIR_IP}					10.10.11.56
+${ALTAIR_USERNAME}				Administrator
+${ALTAIR_PASSWORD}				Cosmos123
+
+
+*** Keywords ***
+Login And Load Test Data
+	Set Log Level   TRACE
+	[Arguments]     ${username}
+	Set To Dictionary	${admin_credentials}	userName	${username}
+	Fusion Api Login Appliance  ${appliance_ip}     ${admin_credentials}
+	Log		Appliance IP is : ${appliance_ip}
+	Log 	Admin credentials: ${admin_credentials}
+	Altair API Login Appliance	${ALTAIR_IP}	${ALTAIR_USERNAME}	${ALTAIR_PASSWORD}
+	Load Test Data 	${DATAFILE}
+
+Logout Appliance
+	Fusion Api Logout Appliance
+	Altair Api Logout Appliance
+
+
+Delete Server From Altair
+	[Documentation]	Deleting the Server from Altair
+	[Arguments]		${server_profile}	${enclosureName}	${bayNumber}
+	${serialNum}=	Get Server Virtual Serial Number from Profile	${server_profile}
+
+	${serverStatus}		${serverUri}=	Run Keyword And Ignore Error	Altair API Get Server Uri	${serialNum}
+	#Run Keyword If	'${serverStatus}'=='FAIL' and '${serverUri}'=='Server URI not found'	Pause Execution		message=Failed to get Server uri. Server in ${enclosureName} ${bayNumber} will not be deleted from Altair. Press OK to continue
+	Run Keyword If	'${serverStatus}'=='FAIL' and '${serverUri}'=='Server URI not found'	Fail	  Failed to get Server uri. Server in ${enclosureName} ${bayNumber} will not be deleted from Altair
+
+	${response}=	Altair Api Delete Server	${serverUri}
+	[Return]	${response}
+	
+Get Server Management IP using Serial Number
+	[Documentation]	Get Management IP of server present in Altair using its serial number
+	[Arguments]		${server_profile}	${Enclosure}	${Bay}
+
+	${serialNum}=	Get Server Virtual Serial Number from Profile	${server_profile}
+	${status}	${response}=	Run Keyword And Ignore Error	Altair Api Get Server Info
+	#Run Keyword If	'${status}'=='FAIL'		Pause Execution    message=Altair API Get Server Info keyword has failed for server in Enclosure ${Enclosure} and bay ${bay}. Press OK to continue
+	Run Keyword If	'${status}'=='FAIL'		Fail	Altair API Get Server Info keyword has failed for server in Enclosure ${Enclosure} and bay ${bay}
+
+	${members}=		Get From Dictionary		${response}		members
+	#Run keyword if	${response['count']}==0		Pause Execution    message=No Members are returned from Altair API Get Server Info keyword. Press OK to continue
+	Run Keyword If	${response['count']}==0		Fail	No Members are returned from Altair API Get Server Info keyword.
+
+	:FOR  ${server}  in  @{members}
+	\	${serverSerialNum}=	Get From Dictionary		${server}	serialNumber
+	\	${ipv4addr}=		Run Keyword If		'${serverSerialNum}'=='${serialNum}'	Get From Dictionary		${server}	managementIP
+	\	Exit For Loop If	'${serverSerialNum}'=='${serialNum}'
+	#Run Keyword If	'${ipv4addr}'=='${null}'	Pause Execution		message=Failed to get Management IP for Server with Serial Number ${serialNum}. Press OK to continue
+	Run Keyword If	'${ipv4addr}'=='${null}'	Fail	Failed to get Management IP for Server with Serial Number ${serialNum}
+	[Return]	${ipv4addr}
+	
+Wait For Task And Verify
+	[Documentation]	Wait for the task to complete (fail or pass)
+	[Arguments]		${jobid}	${timeout}
+	${response}=	Altair API Wait For Task	${jobid}	${timeout}	
+	${jobStatus}=		Get From Dictionary		${response}		status
+	${jobState}=		Get From Dictionary		${Response}		state
+	[Return]	${jobStatus}	${jobState}
+	
+Get Server Virtual Serial Number from Profile
+	[Documentation]	Get the Virtual Serial Number from Server Profile 
+	[Arguments]		${server_profile}
+	${profileName}=		Get From Dictionary		${server_profile}	name
+	${resp} = 	Fusion Api Get Server Profiles		param=?filter="'name'=='${profileName}'"
+	
+	${members}=		Get From Dictionary		${resp}		members
+	Run Keyword If	${resp['count']}==0		Fail	No Profiles with Name ${profileName} is returned from Get Server Profile Info keyword.
+	
+	${status}	${serialNumber} = 	Run Keyword And Ignore Error	Get From Dictionary		${resp['members'][0]}	serialNumber
+	#Run Keyword If	'${status}'=='FAIL' and '${serialNumber}'=='${null}'	Pause Execution		message=Failed to get Serial Number from Server Profile with name ${profileName}. Press OK to continue
+	Run Keyword If	'${status}'=='FAIL' and '${serialNumber}'=='${null}'	Fail	  Failed to get Serial Number from Server Profile with name ${profileName}
+	[Return]	${serialNumber}	
+
+
+Power Off Server if On
+	[Documentation]		Power Off the T-Bird server if On 
+    [Arguments]		${server_profile}		${pause}=${True}
+    ${server_hardware}=		Get From Dictionary		${server_profile}		serverHardwareUri 
+    #${server_hardware}=		replace string using regexp  ${server_hardware}  SH:  ${EMPTY}
+    
+    ${server_powerstate}=	Get Server Power	${server_hardware}
+    Return From keyword if		'${server_powerstate}'=='Off'		${True}	
+    #Run Keyword If	'${pause}'=='${True}'	Pause Execution		message=${server_hardware} - is On. Press OK to continue. Server will now Power Off
+    
+    ${powerStatus}=		Run Keyword And Return Status	Power off Server	${server_hardware}
+    #Run Keyword If		'${powerStatus}'=='False'	Pause Execution    message=Failed to power Off the server - ${server_hardware}. Press OK to continue
+	Run Keyword If		'${powerStatus}'=='False'	Fail 	Failed to power Off the server- ${server_hardware}
+	[Return]
+
+
+Wait For Server To Power Off
+	[Documentation]		Wait for the T-Bird serverto power off completely 
+    [Arguments]		${server_profile}
+    ${server_hardware}=		Get From Dictionary		${server_profile}		serverHardwareUri
+    : FOR    ${INDEX}    IN RANGE    1    20
+    \	${server_powerstate}=	Get Server Power	${server_hardware}
+    \	Run Keyword If		'${server_powerstate}'=='Off'		Exit For Loop
+    \	Sleep	30	
+    [Return]	${server_powerstate}
+
+
+Power On Server And Wait Until POST
+	[Documentation]		Power On Server and wait till POST Completes
+	[Arguments]		${server_profile}
+	${server_hardware}=		Get From Dictionary		${server_profile}		serverHardwareUri     
+	${server_powerstate}=	Get Server Power	${server_hardware}
+	Run keyword if		'${server_powerstate}'=='On'	Fail	Server is already On. Power off the server First.
+	${powerStatus}=		Run Keyword And Return Status	Power on Server		${server_hardware}
+    #Run Keyword If		'${powerStatus}'=='False'	Pause Execution    message=Failed to power On the server - ${server_hardware}. Press OK to continue
+	Run Keyword If		'${powerStatus}'=='False'	Fail 	Failed to power Off the server- ${server_hardware}
+	Wait for Server to reach POST State		${server_hardware}	post_state=IN_POST_DISCOVERY_COMPLETE|FINISHED_POST  timeout=20m
+	[Return]
+
+
+Get FCOE Interface Name List
+	[Documentation]		Get FCOE interface name from Linux box. Requires SSH Connection already open.
+	[Arguments]		${server_profile}	${separator}
+	${mac_list}=	Create List
+	${connections}=		Get From Dictionary		${server_profile}	connections
+	:FOR  ${connection}  in  @{connections}
+	\	${functionType}=	Get From Dictionary		${connection}	functionType
+	\	${mac}=		Run Keyword If	'${functionType}'=='FibreChannel'	Get From Dictionary		${connection}	mac
+	\	Run Keyword If	'${functionType}'=='FibreChannel'	Append To List	${mac_list}		${mac}
+	Log To Console	${mac_list}
+	
+	${newresult}=	Create List
+	${resp}=	Execute Command		ifconfig -a | cut -c 1-8 | sort | uniq -u | grep -v lo
+	${result}=	Replace String	${resp}		${SPACE}	${EMPTY}
+	${newresult}=	Split String	${result}		${separator}
+	Log To Console	${newresult}
+
+	${interface_list}=	Create List
+	:FOR  ${mac}  in  @{mac_list}
+	\	${interface}=	Find Interface Corresponding MAC	${newresult}	${mac}
+	\	Append To list	${interface_list}	${interface}
+	[Return]	${interface_list}
+
+
+Find Interface Corresponding MAC
+	[Documentation]	From List of Interfaces, MAC is searched an returned
+	[Arguments]		${interface_list}	${mac}
+	:FOR  ${interface}  in  @{interface_list}
+	\	${response}=	Execute Command		ifconfig ${interface}
+	\	${response}=	Convert To Lowercase	${response}
+	\	${status}	${taskState} =  Run Keyword and Ignore Error  Should Contain  ${response}	${mac}
+	\	Return From keyword If	'${status}'=='PASS'		${interface}
+	[Return]
+
+
+Verify FCOE Disk in Linux
+	[Documentation]		Steps to Enable FCOE Disk on Linux are executed in this Test Case
+	[Arguments]		${InterfaceList}	${ipv4addr}		${VolumeSize}	${Location}
+	
+	:FOR  ${InterfaceName}  in  @{InterfaceList}
+	\	${InterfaceFile}=	Catenate	SEPARATOR=		cfg-	${InterfaceName}
+	#Create Config file for FCOE Interface
+	\	Execute Command		cp /etc/fcoe/cfg-ethx /etc/fcoe/${InterfaceFile}
+	#Modify Interface file to change DCB_REQUIRED to no
+	\	Get Remote File And Return Output		${ipv4addr}	${LINUSER}	${PASSWORD}	/etc/fcoe/${InterfaceFile}	${Location}
+	\	${InterfaceFileLoc}=	Catenate	SEPARATOR=		${Location}		${InterfaceFile}
+	\	Update File Locally		${InterfaceFileLoc}		DCB_REQUIRED="yes"		DCB_REQUIRED="no"
+	\	Put Local File In Remote Path	${ipv4addr}	${LINUSER}	${PASSWORD}		${InterfaceFileLoc}		/etc/fcoe/${InterfaceFile}
+	\	Delete File		${InterfaceFileLoc}
+	#Turn on FCOE Interface, Restart lldpad service and Modify adminStatus in it to disabled
+	\	${command}=		Create List		ifconfig ${InterfaceName} up	service lldpad restart		lldptool set-lldp -i ${InterfaceName} adminStatus=disabled
+	\	Execute Remote Commands		${ipv4addr}	${LINUSER}	${PASSWORD}	/etc/fcoe	${command}
+	
+	#Verify if adminStatus is disabled in lldpad.conf file
+	Get Remote File And Return Output	${ipv4addr}	${LINUSER}	${PASSWORD}		/var/lib/lldpad/lldpad.conf		${Location}
+	${lldpfileloc}=	Catenate	SEPARATOR=		${Location}		lldpad.conf
+	Verify Substring In File		${lldpfileloc}		adminStatus = 0;
+	Delete File		${lldpfileloc}	
+	
+	#Restart lldpad and fcoe service
+	${command}=		Create List		service lldpad restart		service fcoe restart
+	Execute Remote Commands		${ipv4addr}	${LINUSER}	${PASSWORD}	/	${command}
+	
+	#Wait for 2 minutes and verify FCOE Disk of same size is listed as created in Profile
+	Sleep	2m
+	${command}=		Create List		fdisk -l | grep /dev/sd
+	${Output}=	Execute Remote Commands		${ipv4addr}	${LINUSER}	${PASSWORD}	/	${command}
+	Log To Console	${Output}
+	:FOR	${stdout}	in 		@{Output}
+	\	${DiskList}=	Split String	${stdout}	\n
+	
+	:FOR  ${InterfaceName}  in  @{InterfaceList}
+	\	${InterfaceFile}=	Catenate	SEPARATOR=		cfg-	${InterfaceName}
+	\	Execute Command		rm -rf /etc/fcoe/${InterfaceFile}
+	
+	:FOR	${DiskLine}		in		@{DiskList}
+	\	Log To Console	${DiskLine}
+	\	${status}     ${taskState} =  Run Keyword and Ignore Error  Should Contain  ${DiskLine}	${VolumeSize}
+	\	Return from keyword if	   '${status}'=='PASS'		${True}
+	Return from keyword if	   '${status}'!='PASS'		${False}
+	[Return]
+
+
+Verify FCOE Disk in SLES11
+	[Documentation]		Steps to Enable FCOE Disk on SLES 11 OS only
+	[Arguments]		${InterfaceList}	${ipv4addr}		${VolumeSize}	${Location}
+	
+	#Turn On lldpad and fcoe services and create config file for FCOE Interface 
+	${command}=		Create List		chkconfig boot.lldpad on	chkconfig boot.fcoe on		rclldpad start		rcfcoe start
+	Execute Remote Commands		${ipv4addr}	${LINUSER}	${PASSWORD}	/etc/fcoe	${command}
+	:FOR  ${InterfaceName}  in  @{InterfaceList}
+	\	${InterfaceFile}=	Catenate	SEPARATOR=		cfg-	${InterfaceName}
+	\	${command}=		Create List		cp cfg-ethx ${InterfaceFile}
+	\	Execute Remote Commands		${ipv4addr}	${LINUSER}	${PASSWORD}	/etc/fcoe	${command}
+	#Modify Interface file to change DCB_REQUIRED to no
+	\	Get Remote File And Return Output	${ipv4addr}	${LINUSER}	${PASSWORD}	/etc/fcoe/${InterfaceFile}	${Location}
+	\	${InterfaceFileLoc}=	Catenate	SEPARATOR=		${Location}		${InterfaceFile}	
+	\	Update File Locally		${InterfaceFileLoc}		DCB_REQUIRED="yes"		DCB_REQUIRED="no"
+	\	Put Local File In Remote Path	${ipv4addr}	${LINUSER}	${PASSWORD}		${InterfaceFileLoc}		/etc/fcoe/${InterfaceFile}
+	\	Delete File		${InterfaceFileLoc}
+	
+	#Get All Interfaces
+	${newresult}=	Create List
+	${resp}=		Execute Command		ifconfig -a | cut -c 1-8 | sort | uniq -u | grep -v lo
+	${result}=	Replace String	${resp}		${SPACE}	${EMPTY}
+	${newresult}=	Split String	${result}		\n
+	Log To Console	${newresult}
+	
+	#Modify adminStatus in lldpad.conf to disabled for all interfaces
+	:FOR	${interface}	in	@{newresult}
+	\	Execute Command		lldptool set-lldp -i ${interface} adminStatus=disabled
+	
+	#Verify if adminStatus is disabled in lldpad.conf file
+	Get Remote File And Return Output	${ipv4addr}	${LINUSER}	${PASSWORD}		/var/lib/lldpad/lldpad.conf		${Location}
+	${lldpfileloc}=	Catenate	SEPARATOR=		${Location}		lldpad.conf
+	Verify Substring In File		${lldpfileloc}		adminStatus = 0;
+	Delete File		${lldpfileloc}
+	
+	#Restart lldpad and fcoe service
+	${command}=		Create List		rclldpad restart		rcfcoe restart
+	Execute Remote Commands		${ipv4addr}	${LINUSER}	${PASSWORD}	/	${command}
+	
+	#Wait for 2 minutes and verify FCOE Disk of same size is listed as created in Profile
+	Sleep	2m
+	${command}=		Create List		fdisk -l | grep /dev/sd
+	${Output}=	Execute Remote Commands		${ipv4addr}	${LINUSER}	${PASSWORD}	/	${command}
+	:FOR	${stdout}	in 		@{Output}
+	\	${DiskList}=	Split String	${stdout}	\n
+
+	:FOR  ${InterfaceName}  in  @{InterfaceList}
+	\	${InterfaceFile}=	Catenate	SEPARATOR=		cfg-	${InterfaceName}
+	\	Execute Command		rm -rf /etc/fcoe/${InterfaceFile}
+
+	:FOR	${DiskLine}		in		@{DiskList}
+	\	Log To Console	${DiskLine}
+	\	${status}     ${taskState} =  Run Keyword and Ignore Error  Should Contain  ${DiskLine}	${VolumeSize}
+	\	Run keyword if	   '${status}'=='PASS'		Exit For Loop
+	Run keyword if	   '${status}'!='PASS'		FAIL	Failed to Find FCOE Disk	
+	[Return]
+
+
+Verify FCOE Disk in ESX
+	[Documentation]		Steps to Enable FCOE Disk on ESX OS only
+	[Arguments]		${ipv4addr}
+	
+	${resp}=	Execute Command		esxcli fcoe nic list
+	${resplist}=	Split String	${resp}		\n	
+	:FOR	${line}	in	@{resplist}
+	\	${fcoenic}=	Set Variable If		'${line}' in ['vmnic0','vmnic1','vmnic2','vmnic3','vmnic4','vmnic5','vmnic6','vmnic7','vmnic8']		${line}		${null}
+	\	${resp}=	Run Keyword If		'${fcoenic}'!='${null}'		Execute Command		esxcli fcoe nic discover -n ${fcoenic}
+	
+	Sleep	2m
+	${resp}=	Execute Command		esxcli fcoe adapter list
+	Sleep	2m
+	${result}=	Execute Command		esxcli storage core device list
+	
+	${resultlist}=		Split String	${result}		\n
+	:FOR	${line}	in	@{resultlist}
+	\	${value}=	Evaluate	'Display Name: 3PARdata Fibre Channel Over Ethernet Disk'
+	\	${status}     ${taskState} =  Run Keyword and Ignore Error		Should Contain		${line}		${value}
+	\	Return from keyword if	   '${status}'=='PASS'		Exit For Loop
+	Run keyword if	   '${status}'!='PASS'		FAIL	Failed to Find FCOE Disk
+	[Return] 
+
+Verify Local Disk in ESX
+	[Documentation]		Steps to list Local Disk on ESX OS only
+	[Arguments]		${ipv4addr}
+	
+	${resp}=	Execute Command		esxcli fcoe nic list
+	${resplist}=	Split String	${resp}		\n	
+	:FOR	${line}	in	@{resplist}
+	\	${fcoenic}=	Set Variable If		'${line}' in ['vmnic0','vmnic1','vmnic2','vmnic3','vmnic4','vmnic5','vmnic6','vmnic7','vmnic8']		${line}		${null}
+	\	${resp}=	Run Keyword If		'${fcoenic}'!='${null}'		Execute Command		esxcli fcoe nic discover -n ${fcoenic}
+	
+	Sleep	2m
+	
+	${result}=	Execute Command		esxcli storage core device list
+	
+	${resultlist}=		Split String	${result}		\n
+	:FOR	${line}	in	@{resultlist}
+	\	${value}=	Evaluate	'Display Name: HP Serial Attached SCSI Disk'
+	\	${status}     ${taskState} =  Run Keyword and Ignore Error		Should Contain		${line}		${value}
+	\	Return from keyword if	   '${status}'=='PASS'		Exit For Loop
+	Run keyword if	   '${status}'!='PASS'		FAIL	Failed to Find Local Disk
+	[Return]
+
+GET All DHCP IP And Ping
+	[Documentation]	GET DHCP IP From DHCP Server and Ping it
+	[Arguments]	${server_profile}
+	
+    ${profileName}=		Get From Dictionary		${server_profile}	name
+    ${resp} = 	Fusion Api Get Server Profiles		param=?filter="'name'=='${profileName}'"
+    Return From Keyword If  ${resp['count']}==0  FAIL	Server profile with name ${profileName} not found
+	${connections} = 	Get From Dictionary		${resp['members'][0]}	connections
+	:FOR  ${connection}  in  @{connections}
+	\	${functionType}=	Get From Dictionary		${connection}	functionType
+	\	Continue For Loop If	'${functionType}'=='FibreChannel'	
+	\	${mac}=		Run Keyword If	'${functionType}'=='Ethernet'	Get From Dictionary		${connection}	mac
+	\	${connName}=	Get From Dictionary		${connection}	name
+	\	${IPAddress}=   Run keyword If	'${connName}'=='1036'	Run    powershell.exe -ExecutionPolicy Unrestricted -file ${DHCP_FILE} ${mac} ${DHCP_IP} ${WINUSER} ${DHCP_PASSWORD} 10.36.0.0
+	\	...				ELSE IF			'${connName}'=='1037'	Run    powershell.exe -ExecutionPolicy Unrestricted -file ${DHCP_FILE} ${mac} ${DHCP_IP} ${WINUSER} ${DHCP_PASSWORD} 10.37.0.0
+	\	...				ELSE IF			'${connName}'=='1038'	Run    powershell.exe -ExecutionPolicy Unrestricted -file ${DHCP_FILE} ${mac} ${DHCP_IP} ${WINUSER} ${DHCP_PASSWORD} 10.38.0.0
+	\	...				ELSE IF			'${connName}'=='1039'	Run    powershell.exe -ExecutionPolicy Unrestricted -file ${DHCP_FILE} ${mac} ${DHCP_IP} ${WINUSER} ${DHCP_PASSWORD} 10.39.0.0
+	\	...				ELSE IF			'${connName}'=='1040'	Run    powershell.exe -ExecutionPolicy Unrestricted -file ${DHCP_FILE} ${mac} ${DHCP_IP} ${WINUSER} ${DHCP_PASSWORD} 10.40.0.0
+	\	...				ELSE IF			'${connName}'=='1044'	Run    powershell.exe -ExecutionPolicy Unrestricted -file ${DHCP_FILE} ${mac} ${DHCP_IP} ${WINUSER} ${DHCP_PASSWORD} 10.44.0.0
+	\	...				ELSE IF			'${connName}'=='2036'	Run    powershell.exe -ExecutionPolicy Unrestricted -file ${DHCP_FILE} ${mac} ${DHCP_IP} ${WINUSER} ${DHCP_PASSWORD} 10.36.0.0
+	\	...				ELSE IF			'${connName}'=='2037'	Run    powershell.exe -ExecutionPolicy Unrestricted -file ${DHCP_FILE} ${mac} ${DHCP_IP} ${WINUSER} ${DHCP_PASSWORD} 10.37.0.0
+	\	...				ELSE IF			'${connName}'=='2038'	Run    powershell.exe -ExecutionPolicy Unrestricted -file ${DHCP_FILE} ${mac} ${DHCP_IP} ${WINUSER} ${DHCP_PASSWORD} 10.38.0.0
+	\	...				ELSE IF			'${connName}'=='2039'	Run    powershell.exe -ExecutionPolicy Unrestricted -file ${DHCP_FILE} ${mac} ${DHCP_IP} ${WINUSER} ${DHCP_PASSWORD} 10.39.0.0
+	\	...				ELSE IF			'${connName}'=='2040'	Run    powershell.exe -ExecutionPolicy Unrestricted -file ${DHCP_FILE} ${mac} ${DHCP_IP} ${WINUSER} ${DHCP_PASSWORD} 10.40.0.0
+	\	...				ELSE IF			'${connName}'=='2044'	Run    powershell.exe -ExecutionPolicy Unrestricted -file ${DHCP_FILE} ${mac} ${DHCP_IP} ${WINUSER} ${DHCP_PASSWORD} 10.44.0.0
+	\	${ipv4addr}=	Run keyword If	'${connName}'=='1038'	Set Variable	${IPAddress}
+	\	${RC}	${output} =	Run and return RC and Output	ping -n 4 ${IPAddress}
+	\	Log To Console	IP - ${IPAddress}
+	\	${gotTask}     ${response} =  Run Keyword and Ignore Error 	Should be equal		${RC}	${0}	\n${output}
+	\	Run keyword if		'${gotTask}'=='FAIL'	Fail		IP Address - ${IPAddress} is unreachable. Output is ${response}
+	\	${value1}=	Evaluate	'Request timed out'
+	\	${value2}=	Evaluate	'Destination host unreachable'
+	\	${failStatus1}     ${response} =  Run Keyword and Ignore Error 	Should Contain		${output}	${value1}
+	\	${failStatus2}     ${response} =  Run Keyword and Ignore Error 	Should Contain		${output}	${value2}
+	\	Run Keyword If		'${failStatus1}'=='PASS' or '${failStatus2}'=='PASS'	FAIL	IP Address - ${IPAddress} is unreachable.
+	\	...					ELSE					Log To Console	IP Address - ${IPAddress} is pingable.
+	[Return]	${ipv4addr}
+
+	
+Ping IPAddress
+	[Documentation]	Ping the IP address given in argument
+	[Arguments]		${ipv4address}
+	${RC}	${output} =	Run and return RC and Output	ping -n 4 ${ipv4address}
+	${gotTask}     ${response} =  Run Keyword and Ignore Error 	Should be equal		${RC}	${0}	\n${output}
+	Run keyword if		'${gotTask}'=='FAIL'	Fail		IP Address - ${ipv4address} is unreachable. Output is ${response}
+	${value1}=	Evaluate	'Request timed out'
+	${value2}=	Evaluate	'Destination host unreachable'
+	${failStatus1}     ${response} =  Run Keyword and Ignore Error 	Should Contain		${output}	${value1}
+	${failStatus2}     ${response} =  Run Keyword and Ignore Error 	Should Contain		${output}	${value2}
+	Run Keyword If		'${failStatus1}'=='PASS' or '${failStatus2}'=='PASS'	FAIL	IP Address - ${ipv4address} is unreachable.
+	...					ELSE					Log To Console	IP Address - ${ipv4address} is pingable.
+
+Run OSBP
+	[Documentation]	Run OS Build Plan on server added to altair
+	[Arguments]		${JobList}	${EnclosureName}	${Baynumber}	${OSName}		${hostname}	${domain}	${dns}	${Staticip}	${netmask}	${Gateway}
+	${Server_URI}=	Altair API Get Server URI Using Location	${EnclosureName}	${Baynumber}
+	#Sleep	60
+	#${OSBP_URI}=	Altair API Get OS BuildPlan URI		${OSName}
+	${OSBP_URI}=	Altair API Get OSBP URI		${OSName}
+	${MACAddress}=	Altair API Get Server Mac	${Server_URI}
+	${data}	${Deployjoburi}=	Altair API Run Customize OS Buildplan	${OSBP_URI}	${Server_URI}	${MACAddress}	${hostname}	${domain}	${dns}	${Staticip}	${netmask}	${Gateway}
+	Log To Console		Triggered the job Run OSBP with URI
+	Log To Console		- ${Deployjoburi}
+	Append To List		${JobList}	${Deployjoburi}
+	[Return]	${JobList}

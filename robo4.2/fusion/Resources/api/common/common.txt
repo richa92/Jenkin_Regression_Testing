@@ -1,0 +1,638 @@
+*** Settings ***
+Library             RoboGalaxyLibrary
+Library             FusionLibrary
+Library             OperatingSystem
+Library             BuiltIn
+Library             Collections
+Library             XML
+Library             SSHLibrary
+Library             String
+Library             Dialogs
+Library             copy
+Library             ../../../Tools/Build_Data_From_OV_Resource/Build_Request_Body.py
+
+*** Keywords ***
+Copy Dictionary
+    [Documentation]   Override the Builtin.Copy Dictionary with deep copy
+    [Arguments]    ${obj}
+    Log        Deep copy version!!!
+    ${obj} =   copy.deepcopy   ${obj}
+    [Return]    ${obj}
+
+Log to console and logfile
+    [Documentation]    Log to console and logfile
+    [Arguments]    ${data}     ${level}=INFO
+    Log   "Log to console and logfile is deprecated - please use Builtin: Log"   console=True    level=WARN
+    Log    ${data}     ${level}
+    Log to console    ${data}
+
+Log to logfile
+    [Documentation]    Log to logfile
+    [Arguments]    ${data}     ${level}=INFO
+    Log   "Log to logfile is deprecated - please use Builtin: Log"   console=True    level=WARN
+    Log    ${data}     ${level}
+
+Add Key Value to DTO
+    [Documentation]  Add key value pairs to DTO
+    ...              **kwargs are used to add key value pair to the DTO
+    [Arguments]  ${dto}  &{kwargs}
+    # Build a new expected DTO with the kwargs
+    @{keys} =  get dictionary keys  ${kwargs}
+    :FOR  ${key}  in  @{keys}
+    \   Set To Dictionary  ${dto}  ${key}=${kwargs['${key}']}
+    [return]  ${dto}
+
+Add to headers
+    [Documentation]  adds key\value pairs to the default headers and returns the resulting dict.
+    ...   This is useful for supplying a customized header for an individual API call, like specify eTag.
+    ...   example:  ${headers} =    Add to headers   If-Match=*    SomeKey=SomeValue
+    [Arguments]     &{kwargs}
+    ${headers} =    Fusion API get headers
+    ${items} =      Get Dictionary Items    ${kwargs}
+	:FOR	${key}   ${value}	IN   @{items}
+	\	Set to Dictionary   ${headers}   ${key}   ${value}
+    [Return]    ${headers}
+
+Update Dictionary Subset
+    [Documentation]  Update a subset of a dictionary
+    ...              Arguments: dict2 is subset of dict1
+    ...              Data File Example:
+    ...               ${d1} =  { "discoveredPools": None,
+    ...                            "discoveredDomains": None,
+    ...                            "managedDomain": None,
+    ...                             "managedPools": None}
+    ...               ${d2} =  {"managedDomain": "wpst16",
+    ...                           "managedPools": [{"domain":"wpst16","name":"FC_wpst16_r1","deviceType":"FC","freeCapacity":"3595961368576","raidLevel":"RAID1",
+    ...                           "totalCapacity":"3692598132736","uuid":"87d08c70-b92e-4a89-a22b-3db5ef9734cf"},]}
+    ...                        }
+    [Arguments]  ${d1}  ${d2}
+    # Update subset of d1 with d2
+    @{keys} =  get dictionary keys  ${d2}
+    :FOR  ${key}  in  @{keys}
+    \   Set To Dictionary  ${d1}  ${key}=${d2['${key}']}
+    [return]  ${d1}
+
+
+Run Keyword as user
+    [Documentation]    Runs a Fusion_API keyword as a particular user.
+    ...    Ex:    Run Keyword As User    nat    Fusion Api Get Ethernet Networks    ${empty}    param=?filter="'name'=='net_101'"
+    [Arguments]     ${user}     ${keyword}      @{varargs}
+    ${original_user} =   Fusion Api Get Active user
+    ${active_sessions} =    Fusion Api Get Active Sessions
+    Dictionary Should Contain Key    ${active_sessions}    ${user}
+    Fusion Api Switch Active User   ${user}
+    ${resp} =   Run Keyword and continue on failure     ${keyword}  @{varargs}
+    Fusion Api Switch Active User   ${original_user}
+    [Return]    ${resp}
+
+Run Keyword for List
+    [Documentation]    Runs the specified keyword, passing each item in the list as the argument. args and kwargs are supported.
+    [Arguments]    ${list}   ${keyword}   @{varargs}    &{kwargs}
+    Set Log Level    TRACE
+    ${resplist} =   Create List
+    :FOR    ${x}    IN    @{list}
+    \    ${resp} =    Run Keyword And Continue on Failure    ${keyword}   ${x}   @{varargs}    &{kwargs}
+    \   append to list   ${resplist}  ${resp}
+    [Return]    ${resplist}
+
+
+Run keyword for API version
+    [Documentation]   runs a given keyword\args\kwargs for a given X-API version
+    [Arguments]     ${xapi}    ${keyword}    @{varargs}   &{kwargs}
+    ${headers} =    fusion api get headers     #get the current default X-API version
+    ${api} =   Get from Dictionary   ${headers}   X-Api-Version
+    Fusion api set default api version    api=${xapi}
+    ${resp}    Run Keyword    ${keyword}     @{varargs}    &{kwargs}
+    Fusion api set default api version    api=${api}   #set back to original X-API version
+    [Return]   ${resp}
+
+
+Run Keyword for Dict
+    [Documentation]	Runs the specified keyword, passing each VALUE for each KEY in the dict. args and kwargs are supported.
+    [Arguments]    ${dict}   ${keyword}   @{varargs}    &{kwargs}
+    Set Log Level	TRACE
+    ${resplist} =   Create List
+    ${items} =    Get Dictionary Items    ${dict}
+    :FOR    ${key}   ${value}    IN    @{items}
+    \    ${resp} =   Run Keyword    ${keyword}   ${value}   @{varargs}    &{kwargs}
+    \   append to list   ${resplist}  ${resp}
+    [Return]    ${resplist}
+
+Run Keyword for List with kwargs
+    [Documentation]	DEPRECATED: PLEASE USE 'Run Keyword for List'
+    ...             Runs the specified keyword with kwargs, passing each item in the list as the argument
+    ...             Example:
+    ...               Run Keyword for List with kwargs  ${list}  Patch Sas Interconnect  op=replace  path=/deviceResetState  value=Reset  timeout=600  interval=10
+    [Arguments]    ${list}    ${keyword}  &{kwargs}
+    Set Log Level    TRACE
+    :FOR    ${x}    IN    @{list}
+    \    Run Keyword And Continue on Failure    ${keyword}    ${x}  &{kwargs}
+
+Common URI lookup by name
+    [Documentation]	Takes a string containing URI type + : + resource name, performs a lookup by type to determine
+    ...  what the resource type is and then does a GET on that type to return the resource URI
+    ...
+    ...             Ex:    ${uri} =    Common URI Lookup by name    LIG:LIG1
+    ...             Ex:    ${uri} =     Common URI Lookup by name    ServerProfileTemplateV4:480_G9_NoRaid
+    [Arguments]    ${uri}
+    @{words} =    Split String    ${uri}        :       1
+    ${type} =     Get From List    ${words}    0
+    Return From Keyword If    '${uri}' == '${type}'    ${uri}
+    ${name} =    Get From List    ${words}    1
+
+    #  Add lookup via short type name and/or full type.
+    #  For multiple versions that utilize the same api call, you can specify V\\d* to be used as a regexp
+    #  as in LogicalEnclosureV\\d*=Get Logical Enclosure URI
+    #
+    #  See "Get From Dictionary Key then Regexp" keyword helper below
+    #
+    ${lookup} =    Create Dictionary
+    ...    DE=Get Drive Enclosure URI
+    ...    drive-enclosure=Get Drive Enclosure URI
+    ...    DriveEnclosureV\\d*=Get Drive Enclosure URI
+    ...    EG=Get Enclosure Group URI
+    ...    EnclosureGroupV\\d*=Get Enclosure Group URI
+    ...    ENC=Get Enclosure URI
+    ...    EnclosureV\\d*=Get Enclosure URI
+    ...    ETH=Get Ethernet URI
+    ...    ethernet-networkV\\d*=Get Ethernet URI
+    ...    FC=Get FC URI
+    ...    fc-networkV\\d*=Get FC URI
+    ...    FCOE=Get FCoE URI
+    ...    fcoe-networkV\\d*=GET FCoE URI
+    ...    firmware-baselines=Get Firmware Bundle URI
+    ...    HCP=Get Cluster Profile Uri by Name
+    ...    HypervisorClusterProfileV\\d*=Get Cluster Profile Uri by Name
+    ...    HHP=Get Host Profile Uri By Name
+    ...    HypervisorHostProfileV\\d*=Get Host Profile Uri By Name
+    ...    HM=Get Hypervisor Manager URI
+    ...    HypervisorManagerV\\d*=Get Hypervisor Manager URI
+    ...    IC=Get IC URI
+    ...    InterconnectV\\d*=Get IC URI
+    ...    ICTYPE=Get Interconnect Type URI
+    ...    LE=Get Logical Enclosure URI
+    ...    LI=Get LI URI
+    ...    LIG=Get LIG URI
+    ...    LogicalEnclosureV\\d*=Get Logical Enclosure URI
+    ...    logical-interconnectV\\d*=Get LI URI
+    ...    logical-interconnect-groupV\\d*=Get LIG URI
+    ...    LSG=Get LSG URI
+    ...    NS=Get Network Set URI
+    ...    network-setV\\d*=Get Network Set URI
+    ...    Osdp=Get OSDP URI
+    ...    OsdpV\\d*=Get OSDP URI
+    ...    SASIC=Get Sas Interconnect URI
+    ...    SasInterconnectV\\d*=Get Sas Interconnect URI
+    ...    SASICTYPE=Get Sas Interconnect type URI
+    ...    sas-interconnect=Get Sas Interconnect URI
+    ...    SASLIG=Get SASLIG URI
+    ...    sas-logical-interconnect-groupV\\d*=Get SASLIG URI
+    ...    SASLI=Get SAS LI URI
+    ...    SASLJBOD=Get Sas Logical Jbod URI
+    ...    sas-logical-jbod=Get Sas Logical Jbod URI
+    ...    sas-logical-jbodV\\d*=Get Sas Logical Jbod URI
+    ...    SASLJBODATT=Get Sas Logical Jbod Attachment URI
+    ...    sas-logical-jbod-attachment=Get Sas Logical Jbod Attachment URI
+    ...    server-hardware-\\d*=Get Server Hardware URI
+    ...    SH=Get Server Hardware URI
+    ...    SHT=Get Server Hardware Type URI
+    ...    SP=Get Server Profile URI
+    ...    ServerProfileV\\d*=Get Server Profile URI
+    ...    SPT=Get Server Profile Template URI
+    ...    ServerProfileTemplateV\\d*=Get Server Profile Template URI
+    ...    US=Get Uplink Set URI
+    ...    SAN=Get San Manager URI
+    ...    SANManager=Get San Manager URI
+    ...    FCDeviceManagerV\\d*=Get San Manager URI
+    ...    FCPROV=Get Provider URI
+    ...    FCProvider=Get Provider URI
+    ...    FCSanV\\d*=Get Managed SAN URI
+    ...    FCSan=Get Managed SAN URI
+    ...    SSYS=Get Storage System URI
+    ...    SVOL=Get Storage Volume URI
+    ...    Scope=Get Scope URI By Name
+    ...    ScopeV\\d*=Get Scope URI By Name
+    ...    SPOOL=Get Storage Pool URI
+    ...    SVT=Get Storage Volume Template URI
+    ...    StorageVolumeTemplateV\\d*=Get Storage Volume Template URI
+    ...    StoragePoolV\\d*=Get Storage Pool URI
+    ...    StorageSystemV\\d*=Get Storage System URI
+    ...    StorageVolumeV\\d*=Get Storage Volume URI
+    ...    SW=Get Switch Uri By Name
+    ...    SWT=Get Switch Type Uri By Name
+    ...    UserAndRoles=Get User URI
+    ...    USER=Get User URI
+
+    ${api} =    Get From Dictionary Key then Regexp     ${lookup}   ${type}
+
+    Return From Keyword If    '${api}'=='ResourceTypeNotFound'    ResourceTypeNotFound:${type}
+
+    ${uri} =    Run Keyword    ${api}    ${name}
+
+	[Return]    ${uri}
+
+Get From Dictionary Key then Regexp
+    [Documentation]    First tries to use ${type} as a key to ${lookup}.
+    ...    If that lookup fails then tries keys a Regexp to match ${type} for "wildcard" match
+    [Arguments]    ${lookup}    ${type}
+
+    ${status}     ${api} =  Run Keyword and Ignore Error    Get From Dictionary    ${lookup}   ${type}
+    Return from Keyword If    '${status}'=='PASS'    ${api}
+
+    ${keys} =    Get Dictionary Keys    ${lookup}
+    :FOR    ${regexp_type}    in   @{keys}
+    \    ${found_match} =    Run Keyword and Return Status    Should Match Regexp    ${type}    ^${regexp_type}$
+    \    Return From Keyword If    '${found_match}'=='${True}'   ${lookup['${regexp_type}']}
+
+    [Return]    ResourceTypeNotFound
+
+Get Resource
+    [Documentation]    Takes Resource's Category:name from data file,  returns http response
+    ...    Ex:    ${resp} =     Get Resource    LIG:LIG1
+    [Arguments]    ${categoryAndName}  ${api}=${None}
+    ${uri} =    Run Keyword     Common URI lookup by name    ${categoryAndName}
+
+    Should Not Contain    ${uri}    ResourceTypeNotFound    msg=${uri}
+
+    ${resp} =    Get resource by URI  ${uri}  api=${api}
+
+    [Return]    ${resp}
+
+Get Resource by URI
+    [Documentation]    Returns any type of resource using its URI
+    [Arguments]    ${uri}  ${api}=${None}  @{varargs}
+    ${resp} =     Fusion Api Get Resource    ${uri}  @{varargs}  api=${api}
+    [Return]    ${resp}
+
+Delete Resource
+    [Documentation]	Deletes Resource by name
+    ...         Ex:    ${resp} =    Delete Resource    SP:wpst10Bay1
+    [Arguments]    ${categoryAndName}
+    @{words} =    Split String    ${categoryAndName}    :
+    ${type} =    Get From List    ${words}    0
+    ${name} =    Get From List    ${words}    1
+
+    ${lookup} =    Create Dictionary
+    ...    DE=Fusion Api Delete Drive Enclosure
+    ...    EG=Fusion Api Delete Enclosure Group
+    ...    ENC=Fusion Api Delete Enclosures
+    ...    ETH=Fusion Api Delete Ethernet Network
+    ...    FC=Fusion Api Delete Fc Network
+    ...    FCOE=Fusion Api Delete Fcoe Network
+    ...    LI=Fusion Api Delete Li
+    ...    LIG=Fusion Api Delete Lig
+    ...    NS=Fusion Api Delete Network Set
+    ...    SAN=Fusion Api Delete San Manager
+    ...    SASLIG=Fusion Api Delete Sas Lig
+    ...    SH=Fusion Api Delete Server Hardware
+    ...    SP=Fusion Api Delete Server Profile
+    ...    SPT=Fusion Api Delete Server Profile Template
+    ...    US=Fusion Api Delete Uplink Set
+    ...    USER=Fusion Api Delete User
+    ...    SASLJBOD=Fusion Api Delete Sas Logical Jbods
+
+    ${status}     ${api} =  Run Keyword and Ignore Error    Get From Dictionary    ${lookup}   ${type}
+
+    Return From Keyword If    '${status}'=='FAIL'    ResourceTypeNotFound:${type}
+
+    ${resp} =    Run Keyword    ${api}    ${name}
+
+    [Return]    ${resp}
+
+
+Create Resource
+    [Documentation]    Create Resource by name
+    ...         Ex:    ${resp} =    Create Resource    SP    requestBody
+	[Arguments]    ${type}    ${requestBody}
+
+    ${lookup} =    Create Dictionary
+    ...    DE=Fusion Api Create Drive Enclosure
+    ...    EG=Fusion Api Create Enclosure Group
+    ...    ENC=Fusion Api Create Enclosures
+    ...    ETH=Fusion Api Create Ethernet Network
+    ...    FC=Fusion Api Create Fc Network
+    ...    FCOE=Fusion Api Create Fcoe Network
+    ...    LI=Fusion Api Create Li
+    ...    LIG=Fusion Api Create Lig
+    ...    NS=Fusion Api Create Network Set
+    ...    SAN=Fusion Api Create San Manager
+    ...    SH=Fusion Api Create Server Hardware
+    ...    SP=Fusion Api Create Server Profile
+    ...    US=Fusion Api Create Uplink Set
+    ...    USER=Fusion Api Create User
+
+    ${status}     ${api} =  Run Keyword and Ignore Error    Get From Dictionary    ${lookup}   ${type}
+
+    Return From Keyword If    '${status}'=='FAIL'    ResourceTypeNotFound:${type}
+
+    ${resp} =    Run Keyword    ${api}    ${requestBody}
+
+    [Return]    ${resp}
+
+Verify Resource
+    [Documentation]  Verify Resource
+    ...              **kwargs are used to add key value pair to the expected DTO
+    ...              Example:
+    ...                Verify Resource  ${expected_dto}
+    ...                Verify Resource  ${expected_dto}  Status=OK
+    ...              Data Required:
+    ...                Expected Resource DTO
+    [Arguments]  ${expected_dto}  ${api}=${None}  &{kwargs}
+
+    ${status}  ${name} =  Run Keyword and Ignore Error  Get From Dictionary  ${expected_dto}  name
+    Return from keyword if    '${status}'=='FAIL'    ${expected_dto} doesn't contain the key $name
+    ${status}  ${type} =  Run Keyword and Ignore Error  Get From Dictionary  ${expected_dto}  type
+    Return from keyword if    '${status}'=='FAIL'    ${expected_dto} doesn't contain the key $type
+    Log    ${\n}Verifying ${type} ${name}    console=true
+    ${new_expected_dto} =  Add Key Value to DTO  ${expected_dto}  &{kwargs}
+    ${dto} =  Get Resource  ${type}:${name}  api=${api}
+    ${validate_status} =  Run Keyword And Continue on Failure   Fusion api validate response follow  ${new_expected_dto}  ${dto}  wordy=${True}
+    Run Keyword If  '${validate_status}'=='None' or '${validate_status}'=='False'   Run Keyword And Continue On Failure   Fail   Verify ${type} ${name} failed
+    Run Keyword If  '${validate_status}'=='True'    Log    Verify ${type} ${name} succeeded    console=true
+
+Verify Resources for List
+    [Documentation]  Verify a list DTOs with the expected ones
+    ...              **kwargs are used to add key value pair to the expected DTO
+    ...              Example:
+    ...                Verify Resouces for List  ${list}
+    ...                Verify Resources for List  ${list}  status=OK
+    ...              Data Required:
+    ...                List of expected Profile DTO
+    [Arguments]  ${list}  ${api}=${None}  &{kwargs}
+    #Log    ${\n}Verify Resources for List    console=true
+    Run Keyword for List with kwargs  ${list}  Verify Resource  api=${api}  &{kwargs}
+
+Check Resource Existing
+    [Documentation]  Check if the resource exists.
+    ...              Example: Check Resource Existing  SVOL:${volumeName}
+    [Arguments]  ${resource}  ${expected_status_code}='200'
+    ${resp} =  Get Resource  ${resource}
+    ${status} =  set variable if  '${resp['status_code']}'==${expected_status_code}  'PASS'  'FAIL'
+    [return]  ${status}
+
+Get Resource Attribute
+    [Documentation]    Get the resource attribute
+    ...             Example:
+    ...               Get Resource Attibute    SP:${profile}  state
+    [Arguments]    ${categoryAndName}  ${attribute}
+    ${resource} =  Get Resource  ${categoryAndName}
+    ${status}  ${rtn} =  Run Keyword and Ignore Error  Get From Dictionary  ${resource}  ${attribute}
+    ${value} =  set variable if  '${status}'=='PASS'  ${rtn}  ${None}
+    [return]  ${value}
+
+Check Resource Attribute
+    [Documentation]	Check if the resource attribute matches the desired value, which can be regexp
+    ...             Example:
+    ...                 Check Resource Attribute     SH:${ENC1SHBAY1}  state  NoProfileApplied
+    ...                 Check Resource Attribute    SH:${ENC1SHBAY1}  status  OK|Warning
+    [Arguments]  ${categoryAndName}  ${attribute}  ${desiredValue}
+    ${value} =  Get Resource Attribute  ${categoryAndName}  ${attribute}
+    Should match regexp  ${value}  ${desiredValue}  msg=The ${attribute} of resource ${categoryAndName} should match ${desiredValue}:
+
+Add Category
+    [Documentation]	Add category to a resource name if it doesn't have one
+    ...             Exmaple:
+    ...                 ${sh} =  Add Category  ${sh}  SH
+    [Arguments]    ${name}     ${category}
+    Return From Keyword If  '${name}'=='${EMPTY}'   ${name}
+    ${name} =  Replace string using regexp  ${name}  ${category}:  ${EMPTY}
+    [return]  ${category}:${name}
+
+#######################################
+# LOGGING
+#######################################
+Open Connection And Log In
+    [Documentation]     Opens an SSH session to an appliance and logs in
+    [Arguments]         ${SSH_HOST}=localhost   ${SSH_USER}=root   ${SSH_PASS}=hpvse1
+    Open Connection     ${SSH_HOST}     timeout=180s
+    Login               ${SSH_USER}     ${SSH_PASS}
+
+Get Current CiDebug Log
+    [Documentation]     Returns the latest ciDebug log file (the current log)
+    [Arguments]      ${LOG}=/ci/logs/ciDebug.*
+    ${LATEST_LOG_FILE}=  Execute Command  ls \-r ${LOG} | head \-1
+    [return]  ${LATEST_LOG_FILE}
+
+Write To ciDebug Log
+    [Documentation]    Writes data to the current ciDebug log on the OV appliance.
+    ...                No data is provided as an argument, the the current SUITE_NAME and TEST_NAME are logged
+    [Arguments]	       ${TEXT_TO_LOG}=${null}      ${SSH_HOST}=${APPLIANCE_IP}
+    Log Variables
+    ${TEXT_TO_LOG}    Set Variable if     '${TEXT_TO_LOG}' == '${null}'     [${SUITE_NAME}:${TEST_NAME}]    ${TEXT_TO_LOG}
+    Open Connection And Log In      ${SSH_HOST}     ${SSH_USER}    ${SSH_PASS}
+    ${LOG}=   Get Current CiDebug Log
+    ${rc}=    Execute Command    echo "\n#### ${TEXT_TO_LOG}\n" >> ${LOG}     return_stdout=False    return_rc=True
+    Should Be Equal    ${rc}    ${0}
+    Close All Connections
+    [Return]     ${rc}
+
+Get from ciDebug Log
+    [Documentation]    Reads lines between ${STARTSTRING} and ${ENDSTRING} from current ciDebug log on the OV appliance,
+    ...     and then greps the output for terms in ${FILTER}
+    ...     example:   Run Keyword and Ignore Error    ${ERRORS} =    Get from ciDebug Log     ${TEST_NAME}
+    [Arguments]	       ${STARTSTRING}     ${ENDSTRING}=####   ${FILTER}='ERROR\\|exception\\|Exception\\|rollback\\|jdbc\\|Error|'
+    ...                ${SSH_HOST}=${APPLIANCE_IP}
+    Open Connection And Log In      ${SSH_HOST}    ${SSH_USER}    ${SSH_PASS}
+    ${LOG}=       Get Current CiDebug Log
+    ${COMMAND}=   Set Variable   sed -n '/${STARTSTRING}/, /${ENDSTRING}/p' ${LOG} | grep ${FILTER}
+    ${rc}=        Execute Command    ${COMMAND}     return_stdout=True    return_rc=True
+    Close All Connections
+    [Return]    ${rc}
+
+
+#######################################
+# VALIDATION
+#######################################
+New Validate Response
+    [Documentation]    Validates data in a response body against expected values using REGEX
+    ...    looks up ${validation_code} in codes dicitonary
+    ...    ${rc} =    Convert to Integer    400
+    ...    ${valDict} =    Create Dictionary    status_code=${rc}
+    ...                                     errorCode=CRM_DUPLICATE_NETWORK_NAME
+    ...    Validate Response    ${respDict}    ${valDict}
+    [Arguments]    ${resp}    ${validation_code}
+    Set Log Level    TRACE
+    ${validation} =     Get From Dictionary    ${codes}    ${validation_code}
+    ${validation_results} =    Fusion Api Validate Response    ${resp}    ${validation}
+    # Log results
+    # Fail if results['passed'] is False
+    [Return]    ${validation_results}
+
+Validate Response
+    [Documentation]	Validates data in a response body against expected values
+    ...    Example:
+    ...    ${rc} =    Convert to Integer    400
+    ...    ${valDict} =    Create Dictionary    status_code=${rc}
+    ...                     errorCode=CRM_DUPLICATE_NETWORK_NAME
+    ...    Validate Response    ${respDict}    ${valDict}
+    [Arguments]    ${resp}    ${validation}
+    Set Log Level    TRACE
+    ${response} =     Copy Dictionary    ${resp}
+    @{vkeys} =    Get Dictionary Keys    ${validation}
+    ${rkeys} =    Get Dictionary Keys    ${response}
+    @{keys} =    Remove all the keys in response that are not in validation    ${vkeys}    ${rkeys}
+    :FOR    ${x}    IN    @{keys}
+    \    Remove From Dictionary    ${response}    ${x}
+    Dictionaries Should Be Equal    ${validation}    ${response}    msg=Response does not match validation dictionary    values=True
+
+Validate Response Regex
+    [Documentation]    Validates data in a response body against expected values using regex
+    ...    Make sure to escape your pattern strings properly!
+    ...    Example:
+    ...    ${valDict} =    Create Dictionary    status_code=${200}
+    ...                                     taskState=Error
+    ...                     taskStatus=Invalid uplink-set: Port: \\d+ for interconnect-type: .* is not an uplink port.
+    ...    Validate Response Regex    ${respDict}    ${valDict}
+    [Arguments]    ${resp}    ${validation}
+    Set Log Level    TRACE
+    ${response} =   Copy Dictionary    ${resp}
+    @{vkeys} =      Get Dictionary Keys    ${validation}
+    :FOR    ${x}    IN    @{vkeys}
+    \   ${r} =    Convert to string    ${resp['${x}']}
+    \   ${v} =    Convert to string    ${validation['${x}']}
+    \   Should Match Regexp		       ${r}   ${v}
+
+Remove all the keys in response that are not in validation
+    [Documentation]    Remove all the keys in response that are not in validation
+    [Arguments]    ${vkeys}    ${rkeys}
+    :FOR    ${x}    IN    @{vkeys}
+    \    Remove Values From List    ${rkeys}    ${x}
+	[Return]    ${rkeys}
+
+Build Request Body
+    [Documentation]  Using a pre-created data dict create a POST requestbody
+    ...    the data dict should be build by Tools/Build.robot.   See Tools/Build_How_To.py
+    [Arguments]    ${data_dict}
+
+    ${requestBody} =    Build_Request_Body.get    ${data_dict}        wordy=${True}
+
+    Return From Keyword    ${requestBody}
+
+Set OneView Version Metadata
+    [Documentation]  Adds the OneView version information to the test suite metadata
+    ...    Pass 'Logged' argument to True  if appliance is logged in.
+    [Arguments]    ${ONEVIEW_IP}   ${LOGGED}=${FALSE}
+    ${uri}=    Set Variable If    ${LOGGED}    /rest/appliance/nodeinfo/version    ${ONEVIEW_IP}/rest/appliance/nodeinfo/version
+    Log    ${uri}
+    ${response}=    Fusion Api Get Resource    ${uri}
+    Set Suite Metadata    OneView Version    ${response["softwareVersion"]}
+    ${version_uri}=    Set Variable If    ${LOGGED}    /rest/version    ${ONEVIEW_IP}/rest/version
+    Log    ${version_uri}
+    ${ver_response}=    Fusion Api Get Resource    ${version_uri}
+    Set Suite Metadata    Current API Version    ${ver_response['currentVersion']}
+    Set Suite Metadata    Minimum API Version    ${ver_response['minimumVersion']}
+    Log    \nOneView Version: ${response["softwareVersion"]}    console=True
+    Log    \nCurrent API Version: ${ver_response['currentVersion']}    console=True
+    Log    \nMinimum API Version: ${ver_response['minimumVersion']}    console=True
+
+Set RoboGalaxyLibrary Version Metadata
+    [Documentation]  Adds the RoboGalaxyLibrary version information to the test suite metadata
+    ${rglibrary}=   Get Library Instance   RoboGalaxyLibrary
+    ${rglibrary_version}=    Set Variable    ${rglibrary.ROBOT_LIBRARY_VERSION}
+    Set Suite Metadata    RG Library Version    ${rglibrary_version}
+    Log    \nRoboGalaxy Version: ${rglibrary_version}    console=True
+
+Set FusionLibrary Version Metadata
+    [Documentation]  Adds the FusionLibrary version information to the test suite metadata
+    ${fusionlibrary}=   Get Library Instance   FusionLibrary
+    ${fusionlibrary_version}=    Set Variable    ${fusionlibrary.ROBOT_LIBRARY_VERSION}
+    Set Suite Metadata    FusionLibrary Version    ${fusionlibrary_version}
+    Log    \nFusionLibrary Version: ${fusionlibrary_version}    console=True
+
+Wait Until Resource Equals
+   [Documentation]   Wait Until Resource Equals with expected data provided
+   ...                Wait Until Resource Equals  ${expected_dto}  ${TIMEOUT}=1min  ${POLLING_INTERVAL}=10s
+   ...               Keyword calls "Fusion API Validate Response Follow Should be True" and wait until keyword succeeds i.e, Fusion Api Validate Response Follow returns True
+   ...              Data Required:
+   ...                List of Expected Resource DTO  ${expected_dto}
+   [Arguments]      ${expected_dto}  ${TIMEOUT}  ${POLLING_INTERVAL}
+   :FOR  ${new_expected_dto}  IN  @{expected_dto}
+   \   ${name} =  Get From Dictionary  ${new_expected_dto}  name
+   \   ${type}=  Get From Dictionary  ${new_expected_dto}  type
+   \   ${dto} =  Get Resource  ${type}:${name}
+   \   Wait Until Keyword Succeeds    ${TIMEOUT}    ${POLLING_INTERVAL}    Fusion API Validate Response Follow Should be True  ${dto}  ${new_expected_dto}
+
+Fusion API Validate Response Follow Should be True
+   [Documentation]   Fusion API Validate Response Follow keyword status should be true
+   ...    Keyword Fails if response is not as expected data
+   ...    Fusion API Validate Response Follow Should be True  ${resource}  ${expected_dto}
+   [Arguments]  ${resource}   ${expected_data}
+   ${status}=  Fusion Api Validate Response Follow  ${expected_data}  ${resource}
+   Should Be True    ${status}
+
+#######################################
+# Pause and send email on failure
+#######################################
+Pause Test Execution
+   [Documentation]    Pause test execution
+   Return From Keyword If   '${PauseWhenFailed.lower()}'=='false'
+   Log     Encountered failure! Test execution has been paused! If job was launched from Jenkins, please log onto Jenkins slave server to continue the job       level=WARN
+   Pause Execution
+
+Send Mail Notification
+   [Documentation]   Send mail notification using SMTP Server
+   Return From Keyword If   '${Email_when_paused.lower()}'=='false'    Skipped Send Mail Notification (\${Email_when_paused}=${Email_when_paused})
+   Log     Sending mail notification   level=WARN
+   @{receiver_lst}=    Split String               ${Receiver}     ,
+   Connect To SMTP Server          smtp3.hpe.com  True
+   Send Email      ${Sender}    ${receiver_lst}      ${Subject}      ${Content}
+   Disconnect From SMTP Server
+
+Pause And Send EMail on Failure
+   [Documentation]   Popup a dialog to pause the execution if \${PauseWhenFailed} is set to True. Finally close the browser
+   Run Keyword If Test Failed  Pause Test Execution
+   Run Keyword If Test Failed  Send Mail Notification
+
+#########################################
+# Download SPP File to Local Path
+#########################################
+Download Latest File From Web Folder
+   [Documentation]   Download latest File from Web Folder to Local Path. It lists all files from web folder
+   ...               and downloads latest one.
+   ...     Usage     ${WEB_URL} ${WEB_USERNAME}, ${WEB_PASSWORD} should be passed via command line.
+   ...               Here WEB_URL is Directory/Folder where files are listed
+   ...     pybot -v WEB_URL:http://wpstwork4.vse.rdlabs.hpecorp.net/OVST/SPP/DD-TH1 -v WEB_USERNAME:your web url's username -v WEB_PASSWORD:your web url's password 02_Add_Base_Resources.robot
+   [Arguments]    ${WEB_URL}=None    ${WEB_USERNAME}=None    ${WEB_PASSWORD}=None
+   Log   WEB_URL:${WEB_URL}     console=True
+   Run Keyword If   '${WEB_URL}'=='${None}'   Fail   msg="Specify HTTP Url in Command line"
+   Httpserver open connection       ${WEB_URL}     ${WEB_USERNAME}    ${WEB_PASSWORD}
+   Log    WEB_URL:${WEB_URL}   console=True
+   ${files} =  Http Directory List Files    ${WEB_URL}
+   Run Keyword If   '${files}'=='[]'    Set Suite Variable    ${SPP_LOCAL_FILE}    None
+   Return From Keyword If   '${files}'=='[]'   ${SPP_LOCAL_FILE}
+   ${newfile} =    Get Latest File From Weblist     ${files}
+   Return From Keyword If    '${newfile}' == '${None}'
+   ${remoteurl} =   Set Variable    ${newfile.url}
+   ${remotefilename} =  Set Variable    ${newfile.name}
+   ${remotefilesize} =   Set Variable    ${newfile.size}
+   Create Folder If Not Exists    ${SPP_LOCALPATH}
+   ${localfile} =   join path    ${SPP_LOCALPATH}  ${remotefilename}
+   Log    Latest modified file from WebList :${remotefilename}   console=True
+   ${flag} =    Is Http File Latest    ${newfile}   ${localfile}
+   Run Keyword if   ${flag} == ${FALSE}   Log   Local path has latest file. Skip the download   INFO   console=True
+   ...   ELSE   Run Keywords    Log    Downloading File '${remotefilename}' to local path   INFO   console=True
+   ...          AND   Http Directory Download File    ${remoteurl}   ${localfile}   ${THREADNUM}
+   Httpserver close Connection
+   Set Suite Variable    ${SPP_LOCAL_FILE}    ${localfile}
+
+Download Specified SPP to Local Path
+    [Documentation]   Download Given SPP File to Local Path
+    ...     Usage     ${WEB_URL} ${WEB_USERNAME}, ${WEB_PASSWORD} should be passed via command line.
+    ...               Here WEB_URL is absolute path of remote file to be download
+    ...     pybot -v WEB_URL:http://wpstwork4.vse.rdlabs.hpecorp.net/OVST/SPP/DD-TH1/SPP2017100.2017_0908.53.iso -v WEB_USERNAME:your web url's username -v WEB_PASSWORD:your web url's password 02_Add_Base_Resources.robot
+    [Arguments]    ${remote_spp_file}=None   ${WEB_USERNAME}=None    ${WEB_PASSWORD}=None
+    Run Keyword If   '${remote_spp_file}'=='${None}'   Fail   msg="Specify Web url of file in command line"
+    Httpserver open connection       ${remote_spp_file}     ${WEB_USERNAME}    ${WEB_PASSWORD}
+    Log    WEB_URL:${remote_spp_file}   console=True
+    ${_}   ${file} =    Split Path    ${remote_spp_file}
+    Create Folder If Not Exists    ${SPP_LOCALPATH}
+    ${localfile} =   join path    ${SPP_LOCALPATH}  ${file}
+    Http Directory Download File    ${remote_spp_file}   ${localfile}   ${THREADNUM}
+    Httpserver close Connection
+    Set Suite Variable    ${SPP_LOCAL_FILE}    ${localfile}
+
+Create Folder If Not Exists
+    [Documentation]   Create Folder If Not Exists
+    [Arguments]   ${dirname}
+    ${status}    ${message}    Run Keyword And Ignore Error    OperatingSystem.Directory Should Exist     ${dirname}
+    Run Keyword If    '${status}'=='FAIL'    Create Directory    ${dirname}

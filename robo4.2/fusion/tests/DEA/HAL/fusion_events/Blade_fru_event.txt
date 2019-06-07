@@ -1,0 +1,365 @@
+*** Settings ***
+Documentation    Test suite to validate blade related events on OneView and FLM
+...    It covers testing of:
+...        hpris.emRegistry.2.0.BladeFruContentFault
+...        hpris.emRegistry.2.0.BladeFruFault
+...        hpris.emRegistry.2.0.BladeMezzFruContentFault 
+...        hpris.emRegistry.2.0.BladeMezzFruFault
+...        hpris.emRegistry.2.0.BladeMezzFruManufacturedForInvalidFault
+...        hpris.emRegistry.2.0.BladeMezzFruManufacturedForMismatchFault
+...        hpris.emRegistry.2.0.BladeFruManufacturedForInvalidFault
+...        hpris.emRegistry.2.0.BladeFruManufacturedForMismatchFault
+...    = GENERIC USAGE =
+...    | pybot | -v ENC_SERIAL_NO:[enclosure serial #] | -v APPLIANCE_IP:<ipv4> | -v CIM_Linux_IP:<ipv4> |-v GIT_REPO_ROOT: | Blade_fru_event.txt |
+...    = Variables =
+...    | GIT_REPO_ROOT |      Required: Repo root path if NOT defined in environment variable this is mgmtfw root location|
+...    | ENC_SERIAL_NO |      Optional: If omitted, will use the 1st enclosure detected in OV |
+...    | APPLIANCE_IP |       Required: OneView IPv4 address |
+...    | CIM_Linux_IP |       Required:CI Manager ipv4 under test |
+
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Library           RoboGalaxyLibrary
+Library           MgmtFWLibrary
+Library           json
+
+Suite Setup       Configure Events Test Environment
+Suite Teardown    Run Keywords  Logout of EM RIS   AND    Logout of Fusion Via REST
+
+*** Test Case ***
+TC 01: Blade Event - Validate Blade FruContentFault Event
+    [Documentation]    This test will verify Frucontent fault event for Blade device
+    [Tags]    Blade    Alert    Events    FLM2.00     FLM1.01    OV3.10    Automated
+    ${occupied_blade_list}=    Get List of Occupied iLO Blade Bays
+    Should Not Be Empty    ${occupied_blade_list}    msg=No Blades present in the enclosure
+    : FOR    ${bladebay}    IN    @{occupied_blade_list}
+    \    #Check Blade Power status
+    \    Validate Blade Power Status    ${bladebay}    ${iLO_Username}    ${iLO_Password}    On
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    #Flash Invalid camic Bay Fru for Server Bay
+    \    ${blade_type}=    Get Blade Type    ${bladebay}
+    \    ${ilo_ip}=    Get iLO IPv6 LL Address from EM RIS      ${bladebay}
+    \    ${flash_status}=    Run Keyword If    '${blade_type}' == 'BlackBird'    Flash Blade FRU    ${bladebay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\${ContentFault_blackbirdfru}
+    \    ...   ELSE IF    '${blade_type}' == 'RedBird'    Flash Blade FRU    ${bladebay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\${ContentFault_redbirdfru}
+    \    ...   ELSE IF    '${blade_type}' == 'FireBird2s'    Flash Blade FRU    ${bladebay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\${bigbirdfru_hpe}    
+    \    ...   ELSE IF    '${blade_type}' == 'FireBird4s'    Flash Blade FRU    ${bladebay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\${bigbirdfru_hpe}    
+    \    RIS EM Efuse Blade    ${bladebay}    10
+    \    Sleep    10
+    \    ${status}=    Wait for Device Critical    ${Blade_Device}    ${bladebay}
+    \    Should Be True      ${status}   ${Blade_Device} Critical Status not detected
+    \    Sleep    60    # wait for event to be populated in audit log
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_Blade_FruContentFault}    ${Blade_Device}    ${bladebay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_FruContentFault}    ${last_fusion_event_id}
+    \    #Check Blade Power status
+    \    Sleep    60    # wait for iLO to boot up
+    \    Validate Blade Power Status    ${bladebay}    ${iLO_Username}    ${iLO_Password}    Off
+    \    # Flash the Good Fru
+    \    Log To Console    Flash Good Fru to bay: ${bladebay}
+    \    Flash Blade Fru    ${bladebay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\Fru_Files\\${CAT}\\Good_Fru\\BLADE\\${blade_bay}\\fru.bin
+    \    RIS EM Efuse On Blade    ${bladebay}
+    \    Sleep    10
+    \    RIS EM Efuse Off Blade    ${bladebay}
+    \    Login to iLO   ${ilo_ip}    ${iLO_Username}    ${iLO_Password}
+    \    Wait for iLO Blade PowerOn
+    \    Logout of iLO
+    \    Validate Blade Power Status    ${bladebay}    ${iLO_Username}    ${iLO_Password}    On
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Flash Blade Fru    ${bladebay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\Fru_Files\\${CAT}\\Good_Fru\\BLADE\\${blade_bay}\\fru.bin    AND    RIS EM Efuse On Blade    ${bladebay}    AND    Sleep    10    AND    RIS EM Efuse Off Blade    ${bladebay}
+
+TC 02: Blade Event - Validate Blade FruFault Event
+    [Documentation]    This test is to verify Blade Fru Fault events for blade devices 
+    [Tags]    Blade    Alert    Events    FLM2.00     OV3.10    Automated
+    ${present_blade_list}=    Get List of Occupied Blade Bays
+    Should Not Be Empty    ${present_blade_list}    msg=No Blades present in the enlcosure
+    : FOR    ${blade_bay}    IN    @{present_blade_list}
+    \    Log    message=Injecting Blade fru fault for bay:${blade_bay} and verify failed status/alert event in diags audit log    console=True
+    \    ${Blade_Fault_Status}=    Set EM RIS FRU Faults    ${Blade_Device}    true
+    \    Should Be Equal As Strings    ${Blade_Fault_Status}    <Response [200]>
+    \    RIS EM Efuse Blade    ${blade_bay}    8
+    \    Sleep    ${EM_EFUSE_Duration}
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_Blade_Critical}    ${Blade_Device}    ${blade_bay}    250
+    \    Verify Audit Log Alert Event    ${EL_Blade_FruFault}    ${Blade_Device}    ${blade_bay}    250
+    \    Log    message=Clearing Blade fru fault injection for bay:${blade_bay} and verify ok status/alert event in diags audit log    console=True
+    \    ${Blade_Fault_Status}=    Set EM RIS FRU Faults    ${Blade_Device}    false
+    \    Should Be Equal As Strings    ${Blade_Fault_Status}    <Response [200]>
+    \    RIS EM Efuse Blade    ${blade_bay}    8
+    \    Sleep    ${EM_EFUSE_Duration}
+    \    Wait for Device OK    ${Blade_Device}    ${blade_bay}
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_Blade_OK}    ${Blade_Device}    ${blade_bay}    250
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Set EM RIS FRU Faults    ${Blade_Device}    false    AND
+    ...    EM Clear Blade Status    ${blade_bay}
+
+TC 03: Verify BladeFruManufacturedForInvalidFault Event
+    [Documentation]    This test will validate Compatability check when ManufacturedFor field in Midplane is HPE and in Blade is Foo
+    [Tags]    Blade    Alert    Events    FLM2.00    OV3.10    Automated
+    ${ManufacturedFor}=    Get ManufacturedFor From Midplane FRU
+    Should Be Equal As Strings    ${ManufacturedFor}    HPE
+    ${occupied_blade_list}=    Get List of Occupied iLO Blade Bays
+    Should Not Be Empty    ${occupied_blade_list}    msg=No Blades present in the enclosure
+    : FOR    ${bladebay}    IN    @{occupied_blade_list}
+    \    #Check Blade Power status
+    \    Validate Blade Power Status    ${bladebay}    ${iLO_Username}    ${iLO_Password}    On   
+    \    ${last_fusion_event_id}=    get last fusion event ID 
+    \    #Flash InCompatible Fru
+    \    ${blade_type}=    Get Blade Type    ${bladebay}
+    \    ${ilo_ip}=    Get iLO IPv6 LL Address from EM RIS      ${bladebay}    
+    \    ${flash_status}=    Run Keyword If    '${blade_type}' == 'BlackBird'    Flash Blade BaseBoard FRU    ${ilo_ip}     ${Ilo_Username}     ${Ilo_Password}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\${blackbirdfru_foo}
+    \    ...   ELSE IF    '${blade_type}' == 'RedBird'    Flash Blade BaseBoard FRU    ${ilo_ip}     ${Ilo_Username}     ${Ilo_Password}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\${redbirdfru_foo}
+    \    ...   ELSE IF    '${blade_type}' == 'FireBird2s'    Flash Blade BaseBoard FRU    ${ilo_ip}     ${Ilo_Username}     ${Ilo_Password}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\${FireBird2sfru_foo}    
+    \    ...   ELSE IF    '${blade_type}' == 'FireBird4s'    Flash Blade BaseBoard FRU    ${ilo_ip}     ${Ilo_Username}     ${Ilo_Password}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\${firebird4sfru_foo}    
+    \    RIS EM Efuse Blade    ${bladebay}    10
+    \    Sleep    10
+    \    ${status}=    Wait for Device Critical    ${Blade_Device}    ${bladebay}
+    \    Should Be True      ${status}   ${Blade_Device} Critical Status not detected
+    \    ${ManufacturedFor_Blade}=    Get ManufacturedFor From BaseBoardFru    ${bladebay}
+    \    List Should Not Contain Value    ${Compatible_Devices}    ${ManufacturedFor_Blade}
+    \    ${Blade_Health}=    Get Blade Health    ${bladebay}
+    \    Should Be Equal As Strings    ${Blade_Health}    ${HEALTH_CRITICAL}
+    \    ${Blade_Fault_Status}=    Get Blade Fault Status    ${bladebay}    FRUManufacturedForInvalid
+    \    Should Be Equal As Strings    ${Blade_Fault_Status}    ${STATUS_CRITICAL}
+    \    ${Blade_Fault_Status}=    Get Blade Fault Status    ${bladebay}    FRUManufacturedForMismatch
+    \    Should Be Equal As Strings    ${Blade_Fault_Status}    ${STATUS_OK}
+    \    Sleep    10    # wait for event to be populated in audit log
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_Blade_FruManufacturedForInvalidFault}    ${Blade_Device}    ${bladebay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_FruManufacturedForInvalidFault}    ${last_fusion_event_id}
+    \    #Check Blade Power status
+    \    Validate Blade Power Status    ${bladebay}    ${iLO_Username}    ${iLO_Password}    Off
+    \    # Flash the Good Fru
+    \    Log To Console    Flash Good Fru to bay: ${bladebay}
+    \    Flash Good BaseBoardFru For Blade Device    ${bladebay}    ${ilo_ip}     ${Ilo_Username}     ${Ilo_Password}
+    \    RIS EM Efuse On Blade    ${bladebay}
+    \    Sleep    10
+    \    RIS EM Efuse Off Blade    ${bladebay}
+    \    Login to iLO   ${ilo_ip}    ${iLO_Username}    ${iLO_Password}
+    \    Wait for iLO Blade PowerOn   
+    \    Logout of iLO 
+    \    Validate Blade Power Status    ${bladebay}    ${iLO_Username}    ${iLO_Password}    On
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Flash Good BaseBoardFru For Blade Device    ${bladebay}    ${ilo_ip}     ${Ilo_Username}     ${Ilo_Password}    AND    RIS EM Efuse On Blade    ${bladebay}    AND    Sleep    10    AND    RIS EM Efuse Off Blade    ${bladebay}    
+
+TC 04: Verify BladeFruManufacturedForMismatchFault Event
+    [Documentation]    This test will validate Compatability check when ManufacturedFor field in Midplane is HPE and in Blade is NEC
+    [Tags]    Blade    Alert    Events    FLM2.00    OV3.10    Automated
+    ${ManufacturedFor}=    Get ManufacturedFor From Midplane FRU
+    Should Be Equal As Strings    ${ManufacturedFor}    HPE
+    ${occupied_blade_list}=    Get List of Occupied iLO Blade Bays
+    Should Not Be Empty    ${occupied_blade_list}    msg=No Blades present in the enclosure
+    : FOR    ${bladebay}    IN    @{occupied_blade_list}
+    \    #Check Blade Power status
+    \    Validate Blade Power Status    ${bladebay}    ${iLO_Username}    ${iLO_Password}    On
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    #Flash InCompatible Fru
+    \    ${blade_type}=    Get Blade Type    ${bladebay}
+    \    ${ilo_ip}=    Get iLO IPv6 LL Address from EM RIS      ${bladebay}    
+    \    ${flash_status}=    Run Keyword If    '${blade_type}' == 'BlackBird'    Flash Blade BaseBoard FRU    ${ilo_ip}     ${Ilo_Username}     ${Ilo_Password}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\${blackbirdfru_nec}
+    \    ...   ELSE IF     '${blade_type}' == 'RedBird'    Flash Blade BaseBoard FRU    ${ilo_ip}     ${Ilo_Username}     ${Ilo_Password}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\${redbirdfru_nec}
+    \    ...   ELSE IF    '${blade_type}' == 'FireBird2s'    Flash Blade BaseBoard FRU    ${ilo_ip}     ${Ilo_Username}     ${Ilo_Password}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\${FireBird2sfru_nec}    
+    \    ...   ELSE IF    '${blade_type}' == 'FireBird4s'    Flash Blade BaseBoard FRU    ${ilo_ip}     ${Ilo_Username}     ${Ilo_Password}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\${firebird4sfru_nec}    
+    \    RIS EM Efuse Blade    ${bladebay}    10
+    \    Sleep    10
+    \    ${status}=    Wait for Device Critical    ${Blade_Device}    ${bladebay}
+    \    Should Be True      ${status}   ${Blade_Device} Critical Status not detected
+    \    ${ManufacturedFor_Blade}=    Get ManufacturedFor From BaseBoardFru    ${bladebay}
+    \    List Should Contain Value    ${Compatible_Devices}    ${ManufacturedFor_Blade}
+    \    ${Blade_Health}=    Get Blade Health    ${bladebay}
+    \    Should Be Equal As Strings    ${Blade_Health}    ${HEALTH_CRITICAL}
+    \    ${Blade_Fault_Status}=    Get Blade Fault Status    ${bladebay}    FRUManufacturedForMismatch
+    \    Should Be Equal As Strings    ${Blade_Fault_Status}    ${STATUS_CRITICAL}
+    \    Sleep    10    # wait for event to be populated in audit log
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_Blade_FruManufacturedForMismatchFault}    ${Blade_Device}    ${bladebay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_FruManufacturedForMismatchFault}    ${last_fusion_event_id}
+    \    #Check Blade Power status
+    \    Validate Blade Power Status    ${bladebay}    ${iLO_Username}    ${iLO_Password}    Off
+    \    # Flash the Good Fru
+    \    Log To Console    Flash Good Fru to bay: ${bladebay}
+    \    Flash Good BaseBoardFru For Blade Device    ${bladebay}    ${ilo_ip}     ${Ilo_Username}     ${Ilo_Password}
+    \    RIS EM Efuse On Blade    ${bladebay}
+    \    Sleep    10
+    \    RIS EM Efuse Off Blade    ${bladebay}
+    \    Login to iLO   ${ilo_ip}    ${iLO_Username}    ${iLO_Password}
+    \    Wait for iLO Blade PowerOn   
+    \    Logout of iLO 
+    \    Validate Blade Power Status    ${bladebay}    ${iLO_Username}    ${iLO_Password}    On
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Flash Good BaseBoardFru For Blade Device    ${bladebay}    ${ilo_ip}     ${Ilo_Username}     ${Ilo_Password}    AND    RIS EM Efuse On Blade    ${bladebay}    AND    Sleep    10    AND    RIS EM Efuse Off Blade    ${bladebay}
+
+TC 05: Verify BladeMezzFruContentFault Event For Mezz Device
+    [Documentation]     Verify BladeMezzFruContentFault event for Mezz device
+    [Tags]    Blade    Alert    Events    FLM2.00    OV3.10    Automated
+    ${occupied_blade_list}=    Get List of Occupied ILO Blade Bays
+    Should Not Be Empty    ${occupied_blade_list}    msg=No Blades present in the enclosure
+    ${blade_bay}=    Get Random Item From List    ${occupied_blade_list}
+    Validate Blade Power Status    ${blade_bay}    ${iLO_Username}    ${iLO_Password}    On
+    ${mezzSlotDict}     ${mezzSlotlist}=    Get iLO Mezz list    ${blade_bay}
+    Log To Console    ${mezzSlotlist}
+    : FOR    ${mezz_slot}    IN    @{mezzSlotlist}
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    FRU_Init_File Cleanup
+    \    Fru_File Cleanup
+    \    Replace Text in Mezz Update Config Data File    compaq    ${iLO_Admin_Password}
+    \    ${ilo_ip}=    Get iLO IPv6 LL Address from EM RIS    ${blade_bay}
+    \    Flash Mezz FRU Update For content fault    ${mezz_slot}    ${blade_bay}    ${ilo_ip}
+    \    ${efuse_status_code}=    RIS EM Efuse Blade    ${blade_bay}    10
+    \    Sleep    10
+    \    ${status}=    Wait for Device Critical    ${Blade_Device}    ${blade_bay}
+    \    Should Be True      ${status}   ${Blade_Device} Critical Status not detected
+    \    Sleep    30    # Wait for BladeMezzFruContentFault to log to audit log after encountering blade critical status
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_Blade_MezzFruContentFault}    ${Blade_Device}    ${blade_bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_MezzFruContentFault}    ${last_fusion_event_id}
+    \    FRU_Init_File Cleanup
+    \    Fru_File Cleanup
+    \    Replace Text in Mezz Update Config Data File    compaq    ${iLO_Admin_Password}
+    \    Perform Mezz FRU Update on Blade in Bay    ${blade_bay}
+    \    ${efuse_status_code}=    RIS EM Efuse Blade    ${blade_bay}    10
+    \    Sleep    10
+    \    Wait for Device OK    ${Blade_Device}    ${blade_bay}
+    FRU_Init_File Cleanup
+    Fru_File Cleanup
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Fru_File Cleanup    AND    FRU_Init_File Cleanup    AND    Replace Text in Mezz Update Config Data File    compaq    ${iLO_Admin_Password}    AND    Perform Mezz FRU Update on Blade in Bay    ${blade_bay}    AND     Fru_File Cleanup    AND    FRU_Init_File Cleanup    AND    RIS EM Efuse Blade    ${blade_bay}    10    AND    sleep    10
+
+TC 06: Verify BladeMezzFruManufacturedForInvalidFault Event
+    [Documentation]    This test will validate Compatability check when ManufacturedFor field in Midplane is HPE and in Mezz is Foo
+    [Tags]    Blade    Alert    Events    FLM2.00    OV3.10    Automated
+    ${ManufacturedFor}=    Get ManufacturedFor From Midplane FRU
+    Should Be Equal As Strings    ${ManufacturedFor}    HPE
+    ${occupied_blade_list}=    Get List of Occupied ILO Blade Bays
+    Should Not Be Empty    ${occupied_blade_list}    msg=No Blades present in the enclosure
+    ${blade_bay}=    Get Random Item From List    ${occupied_blade_list}
+    Validate Blade Power Status    ${blade_bay}    ${iLO_Username}    ${iLO_Password}    On
+    ${mezzSlotDict}     ${mezzSlotlist}=    Get iLO Mezz list    ${blade_bay}
+    Log To Console    ${mezzSlotlist}
+    : FOR    ${mezz_slot}    IN    @{mezzSlotlist}
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    FRU_Init_File Cleanup
+    \    Fru_File Cleanup
+    \    Replace Text in Mezz Update Config Data File    compaq    ${iLO_Admin_Password}
+    \    ${ilo_ip}=    Get iLO IPv6 LL Address from EM RIS    ${blade_bay}
+    \    Flash Mezz FRU Update For Card Type    ${mezz_slot}    ${blade_bay}    ${ilo_ip}    Foo
+    \    ${efuse_status_code}=    RIS EM Efuse Blade    ${blade_bay}    10
+    \    Sleep    10
+    \    ${status}=    Wait for Device Critical    ${Blade_Device}    ${blade_bay}
+    \    Should Be True      ${status}   ${Blade_Device} Critical Status not detected
+    \    Sleep    30    # Wait for BladeMezzFruManufacturedForInvalidFault to log to audit log after encountering blade critical status
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_Blade_MezzFruManufacturedForInvalidFault}    ${Blade_Device}    ${blade_bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_MezzFruManufacturedForInvalidFault}    ${last_fusion_event_id}
+    \    FRU_Init_File Cleanup
+    \    Fru_File Cleanup
+    \    Replace Text in Mezz Update Config Data File    compaq    ${iLO_Admin_Password}
+    \    Perform Mezz FRU Update on Blade in Bay    ${blade_bay}
+    \    ${efuse_status_code}=    RIS EM Efuse Blade    ${blade_bay}    10
+    \    Sleep    10
+    \    Wait for Device OK    ${Blade_Device}    ${blade_bay}
+    FRU_Init_File Cleanup
+    Fru_File Cleanup
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    FRU_Init_File Cleanup    AND    Fru_File Cleanup    AND    Replace Text in Mezz Update Config Data File    compaq    ${iLO_Admin_Password}    AND    Perform Mezz FRU Update on Blade in Bay    ${blade_bay}    AND    FRU_Init_File Cleanup    AND    Fru_File Cleanup    AND    RIS EM Efuse Blade    ${blade_bay}    10    AND    Sleep    10 
+
+TC 07: Verify BladeMezzFruManufacturedForMismatchFault Event
+    [Documentation]    This test will validate Compatability check when ManufacturedFor field in Midplane is HPE and in Mezz is Foo
+    [Tags]    Blade    Alert    Events    FLM2.00    OV3.10    Automated
+    ${ManufacturedFor}=    Get ManufacturedFor From Midplane FRU
+    Should Be Equal As Strings    ${ManufacturedFor}    HPE
+    ${occupied_blade_list}=    Get List of Occupied ILO Blade Bays
+    Should Not Be Empty    ${occupied_blade_list}    msg=No Blades present in the enclosure
+    ${blade_bay}=    Get Random Item From List    ${occupied_blade_list}
+    Validate Blade Power Status    ${blade_bay}    ${iLO_Username}    ${iLO_Password}    On
+    ${mezzSlotDict}     ${mezzSlotlist}=    Get iLO Mezz list    ${blade_bay}
+    Log To Console    ${mezzSlotlist}
+    : FOR    ${mezz_slot}    IN    @{mezzSlotlist}
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    FRU_Init_File Cleanup
+    \    Fru_File Cleanup
+    \    Replace Text in Mezz Update Config Data File    compaq    ${iLO_Admin_Password}
+    \    ${ilo_ip}=    Get iLO IPv6 LL Address from EM RIS    ${blade_bay}
+    \    Flash Mezz FRU Update For Card Type    ${mezz_slot}    ${blade_bay}    ${ilo_ip}    NEC
+    \    ${efuse_status_code}=    RIS EM Efuse Blade    ${blade_bay}    10
+    \    Sleep    10
+    \    ${status}=    Wait for Device Critical    ${Blade_Device}    ${blade_bay}
+    \    Should Be True      ${status}   ${Blade_Device} Critical Status not detected
+    \    Sleep    30    # Wait for BladeMezzFruManufacturedForMismatchFault to log to audit log after encountering blade critical status
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_Blade_MezzFruManufacturedForMismatchFault}    ${Blade_Device}    ${blade_bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_MezzFruManufacturedForMismatchFault}    ${last_fusion_event_id}
+    \    FRU_Init_File Cleanup
+    \    Fru_File Cleanup
+    \    Replace Text in Mezz Update Config Data File    compaq    ${iLO_Admin_Password}
+    \    Perform Mezz FRU Update on Blade in Bay    ${blade_bay}
+    \    ${efuse_status_code}=    RIS EM Efuse Blade    ${blade_bay}    10
+    \    Sleep    10
+    \    Wait for Device OK    ${Blade_Device}    ${blade_bay}
+    FRU_Init_File Cleanup
+    Fru_File Cleanup
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    FRU_Init_File Cleanup    AND    Fru_File Cleanup    AND    Replace Text in Mezz Update Config Data File    compaq    ${iLO_Admin_Password}    AND    Perform Mezz FRU Update on Blade in Bay    ${blade_bay}    AND    FRU_Init_File Cleanup    AND    Fru_File Cleanup    AND    RIS EM Efuse Blade    ${blade_bay}    10    AND    Sleep    10
+
+TC 08: Verify BladeMezzFruFault Event For Mezz Device
+    [Documentation]     Verify BladeMezzFruFault event for Mezz device
+    [Tags]    Blade    Alert    Events    FLM2.00    OV3.10    Automated    QXCR1001513438    # Can't run this test until iLO fixes this in 2.52 or iLO 5
+    Fru_File Cleanup
+    FRU_Init_File Cleanup
+    ${occupied_blade_list}=    Get List of Occupied ILO Blade Bays
+    Should Not Be Empty    ${occupied_blade_list}    msg=No Blades present in the enclosure
+    ${blade_bay}=    Get Random Item From List    ${occupied_blade_list}
+    ${ilo_ip}=    Get iLO IPv6 LL Address from EM RIS    ${blade_bay}
+    Validate Blade Power Status    ${blade_bay}    ${iLO_Username}    ${iLO_Password}    On
+    ${mezzSlotDict}     ${mezzSlotlist}=    Get iLO Mezz list    ${blade_bay}
+    Log To Console    ${mezzSlotlist}
+    Replace Text in Mezz Update Config Data File    compaq    ${iLO_Admin_Password}
+    #Perform Mezz FRU Update on Blade in Bay    ${blade_bay}
+    : FOR    ${mezz_slot}    IN    @{mezzSlotlist}
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${mezz_slotid}=    Get From Dictionary    ${mezzSlotDict}    ${mezz_slot}
+    \    ${mezzs}=   em api get mezz details   ${ilo_ip}    ${mezz_slot}    ${mezzSlotlist}
+    \    ${mezzcardtype}=    em api get mezz card in slot   ${mezzs}    ${mezz_slotid}
+    \    ${mezz_type}=    Get Mezz Type By ModelName    ${mezzs['Name']}
+    \    ${partnumber} =    Get mezz partnumber    ${blade_bay}    ${mezz_slotid}
+    \    ${fru_inst}=    ilo ris fru inst    ${partnumber}     ${mezz_slot}
+    \    ${hphdbind_cmd}=    ilo ris hphdbind    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\Bronco\\Mezz_bad.bin    ${fru_inst}
+    \    Log To Console    ${hphdbind_cmd}
+    \    ${return_code}    ${output}=    Run and Return RC and Output    ${hphdbind_cmd}
+    \    ${hpqlocfg_cmd}=    ilo ris hpqlocfg    ${GIT_REPO_ROOT}${FRU_UPDATE_ROOT}/golden.bin    ${ilo_ip}    Administrator    ${iLO_Admin_Password}
+    \    Log To Console    ${hpqlocfg_cmd}
+    \    ${return_code}    ${output}=    Run and Return RC and Output    ${hpqlocfg_cmd}
+    \    Should Be Equal As Integers    ${return_code}    0    Expected return result {return_code} equal to 1 (failure) found ${return_code}. Check Check ${Mezz_Update_Output_File} file for reason.
+    \    Log to Console    ${output}
+    \    Remove File     ${GIT_REPO_ROOT}${FRU_UPDATE_ROOT}/golden.bin
+    \    ${efuse_status_code}=    RIS EM Efuse Blade    ${blade_bay}    ${10}
+    \    Sleep    10
+    \    Wait for Device Degraded    ${Blade_Device}    ${blade_bay}
+    \    Sleep    300    # Wait for BladeMezzFruFault to log to audit log after encountering blade critical status
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_Blade_MezzFruFault}    ${Blade_Device}    ${blade_bay}    450
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_MezzFruFault}    ${last_fusion_event_id}
+    \    ${filename}=     ilo ris get mezz bin    ${mezz_type}
+    \    ${hpqlocfg_cmd}=    ilo ris hpqlocfg    ${GIT_REPO_ROOT}${FRU_UPDATE_ROOT}/golden.bin    ${ilo_ip}    Administrator    ${iLO_Admin_Password}
+    \    Log To Console    ${hpqlocfg_cmd}
+    \    ${return_code}    ${output}=    Run and Return RC and Output    ${hpqlocfg_cmd}
+    \    Should Be Equal As Integers    ${return_code}    0    Expected return result {return_code} equal to 1 (failure) found ${return_code}. Check Check ${Mezz_Update_Output_File} file for reason.
+    \    Log to Console    ${output}
+    \    ${efuse_status_code}=    RIS EM Efuse Blade    ${blade_bay}    ${10}
+    \    Sleep    10
+    \    Wait for Device OK    ${Blade_Device}    ${blade_bay}
+    Delete files in fru_bin
+    Fru_File Cleanup
+    FRU_Init_File Cleanup 
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    FRU_Init_File Cleanup    AND    Fru_File Cleanup    AND    Replace Text in Mezz Update Config Data File    compaq    ${iLO_Admin_Password}    AND    Perform Mezz FRU Update on Blade in Bay    ${blade_bay}    AND    FRU_Init_File Cleanup    AND    Fru_File Cleanup    AND    RIS EM Efuse Blade    ${blade_bay}    10    AND    Sleep    10     AND    Wait for Device OK    ${Blade_Device}    ${blade_bay}    AND    Remove File     ${GIT_REPO_ROOT}${FRU_UPDATE_ROOT}/golden.bin   # Cleanup files
+

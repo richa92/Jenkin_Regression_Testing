@@ -1,0 +1,95 @@
+*** Settings ***
+Documentation     Checking Power Subsystem and Power Supply Health EM/OV alerts
+...    It covers testing of:
+...      PowerSubsystemMismatch
+...      PowerSubsystemMismatchCleared
+...      PowerSubsystemRedundancyLost
+...      PowerSubsystemRedundancyLostCleared
+...    = GENERIC USAGE =
+...    | pybot | -v ENC_SERIAL_NO:[enclosure serial #] | -v APPLIANCE_IP:<ipv4> | -v CIM_Linux_IP:<ipv4> |-v GIT_REPO_ROOT: | em_OV_powersubsystem_health_test.txt |
+...    = Variables =
+...    | GIT_REPO_ROOT |      Required: Repo root path if NOT defined in environment variable this is mgmtfw root location|
+...    | ENC_SERIAL_NO |      Optional: If omitted, will use the 1st enclosure detected in OV |
+...    | APPLIANCE_IP |       Required: OneView IPv4 address |
+...    | CIM_Linux_IP |       Required:CI Manager ipv4 under test |
+
+Library           RoboGalaxyLibrary
+Library           MgmtFWLibrary
+Library           Dialogs
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/resources/thunderbird_all.txt
+Suite Setup       Configure Events Test Environment
+Suite Teardown    Run Keywords  Logout of EM RIS   AND    Logout of Fusion Via REST
+
+*** Test Cases ***
+TC: Power Subsystem 1: Check for Power Subsystem Mismatch and cleared alerts
+    [Documentation]    The test flash PS FRU with different Spare P/N and verify EM/OV alerts for Power Subsystem Mismatch
+    ...    and cleared event
+    [Tags]    PowerSubsystem    FLM1.01   Automated    FRU    Disabled
+    #Store the original FRU to be re-applied after test case completion
+    Store Powersupply Fru
+    ${occupied_ps_list}=    Get List of Occupied PowerSupply Bays
+    ${original_ps_sparepn_list}=    Get Powersupply Spare PN List
+    ${last_fusion_event_id}=    get last fusion event ID
+    : FOR    ${ps_bay}    IN    @{occupied_ps_list}
+    \    Log to Console    Flashing PS ${ps_bay} with bogus PN FRU
+    # Verify flashing bad FRU
+    \    ${res}=    Flash PowerSupply Fru    ${ps_bay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\${Cust_PS_Fru_Path}\\Johnny\\PSFru_bogusPN.bin
+    \    EM Clear PowerSupply Status No Sleep    ${ps_bay}
+    \    ${index}=    Evaluate    ${ps_bay} - 1
+    \    ${bogus_ps_fru}=    Get Powersupply Fru    ${ps_bay}
+    \    ${bogus_ps_spare_pn}=    Get PCA Spare PN From FRU    ${bogus_ps_fru}
+    \    ${original_ps__spare_pn}=    Get From List    ${original_ps_sparepn_list}    ${index}
+    \    Run Keyword And Continue On Failure    Should Not Be Equal As Strings    ${bogus_ps_spare_pn}    ${original_ps_spare_pn}
+    \    ${temp_list}=    Copy List    ${original_ps_sparepn_list}
+    \    Set List Value    ${temp_list}    ${index}    ${bogus_ps_spare_pn}
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Fusion Event Sent By EM    ${EL_Power_Subsystem_Mismatch}    ${last_fusion_event_id}    ${Enclosure_category}
+    #Restore powersupply FRU
+    \    ${ps_present}=    Check Device Presence    powersupply    ${ps_bay}
+    \    Log to Console    Restoring powersupply FRU in bay ${ps_bay}
+    \    Run Keyword if    ${ps_present}    Flash Powersupply Fru    ${ps_bay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\Fru_Files\\${CAT}\\Good_Fru\\PS\\${ps_bay}\\fru.bin
+    \    RIS EM Efuse On PowerSupply    ${ps_bay}
+    \    RIS EM Efuse Off Powersupply No Sleep    ${ps_bay}
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Fusion Event Sent By EM    ${EL_Power_Subsystem_Mismatch_Cleared}    ${last_fusion_event_id}    ${Enclosure_category}
+    [Teardown]    Run Keyword If Test Failed    Flash FRU For ALL Existing Power Supply    ${GIT_REPO_ROOT}${FUSION_FRU_ROOT}
+
+TC: Power Subsystem 2: Check for Power Subsystem Redundancy Lost and cleared alerts
+    [Documentation]    The test efuses power supplies and verify EM/OV alerts for
+    ...                Power Subsystem Redundancy
+    ...                and cleared event
+    [Tags]    PowerSubsystem    FLM1.01    Automated
+    # Get list of Occupied Power Supply Bays
+    ${occupied_ps_list}=    Get List of Occupied PowerSupply Bays
+    ${last_fusion_event_id}=    get last fusion event ID
+    # Fail all but one power supplies; minimum For Redundant Power Feed
+    ${RemainingCount}    Get Length    ${occupied_ps_list}
+    :For    ${bay}    in    @{occupied_ps_list}
+    \    Exit For Loop If    ${RemainingCount}<${minPSForRedundantPowerFeed}
+    \    RIS EM Efuse On PowerSupply    ${bay}
+    \    ${RemainingCount}    Evaluate    ${RemainingCount} - 1
+    # Wait till they're powered off
+    Sleep    10
+    Should Be Equal As Strings    ${RemainingCount}    1
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_Power_Subsystem_Redundancy_Lost}    ${PowerSupply_Device}    ${bay}    250
+    Verify Fusion Event Sent By EM    ${EL_Power_Subsystem_Redundancy_Lost}    ${last_fusion_event_id}    ${Enclosure_category}
+    # Recover all failed power supplies
+    :For    ${bay}    in    @{occupied_ps_list}
+    \    RIS EM Efuse Off Powersupply No Sleep    ${bay}
+    Wait for Enclosure Health OK
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_Power_Subsystem_Redundancy_Lost_Cleared}    ${PowerSupply_Device}    ${bay}    250
+    Verify Fusion Event Sent By EM    ${EL_Power_Subsystem_Redundancy_Lost_Cleared}    ${last_fusion_event_id}    ${Enclosure_category}
+    [Teardown]    Run Keyword If Test Failed    Ensure All PS Are In Good State

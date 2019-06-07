@@ -1,0 +1,130 @@
+*** Settings ***
+Documentation		Deploy OSBP into multiple VM's
+Resource			../resource.txt
+Test Setup			Load Test Data	${DataFile}
+Test Teardown		Logout and close all browsers
+Library				OperatingSystem
+Library				Collections
+Library				String
+Variables			../../../../../../../altair/AltairLibrary/ui/objectrepo/altair_elements_hp_oneview_appliances_page.py
+
+
+*** Test Cases ***	
+Capture deployment IP of server1
+	Log into Altair Appliance as Administrator
+	${server_data} =	Set Variable	${Testdata.test_server[0]}
+	${ilo_ip} =		Set Variable	${server_data.ip}
+	${dep_ip1}=	Get Deployment IP		${ilo_ip}
+	Log		${dep_ip1}
+	set global variable		${dep_ip1}
+
+Power On VM
+	Run		powershell Enable-PSRemoting -Force
+	${domainusername} =	Set Variable	${TestData.clusterNode[0].domainusername}
+	${domainpassword} =	Set Variable	${TestData.clusterNode[0].domainpassword}
+	: FOR	${virtualname}	In	@{TestData.virtual}
+	\	Run		powershell $Username = '${domainusername}'; $Password ='${domainpassword}'; Set-Item -force wsman:\\localhost\\client\\trustedhosts *; Restart-Service WinRM; $pass = ConvertTo-SecureString -AsPlainText $Password -Force; $Cred = New-Object System.Management.Automation.PSCredential -ArgumentList $Username,$pass; Invoke-Command -ComputerName '${dep_ip1}' -ScriptBlock { Start-VM -Name '${virtualname.vmname}' } -credential $Cred
+	Sleep	600
+
+Get Mac Address of VM
+	Run		powershell Enable-PSRemoting -Force
+	${domainusername} =	Set Variable	${TestData.clusterNode[0].domainusername}
+	${domainpassword} =	Set Variable	${TestData.clusterNode[0].domainpassword}
+	@{mac_list} =   Create list
+	: FOR	${virtualname}	In	@{TestData.virtual}
+	\	${mac} =	Run		powershell $Username = '${domainusername}'; $Password ='${domainpassword}'; Set-Item -force wsman:\\localhost\\client\\trustedhosts *; Restart-Service WinRM; $pass = ConvertTo-SecureString -AsPlainText $Password -Force; $Cred = New-Object System.Management.Automation.PSCredential -ArgumentList $Username,$pass; Invoke-Command -ComputerName '${dep_ip1}' -ScriptBlock { $mac="Get-VM -Name '${virtualname.vmname}' | Select -ExpandProperty networkadapters";$mac.MacAddress[1]} -credential $Cred
+	\	append to list   ${mac_list}   ${mac}
+	Log into Altair appliance as Administrator
+	Altair UI Go to Servers Page
+	@{list_ip} =	Create list
+	: For   ${item}   In   @{mac_list}
+	\	${ip} =		Get Deployment IP with mac address	${item}
+	\	Append to list		${list_ip}		${ip}
+	Set Global Variable		@{list_ip}
+
+Run OS Build Plan
+	Login as Infrastructure Administrator
+	Maximize Browser Window
+	: For	${item}		in	@{list_ip}
+	\	Altair UI Go to Servers Page
+	\	${serial_no} =	Altair Get Serial Number From Mac Address	${item}
+	\	Altair UI Go To OS Build Plans Page
+	\	Altair UI Run OS Buildplan From OS Buildplans Page		${TestData.edit_osbp[1].name}	${serial_no}
+	\	Sleep	20
+	Altair UI Logout Appliance Console
+	Close All Browsers
+
+Get Deployment Job Status
+	Login as Infrastructure Administrator
+	Maximize Browser Window
+	: For	${item}		in	@{list_ip}
+	\	Altair UI Go to Servers Page
+	\	${status} =		Select Server and get job status with mac address		${item}
+	\	Run keyword and Continue on failure		Should Be Equal As Strings		${status}		True
+	\	${job_status} =		Set variable if		'${status}'=='${blnExpected}'	Succeeded	Failed
+	\	Log		job - deployment ${job_status} for ${item}		WARN
+	Altair UI Logout Appliance Console
+	Close All Browsers
+	
+*** Keywords ***
+Altair Get Serial Number From Mac Address
+    [Arguments]     ${server_name}
+	[return]	${serial_no}
+	Altair UI Go to Servers Page
+	${server_dict} =	Create Dictionary
+	${server_names} =	Create List
+	${server_dict} =  altair_ui_get_complete_server_list		none
+	${server_names} = 	Get Dictionary Values 	${server_dict}
+	${server_list_length} = 	Get Length	${server_names}
+	${ilo_ip} =	Set Variable	${server_name}	
+	: FOR	${i}	IN RANGE	1	${server_list_length+1}
+	\	${locator} =	Get UI Object	${AltairServersPage.ID_TABLE_SERVER_NAME}	${i}
+	\	${ser_details} =	altair_ui_get_server_details	${locator}
+	\	${server_details} = 	Convert To List		${ser_details}
+	\	${serial_no} =	Set Variable	${server_details[9]} 
+	\	Run Keyword if	'${ilo_ip}'=='${server_details[4]}'		Log		${serial_no}
+	\	Run Keyword if	'${ilo_ip}'=='${server_details[4]}'		Set Global Variable		${serial_no}
+	\	Run Keyword if	'${ilo_ip}'=='${server_details[4]}'		Exit For Loop
+	
+Select Server and get job status with mac address
+	[Arguments]		${ilo_ip}
+	[return]	${status}
+	${server_dict} =	Create Dictionary
+	@{server_names} =	Create List
+	${server_dict} =	altair_ui_get_complete_server_list	none
+	${server_names} =	Get Dictionary Values		${server_dict}
+	${server_list_length} =		Get Length		${server_names}
+	: FOR	${i}	IN RANGE	1	${server_list_length+1}
+	\	${locator} = 	Get UI Object	${AltairServersPage.ID_TABLE_SERVER_NAME}	${i}
+	\	${ser_details} =	altair_ui_get_server_details		${locator}
+	\	${server_details} =		Convert To List		${ser_details}
+	\	Log		${server_details}
+	\	${status} =		Run Keyword if		'${ilo_ip}'=='${server_details[4]}'		Altair trace job status
+	\	Run Keyword if		'${ilo_ip}'=='${server_details[4]}'		Exit For Loop
+	
+Get Deployment IP with mac address
+	[Arguments]		${mac}
+	[return]	${ip}
+	${server_dict} =	Create Dictionary
+	@{server_names} =	Create List
+	${server_dict} =	altair_ui_get_complete_server_list	none
+	${server_names} =	Get Dictionary Values	${server_dict}
+	${server_list_length} =		Get Length		${server_names}
+	${ip_list} =	Create Dictionary
+	${mac1} =	Set Variable	//*[@id='osdserver-network-table']/tbody/tr[3]/td[2]/div
+	${mac2} =	Set Variable	//*[@id='osdserver-network-table']/tbody/tr[2]/td[2]/div
+	${get_ip1} =		Set Variable	//*[@id='osdserver-network-table']/tbody/tr[3]/td[3]/div
+	${get_ip2} =		Set Variable	//*[@id='osdserver-network-table']/tbody/tr[2]/td[3]/div
+	: FOR	${i}	IN RANGE	1	${server_list_length}+1
+	\	${server} =	Get Ui Object	${AltairServersPage.ID_SERVERS_LIST_SELECTED}	${i}
+	\	Wait For Element and click	${server}
+	\	sleep	5
+	\	${exis_mac1} =	get_text	${mac1}
+	\	${exis_mac2} =	get_text	${mac2}
+	\	${exis_mac1} =	Remove String	${exis_mac1}	:
+	\	${exis_mac2} =	Remove String	${exis_mac2}	:
+	\	${ip1} =	Run Keyword if	'${mac}' == '${exis_mac1}'	get_text	${get_ip1}
+	\	${ip2} =	Run Keyword if	'${mac}' == '${exis_mac2}'	get_text	${get_ip2}
+	\	Run keyword if	'${mac}' == '${exis_mac1}'	Set to dictionary	${ip_list}	${mac}		${ip1}
+	\	Run keyword if	'${mac}' == '${exis_mac2}'	Set to dictionary	${ip_list}	${mac}		${ip2}
+	${ip} =	Set Variable	${ip_list["${mac}"]}

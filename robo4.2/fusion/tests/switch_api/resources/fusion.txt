@@ -1,0 +1,592 @@
+*** Settings ***
+Documentation     Fusion Rest API keywords 
+...               = Usage =
+...               | Library | resources/fusion.txt |
+Library           Collections
+Library           String
+Library           SSHLibrary
+Library           RoboGalaxyLibrary         # DVTs Robot Framework extensions
+Library           FusionLibrary                  # DVTs Robot Framework extensions
+Library           FusionLibrary             # DVTs Robot Framework extensions
+Variables         resources/variables.py    # Comet-DVT default variables
+
+*** Variables ***
+
+
+*** Keywords ***
+Login to Fusion Via REST
+    [Documentation]    Connects to the Appliance and creates a session using the Username and Password.
+    [Documentation]    Example:\n| Login to Fusion Via REST | 10.0.12.106 | Administrator | hpvse123 |
+    [Arguments]    ${IP}=${FUSION_IP}    ${USERNAME}=${FUSION_USERNAME}    ${PASSWORD}=${FUSION_PASSWORD}
+    Should Not Be Equal    ${IP}    'unknown'    msg=Please specify a valid Fusion IP address or hostname
+    ${Response}    ${SessionId}    Fusion Api Login Appliance    ${IP}    ${USERNAME}    ${PASSWORD}
+    ${Status}    Get From Dictionary    ${Response}    status
+    Return From Keyword If    '${Status}' == '200'    ${Response}
+    ${errorCode}    Get From Dictionary    ${Response}    errorCode
+    ${message}      Get From Dictionary    ${Response}    message
+    Fatal Error    msg=Invalid response returned ${Status} ${errorCode} ${message}
+
+Logout of Fusion Via REST
+    [Documentation]    Terminates a session with the REST API.
+    [Documentation]    Example:\n| Logout Of Fusion Via REST |
+    Fusion Api Logout Appliance
+
+Login to Fusion via SSH
+    [Documentation]    Connect to Fusion VM via SSH
+    [Documentation]    Example:\n| Login to Fusion Via SSH | 10.0.12.106 | Administrator | hpvse123 |
+    [Arguments]    ${IP}=${FUSION IP}    ${USERNAME}=${FUSION_SSH_USERNAME}    ${PASSWORD}=${FUSION_SSH_PASSWORD}
+    ...            ${PROMPT}=${FUSION_PROMPT}    ${TIMEOUT}=${FUSION_TIMEOUT}
+    Log Many    ${IP}    ${USERNAME}    ${PASSWORD}    ${PROMPT}    ${TIMEOUT}
+    Set Default Configuration    prompt=${PROMPT}    timeout=${TIMEOUT}
+    ${Id}=    Open Connection    ${IP}
+    ${Output}=    Login    ${USERNAME}    ${PASSWORD}
+    [Return]    ${Id}
+
+Logout of Fusion Via SSH
+    [Documentation]    Exits the current SSH session
+    [Documentation]    Example:\n| Logout Of Fusion Via SSH |
+    Close Connection
+
+Set Fusion Version Metadata
+    [Documentation]    Get the version ident string from Fusion
+    Login to Fusion via REST
+    ${Response}=    Fusion Api Get Appliance Version
+    Logout of Fusion Via REST
+    Log    ${Response}
+    ${softwareVersion}=    Get from Dictionary    ${Response}    softwareVersion
+    ${date}=               Get from Dictionary    ${Response}    date
+    Set Suite Metadata     Fusion Version    ${softwareVersion} : ${date}    top=True
+
+
+Get Id From Uri
+    [Documentation]    Returns the uuid from a REST uri string.
+    [Documentation]    Example:\n| ${Id} | Get Id From Uri | ${Uri} |
+    [Arguments]    ${Uri}
+    ${Id}     Fetch From Right    ${Uri}    /
+    [Return]    ${Id}
+
+Check Response
+    [Arguments]    ${response}
+    Should Not Contain    ${response}    errorCode
+
+# -----------------------------------------------------------------------------
+#		FUSION STATE VERIFICATION
+# -----------------------------------------------------------------------------
+Verify Fusion Factory Setting
+	[Documentation]	 Check for defined Logical Interconnect Groups, Logical Interconnects, Ethernet Networks
+	...				 , and uplink sets.
+	@{ELEMENTS}=	Create List    logical interconnect groups	
+	...                            logical interconnects
+	...                            ethernet networks
+	...                            uplink sets
+	${total_count}=		Set Variable	0
+	: For     ${element}     in    @{ELEMENTS}
+    \    ${response}=    run keyword    Fusion Api Get ${element}
+    \    ${count}      Get From Dictionary    ${response}    count
+    \	 Run Keyword If		${count}!=0		Log 	There are defined ${element}.	level=WARN
+    \	 ${total_count}=		Evaluate	${total_count}+${count}
+    ${rc}=		Set Variable If		${total_count}!=0		${False}	${True}
+    [Return]	${rc}
+    
+Verify Interconnect created
+	[Documentation]	 Check for defined Logical Interconnect Groups, Logical Interconnects, and Interconnects
+	@{ELEMENTS}=	Create List    logical interconnect groups
+	...							   logical interconnects
+	...                            interconnects
+	${total_count}=		Set Variable	0
+	: For     ${element}     in    @{ELEMENTS}
+    \    ${response}=    run keyword    Fusion Api Get ${element}
+    \	 Log	${response}
+    \    ${count}      Get From Dictionary    ${response}    count
+    \	 Run Keyword If		${count}==0		Log 	There are no defined ${element}.	level=WARN
+    \	 ${total_count}=		Evaluate	${total_count}+${count}
+    ${rc}=		Set Variable If		${total_count}==0		${False}	${True}
+    [Return]	${rc}
+    
+CleanUp FusionVM
+    [Documentation]    Remove all entities from a Fusion VM
+    @{Fusion_Entities}    Create List    Uplink Sets
+    ...                                  Ethernet Networks
+    ...                                  Logical Interconnect Groups
+    #...                                 Logical Interconnects
+    #...                                 Network-Sets
+    #...                                 Network Lists
+    #...                                 FC-Networks
+    Login to Fusion via REST
+    : For     ${Entity}     in    @{Fusion_Entities}
+    \    ${Response}=    Run Keyword    Fusion Api Get ${entity}
+    \    ${Members}    Get From Dictionary    ${Response}    members
+    \    ${Count}      Get From Dictionary    ${Response}    count
+    \    Delete Fusion Entity    ${Entity}    ${Count}      ${Members}
+    Logout of Fusion via REST
+    
+# -----------------------------------------------------------------------------
+#		FUSION CLEANUP & RESET
+# -----------------------------------------------------------------------------
+Reset Fusion Appliance to Factory Default
+    [Documentation]    Return the Fusion Appliance to the factory default state
+    Login to Fusion via SSH
+    Set Default Configuration    timeout=900    # Some commands (below) take a long time
+    @{Commands}    Create List    /ci/bin/cic-factory-reset
+    ...    /ci/bin/afterFactoryReset.sh         # ~12 minutes
+    ...    [ -e /var/tmp/hydrogen-switch-config/switchConfig.cfg ] && rm /var/tmp/hydrogen-switch-config/switchConfig.cfg || echo 'No file to delete'
+    ...    /ci/bin/cic-run-level database       # ~1 minute
+    ...    [ -d /root/scripts ] && cd /root/scripts && ./invoke_li_auth.sh || echo 'No /root/scripts folder present'
+    ...    [ -d /root/dbscripts ] && cd /root/dbscripts && ./invoke_li_auth.sh || echo 'No /root/dbscripts folder present'
+    ...    /ci/bin/cic-run-level normal
+    :FOR    ${Command}    IN    @{Commands}
+    \    ${stdout}    ${stderr}    ${rc}=    Execute Command    ${Command}    return_stderr=True    return_rc=True
+    \    Log    ${stdout}
+    \    Should Be Empty    ${stderr}                 msg=Error returned: ${rc} ${stderr}
+    \    Should Be Equal As Integers    ${rc}    0    msg=non-zero return code ${rc}
+    Logout of Fusion Via SSH
+
+Delete Fusion Entity 
+    [Documentation]    Removes specified entities (LIG, LI, etc). Helper keyword; See CleanUp FusionVM 
+    [Arguments]    ${Entity}    ${Count}    ${Members}
+    : FOR    ${Index}    IN RANGE    0    ${Count}
+    \    ${Member}=    Get From Dictionary    ${Members}    ${Index}
+    \    ${Uri}=       Get From Dictionary     ${Member}    uri
+    \    ${ID}=        Fetch From Right    ${Uri}    /
+    \    ${Result}     Run Keyword    Fusion Api Delete ${Entity} Id     ${ID}
+    
+# -----------------------------------------------------------------------------
+#		ETHERNET NETWORKS
+# -----------------------------------------------------------------------------
+Create Ethernet Network
+    [Documentation]    Creates a Network using the supplied Name and vlanId.
+    [Arguments]    ${Name}    ${vlanId}
+    ${Network}    Create Dictionary    type=ethernet-network
+    ...                                vlanId=${vlanId}
+    ...                                name=${Name}    
+    ...                                purpose=General
+    ...                                smartLink=false    
+    ...                                privateNetwork=false
+    ${Response}     Fusion Api Add Ethernet Networks    ${Network}
+    ${Status}       Get From Dictionary    ${Response}    status
+    Return From Keyword If    '${Status}' == '200'    ${Response}
+    ${errorCode}    Get From Dictionary    ${Response}    errorCode
+    ${message}      Get From Dictionary    ${Response}    message
+    Fail    msg=Invalid response returned ${Status} ${errorCode} ${message}
+
+Get Ethernet Network By Id
+    [Documentation]    Returns a Network given a vlanId
+    [Arguments]    ${vlanId}
+    ${Network}    Fusion Api Get Ethernet Networks    filter="vlanId=${vlanId}"
+    ${Count}    Get from Dictionary    ${Network}    count
+    Should Be Equal As Numbers    ${Count}    1    msg=Cant find ethernet-network vlanId ${vlanId}    
+    ${Members}    Get From Dictionary    ${Network}    members
+    ${Element}    Get From List          ${Members}    0
+    ${eVlanId}    Get From Dictionary    ${Element}    vlanId
+    Should Be Equal As Numbers    ${eVlanId}    ${vlanId}    msg=Cant find ethernet-network vlanId ${vlanId}
+    [Return]    ${Element}
+
+Get Ethernet Network By Name
+    [Documentation]    Returns a Network given a network Name
+    [Arguments]    ${Name}
+    ${Network}    Fusion Api Get Ethernet Networks    filter="'name'='${Name}'"
+    ${Count}    Get from Dictionary    ${Network}    count
+    Should Be Equal As Numbers    ${Count}    1    msg=Cant find ethernet-network named ${Name}
+    ${Members}    Get From Dictionary    ${Network}    members
+    ${Element}    Get From List          ${Members}    0
+    ${eName}    Get From Dictionary    ${Element}      name
+    Should Be Equal As Strings    ${eName}    ${Name}    msg=Cant find ethernet-network named ${Name}
+    [Return]    ${Element}
+
+Get Ethernet Network uri by Name
+    [Documentation]    Return a Network uri by Name.
+    [Arguments]    ${name}
+    ${Network}    Get Ethernet Network by Name    ${name}
+    # Pull the uuid from the uri
+    ${Uri}    Get From Dictionary    ${Network}    uri
+    ${Id}     Get Id from Uri    ${Uri}
+    [Return]    ${uri}
+
+Get Ethernet Network vlanId by Name
+    [Documentation]    Return a Network vlandId by Name.
+    [Arguments]    ${name}
+    ${Network}    Get Ethernet Network by Name    ${name}
+    ${vlanId}    Get From Dictionary    ${Network}    vlanId
+    [Return]    ${vlanId}
+
+Delete Ethernet Network by Id
+    [Documentation]    Removes an existing Network by vlanId.
+    [Arguments]    ${vlanId}
+    ${Network}    Get Ethernet Network by Id    ${vlanId}
+    # Pull the uuid from the uri
+    ${Uri}    Get From Dictionary    ${Network}    uri
+    ${Id}     Get Id from Uri    ${Uri}
+    # And finally, remove it
+    ${Response}    Fusion Api Delete Ethernet Networks Id    ${Id}
+    [Return]    ${Response}
+
+# -----------------------------------------------------------------------------
+#		INTERCONNECT-TYPES
+# -----------------------------------------------------------------------------
+Get Interconnect Type Uri List
+    [Documentation]    Return a list of Uris for the given list of named Interconnect-types.
+    [Arguments]    @{ResourceNamesList}
+    ${InterconnectTypeUriList}    Create List
+    : FOR    ${Index}    IN RANGE    0    8
+    \    ${ResourceName}    Get From List    ${ResourceNamesList}    ${Index}
+    \    ${InterconnectTypeUri}    Get Interconnect Type Uri    ${ResourceName}
+    \    Insert into List    ${InterconnectTypeUriList}    ${Index}    ${InterconnectTypeUri}
+    [Return]   @{InterconnectTypeUriList}
+
+Get Interconnect Type Uri
+    [Documentation]    Return the Uri for a Interconnect-type name.
+    [Arguments]    ${ResourceName}
+    Return From Keyword If    '${ResourceName}' == '${None}'    ${None}
+    ${InterconnectTypeCollection}    Fusion Api Get Interconnect Types
+    ${Members}    Get From Dictionary    ${InterconnectTypeCollection}    members
+    ${Count}      Get From Dictionary    ${InterconnectTypeCollection}    count
+    : FOR    ${Index}    IN RANGE    0    ${Count}
+    \    ${InterconnectType}    Get From List    ${Members}    ${Index}
+    \    ${Name}    Get From Dictionary    ${InterconnectType}    name
+    \    ${Uri}     Get From Dictionary    ${InterconnectType}    uri    
+    \    Return From Keyword If    '${Name}' == '${ResourceName}'    ${Uri}
+    Fail    msg=No Interconnect type ${ResourceName} was found
+
+# ------------------------------------------------------------------------------------
+#		LOGICAL INTERCONNECTS
+# ------------------------------------------------------------------------------------
+Create Logical Interconnect
+    [Documentation]    Creates a new Logical Interconnect
+    [Arguments]    ${LiName}    ${LigUri}    ${IP}=${SWITCH_IP}    ${USERNAME}=${SWITCH_USERNAME}    ${PASSWORD}=${SWITCH_PASSWORD}
+    Log Many    ${LiName}    ${LIGUri}    ${IP}    ${USERNAME}    ${PASSWORD}
+    ${LogicalInterconnect}    Build Logical Interconnect Payload    ${LiName}    ${LigUri}    ${IP}    ${USERNAME}    ${PASSWORD}
+    ${Response}    Fusion Api Add Logical Interconnects    ${LogicalInterconnect}
+    ${Status}      Get From Dictionary    ${Response}    status
+    Return From Keyword If    '${Status}' == '200'    ${Response}
+    ${errorCode}    Get From Dictionary    ${Response}    errorCode
+    ${message}      Get From Dictionary    ${Response}    message
+    Fail    msg=Invalid response returned ${Status} ${errorCode} ${message}
+    [Return]    ${Response}
+    
+Build Logical Interconnect Payload
+    [Documentation]    Returns a LogicalInterconnect payload (for subsequent use in creating a Logical Interconnect)
+    [Arguments]    ${LiName}    ${LIGUri}    ${IP}=${SWITCH_IP}    ${USERNAME}=${SWITCH_USERNAME}    ${PASSWORD}=${SWITCH_PASSWORD}
+    ${entry0}    Create Dictionary    value=${IP}          type=Ip
+    ${entry1}    Create Dictionary    value=${USERNAME}    type=UserId
+    ${entry2}    Create Dictionary    value=${PASSWORD}    type=Password
+    ${locationList}    Create List    ${entry0}    ${entry1}    ${entry2}
+    ${locationEntries}    Create Dictionary    locationEntries=${locationList}
+    ${location}    Create Dictionary    location=${locationEntries}
+    ...                                 interconnectUri=${null}
+    ...                                 permittedInterconnectTypeUri=${null}
+    ...                                 logicalDownlinkUri=${null}
+    ${interconnectMapList}    Create List    ${location}
+    ${interconnectMapEntries}    Create Dictionary    interconnectMapEntries=${InterconnectMapList}
+    ${LogicalInterconnect}    Create Dictionary    type=logical-interconnect
+    ...                                            enclosureUris=${null}
+	...                                            telemetryConfiguration=${null}
+	...                                            snmpConfiguration=${null}
+	...                                            portMonitor=${null}
+	...                                            consistencyStatus=${null}
+	...                                            ethernetSettings=${null}
+	...                                            stackingHealth=${null}
+    ...                                            logicalInterconnectGroupUri=${LIGUri}
+    ...                                            interconnectMap=${interconnectMapEntries}
+    ...                                            interconnects=${null}
+	...                                            fusionDomainUri=${null}
+    ...                                            name=${LiName}
+	...                                            state=${null}
+	...                                            description=${null}
+	...                                            status=${null}
+	...                                            uri=${null}
+    ...                                            category=logical-interconnect
+	...                                            eTag=${null}
+	...                                            created=${null}
+	...                                            modified=${null}
+    Log    ${LogicalInterconnect}
+    [Return]    ${LogicalInterconnect}
+
+Get Logical Interconnect
+    [Documentation]    Return a Logical Interconnect by Name
+    [Arguments]    ${LiName}
+    ${LogicalInterconnectCollection}    Fusion Api Get Logical Interconnects
+    ${Members}    Get From Dictionary    ${LogicalInterconnectCollection}    members
+    ${Count}      Get From Dictionary    ${LogicalInterconnectCollection}    count
+    : FOR    ${Index}    IN RANGE    0    ${Count}
+    \    ${LogicalInterconnect}    Get From List    ${Members}    ${Index}
+    \    ${Name}    Get From Dictionary    ${LogicalInterconnect}    name
+    \    Return From Keyword If    '${Name}' == '${LiName}'    ${LogicalInterconnect}
+    Fail    msg=No Logical Interconnect ${LiName} was found
+
+Get Logical Interconnect Uri
+    [Documentation]    Return the Uri for a Logical Interconnect by Name.
+    [Arguments]    ${LiName}
+    ${Li}    Get Logical Interconnect    ${LiName}
+    ${Uri}    Get From Dictionary    ${Li}    uri    
+    [Return]    ${Uri}
+
+Delete Logical Interconnect
+    [Documentation]    Remove the named Logical Interconnect
+    [Arguments]    ${LiName}
+    ${Uri}    Get Logical Interconnect Uri    ${LiName}
+    ${Id}     Get Id From Uri    ${Uri}
+    # Delete the Li using the Id and check the result
+    ${Response}    Fusion Api Delete Logical Interconnects Id    ${Id}
+    ${Status}      Get From Dictionary    ${Response}    status
+    Should Be Equal As Integers    ${Status}    200    msg=Couldn't delete ${LiName}, status : ${Status}
+    [Return]    ${Response}    
+  
+# -----------------------------------------------------------------------------
+#		LOGICAL INTERCONNECT GROUPS
+# -----------------------------------------------------------------------------
+ Create Logical Interconnect Group
+    [Documentation]    Create a new Logical Interconnect Group
+    [Arguments]    ${LigName}    @{InterconnectNamesList}
+    @{InterconnectTypeUriList}     Get Interconnect Type Uri List    @{InterconnectNamesList}
+    ${LogicalInterconnectGroup}    Build Logical Interconnect Group Payload    ${LigName}    @{InterconnectTypeUriList}
+    ${Response}    Fusion Api Add Logical Interconnect Groups    ${LogicalInterconnectGroup}
+    ${Status}       Get From Dictionary    ${Response}    status
+    Return From Keyword If    '${Status}' == '200'    ${Response}
+    ${errorCode}    Get From Dictionary    ${Response}    errorCode
+    ${message}      Get From Dictionary    ${Response}    message
+    Fail    msg=Invalid response returned ${Status} ${errorCode} ${message}
+    [Return]    ${Response]
+
+Get Logical Interconnect Group
+    [Documentation]    Return a Logical Interconnect Group by Name
+    [Arguments]    ${Name}
+    ${LogicalInterconnectGroupCollection}    Fusion Api Get Logical Interconnect Groups    filter="'name'='${Name}'"
+    ${Count}    Get From Dictionary    ${LogicalInterconnectGroupCollection}    count
+    Should Be Equal As Numbers    ${Count}    1    msg=Cant find lig named ${Name}
+    ${Members}    Get From Dictionary    ${LogicalInterconnectGroupCollection}    members
+    ${Lig}    Get From List    ${Members}    0
+    ${LigName}    Get From Dictionary    ${Lig}    name
+    Should Be Equal As Strings    ${Name}    ${LigName}
+    [Return]    ${Lig}
+    
+Get Logical Interconnect Group Uri
+    [Documentation]    Return a Logical Interconnect Groups' Uri by Name
+    [Arguments]    ${Name}
+    ${Lig}    Get Logical Interconnect Group    ${Name}
+    ${Uri}    Get From Dictionary    ${Lig}    uri    
+    [Return]    ${Uri}
+    
+Delete Logical Interconnect Group    
+    [Documentation]    Remove the named Logical Interconnect Group
+    [Arguments]    ${Name}
+    ${Uri}    Get Logical Interconnect Group Uri    ${Name}
+    ${Id}     Get Id From Uri    ${Uri}
+    # Delete the Lig using the Id and check the result
+    ${Response}    Fusion Api Delete Logical Interconnect Groups Id    ${Id}
+    ${Status}      Get From Dictionary    ${Response}    status
+    Should Be Equal As Integers    ${Status}    200    msg=Couldn't delete ${Name}, status : ${Status}
+    [Return]    ${Response}    
+
+Build Logical Interconnect Group Payload
+    [Documentation]    Returns a logical Interconnect Group Payload (for subsequent used in creating a  Logical Interconnect)
+    [Arguments]    ${Name}    @{InterconnectTypeUriList}
+    ${InterconnectMapTemplate}     Build Interconnect Map Template    @{InterconnectTypeUriList}
+    ${LogicalInterconnectGroup}    Create Dictionary    type=logical-interconnect-group
+    ...                                                 category=logical-interconnect-groups
+    ...                                                 name=${Name}
+    ...                                                 interconnectMapTemplate=${InterconnectMapTemplate}
+    ...                                                 state=Active
+    #...                                                 telemetryConfiguration=${telemetryConfiguration}
+    #...                                                 snmpConfiguration=${snmpConfiguration}                                                 
+    [Return]    ${LogicalInterconnectGroup}
+
+Build Interconnect Map Template
+    [Documentation]    For internal use only.
+    [Arguments]    @{UriList}
+    ${InterconnectMapEntryTemplatesList}    Build Interconnect Map Entry Templates List    @{UriList}
+    ${InterconnectMapTemplate}    Create Dictionary    interconnectMapEntryTemplates=${InterconnectMapEntryTemplatesList}
+    [Return]    ${InterconnectMapTemplate}
+
+Build Interconnect Map Entry Templates List
+    [Documentation]    For internal use only.
+    [Arguments]    @{UriList}
+    ${InterconnectMapEntryTemplatesList}    Create List
+    : FOR    ${Index}    IN RANGE     1    9
+    \    ${0Index}    Evaluate    ${Index} - 1
+    \    ${Uri}    Get From List    ${UriList}    ${0Index}
+    \    ${InterconnectMapEntryTemplate}    Build Interconnect Map Entry Template    1    ${Index}    ${Uri}
+    \    Append To List    ${InterconnectMapEntryTemplatesList}    ${InterconnectMapEntryTemplate}
+    [Return]    ${InterconnectMapEntryTemplatesList}
+
+Build Interconnect Map Entry Template
+    [Documentation]    For internal use only.
+    [Arguments]    ${EnclosureNumber}    ${BayNumber}    ${Uri}
+    ${Enclosure}    Create Dictionary                       relativeValue=${EnclosureNumber}
+    ...                                                     type=Enclosure
+    ${Bay}    Create Dictionary                             relativeValue=${BayNumber}
+    ...                                                     type=Bay
+    ${locationEntriesList}    Create List    ${Enclosure}    ${Bay}
+    ${logicalLocation}    Create Dictionary    locationEntries=${locationEntriesList}
+    ${interconnectMapEntryTemplate}    Create Dictionary    logicalDownlinkUri=${null}
+    ...                                                     logicalLocation=${logicalLocation}
+    ...                                                     permittedInterconnectTypeUri=${Uri}
+    [Return]    ${interconnectMapEntryTemplate}
+
+Build Telemetry Configuration
+    [Documentation]    For internal use only.
+    ${TelemetryConfiguration}    Create Dictionary    type=telelmetry-configuration
+    ...                                               category=telemetry-configuration
+    ...                                               enableTelemetry=true
+    ...                                               sampleCount=12
+    ...                                               sampleInterval=300
+    [Return]    ${TelemetryConfiguration}    
+    
+Build Snmp Configuration
+    [Documentation]    For internal use only.
+    ${snmpConfiguration}    Create Dictionary    type=snmp-configuration
+    ...                                          category=snmp-configuration
+    ...                                          enabled=true
+    ...                                          readCommunity=public
+    [Return]    ${snmpConfiguration}
+	
+#FIXME -- CMYeh: the  kwyeord 'Setup Switch Gateway IP' is a workaround used in add_li.txt for the current CRM	
+Setup Switch Gateway IP
+    [Documentation]       Setup Default Gateway IP address in Switch Property file
+    [Arguments]    ${IP}=${SWITCH_GATEWAY_IP}
+    Login to Fusion Via SSH
+    ${out}    execute command    sed -e 's/Gateway=.*/Gateway=${IP}/g' -i /ci/props/switchconnectionproperties.properties
+    Should be equal    ${out}    ${EMPTY}
+    Logout Of Fusion Via SSH
+
+#---------------------------------------------------------------------------------
+#        UPLINKSETS
+#---------------------------------------------------------------------------------
+
+Create Uplinkset
+    [Arguments]    ${name}    ${logicalInterconnectUri}    ${SwitchIP}    ${bay}    ${port}    ${NWUri}
+    #${logicalInterconnectUri}    Get Logical Interconnect Uri    ${LiName}
+    ${UplinkSet}    Build UplinkSet    ${name}    ${logicalInterconnectUri}    ${SwitchIP}    ${bay}    ${port}
+    ...    ${NWUri}
+    #Log    ${UplinkSet}
+    ${Response}    Fusion Api Add Uplink Sets    ${UplinkSet}
+    [Return]    ${response}
+
+Build UplinkSet
+    [Arguments]    ${Name}    ${logicalInterconnectUri}    ${SwitchIP}    ${Bay}    ${Port}    ${NWUri}
+    ...    ${desiredSpeed}=Auto
+    @{networkUris}    Create List    ${NWUri}
+    @{fcNetworkUris}    Create List
+    @{portConfigInfosList}    Build portConfigInfosList    ${SwitchIP}    ${Bay}    ${Port}    ${desiredSpeed}
+    ${UplinkSet}    Create Dictionary    name=${name}    
+    ...                                  type=uplink-set
+    ...                                  fcNetworkUris=@{fcNetworkUris}
+    ...                                  networkUris=@{networkUris}
+    ...                                  portConfigInfos=${portConfigInfosList}
+    ...                                  manualLoginRedistributionState=NotSupported
+    ...                                  connectionMode=Auto
+    ...                                  logicalInterconnectUri=${logicalinterconnecturi}
+    ...                                  networkType=Ethernet
+    [Return]    ${UplinkSet}
+
+Build portConfigInfosList
+    [Arguments]    ${SwitchIP}    ${Bay}    ${Port}    ${desiredSpeed}=Auto
+    ${portConfigInfos}    Build portConfigInfos    ${SwitchIP}    ${Bay}    ${Port}    ${desiredSpeed}
+    @{portConfigInfosList}    Create List    ${portConfigInfos}
+    [Return]    @{portConfigInfosList}
+
+Build portConfigInfos
+    [Arguments]    ${SwitchIP}    ${Bay}    ${Port}    ${desiredSpeed}=Auto
+    ${location}    Build Port Entry    ${SwitchIP}    ${Bay}    ${Port}
+    ${portConfigInfos}    Create Dictionary    desiredSpeed=${desiredSpeed}    location=${location}
+    [Return]    ${portConfigInfos}
+
+Build Port Entry
+    [Arguments]    ${SwitchIP}    ${Bay}    ${Port}
+    ${PortItem}    Create Dictionary    type=Port    value=XGE1/0/${Port}
+    ${BayItem}    Create Dictionary    type=Bay    value=${Bay}
+    ${EncItem}    Create Dictionary    type=Ip    value=${SwitchIP}
+    ${locationEntry}    Create List    ${PortItem}    ${BayItem}    ${EncItem}
+    ${location}    Create Dictionary    locationEntries=${locationEntry}
+    [Return]    ${location}
+
+
+Get Infos List from UplinkSet
+    [Arguments]    ${name}
+    ${UplinkSets}    Fusion Api Get Uplink Sets
+    ${members}    Get from Dictionary    ${UplinkSets}    members
+    ${count}    Get From Dictionary    ${UplinkSets}    count
+    : FOR    ${Index}    IN RANGE    0    ${count}
+    \    ${UplinkSet}=    Get From Dictionary    ${members}    ${Index}
+    \    ${ULSname}    Get From Dictionary    ${UplinkSet}    name
+    \    Exit For Loop if    '${ULSname}'=='${name}'
+    ${portConfigInfos}    Get From Dictionary    ${UplinkSet}    portConfigInfos
+    ${LIUri}    Get From Dictionary    ${UplinkSet}    logicalInterconnectUri
+    ${uristring}    Get From Dictionary    ${UplinkSet}    uri
+    @{temp}=    Split String From Right    ${uristring}    separator=/
+    Set Suite Variable    ${ULSuri}    @{temp}[-1]
+    @{NWUris}    Get From Dictionary    ${UplinkSet}    networkUris
+    [Return]    ${ULSuri}    ${LIUri}    ${portConfigInfos}    @{NWUris}
+
+Add Uplinkset Port
+    [Arguments]    ${name}    ${SwitchIP}    ${bay}    ${port}
+    ${uri}    ${LIUri}    ${PCIs}    @{NWUris}    Get Infos List from UplinkSet    ${name}
+    ${newPCI}    Build portconfiginfos    ${SwitchIP}    ${bay}    ${port}
+    Append To List    ${PCIs}    ${newPCI}
+    ${uplinkset}    Build new UplinkSet    ${PCIs}    ${Name}    ${LIUri}    @{NWUris}
+    ${response}    Fusion Api Set Uplink Sets Id    ${uri}    ${uplinkset}
+    [Return]    ${response}
+
+Remove Uplinkset Port
+    [Arguments]    ${name}    ${remPort}
+    log    ${remPort}
+    ${newPCIs}    Create List
+    ${uri}    ${LIUri}    ${PCIs}    Get Infos List from UplinkSet    ${name}
+    : FOR    ${pci}    IN    @{PCIs}
+    \    ${locations}=    Get From Dictionary    ${pci}    location
+    \    ${ents}=    Get From Dictionary    ${locations}    locationEntries
+    \    ${result}    Check For Port Entries    ${ents}    ${remPort}
+    \    log    ${result}
+    \    Run Keyword if    ${result}==False    Append to List    ${newPCIs}    ${pci}
+    \    log    ${newPCIs}
+    ${uplinkset}    Build new UplinkSet    ${newPCIs}    ${Name}    ${LIUri}
+    ${response}    Fusion Api Set Uplink Sets Id    ${uri}    ${uplinkset}
+    [Return]    ${response}
+
+Check for Port Entries
+    [Arguments]    ${ents}    ${remPort}
+    Set suite variable    ${remPort}    ${remPort}
+    : FOR    ${ent}    IN    @{ents}
+    \    ${type}    Get From Dictionary    ${ent}    type
+    \    ${value}    Get From Dictionary    ${ent}    value
+    \    Exit Forloop if    '${type}'=='Port'
+    ${status}    Run Keyword and return status    should end with    ${value}    /${remPort}
+    [Return]    ${status}
+
+Build new UplinkSet
+    [Arguments]    ${portCIs}    ${name}    ${LIUri}    @{networkUris}
+    # Consider accepting @{networkUris} @{fcNetworkUris} as parameters
+    @{networkUris}    Create List    # list can be empty but not null.
+    @{fcNetworkUris}    Create List    # list can be empty but not null.
+    ${UplinkSet}    Create Dictionary    name=${name}    type=uplink-set    fcNetworkUris=@{fcNetworkUris}    networkUris=@{networkUris}    portConfigInfos=${portCIs}
+    ...    manualLoginRedistributionState=NotSupported    connectionMode=Auto    logicalInterconnectUri=${LIUri}    networkType=Ethernet
+    [Return]    ${UplinkSet}
+
+Remove Uplink Sets
+    ${UplinkSets}    Fusion Api Get Uplink Sets
+    ${members}    Get From Dictionary    ${UplinkSets}    members
+    ${count}    Get From Dictionary    ${UplinkSets}    count
+    : FOR    ${Index}    IN RANGE    0    ${count}
+    \    ${UplinkSet}=    Get From Dictionary    ${members}    ${Index}
+    \    ${uplinkuri}=    Get From Dictionary    ${UplinkSet}    uri
+    \    @{uri}=    Split String from right    ${uplinkuri}    separator=/
+    \    ${response}    Fusion Api delete Uplink Sets Id    @{uri}[-1]
+    \    Check Response    ${response}
+	
+#---------------------------------------------------------------------------------
+#        LLDP
+#---------------------------------------------------------------------------------
+Get Port Neighbor Data From Fusion
+    ${Id}    Fusion API Get Interconnects
+	${First}=    Get From Dictionary    ${Id}    members
+	${Myfirst}=    Get From List    ${First}    0
+	${PayloadUri}=    Get From Dictionary    ${Myfirst}    uri
+	${Uri}    Get Id From Uri    ${PayloadUri}
+    ${Ports}    Fusion Api Get Interconnects Ports    ${Uri}
+    @{Members}    Get From Dictionary    ${Ports}    members
+	${Dict}    Create Dictionary    
+    : FOR    ${Member}    IN    @{Members}
+	\    ${PortName}    Get From Dictionary    ${Member}    portName
+	\    ${Neighbor}    Get From Dictionary    ${Member}    neighbor
+	\    @{temp}=    Split String    ${portName}    separator=GE
+	\    Run Keyword If    "${Neighbor}" != "None"    Set To Dictionary    ${Dict}    @{temp}[-1]    ${Neighbor}
+    [Return]    ${Dict}

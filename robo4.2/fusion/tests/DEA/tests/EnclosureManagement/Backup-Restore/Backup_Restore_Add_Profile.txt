@@ -1,0 +1,229 @@
+*** Settings ***
+Documentation    Test suite executes Backup and Restore process by using local file
+
+...    = GENERIC USAGE =
+...    pybot -L Trace -v APPLIANCE_IP:<APP_IPv4-IPv6> -v Server_Bay:<server bay>    Backup_Restore_Add_Profile.txt
+...    = Variables =
+...    | GIT_REPO_ROOT |      Required: Repo root path if NOT defined in environment variable this is mgmtfw root location|
+...    | APPLIANCE_IP |       Required: OneView IPv4 address |
+
+
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/data_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}/fusion/Resources/api/settings/backups.txt
+Resource          ${GIT_REPO_ROOT}/fusion/Resources/api/settings/restores.txt
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Resource          ${GIT_REPO_ROOT}/fusion/Resources/api/activity/tasks.txt
+Library           RoboGalaxyLibrary
+Library           MgmtFWLibrary
+Library           FusionLibrary
+Library           Collections
+Library           Selenium2Library
+
+Suite Setup       Run Keywords    Login to Fusion Via REST    AND    Clean UP Environment    AND    Cleanup Backup Restore Environment
+Suite Teardown    Run Keywords    Clean UP Environment    AND    Cleanup Backup Restore Environment    AND    Logout of Fusion Via REST
+
+*** Test Cases ***
+
+TC 01: Test Case Executes Backup Process And Restores Using A Local Backup File and Validates The Data
+    [Documentation]    This test executes backup process, Removes a server profile,
+    ...    Restores backup from local backup file, Validates the data and Adds additional server profile.
+    [Tags]    Backup    Restore    Automated
+    [Setup]    Set Library Search Order    fusion_api_appliance_setup    tasks    fusion_api_validation    common
+    ${last_eventID}=    Get Last Fusion Event Id
+    Clean UP Environment
+    Set To Dictionary    ${encl_group['interconnectBayMappings'][0]}    logicalInterconnectGroupUri    LIG:${LIG_Name}
+    Setup Ethernet FCoE Appliance
+    ${resp} =    fusion api get server hardware
+    ${servers} =    Get From Dictionary    ${resp}    members
+    ${server} =    Get From List    ${servers}    0
+    ${server2} =    Get From List    ${servers}    1
+    ${Server_Bay} =    Get From Dictionary    ${server}    position
+    ${bay_list} =    Create List    ${Server_Bay}
+    ${Server_Bay2} =    Get From Dictionary    ${server2}    position
+    Set To Dictionary    ${enet_connection['connections'][0]}    networkUri    ETH:${Ethernet_Name}
+    ${server_profile_body}=    Update Ethernet Server Profile body    ${Server_Bay}    ${server_profiles[0]}
+    Create Server Profile    ${server_profile_body}
+    ${server_state}=    Get Server State    ${Server_Bay}
+    Should Be Equal    ${server_state}    ProfileApplied
+    Power ON Server Blade Bay    ${Server_Bay}
+    ${pre_ENC_COUNT} =    Fusion Api Get Enclosures
+    ${pre_LE_COUNT} =    Fusion Api Get Logical Enclosure
+    ${pre_HW_COUNT} =    Fusion Api Get Server Hardware
+    ${pre_EG_COUNT} =    Fusion Api Get Enclosure Groups
+    ${pre_SP_COUNT} =    Fusion Api Get Server Profiles
+    ${pre_LIG_COUNT} =    Fusion Api Get LIG
+    ${pre_IC_COUNT} =    Fusion Api Get Interconnect
+    ${pre_ETH_COUNT} =    Fusion Api Get Ethernet Networks
+    ${pre_FCOE_COUNT} =    Fusion Api Get FCoE Networks
+    #   Get server details before backup
+    ${pre_backup_server_details}=    Get server Information    ${Server_Bay}
+    #   Get server details post restore
+    ${pre_backup_profile_details}=    Fusion Api Get Server Profiles    ${pre_backup_server_details['serverProfileUri']}
+    ${Backup_file}=    Build OV Back up File Name
+    # Create a backup and download to a local file
+    Create Backup
+    ${backup_uri}=    Get Backup URI
+    Download Backup    ${backup_uri}    ${Backup_file}
+    Delete Server Profile    ${bay_list}
+    # Upload the local backup file and initiate restore process
+    Upload Backup    ${Backup_file}
+    ${backup_uri}=    Get Backup URI
+    Initiate Restore    ${backup_uri}
+    #default wait is 90m
+    Wait Until Keyword Succeeds    90m    30s    OneView Restore Complete
+    Run Keywords    Login to Fusion Via REST
+    ${resp} =    Fusion Api Get Server Profiles
+    ${profile_list} =    Get From Dictionary    ${resp}    members
+    ${status}=    Validate alertID in fusion events    ${last_eventID}    ${Server_Virtual_MACfault_AlertID}
+    ${server_state}=    Run Keyword If    '${status}'=='PASS'
+    ...    Run Keywords    Power OFF Server Blade Bay    ${Server_Bay}
+    ...    AND    Sleep    120
+    ...    AND    Unassign Profiles From Servers    ${profile_list}
+    ...    AND    Assign Profiles To Servers    ${profile_list}
+    ...    AND    Set Variable    Get Server State    ${Server_Bay}
+    ...    AND    Should Be Equal    ${server_state}    ProfileApplied
+    ...    AND    Power ON Server Blade Bay    ${Server_Bay}
+    #   Get server details post restore
+    ${post_restore_server_details}=    Get server Information    ${Server_Bay}
+    #   Get server details post restore
+    ${post_restore_profile_details}=    Fusion Api Get Server Profiles    ${post_restore_server_details['serverProfileUri']}
+    #   post backup device counts
+    ${post_ENC_COUNT} =    Fusion Api Get Enclosures
+    ${post_LE_COUNT} =    Fusion Api Get Logical Enclosure
+    ${post_HW_COUNT} =    Fusion Api Get Server Hardware
+    ${post_EG_COUNT} =    Fusion Api Get Enclosure Groups
+    ${post_SP_COUNT} =    Fusion Api Get Server Profiles
+    ${post_LIG_COUNT} =    Fusion Api Get LIG
+    ${post_IC_COUNT} =    Fusion Api Get Interconnect
+    ${post_ETH_COUNT} =    Fusion Api Get Ethernet Networks
+    ${post_FCOE_COUNT} =    Fusion Api Get FCoE Networks
+    #  Compare the pre and post counts
+    Should be Equal    ${pre_ENC_COUNT['count']}    ${post_ENC_COUNT['count']}
+    Should be Equal    ${pre_LE_COUNT['count']}    ${post_LE_COUNT['count']}
+    Should be Equal    ${pre_HW_COUNT['count']}    ${post_HW_COUNT['count']}
+    Should be Equal    ${pre_EG_COUNT['count']}    ${post_EG_COUNT['count']}
+    Should be Equal    ${pre_SP_COUNT['count']}    ${post_SP_COUNT['count']}
+    Should be Equal    ${pre_LIG_COUNT['count']}    ${post_LIG_COUNT['count']}
+    Should be Equal    ${pre_IC_COUNT['count']}    ${post_IC_COUNT['count']}
+    Should be Equal    ${pre_FCOE_COUNT['count']}    ${post_FCOE_COUNT['count']}
+    #  Compare the server details before and after restore
+    Should be Equal    ${pre_backup_server_details['model']}    ${post_restore_server_details['model']}
+    Should be Equal    ${pre_backup_server_details['mpHostInfo']}    ${post_restore_server_details['mpHostInfo']}
+    Should be Equal    ${pre_backup_server_details['mpState']}    ${post_restore_server_details['mpState']}
+    Should be Equal    ${pre_backup_server_details['name']}    ${post_restore_server_details['name']}
+    Should be Equal    ${pre_backup_server_details['position']}    ${post_restore_server_details['position']}
+    Should be Equal    ${pre_backup_server_details['remoteSupportUri']}    ${post_restore_server_details['remoteSupportUri']}
+    Should be Equal    ${pre_backup_server_details['serverHardwareTypeUri']}    ${post_restore_server_details['serverHardwareTypeUri']}
+    Should be Equal    ${pre_backup_server_details['state']}    ${post_restore_server_details['state']}
+    Should be Equal    ${pre_backup_server_details['uidState']}    ${post_restore_server_details['uidState']}
+    #  Compare the server profile details before and after restore
+    Should be Equal    ${pre_backup_profile_details['boot']}    ${post_restore_profile_details['boot']}
+    Should be Equal    ${pre_backup_profile_details['bootMode']}    ${post_restore_profile_details['bootMode']}
+    Should be Equal    ${pre_backup_profile_details['state']}    ${post_restore_profile_details['state']}
+    Should be Equal    ${pre_backup_profile_details['serialNumber']}    ${post_restore_profile_details['serialNumber']}
+    Should be Equal    ${pre_backup_profile_details['enclosureBay']}    ${post_restore_profile_details['enclosureBay']}
+    # Create additional server profile
+    ${server_profile_body}=    Update FCOE Server Profile body    ${Server_Bay2}    ${server_profiles[0]}
+    Create Server Profile    ${server_profile_body}
+    ${server_state}=    Get Server State    ${Server_Bay2}
+    Should Be Equal    ${server_state}    ProfileApplied
+    [Teardown]    Clean Up Environment
+
+TC 02: Test Case Executes Backup Process And Restores Using A Local Backup File and Validates The Data
+    [Documentation]    This test executes backup process, Removes a server profile,
+    ...    Restores backup from local backup file, Validates the data and Again removes a profile
+    [Tags]    Backup    Restore    Automated
+    [Setup]    Set Library Search Order    fusion_api_appliance_setup    tasks    fusion_api_validation    common
+    ${last_eventID}=    Get Last Fusion Event Id
+    Clean UP Environment
+    Set To Dictionary    ${encl_group['interconnectBayMappings'][0]}    logicalInterconnectGroupUri    LIG:${LIG_Name}
+    Setup Ethernet FCoE Appliance
+    ${bay_list}=    Create List    ${Server_Bay}
+    Set To Dictionary    ${enet_connection['connections'][0]}    networkUri    ETH:${Ethernet_Name}
+    ${server_profile_body}=    Update Ethernet Server Profile body    ${Server_Bay}    ${server_profiles[0]}
+    Create Server Profile    ${server_profile_body}
+    ${server_state}=    Get Server State    ${Server_Bay}
+    Should Be Equal    ${server_state}    ProfileApplied
+    Power ON Server Blade Bay    ${Server_Bay}
+    ${pre_ENC_COUNT} =    Fusion Api Get Enclosures
+    ${pre_LE_COUNT} =    Fusion Api Get Logical Enclosure
+    ${pre_HW_COUNT} =    Fusion Api Get Server Hardware
+    ${pre_EG_COUNT} =    Fusion Api Get Enclosure Groups
+    ${pre_SP_COUNT} =    Fusion Api Get Server Profiles
+    ${pre_LIG_COUNT} =    Fusion Api Get LIG
+    ${pre_IC_COUNT} =    Fusion Api Get Interconnect
+    ${pre_ETH_COUNT} =    Fusion Api Get Ethernet Networks
+    ${pre_FCOE_COUNT} =    Fusion Api Get FCoE Networks
+    #   Get server details before backup
+    ${pre_backup_server_details}=    Get server Information    ${Server_Bay}
+    #   Get server details post restore
+    ${pre_backup_profile_details}=    Fusion Api Get Server Profiles    ${pre_backup_server_details['serverProfileUri']}
+    ${Backup_file}=    Build OV Back up File Name
+    # Create a backup and download to a local file
+    Create Backup
+    ${backup_uri}=    Get Backup URI
+    Download Backup    ${backup_uri}    ${Backup_file}
+    Delete Server Profile    ${bay_list}
+    # Upload the local backup file and initiate restore process
+    Upload Backup    ${Backup_file}
+    ${backup_uri}=    Get Backup URI
+    Initiate Restore    ${backup_uri}
+    #default wait is 90m
+    Wait Until Keyword Succeeds    90m    30s    OneView Restore Complete
+    Run Keywords    Login to Fusion Via REST
+    ${resp} =    Fusion Api Get Server Profiles
+    ${profile_list} =    Get From Dictionary    ${resp}    members
+    ${status}=    Validate alertID in fusion events    ${last_eventID}    ${Server_Virtual_MACfault_AlertID}
+    ${server_state}=    Run Keyword If    '${status}'=='PASS'
+    ...    Run Keywords    Power OFF Server Blade Bay    ${Server_Bay}
+    ...    AND    Sleep    120
+    ...    AND    Unassign Profiles From Servers    ${profile_list}
+    ...    AND    Assign Profiles To Servers    ${profile_list}
+    ...    AND    Set Variable    Get Server State    ${Server_Bay}
+    ...    AND    Should Be Equal    ${server_state}    ProfileApplied
+    ...    AND    Power ON Server Blade Bay    ${Server_Bay}
+    #   Get server details post restore
+    ${post_restore_server_details}=    Get server Information    ${Server_Bay}
+    #   Get server details post restore
+    ${post_restore_profile_details}=    Fusion Api Get Server Profiles    ${post_restore_server_details['serverProfileUri']}
+    #   post backup device counts
+    ${post_ENC_COUNT} =    Fusion Api Get Enclosures
+    ${post_LE_COUNT} =    Fusion Api Get Logical Enclosure
+    ${post_HW_COUNT} =    Fusion Api Get Server Hardware
+    ${post_EG_COUNT} =    Fusion Api Get Enclosure Groups
+    ${post_SP_COUNT} =    Fusion Api Get Server Profiles
+    ${post_LIG_COUNT} =    Fusion Api Get LIG
+    ${post_IC_COUNT} =    Fusion Api Get Interconnect
+    ${post_ETH_COUNT} =    Fusion Api Get Ethernet Networks
+    ${post_FCOE_COUNT} =    Fusion Api Get FCoE Networks
+    #  Compare the pre and post counts
+    Should be Equal    ${pre_ENC_COUNT['count']}    ${post_ENC_COUNT['count']}
+    Should be Equal    ${pre_LE_COUNT['count']}    ${post_LE_COUNT['count']}
+    Should be Equal    ${pre_HW_COUNT['count']}    ${post_HW_COUNT['count']}
+    Should be Equal    ${pre_EG_COUNT['count']}    ${post_EG_COUNT['count']}
+    Should be Equal    ${pre_SP_COUNT['count']}    ${post_SP_COUNT['count']}
+    Should be Equal    ${pre_LIG_COUNT['count']}    ${post_LIG_COUNT['count']}
+    Should be Equal    ${pre_IC_COUNT['count']}    ${post_IC_COUNT['count']}
+    Should be Equal    ${pre_FCOE_COUNT['count']}    ${post_FCOE_COUNT['count']}
+    #  Compare the server details before and after restore
+    Should be Equal    ${pre_backup_server_details['model']}    ${post_restore_server_details['model']}
+    Should be Equal    ${pre_backup_server_details['mpHostInfo']}    ${post_restore_server_details['mpHostInfo']}
+    Should be Equal    ${pre_backup_server_details['mpState']}    ${post_restore_server_details['mpState']}
+    Should be Equal    ${pre_backup_server_details['name']}    ${post_restore_server_details['name']}
+    Should be Equal    ${pre_backup_server_details['position']}    ${post_restore_server_details['position']}
+    Should be Equal    ${pre_backup_server_details['remoteSupportUri']}    ${post_restore_server_details['remoteSupportUri']}
+    Should be Equal    ${pre_backup_server_details['serverHardwareTypeUri']}    ${post_restore_server_details['serverHardwareTypeUri']}
+    Should be Equal    ${pre_backup_server_details['state']}    ${post_restore_server_details['state']}
+    Should be Equal    ${pre_backup_server_details['uidState']}    ${post_restore_server_details['uidState']}
+    #  Compare the server profile details before and after restore
+    Should be Equal    ${pre_backup_profile_details['boot']}    ${post_restore_profile_details['boot']}
+    Should be Equal    ${pre_backup_profile_details['bootMode']}    ${post_restore_profile_details['bootMode']}
+    Should be Equal    ${pre_backup_profile_details['state']}    ${post_restore_profile_details['state']}
+    Should be Equal    ${pre_backup_profile_details['serialNumber']}    ${post_restore_profile_details['serialNumber']}
+    Should be Equal    ${pre_backup_profile_details['enclosureBay']}    ${post_restore_profile_details['enclosureBay']}
+    #  Delete server profile
+    Delete Server Profile    ${bay_list}
+    [Teardown]    Clean Up Environment

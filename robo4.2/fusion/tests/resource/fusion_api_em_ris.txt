@@ -1,0 +1,423 @@
+*** Settings ***
+Library               RoboGalaxyLibrary
+Library               FusionLibrary
+Library               OperatingSystem
+Library               BuiltIn
+Library               Collections
+Library               SSHLibrary
+Library               String
+Library               helper.py
+
+*** Variables ***
+${FUSION_NIC}     bond0
+
+*** Keywords ***
+# -----------------------------------------------------------------------------
+#   EM KEYWORDS
+# -----------------------------------------------------------------------------
+lldpcli show neighbors
+    [Documentation]    Retrieves the active EM IPv6 LL address
+    Set Log Level    TRACE
+    ${EM_IP} =  Execute SSH Command     lldpcli show neighbors
+    ${m}    ${EM_IP} =  Should Match Regexp     ${EM_IP}    (?im)MgmtIP:\\s*(\\S*:\\S*:\\S*:\\S*:\\S*:\\S*)
+    [Return]    ${EM_IP}
+
+Get EM IP
+    [Documentation]    Retrieves the EM IPv6 LL address.
+    ...      If ${enc_serial} is supplied, the EM IPv6 for that enclosure is returned.
+    ...      Otherwise, the active EM IPv6 LL address is returned.
+    [Arguments]    ${enc_serial}=${null}   ${iface}=eth0
+    Set Log Level    TRACE
+    ${EM_IP} =    Run Keyword If    '${enc_serial}' is 'None'    lldpcli show neighbors
+    ...           ELSE    Execute SSH Command     /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${enc_serial} -o i   iface=${iface}
+    ${m}    ${EM_IP} =  Should Match Regexp     ${EM_IP}    (?im)(\\S*:\\S*:\\S*:\\S*:\\S*:\\S*)
+    # new handling to add brackets for newest curl versions (4.00 pb39+)
+    ${cv} =   Get curl version
+    ${EM_IP} =   add_brackets_for_latest_curl   ${cv}   ${EM_IP}%${FUSION_NIC}
+    Set Suite Variable    ${EM_IP}
+    log to console     \nEM IP: ${EM_IP}
+    [Return]    ${EM_IP}
+
+Get curl version
+    [Documentation]    Retrieves the active CIM curl version and adds or removes brackets. New version of curl handle IPv6 with []
+    Set Log Level    TRACE
+    ${curl} =    Execute SSH Command     curl --version | python -c 'print [int(x) for x in raw_input().split(" ", 2)[1].split(".")]'
+    [Return]    ${curl}
+
+
+Get Active CIM Serial Number
+    [Documentation]    Retrieves the active CIM Serial Number.
+    Set Log Level    TRACE
+    ${Active_CIM_Serial} =    Execute SSH Command     lldpcli show neighbors
+    ${m}    ${Active_CIM_Serial} =  Should Match Regexp     ${Active_CIM_Serial}    (?im)SysDescr:\\s*{"SN":"(\\S*)",\\S*,\\S*,\\S*
+    Set Suite Variable    ${Active_CIM_Serial}
+    log to console     \nActive CIM Serial Number: ${Active_CIM_Serial}
+    [Return]    ${Active_CIM_Serial}
+
+Get EM Enclosures
+    [Documentation]    Get EM Enclosures
+    # Get EM enclosures
+    ${EM_ENCS} =   Execute SSH Command     /ci/bin/tbird/appliance-hal.sh list-enclosures
+    @{enclosures} =     Split to lines  ${EM_ENCS}  ${null}
+    #${EM_ENCS}=    Fetch From Left    ${EM_ENCS}  \r\n[
+    ${EM_ENCS}=    Create List   @{enclosures}
+    Set Suite Variable    ${EM_ENCS}
+    log to console     \nEnclosures: ${EM_ENCS}
+    [Return]    ${EM_ENCS}
+
+Get EM Token
+    [Documentation]     Get EM Token
+    [Arguments]     ${enc_serial}
+    # Get EM token
+    ${EM_TOKEN} =  Execute SSH Command
+    ...    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${enc_serial} -o token
+    ${EM_TOKEN}    Should Match Regexp    ${EM_TOKEN}    (?i)\\S*
+    Set Suite Variable    ${EM_TOKEN}   ${EM_TOKEN}
+    log to console     \nEM TOKEN: ${EM_TOKEN}
+    [Return]    ${EM_TOKEN}
+
+Get EM Sessions
+    [Documentation]    Get EM Sessions
+    # Get Sessions using session Id to test that everything is working
+    ${Header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    ${Output}    Execute SSH Command
+    ...    curl -ikX GET --tlsv1 https://${EM_IP}/rest/v1/Sessions -H ${Header}
+    Should Contain    ${Output}    "Name": "Sessions Collection"
+    ...    msg=Get Sessions action failed \n${Output}
+
+Login to EM And Create Session
+    [Documentation]    Login to EM And Create Session
+    # Get EM IP and create session
+    Get EM IP
+    ${encl_list}=    Get Active CIM Serial Number
+    Get EM Token    ${encl_list}
+    Get EM Sessions
+
+Get EM Diags RedundancySummary
+    [Documentation]    Get EM Diags RedundancySummary
+
+    ${Header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    ${Output}    Execute SSH Command
+    ...    curl -ikX GET --tlsv1 https://${EM_IP}/rest/v1/Diags/RedundancySummary -H ${Header}
+    [Return]    ${Output}
+
+Get EM Active Bay
+    [Documentation]    Retrieves Em Active bay number
+    ${summary}=    Get EM Diags RedundancySummary
+    ${active_bay_line}=    Get Lines Containing String    ${summary}    THIS EM [    case_insensitive=True
+    ${active_bay_list}=    Split String    ${active_bay_line}   ]:
+    ${active_bay}=    Should Match Regexp    ${active_bay_list[0]}    \\d
+    [Return]    ${active_bay}
+
+Get EM Standby Bay
+    [Documentation]    Retrieves Em Standby bay number
+    ${summary}=    Get EM Diags RedundancySummary
+    ${standby_bay_line}=    Get Lines Containing String    ${summary}    peer EM [    case_insensitive=True
+    ${standby_bay_list}=    Split String    ${standby_bay_line}   ]:
+    ${standby_bay}=    Should Match Regexp    ${standby_bay_list[0]}    \\d
+    [Return]    ${standby_bay}
+
+EM Failover
+    [Documentation]    Perform EM ForceFailover operation
+    [Arguments]    ${em_bay}
+    ${Header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    ${Data}      Set Variable    {"Action":"ForceFailover"}
+    fusion_api_appliance_setup.Log to console and logfile      \t Issuing ForceFailover on EM:${EM_IP}
+    ${Output}    Execute SSH Command
+    ...    curl -ikX POST --tlsv1 -H ${Header} --data-ascii '${Data}' https://${EM_IP}/rest/v1/EnclosureManager/${em_bay}
+    Should Contain    ${Output}    { "Action": "ForceFailover" }
+    ...    msg=ForceFailover action failed \n${Output}
+
+EM Reset To Factory
+    [Documentation]    Perform EM Factory reset operation
+    [Arguments]    ${em_bay}
+    ${Header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    ${Data}      Set Variable    {"Action":"ResetToFactory"}
+    fusion_api_appliance_setup.Log to console and logfile      \t Issuing ResetToFactory on EM:${EM_IP}
+    ${Output}    Execute SSH Command
+    ...    curl -ikX POST --tlsv1 -H ${Header} --data-ascii '${data}' https://${EM_IP}/rest/v1/EnclosureManager/${em_bay}
+    Should Contain    ${Output}    { "Action": "ResetToFactory" }
+    ...    msg=ResetToFactory action failed \n${Output}
+
+Get Standby EM IP
+    [Documentation]    Retrieves STANDBY EM IP value
+    ${Header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    ${Output}    Execute SSH Command     curl -ikX GET --tlsv1 https://${EM_IP}/rest/v1/Diags/RedundancySummary -H ${Header}
+    ${peer_em_line}=    Get Lines Containing String    ${Output}    peer EM [    case_insensitive=True
+    ${peer_em_list}=    Split String    ${peer_em_line}   standby)
+    ${stdby_em_ip}=    Set Variable    ${peer_em_list[1].strip()}
+    [Return]    ${stdby_em_ip}
+
+Diags Ping EM IPv6
+    [Documentation]    Ping EM IPv6 via Diags command
+    [Arguments]     ${my_em_ipv6}
+    ${Header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    ${Output}    Execute SSH Command     curl -ikX GET --tlsv1 https://${EM_IP}/rest/v1/Diags/ping6/${my_em_ipv6} -H ${Header}
+    ${ping_respond}=    Get Lines Containing String    ${Output}    packet loss    case_insensitive=True
+    ${packet_lost}=    Split String    ${ping_respond}    ,
+    ${ping_result}=    Set Variable    ${packet_lost[2].strip()}
+    [Return]    ${ping_result}
+
+Get EM Account Service
+    [Documentation]     Get Sessions using session Id to test that everything is working
+    ${Header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    ${Output}    Execute SSH Command
+    ...    curl -ikX GET --tlsv1 https://${EM_IP}/rest/v1/AccountService -H ${Header}
+    [Return]    ${Output}
+
+Get Interconnect Bays
+    [Documentation]     Get Sessions using session Id to test that everything is working
+    [Arguments]     ${bay_no}
+    ${Header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    ${Output}    Execute SSH Command
+    ...    curl -ikX GET --tlsv1 https://${EM_IP}/rest/v1/InterconnectBays -H ${Header}
+
+Get Interconnect Bay
+    [Documentation]     Get Sessions using session Id to test that everything is working
+    [Arguments]     ${bay_no}
+    ${Header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    ${Output}    Execute SSH Command
+    ...    curl -ikX GET --tlsv1 https://${EM_IP}/rest/v1/InterconnectBays/${bay_no} -H ${Header}
+    [Return]    ${Output}
+
+Get EM Diags AuditLog Info
+    [Documentation]    This keyword is to retrieve the last 50 EM events from Audit Log file
+    ${Header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    ${Output}    Execute SSH Command    curl -ikX GET --tlsv1 https://${EM_IP}/rest/v1/Diags/AuditLog/50 -H ${Header}
+    [Return]    ${Output}
+
+Get EM Diags Uptime Info
+    [Documentation]    This keyword is to retrieve the last 50 EM events from Audit Log file
+    ${Header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    ${Output}    Execute SSH Command    curl -ikX GET --tlsv1 https://${EM_IP}/rest/v1/Diags/Uptime -H ${Header}
+    [Return]    ${Output}
+
+Get CIManager Bays
+    [Documentation]     Get CIM Bays
+    ${Header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    ${Output}    Execute SSH Command
+    ...    curl -kX GET --tlsv1 https://${EM_IP}/rest/v1/CIManagerBays -H ${Header}
+    ${responseData} =   Evaluate   json.loads('''${Output}''')   json
+    [Return]    ${responseData}
+
+Get CIManager Populated Bays
+    [Documentation]    Get non-empty CIM bays
+    ${bayList} =   Create List
+    ${Header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    ${CIMBays} =   Get CIManager Bays
+    ${l} =   Get Length   ${CIMBays['links']['Member']}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \   ${Output}    Execute SSH Command   curl --tlsv1 -kX GET https://${EM_IP}${CIMBays['links']['Member'][${x}]['href']} -H ${Header}
+    \   ${responseData} =   Evaluate   json.loads('''${Output}''')   json
+    \   Run Keyword If   ${responseData['Empty']} is ${False}   Append To List   ${bayList}   ${responseData['BayNum']}
+    [Return]    ${bayList}
+
+#######################################
+# Device Efuse - Keywords
+#######################################
+EFuse ICM
+    [Documentation]    Perform an efuse action on a ICM bay. Action = EFuseOff | EFuseOn
+    [Arguments]    ${Action}    ${BayNumber}
+    ${Header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    ${Data}      Set Variable    {"Action":"${Action}"}
+    fusion_api_appliance_setup.Log to console and logfile    \t Issuing ${Action} for ICM:${BayNumber}
+    ${Output}    Execute SSH Command
+    ...    curl -ikX POST --tlsv1 -H ${Header} --data-ascii '${data}' https://${EM_IP}/rest/v1/InterconnectBays/${BayNumber}
+    Should Contain    ${Output}    { "Action": "${Action}" }
+    ...    msg=EFuse action failed \n${Output}
+
+EFuse Blade
+    [Documentation]    Perform an efuse action on a Blade bay. Action = EFuseOff | EFuseOn
+    [Arguments]    ${Action}    ${BayNumber}
+    ${Header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    ${Data}      Set Variable    {"Action":"${Action}"}
+    fusion_api_appliance_setup.Log to console and logfile      \t Issuing ${Action} for Server:${BayNumber}
+    ${Output}    Execute SSH Command
+    ...    curl -ikX POST --tlsv1 -H ${Header} --data-ascii '${data}' https://${EM_IP}/rest/v1/BladeBays/${BayNumber}
+    Should Contain    ${Output}    { "Action": "${Action}" }
+    ...    msg=EFuse action failed \n${Output}
+
+EFuseOff Blade List
+    [Documentation]    Perform an efuse action on a Blade bay. Action = EFuseOff | EFuseOn
+    [Arguments]    ${Bay_List}
+    ${Header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    ${Data}      Set Variable    {"Action":"EFuseOff"}
+    :FOR    ${bay}    IN    @{Bay_List}
+    \    ${ic} =     Get From List   ${ics}    ${x}
+    \    fusion_api_appliance_setup.Log to console and logfile      \t Issuing ${Action} for Server:${BayNumber}
+    \    ${Output}    Execute SSH Command
+    ...    curl -ikX POST --tlsv1 -H ${Header} --data-ascii '${data}' https://${EM_IP}/rest/v1/BladeBays/${bay}
+    \    Should Contain    ${Output}    { "Action": "${Action}" }
+    ...    msg=EFuse action failed \n${Output}
+
+EFuse CIM
+    [Documentation]    Perform an efuse action on a CIM bay. Action = EFuseReset | EFuseOff | EFuseOn
+    [Arguments]   ${BayNumber}   ${Action}=EFuseReset
+    ${Header}   Set Variable   "X-Auth-Token":"${EM_TOKEN}"
+    ${Data}     Set Variable   {"Action":"${Action}"}
+    fusion_api_appliance_setup.Log to console and logfile   \t Issuing ${Action} for CIM:${BayNumber}
+    ${Output}    Execute SSH Command
+    ...    curl -ikX POST --tlsv1 -H ${Header} --data-ascii '${Data}' https://${EM_IP}/rest/v1/CIManagerBays/${BayNumber}
+    Should Contain   ${Output}    202 Accepted
+    ...    msg=EFuse action failed \n${Output}
+
+EFuse Fan Bay
+    [Documentation]    Perform an efuse action on a fan bay. Action = EFuseOff | EFuseOn
+    [Arguments]    ${Action}    ${BayNumber}
+    ${Header}   Set Variable   "X-Auth-Token":"${EM_TOKEN}"
+    ${Data}      Set Variable    {"Action":"${Action}"}
+    ${Output}    Execute SSH Command
+    ...    curl -ikX POST --tlsv1 -H ${Header} --data-ascii '${data}' https://${EM_IP}/rest/v1/FanBays/${BayNumber}
+    Should Contain    ${Output}    { "Action": "${Action}" }
+    ...    msg=EFuse action failed \n${Output}
+
+#######################################
+# Device State - Keywords
+#######################################
+Device Reached State
+    [Documentation]    This keyword will get the current enclosure state
+    [Arguments]    ${uri}    ${state}
+    Set Log Level    TRACE
+    ${resp} =   fusion api get resource    ${uri}
+    common.Log to console and logfile    \t ${uri}: ${resp['state']}
+    Should Match Regexp    ${resp['state']}    ${state}
+    [Return]    ${resp}
+
+IC Reached State
+    [Documentation]    This keyword will get the current enclosure IC's state
+    [Arguments]     ${uri}  ${state}
+    Set Log Level   TRACE
+    ${resp} =   fusion api get resource     ${uri}
+    fusion_api_appliance_setup.Log to console and logfile      \t ${uri}: ${resp['state']}
+    Should Match Regexp     ${resp['state']}    ${state}
+    [Return]    ${resp}
+
+Get IC
+    [Documentation]    This keyword will get the current ICM info
+    ${resp} =    fusion api get interconnect
+    ${ic_list} =    Create List
+    ${ics} =     Get From Dictionary    ${resp}    members
+    ${l} = 	Get Length	${ics}
+    :FOR    ${x}    IN RANGE	0	${l}
+    \    ${ic} =     Get From List   ${ics}    ${x}
+    \    Run Keyword If    '${ic['model']}' != '${ICM_MODEL}'    Continue For Loop
+    \    Append to list    ${ic_list}    ${ic}
+    [Return]    ${ic_list}
+
+Get from IC
+    [Documentation]    This keyword will get the current ICM element value
+    [Arguments]     ${ic}   ${element}
+    ${return} =     Get From Dictionary     ${ic}   ${element}
+    [Return]    ${return}
+
+#######################################
+# Device Bay list - Keywords
+#######################################
+Get ICM Bay List
+    [Documentation]    This keyword will get the current number of ICM from a SINGLE enclosure
+    ${resp} =   fusion api get interconnect
+    ${ic_list} =    Create List
+    ${ics} =     Get From Dictionary     ${resp}    members
+    ${l} =  Get Length  ${ics}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${ic} =     Get From List   ${ics}    ${x}
+    \    ${bay} =    Fetch from right    ${ic['name']}    ${SPACE}
+    \    Append to list    ${ic_list}  ${bay}
+    Sort List    ${ic_list}
+    [Return]    ${ic_list}
+
+Get Server Bay List
+    [Documentation]    This keyword will get the current number of SERVER BLADE from a SINGLE enclosure
+    ${resp} =    fusion api get server hardware
+    ${blade_list} =    Create List
+    ${blades} =     Get From Dictionary    ${resp}    members
+    ${l} =  Get Length  ${blades}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${blade} =     Get From List   ${blades}    ${x}
+    \    ${bay} =    Fetch from right    ${blade['name']}    ${SPACE}
+    \   Append to list    ${blade_list}  ${bay}
+    Sort List    ${blade_list}
+    [Return]    ${blade_list}
+
+Get Current Fan List
+    [Documentation]    This keyword will get the current number of Fan included the count
+    ...                from a SINGLE enclosure
+    ${cur_fan_list} =    Create List
+    ${resp} =    Fusion Api Get Enclosures
+    ${fan_list} =     Get From Dictionary    ${resp['members'][0]}    fanBays
+    ${fan_count} =  Get Length  ${fan_list}
+    :FOR    ${x}    IN RANGE    0   ${fan_count}
+    \    ${fan} =     Get From Dictionary   ${fan_list[${x}]}    bayNumber
+    \    ${fan_status}=    Get From Dictionary    ${fan_list[${x}]}    devicePresence
+    \    Run Keyword And Ignore Error    Run Keyword If     '${fan_status}'=='Present'    Append to list    ${cur_fan_list}    ${fan}
+    Sort List    ${cur_fan_list}
+    ${cur_fan_count}=    Get Length    ${cur_fan_list}
+    [Return]    ${cur_fan_list}    ${cur_fan_count}
+
+#######################################
+# Device Info list - Keywords
+#######################################
+Get ICM Info
+    [Documentation]    Get ICM Info
+    [Arguments]    ${bay_num}
+    ${bay_num}=    Convert To Integer    ${bay_num}
+    ${resp} =   fusion api get interconnect
+    ${ics} =     Get From Dictionary     ${resp}    members
+    ${l} =  Get Length  ${ics}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${ic} =     Get From List   ${ics}    ${x}
+    \    ${icm_location}=    Set Variable    ${ic['interconnectLocation']['locationEntries']}
+    \    ${icm_bay}=    Get ICM Bay From Location    ${icm_location}
+    \    ${icm_bay}=    Convert To Integer    ${icm_bay}
+    \    Run Keyword If    ${bay_num}!=${icm_bay}    Continue For Loop
+    \    ${uri}=    Get From Dictionary     ${ic}   uri
+    \    ${icm_info}=    fusion api get interconnect    uri=${uri}
+    [Return]    ${icm_info}
+
+Get ICM Bay From Location
+    [Documentation]   Get ICM Bay From Location
+    [Arguments]    ${icm_location}
+    ${l} =  Get Length  ${icm_location}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${location_entry_dict} =     Get From List   ${icm_location}    ${x}
+    \    ${type}=    Get From Dictionary    ${location_entry_dict}    type
+    \    Run Keyword If    '${type}'!='Bay'    Continue For Loop
+    \    ${bay_location}=    Get From Dictionary    ${location_entry_dict}    value
+    [Return]    ${bay_location}
+
+Get Server Info
+    [Documentation]    Get Server info
+    [Arguments]    ${bay_num}
+    ${server_info}=    Set Variable    False
+    ${bay_num}=    Convert To Integer    ${bay_num}
+    ${resp} =   fusion api get server hardware
+    ${servers} =     Get From Dictionary     ${resp}    members
+    ${l} =  Get Length  ${servers}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${server} =     Get From List   ${servers}    ${x}
+    \    ${server_bay}=    Get From Dictionary    ${server}    position
+    \    Run Keyword If    ${bay_num}!=${server_bay}    Continue For Loop
+    \    ${uri}=    Get From Dictionary     ${server}   uri
+    \    ${server_info}=    fusion api get server hardware    uri=${uri}
+    [Return]    ${server_info}
+
+Get Blade FRU Information
+    [Documentation]    Get server blade FRU information
+    [Arguments]    ${bay_num}
+    ${header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    Log to console and logfile      \t Reading FRU Info for Blade Bay: ${bay_num}
+    ${output}    Execute SSH Command    curl -ikX GET --tlsv1 https://${EM_IP}/rest/v1/BladeFru/${bay_num} -H ${header}
+    [Return]    ${output}
+
+Get Front Panel Info Through EM
+    [Documentation]    This keyword is to read Front Panel FRU data through EM
+    ${Header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    ${Output}    Execute SSH Command    curl -ikX GET --tlsv1 https://${EM_IP}/rest/v1/FrontPanelFru/1 -H ${Header}
+    [Return]    ${Output}
+
+Run SSH Command Using EM
+    [Documentation]    This keyword is to run SSH command and obtain data for a module through EM
+    [Arguments]    ${module}
+    ${Header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    ${Output}    Execute SSH Command    curl -ikX GET --tlsv1 https://${EM_IP}/rest/v1/${module} -H ${Header}
+    [Return]    ${Output}

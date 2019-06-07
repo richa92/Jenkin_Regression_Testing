@@ -1,0 +1,748 @@
+*** Settings ***
+Documentation      SAW_TC (LE-LI-COMPLIANCE - Enclosure_56)
+Library            json
+Library            FusionLibrary
+Library            RoboGalaxyLibrary
+Variables          data_variables_Utah-ocho.py
+Resource           ../../../../../../../Resources/api/fusion_api_resource.txt
+Library            SSHLibrary
+
+*** Variables ***
+${APPLIANCE_IP}     15.245.132.63
+
+#######################################################################################################################################################
+#                        TEST CASE DESCRIPTION :   SAW_TC_LE-LI-COMPLIANCE fOR SUPERSHAW AND UTAH-OCHO MODELS
+#######################################################################################################################################################
+#     STEP 1     : Login , creating users , networks , 2LIG's , Enclosure Group , Importing Enclosure , Server Profile
+#     STEP 2,3   : Edit telemetry configurations (sampleInterval,sampleCount,enableTelemetry) in LI1
+#                      verifying the consistency state, validating Alerts,
+#                      Performing LE_update from group ,verifying the consistency state for both LI's and LE.
+#     STEP 4     : Editing SNMP configuration in LI1
+#                      verifying the consistency state , validating Alerts,
+#                      Performing LE_update from group ,verifying the consistency state for both LI's and LE.
+#   STEP 5,6,7,8 : Editing (enableFastMacCacheFailover,enableIgmpSnooping,igmpIdleTimeoutInterval,macRefreshInterval,enableNetworkLoopProtection)
+#                      verifying the consistency state , validating Alerts,
+#                      Performing LE_update from group ,verifying the consistency state for both LI's and LE.
+#     STEP 9     : Adding Uplink_Set in LI2
+#                      verifying the consistency state , validating Alerts,
+#                      Performing LE_update from group ,verifying the consistency state for both LI's and LE.
+#     STEP 10    : Editing Uplink_Set in LI2
+#                      verifying the consistency state , validating Alerts,
+#                      Performing LE_update from group ,verifying the consistency state for both LI's and LE.
+#     STEP 11    : Deleting Uplink_Set in LI1
+#                      verifying the consistency state , validating Alerts,
+#                      Performing LE_update from group ,verifying the consistency state for both LI's and LE.
+#     STEP 12    : Authorization_test for different users
+#######################################################################################################################################################
+
+
+***Test Cases***
+######    STEP 1 - CREATING NETWORKS, LIG'S ,EG , ENCLOSURE , SERVER_PROFILE #######
+1_Login
+    [Documentation]  Login into the Appliance and creating users
+    Set Log Level    TRACE
+    ${resp}    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    Run Keyword If  '${resp[0]['status_code']}' != '200'    Fail    ELSE  Log to console  \nSuccessfully logged into the appliance
+
+    ${resp}    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${serveradmin_credentials}
+    ${resp}    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${network_admin}
+
+    Power off ALL Servers
+    Remove All Server Profiles
+    Remove All Enclosures
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove ALL Ethernet Networks
+    Remove ALL FC Networks
+    Remove ALL FCoE Networks
+    Remove ALL Network Sets
+    Remove ALL Users
+
+    ##########Creating Users###########
+    ${l} =  Get Length  ${users}
+    Log to console  \n total Users ${l}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${resp}     Fusion Api Add User     body=${users[${x}]}
+    \   Run Keyword If  '${resp['status_code']}' != '200'  Fail    ELSE  log to console   \n-Created ${users[${x}]['permissions'][0]['roleName']} user successfully
+    \   Log to console  \n response ${resp}
+
+2_Login As Sarah and Deleting all alerts
+    [Documentation]    Deleting the alert messages
+    ${resp}=    Fusion Api Switch Active User    Serveradmin
+    Clear Alert Message
+
+
+3_creating Networks , LIG's
+    [Documentation]   creating networks and LIG's
+    ${resp}=    Fusion Api Switch Active User    Networkadmin
+
+    ###############creating Networks############
+    [Tags]  add   POSITIVE
+    Log to console    \n-Creating Ethernet Networks
+    ${Ethernet_uriList} =   Create List
+    :FOR   ${ethnet}   IN   @{ethernet_networks}
+    \   ${resp}        Fusion Api Create Ethernet Network   body=${ethnet}
+    \   ${eth_name}    Get From Dictionary   ${ethnet}   name
+    \   ${uri}      Get Ethernet URI    ${eth_name}
+    \   Continue For Loop If   '${uri}' == '${null}'
+    \   Append To List   ${Ethernet_uriList}   ${uri}
+    Log to console    \n-Ethernet networks list : ${Ethernet_uriList}
+
+    ${resp}    Fusion Api Create Fc Network    ${Fc_body}
+    Run keyword unless  ${resp['status_code']}== 202    Fail    ${resp['message']}
+    Log to console    \n-FC network created successfully!
+
+    ${LIG_len}  Get Length  ${LIG_body}
+    Log to console  \n total LIG ${LIG_len}
+    :FOR    ${x}    IN RANGE    0   ${LIG_len}
+    \    ${body} =   Build LIG body    ${LIG_body[${x}]}
+    \    Log to console and logfile    \n-Creating LIG
+    \    ${resp} =   Fusion Api Create LIG   ${body}
+    \    Run Keyword If   '${resp['status_code']}' != '202'  Fail    ELSE   log to console   \n-Created ${LIG_body[${x}]} successfully
+    \    ${task} =   Wait For Task   ${resp}    60s  30s
+    \    Run Keyword If   '${task['taskState']}' !='Completed'  or  '${task['status_code']}' !='200'   fail
+    \    ${resp}=    Fusion Api Get Lig    param=?filter="'name'=='${LIG_body[${x}]['name']}'"
+    \    Run Keyword Unless    '${resp['members'][0]['name']}'  ==  '${LIG_body[${x}]['name']}'     FAIL
+    \    Log to console and logfile    \n-Created LIG is present
+
+4_creating EG and Importing Enclosure
+    [Documentation]   creating EG and importing Enclosure
+    ${resp}=    Fusion Api Switch Active User    Serveradmin
+
+    ${eg_resp}    Add Enclosure Group from variable    ${eg_body1}
+    Run keyword unless   ${eg_resp['status_code']}== 201        Fail    "Unable to Create Enclosure Group"
+    Log to console and logfile    \n\nEG created succesfully
+
+    ${encs}    Get Variable Value   ${encs}
+    Run Keyword If      ${encs} is not ${null}     Add Enclosures from variable   ${encs}
+    Log to console and logfile    Enclosure imported successfully
+
+    Sleep   1min
+
+    ############################
+    ${LI_URI} =    Get LI URI    ${LI1}
+    Set Global Variable    ${LI1_URI}    ${LI_URI}
+    ############################
+    ############################
+    ${LI_URI} =    Get LI URI    ${LI2}
+    Set Global Variable    ${LI2_URI}    ${LI_URI}
+    ############################
+    #############################
+    ${LE_uri}     Get LE URI   ${Enclosure_Name1}
+    Set Global Variable    ${LE_URI}    ${LE_uri}
+    ############################
+
+    verifying Both LI and LE Consistent    ${LI1_URI}    ${LI2_URI}    ${LE_uri}
+
+5_Checking the ICM state
+    [Documentation]   verifying the ICM state
+    ${resp}=    Fusion Api Switch Active User    Networkadmin
+############################
+    ${LI_URI} =    Get LI URI    ${LI1}
+    Set Global Variable    ${LI1_URI}    ${LI_URI}
+    ############################
+    ############################
+    ${LI_URI} =    Get LI URI    ${LI2}
+    Set Global Variable    ${LI2_URI}    ${LI_URI}
+    ############################
+    #############################
+    ${LE_uri}     Get LE URI   ${Enclosure_Name1}
+    Set Global Variable    ${LE_URI}    ${LE_uri}
+    ############################
+    Verifying the state of ICM    ${LI1_URI}    ${LI2_URI}
+
+
+6_Creating Server Profiles
+    [Documentation]  creating the server profile
+    ${resp}=    Fusion Api Switch Active User    Serveradmin
+    Poweroff the server_hardware and creating the server_profile    ${SP_body1}   ${bay_no}
+
+########## STEP : 2 - EDITING TELEMETRY CONFIGURATION IN LI1 AND VERIFYING THE CONSISTENCY OF LI'S AND LE PRE AND POST UPDATE###########
+
+7_Editing the LI1, Telemetry Configuration
+    [Documentation]    Editing the LI1, Telemetry Configuration
+    ${resp}=    Fusion Api Switch Active User    Networkadmin
+
+    ${LI_URI} =    Get LI URI    ${LI1}
+    Set Global Variable    ${LI1_URI}    ${LI_URI}
+    ############################
+    ############################
+    ${LI_URI} =    Get LI URI    ${LI2}
+    Set Global Variable    ${LI2_URI}    ${LI_URI}
+    ############################
+    #############################
+    ${LE_uri}     Get LE URI   ${Enclosure_Name1}
+    Set Global Variable    ${LE_URI}    ${LE_uri}
+    ############################
+
+    Telemetry Edit in LI_1    ${LI1_URI}
+    ###Verifying Telemetry configuration is changed in LI_1###
+    ${li_resp} =    Fusion Api Get Li   ${LI1_URI}
+    Log to console and logfile    ${li_resp['telemetryConfiguration']['sampleInterval']}
+    Run keyword unless    '${li_resp['telemetryConfiguration']['sampleInterval']}' == '200'    Fail     ${li_resp['telemetryConfiguration']['sampleInterval']}
+    Run keyword unless    '${li_resp['telemetryConfiguration']['sampleCount']}' == '20'    Fail     ${li_resp['telemetryConfiguration']['sampleCount']}
+
+
+8_Checking the state of LI after Editing Telemetry in LI1 and performing update from in LE
+    [Documentation]    Checking the state of LI after Editing Telemetry in LI1
+    ${resp}=    Fusion Api Switch Active User    Serveradmin
+
+    LI1 and LE as Inconsistent    ${LI1_URI}    ${LI2_URI}    ${LE_uri}
+    Validating the LI_Alert_Active and Severity_Warning     ${alert1}
+
+    Perform an Update From Group   ${LE_uri}    25 min    15 s
+
+9_Checking the telemetry is been reflected as in LIG1
+    [Documentation]   verifying that telemetry is been reflected as in LIG1
+    ${resp}=    Fusion Api Switch Active User    Networkadmin
+    ${li_resp} =    Fusion Api Get Li   ${LI1_URI}
+    Log to console and logfile    ${li_resp['telemetryConfiguration']['sampleInterval']}
+    Run keyword unless    '${li_resp['telemetryConfiguration']['sampleInterval']}' == '300'    Fail     ${li_resp['telemetryConfiguration']['sampleInterval']}
+    Run keyword unless    '${li_resp['telemetryConfiguration']['sampleCount']}' == '12'    Fail     ${li_resp['telemetryConfiguration']['sampleCount']}
+
+10_Checking the state of LI
+    [Documentation]    hecking the state of LI after LE_update
+    Set Log Level    TRACE
+    ${resp}=    Fusion Api Switch Active User    Serveradmin
+
+    verifying Both LI and LE Consistent    ${LI1_URI}    ${LI2_URI}    ${LE_uri}
+    Clear Alert Message
+    Validating the LI_Alert_cleared and Severity_OK
+
+
+########## STEP : 3 - DISABLING TELEMETRY CONFIGURATION IN LI1 AND VERIFYING THE CONSISTENCY OF LI'S AND LE PRE AND POST UPDATE###########
+
+11_Disable Telementry in LI_1
+    [Documentation]    Disabling Telementry in LI_1
+    ${resp}=    Fusion Api Switch Active User    Networkadmin
+
+    ${li_resp} =    Fusion Api Get Li   ${LI1_URI}
+    ${telemetry_1_uri}    Get From Dictionary    ${li_resp['telemetryConfiguration']}    uri
+    ${resp}    Fusion Api Update LI Telemetry Configuration    ${Li_body_Disable}    ${telemetry_1_uri}
+    Run keyword unless    ${resp['status_code']} == 202    Fail    ${resp['message']}
+    ${task} =   Wait For Task   ${resp}     120s    30s
+    ${li_resp} =    Fusion Api Get Li   ${LI1_URI}
+    Run keyword unless    '${li_resp['telemetryConfiguration']['enableTelemetry']}' == 'False'    Fail     ${LI1_URI} is ${li_resp['telemetryConfiguration']['enableTelemetry'}
+
+12_Checking the state of LI after Disabling telemetry in LI_1
+    [Documentation]    Checking the state of LI after Disabling telemetry in LI_1
+    ${resp}=    Fusion Api Switch Active User    Serveradmin
+
+    LI1 and LE as Inconsistent    ${LI1_URI}    ${LI2_URI}    ${LE_uri}
+    Validating the LI_Alert_Active and Severity_Warning    ${alert1}
+
+    Perform an Update From Group   ${LE_uri}    15 min      15 s
+
+
+13_Verifying the telemetry is enabled in LI_1
+    [Documentation]     Verifying the telemetry is enabled in LI_1
+    ${resp}=    Fusion Api Switch Active User    Networkadmin
+    ###########checking the state of telemetryConfiguration as True################
+    ${li_resp} =    Fusion Api Get Li   ${LI1_URI}
+    Run keyword unless    '${li_resp['telemetryConfiguration']['enableTelemetry']}' == 'True'    Fail     ${LI1_URI} is ${li_resp['telemetryConfiguration']['enableTelemetry'}
+
+
+14_Checking the state of LI after Update from group
+    [Documentation]     Checking the state of LI after Update from group
+    ${resp}=    Fusion Api Switch Active User    Serveradmin
+
+    verifying Both LI and LE Consistent    ${LI1_URI}    ${LI2_URI}    ${LE_uri}
+
+    Clear Alert Message
+    Validating the LI_Alert_cleared and Severity_OK
+
+
+########## STEP : 4 - DISABLING SNMP CONFIGURATION IN LI1 AND VERIFYING THE CONSISTENCY OF LI'S AND LE PRE AND POST UPDATE###########
+
+
+15_SNMP Edit_Disable in LI
+    [Documentation]   editing SNMP in LI1
+    ${resp}=    Fusion Api Switch Active User    Networkadmin
+
+    ${li_resp} =    Fusion Api Get Li   ${LI1_URI}
+    ${LI1_SNMP_Status_Before}    Get From Dictionary    ${li_resp['snmpConfiguration']}    enabled
+    ${resp}    Fusion Api Update snmp configuration    ${snmp_body}    ${LI1_URI}
+    Run keyword unless    ${resp['status_code']} == 202    Fail    ${resp['message']}
+    ${task} =   Wait For Task   ${resp}     120s    30s
+    ${li_resp} =    Fusion Api Get Li   ${LI1_URI}
+    Run keyword unless    '${li_resp['snmpConfiguration']['enabled']}' == 'False'    Fail     ${LI1_URI} is ${li_resp['snmpConfiguration']['enabled'}
+
+
+16_Checking the state of LI
+    [Documentation]    verifying the state of LI's and LE after SNMP_edit in LI1
+    ${resp}=    Fusion Api Switch Active User    Serveradmin
+
+    LI1 and LE as Inconsistent    ${LI1_URI}    ${LI2_URI}    ${LE_uri}
+    Validating the LI_Alert_Active and Severity_Warning    ${alert1}
+
+    Perform an Update From Group   ${LE_uri}    15 min      15 s
+
+17_Verifying the state of SNMP is True after Update from group
+    [Documentation]     Verifying the state of SNMP is True after Update from group
+    ${resp}=    Fusion Api Switch Active User    Networkadmin
+    ###########checking the state of SNMP as True################
+    ${li_resp} =    Fusion Api Get Li   ${LI1_URI}
+    Run keyword unless    '${li_resp['snmpConfiguration']['enabled']}' == 'True'    Fail     ${LI1_URI} is ${li_resp['snmpConfiguration']['enabled'}
+
+
+18_Checking the state of LI
+    [Documentation]    verifying the state of Li's and LE after update from group
+    ${resp}=    Fusion Api Switch Active User    Serveradmin
+
+    verifying Both LI and LE Consistent    ${LI1_URI}    ${LI2_URI}    ${LE_uri}
+
+    Clear Alert Message
+    Validating the LI_Alert_cleared and Severity_OK
+
+
+########## STEP : 5 - EDITING ethernetSettings_enableIgmpSnooping IN LI2 AND VERIFYING THE CONSISTENCY OF LI'S AND LE PRE AND POST UPDATE###########
+
+19_Edit LI_2 Ethernet configurations_enableIgmpSnooping
+    [Documentation]    Edit LI_2 Ethernet configurations_enableIgmpSnooping
+    ${resp}=    Fusion Api Switch Active User    Networkadmin
+
+    ${li_resp} =    Fusion Api Get Li   ${LI2_URI}
+    #${LI1_IGMP_Status_Before}    Get From Dictionary    ${li_resp['ethernetSettings']}    enableIgmpSnooping
+    ${LI1_IGMP_ID}    Get From Dictionary    ${li_resp['ethernetSettings']}    id
+    Set To Dictionary   ${IGMP_body}    id     ${LI1_IGMP_ID}
+    ${resp}    Fusion Api Update LI Ethernet Settings    ${IGMP_body}    ${LI2_URI}
+    Run keyword unless    ${resp['status_code']} == 202    Fail    ${resp['message']}
+    ${task} =   Wait For Task   ${resp}     120s    30s
+
+
+    ${resp}=    Fusion Api Switch Active User    Serveradmin
+    ${li_resp} =    Fusion Api Get Li   ${LI2_URI}
+    Run keyword unless    '${li_resp['ethernetSettings']['enableIgmpSnooping']}' == 'True'    Fail     ${LI1_URI} is ${li_resp['ethernetSettings']['enableIgmpSnooping'}
+
+    LI2 and LE as Inconsistent   ${LI1_URI}    ${LI2_URI}    ${LE_uri}
+    Validating the LI_Alert_Active and Severity_Warning    ${alert2}
+
+    Perform an Update From Group   ${LE_uri}    15 min      15 s
+
+    ###########checking the state of IGMP as false################
+    ${li_resp} =    Fusion Api Get Li   ${LI2_URI}
+    Run keyword unless    '${li_resp['ethernetSettings']['enableIgmpSnooping']}' == 'False'    Fail     ${LI2_URI} is ${li_resp['ethernetSettings']['enableIgmpSnooping']}
+
+    verifying Both LI and LE Consistent    ${LI1_URI}    ${LI2_URI}    ${LE_uri}
+
+    Clear Alert Message
+    Validating the LI_Alert_cleared and Severity_OK
+
+
+######## STEP : 6 - EDITING ethernetSettings_enableFastMacCacheFailover IN LI2 & VERIFYING THE CONSISTENCY OF LI'S AND LE PRE AND POST UPDATE#######
+
+20_Edit LI_2 Ethernet configurations_IGMP_enableFastMacCacheFailover
+    [Documentation]    Edit LI_2 Ethernet configurations_IGMP_enableFastMacCacheFailover
+    ${resp}=    Fusion Api Switch Active User    Networkadmin
+
+    ${li_resp} =    Fusion Api Get Li   ${LI2_URI}
+    #${LI1_IGMP_Status_Before}    Get From Dictionary    ${li_resp['ethernetSettings']}    enableFastMacCacheFailover
+    ${LI1_IGMP_ID}    Get From Dictionary    ${li_resp['ethernetSettings']}    id
+    Set To Dictionary   ${IGMP_enableFastMacCacheFailover}    id     ${LI1_IGMP_ID}
+    ${resp}    Fusion Api Update LI Ethernet Settings    ${IGMP_enableFastMacCacheFailover}    ${LI2_URI}
+    Run keyword unless    ${resp['status_code']} == 202    Fail    ${resp['message']}
+    ${task} =   Wait For Task   ${resp}     120s    30s
+    ${li_resp} =    Fusion Api Get Li   ${LI2_URI}
+    Run keyword unless    '${li_resp['ethernetSettings']['enableFastMacCacheFailover']}' == 'False'    Fail     ${LI2_URI} is ${li_resp['ethernetSettings']['enableFastMacCacheFailover']}
+
+
+21_Checking the state of LI_enableFastMacCacheFailover_True
+    [Documentation]    Checking the state of LI_enableFastMacCacheFailover_True
+    ${resp}=    Fusion Api Switch Active User    Serveradmin
+
+    LI2 and LE as Inconsistent   ${LI1_URI}    ${LI2_URI}    ${LE_uri}
+    Validating the LI_Alert_Active and Severity_Warning    ${alert2}
+    Perform an Update From Group   ${LE_uri}    15 min      15 s
+
+    ###########checking the state of IGMP as true################
+    ${li_resp} =    Fusion Api Get Li   ${LI2_URI}
+    Run keyword unless    '${li_resp['ethernetSettings']['enableFastMacCacheFailover']}' == 'True'    Fail     ${LI2_URI} is '${li_resp['ethernetSettings']['enableFastMacCacheFailover']}'
+
+    verifying Both LI and LE Consistent    ${LI1_URI}    ${LI2_URI}    ${LE_uri}
+
+    Clear Alert Message
+    Validating the LI_Alert_cleared and Severity_OK
+
+
+
+####### STEP : 7 - EDITING ethernetSettings_igmpIdleTimeoutInterval IN LI2 AND VERIFYING THE CONSISTENCY OF LI'S AND LE PRE AND POST UPDATE###########
+
+
+22_Edit LI_2 Ethernet configurations_igmpIdleTimeoutInterval
+    [Documentation]    Editing LI_2 Ethernet configurations_igmpIdleTimeoutInterval
+    ${resp}=    Fusion Api Switch Active User    Networkadmin
+
+    ${li_resp} =    Fusion Api Get Li   ${LI2_URI}
+    ${LI2_IGMP_ID}    Get From Dictionary    ${li_resp['ethernetSettings']}    id
+    Set To Dictionary   ${IGMP_igmpIdleTimeoutInterval}    id     ${LI2_IGMP_ID}
+    ${resp}    Fusion Api Update LI Ethernet Settings    ${IGMP_igmpIdleTimeoutInterval}    ${LI2_URI}
+    Run keyword unless    ${resp['status_code']} == 202    Fail    ${resp['message']}
+    ${task} =   Wait For Task   ${resp}     120s    30s
+
+23_checking LI_2 Ethernet configurations_igmpIdleTimeoutInterval is changed
+    [Documentation]   verifying that Ethernet configurations_igmpIdleTimeoutInterval is changed
+    ${resp}=    Fusion Api Switch Active User     Serveradmin
+    ${li_resp} =    Fusion Api Get Li   ${LI2_URI}
+    Run keyword unless    '${li_resp['ethernetSettings']['igmpIdleTimeoutInterval']}' == '100'    Fail     ${LI2_URI} is ${li_resp['ethernetSettings']['igmpIdleTimeoutInterval']}
+
+    LI2 and LE as Inconsistent   ${LI1_URI}    ${LI2_URI}    ${LE_uri}
+    Validating the LI_Alert_Active and Severity_Warning    ${alert2}
+
+
+    Perform an Update From Group   ${LE_uri}    15 min      15 s
+
+    ${li_resp} =    Fusion Api Get Li   ${LI2_URI}
+    Run keyword unless    '${li_resp['ethernetSettings']['igmpIdleTimeoutInterval']}' == '260'    Fail     ${LI2_URI} is ${li_resp['ethernetSettings']['igmpIdleTimeoutInterval']}
+
+
+
+24_Checking the state of LI and LE after LE_UPdate
+    [Documentation]    hecking the state of LI and LE after LE_UPdate for Ethernet configurations_igmpIdleTimeoutInterval
+    ${resp}=    Fusion Api Switch Active User    Networkadmin
+
+    verifying Both LI and LE Consistent    ${LI1_URI}    ${LI2_URI}    ${LE_uri}
+    Clear Alert Message
+    Validating the LI_Alert_cleared and Severity_OK
+
+
+########## STEP : 8 - EDITING ethernetSettings_macRefreshInterval IN LI2 AND VERIFYING THE CONSISTENCY OF LI'S AND LE PRE AND POST UPDATE###########
+
+25_Edit LI_2 Ethernet configurations_IGMP_macRefreshInterval
+    [Documentation]    Edit LI_2 Ethernet configurations_IGMP_macRefreshInterval
+    ${resp}=    Fusion Api Switch Active User    Networkadmin
+
+    ${li_resp} =    Fusion Api Get Li   ${LI2_URI}
+    ${LI2_IGMP_ID}    Get From Dictionary    ${li_resp['ethernetSettings']}    id
+    Set To Dictionary   ${IGMP_macRefreshInterval}    id     ${LI2_IGMP_ID}
+    ${resp}    Fusion Api Update LI Ethernet Settings    ${IGMP_macRefreshInterval}    ${LI2_URI}
+    Run keyword unless   ${resp['status_code']} == 202    Fail    ${resp['message']}
+    ${task} =   Wait For Task   ${resp}     120s    30s
+    ${li_resp} =    Fusion Api Get Li   ${LI2_URI}
+    Run keyword unless    '${li_resp['ethernetSettings']['macRefreshInterval']}' == '10'    Fail     ${LI1_URI} is ${li_resp['ethernetSettings']['macRefreshInterval']}
+
+
+26_Checking the state of LI
+    [Documentation]     Checking the state of LI's and LE for Ethernet configurations_IGMP_macRefreshInterval
+    ${resp}=    Fusion Api Switch Active User    Serveradmin
+
+    LI2 and LE as Inconsistent   ${LI1_URI}    ${LI2_URI}    ${LE_uri}
+    Validating the LI_Alert_Active and Severity_Warning    ${alert2}
+
+    Perform an Update From Group   ${LE_uri}    15 min      15 s
+
+    ###########checking the state of IGMP as true################
+    ${li_resp} =    Fusion Api Get Li   ${LI2_URI}
+    Run keyword unless    '${li_resp['ethernetSettings']['macRefreshInterval']}' == '5'    Fail     ${LI2_URI} is '${li_resp['ethernetSettings']['macRefreshInterval']}'
+
+    verifying Both LI and LE Consistent    ${LI1_URI}    ${LI2_URI}    ${LE_uri}
+
+    Clear Alert Message
+    Validating the LI_Alert_cleared and Severity_OK
+
+
+############STEP : 9 - ADDING US IN LI2 AND VERIFYING THE CONSISTENCY OF LI'S AND LE PRE AND POST UPDATE##################
+
+27_Adding Uplink_set
+    [Documentation]    Adding Uplink_set in LI2
+    ${resp}=    Fusion Api Switch Active User    Networkadmin
+
+    ${enc_uri} =    Get Enclosure URI   ${Enclosure_Name1}
+    Set To Dictionary   ${li_US['portConfigInfos'][0]['location']['locationEntries'][2]}    value     ${enc_uri}
+    Set To Dictionary    ${li_US}    logicalInterconnectUri    ${LI2_URI}
+    ${st_resp} =    Fusion Api Create Uplink Set    ${li_US}
+    Run keyword unless    ${st_resp['status_code']}== 202    Fail    ${st_resp['message']}
+    ${task} =   Wait For Task   ${st_resp}  60s  30s
+
+    ${get_resp}    Fusion Api Get Uplink Set    param=?filter="'name'=='${li_US['name']}'"
+    Log to console and logfile     ${get_resp['members'][0]['name']}
+    Run keyword unless    '${get_resp['members'][0]['name']}' == '${li_US['name']}'  Fail    '${li_US['name']}' is NOT_Created
+
+
+28_Checking the state of LI
+    [Documentation]   verifying the state of LI's and LE after adding the uplink set
+    ${resp}=    Fusion Api Switch Active User    Serveradmin
+
+    LI2 and LE as Inconsistent   ${LI1_URI}    ${LI2_URI}    ${LE_uri}
+    Validating the LI_Alert_Active and Severity_Warning    ${alert2}
+
+    Perform an Update From Group   ${LE_uri}    15 min      15 s
+
+    verifying Both LI and LE Consistent    ${LI1_URI}    ${LI2_URI}    ${LE_uri}
+
+    Clear Alert Message
+    Validating the LI_Alert_cleared and Severity_OK
+
+    ${get_resp}    Fusion Api Get Uplink Set    ${LI2_URI}
+    Log to console and logfile     ${get_resp}
+    #Run keyword unless    '${get_resp['members'][0]['name']}' != '${li_US['name']}'   Fail   '${li_US['name']}' is NOT_Deleted
+
+
+############ STEP : 10 - EDITING US IN LI2 AND VERIFYING THE CONSISTENCY OF LI'S AND LE PRE AND POST UPDATE##################
+
+
+29_Edit uplink set in LI_2
+    [Documentation]    Editing uplink set in LI_2
+    ${resp}=    Fusion Api Switch Active User    Networkadmin
+
+    ${body} =   Build US body   ${li2_uplink_set_Edit}   ${LI2_URI}
+    ${uplinksets} =         Fusion Api Get Uplink Set   param=?filter="'name'=='${LIG_body[1]['uplinkSets'][0]['name']}'"
+    ${li2_uplink_set_Edit} =    Get From List   ${uplinksets['members']}    0
+    ${us_uri} =      Get From Dictionary   ${li2_uplink_set_Edit}   uri
+    ${resp} =  Fusion Api Edit Uplink Set  body=${body}    uri=${us_uri}
+    ${task} =    Wait For Task   ${resp}     5 min   15s
+
+
+30_Checking the state of LI
+    [Documentation]    verifying the state of LI's and LE after editing the uplink set
+    ${resp}=    Fusion Api Switch Active User    Serveradmin
+
+    LI2 and LE as Inconsistent   ${LI1_URI}    ${LI2_URI}    ${LE_uri}
+    Validating the LI_Alert_Active and Severity_Warning    ${alert2}
+
+    Perform an Update From Group   ${LE_uri}    15 min      15 s
+
+    verifying Both LI and LE Consistent    ${LI1_URI}    ${LI2_URI}    ${LE_uri}
+    Clear Alert Message
+    Validating the LI_Alert_cleared and Severity_OK
+
+############ STEP : 11 - DELETING US IN LI1 AND VERIFYING THE CONSISTENCY OF LI'S AND LE PRE AND POST UPDATE##################
+
+
+31_Delete Uplink_set from LI_1
+    [Documentation]    Deleting Uplink_set from LI_1
+    ${resp}=    Fusion Api Switch Active User    Networkadmin
+
+    ${resp} =   Fusion Api Delete Uplink Set    ${LIG_body[0]['uplinkSets'][0]['name']}
+
+
+32_Checking the state of LI
+    [Documentation]    verifying the state of LI's and LE after deleting the uplink set
+    ${resp}=    Fusion Api Switch Active User    Serveradmin
+
+    LI1 and LE as Inconsistent    ${LI1_URI}    ${LI2_URI}    ${LE_uri}
+    Validating the LI_Alert_Active and Severity_Warning    ${alert1}
+
+    Perform an Update From Group   ${LE_uri}    15 min      15 s
+
+    verifying Both LI and LE Consistent    ${LI1_URI}    ${LI2_URI}    ${LE_uri}
+    Clear Alert Message
+    Validating the LI_Alert_cleared and Severity_OK
+
+
+############## STEP : 12 - AUTHORIZATION TESTS##########
+
+33_Authorization tests for users
+    [Documentation]    Authorization tests for users
+    ${l} =  Get Length  ${Authorization_Login}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${resp}     Fusion Api Login Appliance      ${APPLIANCE_IP}     ${Authorization_Login[${x}]}
+    \   Log to console and logfile  \n Logged in successfully as ${Authorization_Login[${x}]['userName']}
+
+    ${l} =  Get Length  ${EditTelemetryNoPriv_users}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${resp}     Fusion Api Login Appliance      ${APPLIANCE_IP}     ${EditTelemetryNoPriv_users[${x}]}
+    \   Log to console and logfile  \n Logged in successfully as ${EditTelemetryNoPriv_users[${x}]['userName']}
+    \   Log to console and logfile   verifying the Authorization for Editing the Telementry for ${EditTelemetryNoPriv_users[${x}]['userName']}
+    \   Authorization_Edit Telemetry in LI1   ${LI1_URI}
+    \   Log to console and logfile   verifying the Authorization for Editing the SNMP for ${EditTelemetryNoPriv_users[${x}]['userName']}
+    \   Authorization_Edit SNMP in LI1   ${LI1_URI}
+    \   Log to console and logfile   verifying the Authorization for Editing the IGMP for ${EditTelemetryNoPriv_users[${x}]['userName']}
+    \   Authorization_Edit IGMP in LI1   ${LI1_URI}
+
+34_Cleanup
+    [Documentation]    Final Cleanup
+
+    Power off ALL Servers
+    Remove All Server Profiles
+    Remove ALL Enclosures
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove ALL Ethernet Networks
+    Remove ALL FC Networks
+
+    ######Verifying LI1 and LI2 are deleted########
+    ${li_resp} =    Fusion Api Get Li   ${LI1_URI}
+    Run Keyword If    '${resp[0]['status_code']}' != '404'    Fail    ELSE  Log to console  \n${li_resp['message']}
+    ${li_resp} =    Fusion Api Get Li   ${LI2_URI}
+    Run Keyword If    '${resp[0]['status_code']}' != '404'    Fail    ELSE  Log to console  \n${li_resp['message']}
+
+***Keywords***
+Telemetry Edit in LI_1
+    [Documentation]  Telemetry Edit in LI_1
+    [Arguments]   ${LI1_URI}
+    ${li_resp} =    Fusion Api Get Li   ${LI1_URI}
+    ${telemetry_1_uri}    Get From Dictionary    ${li_resp['telemetryConfiguration']}    uri
+    ${telemetry_1_name}    Get From Dictionary    ${li_resp['telemetryConfiguration']}    name
+    Set To Dictionary     ${Li_body}     uri   ${telemetry_1_uri}
+    Set To Dictionary     ${Li_body}   name    ${telemetry_1_name}
+    ${resp}    Fusion Api Update LI Telemetry Configuration    ${Li_body}    ${telemetry_1_uri}
+    Run keyword unless    ${resp['status_code']} == 202    Fail    ${resp['message']}
+    ${task} =   Wait For Task   ${resp}     120s    30s
+
+Clear Alert Message
+    [Documentation]  Clearing the Alert Message
+    ${del_resp} =    Fusion Api Delete Alert
+    Run keyword unless    ${del_resp['status_code']}== 202    Fail    "Unable to Clear Alert Message"
+    Log to console and logfile    \n\nAlert Message cleared Successfully
+
+Verifying the presence of created LIG
+    [Documentation]  Verifying the presence of created LIG
+    ${resp}=    Fusion Api Get Lig    param=?filter="'name'=='${lig1['name']}'"
+    Run Keyword Unless    '${resp['members'][0]['name']}'  ==  '${lig1['name']}'     FAIL
+    ${resp}=    Fusion Api Get Lig    param=?filter="'name'=='${lig2['name']}'"
+    Run Keyword Unless    '${resp['members'][0]['name']}'  ==  '${lig2['name']}'     FAIL
+
+
+Get LE URI
+    [Documentation]  Fetches LE URI
+    [Arguments]     ${le}
+    ${resp} =   Fusion Api Get Logical Enclosure        param=?filter="'name'=='${le}'"
+    ${uri} =    Get From Dictionary     ${resp['members'][0]}   uri
+    [Return]    ${uri}
+
+Poweroff the server_hardware and creating the server_profile
+    [Documentation]  Poweringoff the server_hardware and creating the server_profile
+    [Arguments]     ${SP_body1}   ${bay_no}
+    Log to console    Powering off SERVERS
+    ${sp_resp} =    Fusion Api Get Server Hardware    param=?filter="'name'=='${Enclosure_Name1}, bay ${bay_no}'"
+    Set Global Variable    ${sp_uri}    ${sp_resp['members'][0]['uri']}
+    Log to console and logfile    ${sp_uri}
+    ${body} =   Create Dictionary   powerState=Off
+    ...                             powerControl=PressAndHold
+    ${resp} =   Fusion Api Edit Server Hardware Power State     body=${body}    uri=${sp_uri}
+    ${task} =   Wait For Task     ${resp}    240s    5s
+    Log to console and logfile    \nSuccessfully powered off the server
+
+    Log to console and logfile    \n-Creating Server Profile
+    Add Server Profiles from variable     ${SP_body1}
+
+verifying Both LI and LE Consistent
+    [Documentation]  Verifying the state of Both LI's and LE are Consistent
+    [Arguments]     ${LI1_URI}    ${LI2_URI}    ${LE_uri}
+
+    ${li_resp} =    Fusion Api Get Li   ${LI1_URI}
+    Run keyword unless    '${li_resp['consistencyStatus']}' == 'CONSISTENT'    Fail    ${LI1_URI} is ${li_resp['consistencyStatus']}
+    ${li_resp} =    Fusion Api Get Li   ${LI2_URI}
+    Run keyword unless    '${li_resp['consistencyStatus']}' == 'CONSISTENT'    Fail     ${LI2_URI} is ${li_resp['consistencyStatus']}
+    ${resp}    Fusion Api Get Logical Enclosure    ${LE_URI}
+    Run keyword unless    '${resp['state']}' == 'Consistent'    Fail     ${LE_URI} is ${resp['state']}
+
+LI1 and LE as Inconsistent
+    [Documentation]  Verifying the state of LI1 and LE as Inconsistent
+    [Arguments]     ${LI1_URI}    ${LI2_URI}    ${LE_uri}
+    ${li_resp} =    Fusion Api Get Li   ${LI1_URI}
+    Run keyword unless    '${li_resp['consistencyStatus']}' == 'NOT_CONSISTENT'    Fail    ${LI1_URI} is ${li_resp['consistencyStatus']}
+
+    ${li_resp} =    Fusion Api Get Li   ${LI2_URI}
+    Run keyword unless  '${li_resp['consistencyStatus']}' == 'CONSISTENT'    Fail     ${LI2_URI} is ${li_resp['consistencyStatus']}
+
+    ${resp}    Fusion Api Get Logical Enclosure    ${LE_URI}
+    Run keyword unless    '${resp['state']}' == 'Inconsistent'    Fail     ${LE_URI} is ${resp['state']}
+
+
+LI2 and LE as Inconsistent
+    [Documentation]  Verifying the state of LI2 and LE as Inconsistent
+    [Arguments]     ${LI1_URI}    ${LI2_URI}    ${LE_uri}
+    ${li_resp} =    Fusion Api Get Li   ${LI1_URI}
+    Run keyword unless    '${li_resp['consistencyStatus']}' == 'CONSISTENT'    Fail    ${LI1_URI} is ${li_resp['consistencyStatus']}
+
+    ${li_resp} =    Fusion Api Get Li   ${LI2_URI}
+    Run keyword unless    '${li_resp['consistencyStatus']}' == 'NOT_CONSISTENT'    Fail     ${LI2_URI} is ${li_resp['consistencyStatus']}
+
+    ${resp}    Fusion Api Get Logical Enclosure    ${LE_URI}
+    Run keyword unless    '${resp['state']}' == 'Inconsistent'    Fail     ${LE_URI} is ${resp['state']}
+
+Perform an Update From Group
+    [Documentation]  Performing Update from group in LE
+    [Arguments]     ${LE_uri}   ${timeout}=10 min   ${interval}=15s
+    ${resp_update} =        Fusion Api Update Logical Enclosure from Group   uri=${LE_uri}
+    Run keyword unless    ${resp_update['status_code']}== 202    Fail    ${resp_update['message']}
+    ${task} =   Wait For Task   ${resp_update}  900s    30s
+    Sleep   30s
+    Log to console and logfile    \nLE updated from group successfully.
+
+
+
+Authorization_Edit Telemetry in LI1
+    [Documentation]  Edit Telemetry in LI1
+    [Arguments]     ${LI1_URI}
+
+    ${li_resp} =    Fusion Api Get Li   ${LI1_URI}
+    ${telemetry_1_uri}    Get From Dictionary    ${li_resp['telemetryConfiguration']}    uri
+    ${telemetry_1_name}    Get From Dictionary    ${li_resp['telemetryConfiguration']}    name
+    Set To Dictionary     ${Li_body}     uri   ${telemetry_1_uri}
+    Set To Dictionary     ${Li_body}   name    ${telemetry_1_name}
+    ${resp}    Fusion Api Update LI Telemetry Configuration    ${Li_body}    ${telemetry_1_uri}
+    Run keyword unless    '${resp['errorCode']}' == 'ACTION_FORBIDDEN_BY_ROLE'    Fail    ${resp['message']}
+
+
+Authorization_Edit SNMP in LI1
+    [Documentation]  Editing snmp in LI1
+    [Arguments]     ${LI1_URI}
+    ${li_resp} =    Fusion Api Get Li   ${LI1_URI}
+    ${LI1_SNMP_Status_Before}    Get From Dictionary    ${li_resp['snmpConfiguration']}    enabled
+    ${resp}    Fusion Api Update snmp configuration    ${snmp_body}    ${LI1_URI}
+    Run keyword unless  '${resp['errorCode']}' == 'ACTION_FORBIDDEN_BY_ROLE'    Fail    ${resp['message']}
+
+Authorization_Edit IGMP in LI1
+    [Documentation]  Editing IGMP in LI1
+    [Arguments]     ${LI1_URI}
+    ${li_resp} =    Fusion Api Get Li   ${LI1_URI}
+    ${LI1_IGMP_ID}    Get From Dictionary    ${li_resp['ethernetSettings']}    id
+    Set To Dictionary   ${IGMP_body_False}    id     ${LI1_IGMP_ID}
+    ${resp}    Fusion Api Update LI Ethernet Settings    ${IGMP_body_False}    ${LI1_URI}
+    Run keyword unless    '${resp['errorCode']}' == 'ACTION_FORBIDDEN_BY_ROLE'    Fail    ${resp['message']}
+
+Validating the LI_Alert_Active and Severity_Warning
+    [Documentation]  Validating the LI_Active Severity
+    #Checking for the alert message in LI
+    [Arguments]     ${alerts}
+    ${Alert_msg}    Create List
+    ${severity_state}    Create List
+    ${resp} =    Fusion Api Get Alerts
+    ${mem_resp} =  Get From Dictionary     ${resp}     members
+    ${len} =   Get Length  ${mem_resp}
+    :FOR   ${x}    IN RANGE    0   ${len}
+    \  Run Keyword If    '${mem_resp[${x}]['alertState']}' !='Active'    Continue For Loop
+    \  Run Keyword If    '${mem_resp[${x}]['physicalResourceType']}' !='logical-interconnects'   Continue For Loop
+    \  Run Keyword If    '${mem_resp[${x}]['severity']}' !='Warning'    Continue For Loop
+    \  ${replace}=     Remove String Using Regexp  ${mem_resp[${x}]['description']}  \n
+    \  Run Keyword If  '${replace}' == '${alerts}'   Append To List    ${Alert_msg}    ${replace}
+    \  Append To List    ${severity_state}    ${mem_resp[${x}]['severity']}
+    Run keyword unless  ${Alert_msg} == ${alert_msg}    Fail    ${resp['message']}   ${Alert_msg}
+
+Validating the LI_Alert_cleared and Severity_OK
+    [Documentation]  Validating the LI_Active Severity
+    #Checking for the alert message in LI
+    ${Alert_msg}    Create List
+    ${severity_state}    Create List
+    ${resp} =    Fusion Api Get Alerts
+    ${mem_resp} =  Get From Dictionary     ${resp}     members
+    ${len} =   Get Length  ${mem_resp}
+    :FOR   ${x}    IN RANGE    0   ${len}
+    \  Run Keyword If    '${mem_resp[${x}]['alertState']}' !='Cleared'    Continue For Loop
+    \  Run Keyword If    '${mem_resp[${x}]['physicalResourceType']}' !='logical-interconnects'   Continue For Loop
+    \  Run Keyword If    '${mem_resp[${x}]['severity']}' !='OK'    Continue For Loop
+    \  Append To List   ${Alert_msg}   ${mem_resp[${x}]['alertState']}
+    \  Append To List    ${severity_state}    ${mem_resp[${x}]['severity']}
+    Log to console and logfile    ${Alert_msg}
+    Log to console and logfile    ${severity_state}
+
+
+Verifying the state of ICM
+    [Documentation]  Checking the state of ICM's
+    [Arguments]     ${LI1_URI}     ${LI2_URI}
+    ${li_resp} =    Fusion Api Get Li   ${LI1_URI}
+    Set Global Variable    ${ic_uri}    ${li_resp['interconnects']}
+    ${length} =    Get Length     ${ic_uri}
+    :FOR    ${z}    IN RANGE    0    ${length}
+    \    ${ic_resp} =    Fusion Api Get Interconnect    ${ic_uri[${z}]}
+    \    Run keyword unless    '${ic_resp['state']}' == 'Configured'    Fail    ${ic_uri[${z}]} is ${li_resp['state']}
+    \    Log to console and logfile    ${ic_uri[${z}]} is configured
+    ${li_resp} =    Fusion Api Get Li   ${LI2_URI}
+    Set Global Variable    ${ic_uri}    ${li_resp['interconnects']}
+    ${length} =    Get Length     ${ic_uri}
+    :FOR    ${z}    IN RANGE    0    ${length}
+    \    ${ic_resp} =    Fusion Api Get Interconnect    ${ic_uri[${z}]}
+    \    Run keyword unless    '${ic_resp['state']}' == 'Configured'    Fail    ${ic_uri[${z}]} is ${li_resp['state']}
+    \    Log to console and logfile    ${ic_uri[${z}]} is configured

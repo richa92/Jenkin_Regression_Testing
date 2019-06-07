@@ -1,0 +1,265 @@
+*** Settings ***
+Documentation    Test suite to validate Ethernet network test scenarios
+
+...    = GENERIC USAGE =
+...    | pybot | -v ENC_SERIAL_NO:[enclosure serial #] | -v APPLIANCE_IP:<ipv4> |-v GIT_REPO_ROOT: |-v ENCLOSURES: |-v Adapter_Bay: | Enlosure_Ethernet_Network.txt |
+...    = Variables =
+...    | GIT_REPO_ROOT |      Required: Repo root path if NOT defined in environment variable this is mgmtfw root location|
+...    | ENC_SERIAL_NO |      Optional: If omitted, will use the 1st enclosure detected in OV |
+...    | APPLIANCE_IP |       Required: OneView IPv4 address |
+...    | ADAPTER_BAY |        Required: Server Hardware |
+...    | Ethernet_Name |      Optional: Ethernet network name defined in dea variable
+
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/data_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/petest_resource.txt
+Resource          ${GIT_REPO_ROOT}//fusion/tests/DEA/tests/EnclosureManagement/EM_Ethernet/Ethernet_Resource.txt
+Library           RoboGalaxyLibrary
+Library           MgmtFWLibrary
+Library           FusionLibrary
+Library           Collections
+Library           BuiltIn
+Library           Selenium2Library
+
+
+Suite Setup       Run Keywords    Set Library Search Order    fusion_api_resource    ssh    AND    Login to Fusion Via REST    AND     Login to Fusion via SSH
+Suite Teardown    Run Keywords    Set Library Search Order    fusion_api_resource    ssh    fusion_api_appliance_teardown    server_profile    AND    Clean UP Environment    AND     Logout of Fusion Via REST    AND    Logout of Fusion Via SSH
+
+*** Test Cases ***
+
+TC01:: EM Ethernet Network: Validate Changing Maximum Bandwidth In Existing Ethernet network Gets Updated In Server Profile 
+    [Documentation]    Verify that Changing Maximum Bandwidth In Existing Ethernet network Gets Updated In Server Profile
+    [Tags]    PE    API    Automated1   FLM
+    [Setup]   Set Library Search Order    Ethernet_Resource    fusion_api_appliance_setup    logical_enclosure    fusion_api_appliance_teardown    server_profile
+    Clean UP Environment
+    ${expItem}=    Create List
+    Add Ethernet Networks From Variable    ${Eth_Networks}
+    Add LIG From Variable    ${LIG_Data}
+    Add Enclosure Group from variable    ${EG_Data}
+    #Logical Enclosure Group data
+    Add Logical Enclosure from variable    ${LE_Data}
+    Set To Dictionary    ${enet_connection['connections'][0]}    networkUri    ETH:${Ethernet_Name}
+    #    Create Server Profile
+    ${responses}=  Add Server Profiles from variable    ${Server_Profile}
+    Run Keyword If  ${responses} is not ${null}     Wait For Task2  ${responses}   timeout=1800    interval=60
+    # Edit the network , update it. Verify the changed bandwidth in SP - Connections
+    ${networks} =   Fusion Api Get Ethernet Networks
+    ${count}=    Convert To String  ${networks['count']}
+    Run Keyword If  '${count}'=='0'    Log     Ethernet Network doesn't exists   WARN
+    :FOR    ${net}    IN    @{networks['members']}
+    \       Continue For Loop If   '${net['name']}'!='${Ethernet_Name}'    
+    \       ${uri}=   Get Ethernet URI    ${Ethernet_Name}
+    \       ${resp}=    Fusion Api Get Ethernet Networks    ${uri}
+    \       ${ctUri}=    Get connectionTemplateUri    ${Ethernet_Name}    ethernet
+    \       ${ct}=    Fusion Api Get Connection Templates     ${ctUri}
+    \       ${bandwidth}=     Get From Dictionary    ${ct}    bandwidth
+    \       ${default_maxBandwidth}=     Get From Dictionary    ${bandwidth}    maximumBandwidth
+    \       ${default_preferedBandwidth}=     Get From Dictionary    ${bandwidth}    typicalBandwidth
+    \       ${mod_bandwidth_val} =    Set Variable     10000 
+    \       Set To Dictionary    ${bandwidth}    maximumBandwidth    ${mod_bandwidth_val}
+    \       Log To Console    ${ct}[bandwidth]
+    \       Run keyword if      ${bandwidth} != ${None}
+    \       ...                 Remove From Dictionary      ${ct}   headers  status   category   created   status_code   state   modified   description
+    \       Set To Dictionary    ${ct}    bandwidth    ${bandwidth}
+    \       ${status}=   Fusion Api Update Connection Template   ${ct}    ${ctUri}
+    \       # Get the Bandwidth details from Server Profile and verify for updation
+    \       ${server_info}=    Get Server Information    ${Adapter_Bay}
+    \       ${profile_info}=    Get Server Profile Info    ${server_info}
+    \       # v600 API DTO code
+    \       Set To Dictionary    ${enet_connection['connections'][0]}    networkUri    ETH:${Ethernet_Name}
+    \       Log To Console    ${profile_info}
+    \       ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary    ${profile_info['connectionSettings']}    connections
+    \       ${connections} =     set variable if  '${status}'=='PASS'  ${return}
+    \       ${maxMbps}=    Get From Dictionary    ${connections[0]}    maximumMbps
+    \       Should Be Equal As Integers     ${maxMbps}    ${mod_bandwidth_val}
+
+TC02:: EM Ethernet Network: Validate That Maximum Bandwidth Not Updated To Out Of Range Max Value in Existing Ethernet Network
+    [Documentation]    Test verifies That Maximum Bandwidth Not Updated To Out Of Range Max Value in Existing Ethernet Network
+    [Tags]    PE    API    Automated1   FLM
+    [Setup]   Set Library Search Order    fusion_api_resource    ssh
+    ${networks} =   Fusion Api Get Ethernet Networks
+    ${count}=    Convert To String  ${networks['count']}
+    Run Keyword If  '${count}'=='0'    Log     Ethernet Network doesn't exists   WARN
+    :FOR    ${net}    IN    @{networks['members']}
+    \       Continue For Loop If   '${net['name']}'!='${Ethernet_Name}'    
+    \       ${ctUri}=    Get connectionTemplateUri    ${Ethernet_Name}    ethernet
+    \       ${ct}=    Fusion Api Get Connection Templates     ${ctUri}
+    \       ${bandwidth}=     Get From Dictionary    ${ct}    bandwidth
+    \       # Bandwidth range 0.1 to 20
+    \       ${max_bandwidth_outofrange} =    Set Variable     21000
+    \       Set To Dictionary    ${bandwidth}    maximumBandwidth    ${max_bandwidth_outofrange}
+    \       ${bandwidth}=     Get From Dictionary    ${ct}    bandwidth
+    \       Log To Console    ${ct}[bandwidth]
+    \       Run keyword if      ${bandwidth} != ${None}
+    \       ...                 Remove From Dictionary      ${ct}   headers  status   category   created   status_code   state   modified   description
+    \       Set To Dictionary    ${ct}    bandwidth    ${bandwidth}
+    \       ${resp}=   Fusion Api Update Connection Template   ${ct}    ${ctUri}
+    \       Should Not Be Equal     ${resp['status_code']}    '200'      msg= "Bandwidth is greater than maximum bandwidth range"
+    \       ${ctUri}=    Get connectionTemplateUri    ${Ethernet_Name}    ethernet
+    \       ${ct}=    Fusion Api Get Connection Templates     ${ctUri}
+    \       ${bandwidth}=     Get From Dictionary    ${ct}    bandwidth
+    \       ${maxbandwidth}=     Get From Dictionary    ${bandwidth}    maximumBandwidth
+    \       Should Not Be Equal     ${bandwidth}    ${max_bandwidth_outofrange}
+
+TC03:: EM Ethernet Network: Validate that Maximum Bandwidth Not Updated To Out Of Range Min Value In Existing Ethernet Network
+    [Documentation]   Test verifies That Maximum Bandwidth Not Updated To Out Of Range Min Value In Existing Ethernet Network
+    [Tags]    PE    API    Automated1    FLM
+    [Setup]   Set Library Search Order    fusion_api_resource    ssh
+    ${networks} =   Fusion Api Get Ethernet Networks
+    ${count}=    Convert To String  ${networks['count']}
+    Run Keyword If  '${count}'=='0'    Log     Ethernet Network doesn't exists   WARN
+    :FOR    ${net}    IN    @{networks['members']}
+    \       Continue For Loop If   '${net['name']}'!='${Ethernet_Name}'    
+    \       ${uri}=   Get Ethernet URI    ${Ethernet_Name}
+    \       ${resp}=    Fusion Api Get Ethernet Networks    ${uri}
+    \       ${ctUri}=    Get connectionTemplateUri    ${Ethernet_Name}    ethernet
+    \       ${ct}=    Fusion Api Get Connection Templates     ${ctUri}
+    \       ${bandwidth}=     Get From Dictionary    ${ct}    bandwidth
+    \       # Bandwidth range 0.1 to 20
+    \       ${min_bandwidth_outofrange} =    Set Variable     0
+    \       Set To Dictionary    ${bandwidth}    maximumBandwidth    ${min_bandwidth_outofrange}
+    \       ${bandwidth}=     Get From Dictionary    ${ct}    bandwidth
+    \       Log To Console    ${ct}[bandwidth]
+    \       Run keyword if      ${bandwidth} != ${None}
+    \       ...                 Remove From Dictionary      ${ct}   headers  status   category   created   status_code   state   modified   description
+    \       Set To Dictionary    ${ct}    bandwidth    ${bandwidth}
+    \       ${resp}=   Fusion Api Update Connection Template   ${ct}    ${ctUri}
+    \       Should Not Be Equal     ${resp['status_code']}    '200'     msg= "Bandwidth is less than minium bandwidth range:"
+    \       ${ctUri}=    Get connectionTemplateUri    ${Ethernet_Name}    ethernet
+    \       ${ct}=    Fusion Api Get Connection Templates     ${ctUri}
+    \       ${bandwidth}=     Get From Dictionary    ${ct}    bandwidth
+    \       ${maxbandwidth}=     Get From Dictionary    ${bandwidth}    maximumBandwidth    
+    \       Should Not Be Equal     ${maxbandwidth}    ${min_bandwidth_outofrange}
+        
+TC04:: EM Ethernet Network: Validate that Preferred bandwidth Not updated to out of range max value in existing ethernet network
+    [Documentation]    Test verifies that Preferred bandwidth Not updated to out of range max value in existing ethernet network
+    [Tags]    PE    API    Automated1    FLM
+    [Setup]   Set Library Search Order    fusion_api_resource    ssh
+    ${networks} =   Fusion Api Get Ethernet Networks
+    ${count}=    Convert To String  ${networks['count']}
+    Run Keyword If  '${count}'=='0'    Log     Ethernet Network doesn't exists   WARN
+    :FOR    ${net}    IN    @{networks['members']}
+    \       Continue For Loop If   '${net['name']}'!='${Ethernet_Name}'    
+    \       ${ctUri}=    Get connectionTemplateUri    ${Ethernet_Name}    ethernet
+    \       ${ct}=    Fusion Api Get Connection Templates     ${ctUri}
+    \       ${bandwidth}=     Get From Dictionary    ${ct}    bandwidth
+    \       # Bandwidth range 0.1 to 20
+    \       ${max_bandwidth_outofrange} =    Set Variable     21000
+    \       Set To Dictionary    ${bandwidth}    typicalBandwidth    ${max_bandwidth_outofrange}
+    \       ${bandwidth}=     Get From Dictionary    ${ct}    bandwidth    
+    \       Log To Console    ${ct}[bandwidth]
+    \       Run keyword if      ${bandwidth} != ${None}
+    \       ...                 Remove From Dictionary      ${ct}   headers  status   category   created   status_code   state   modified   description
+    \       Set To Dictionary    ${ct}    bandwidth    ${bandwidth}
+    \       ${resp}=   Fusion Api Update Connection Template   ${ct}    ${ctUri}
+    \       Should Not Be Equal     ${resp['status_code']}    '200'      msg= "Preferred bandwidth is greater than maximum bandwidth:"
+    \       ${ctUri}=    Get connectionTemplateUri    ${Ethernet_Name}    ethernet
+    \       ${ct}=    Fusion Api Get Connection Templates     ${ctUri}
+    \       ${bandwidth}=     Get From Dictionary    ${ct}    bandwidth
+    \       ${typicalbandwidth}=     Get From Dictionary    ${bandwidth}    typicalBandwidth
+    \       Should Not Be Equal     ${typicalbandwidth}    ${max_bandwidth_outofrange}
+   
+TC05:: EM Ethernet Network: Validate Preferred bandwidth Not updated to out of range min value in existing ethernet network
+    [Documentation]    Test verifies that Preferred bandwidth Not updated to out of range min value in existing ethernet network
+    [Tags]    PE    API    Automated1    FLM
+    [Setup]   Set Library Search Order    fusion_api_resource    ssh
+    ${networks} =   Fusion Api Get Ethernet Networks
+    ${count}=    Convert To String  ${networks['count']}
+    Run Keyword If  '${count}'=='0'    Log     Ethernet Network doesn't exists   WARN
+    :FOR    ${net}    IN    @{networks['members']}
+    \       Continue For Loop If   '${net['name']}'!='${Ethernet_Name}'    
+    \       ${ctUri}=    Get connectionTemplateUri    ${Ethernet_Name}    ethernet
+    \       ${ct}=    Fusion Api Get Connection Templates     ${ctUri}
+    \       ${bandwidth}=     Get From Dictionary    ${ct}    bandwidth
+    \       # Bandwidth range 0.1 to 20
+    \       ${min_bandwidth_outofrange} =    Set Variable     0
+    \       Set To Dictionary    ${bandwidth}    typicalBandwidth    ${min_bandwidth_outofrange}
+    \       ${bandwidth}=     Get From Dictionary    ${ct}    bandwidth    
+    \       Log To Console    ${ct}[bandwidth]
+    \       Run keyword if      ${bandwidth} != ${None}
+    \       ...                 Remove From Dictionary      ${ct}   headers  status   category   created   status_code   state   modified   description
+    \       Set To Dictionary    ${ct}    bandwidth    ${bandwidth}
+    \       ${resp}=   Fusion Api Update Connection Template   ${ct}    ${ctUri}
+    \       Should Not Be Equal     ${resp['status_code']}    '200'     msg= "Preferred bandwidth is less than minium bandwidth range:"
+    \       ${ctUri}=    Get connectionTemplateUri    ${Ethernet_Name}    ethernet
+    \       ${ct}=    Fusion Api Get Connection Templates     ${ctUri}
+    \       ${bandwidth}=     Get From Dictionary    ${ct}    bandwidth
+    \       ${typicalbandwidth}=     Get From Dictionary    ${bandwidth}    typicalBandwidth
+    \       Should Not Be Equal     ${typicalbandwidth}    ${min_bandwidth_outofrange}
+
+TC06:: EM Ethernet Network: Validate Connection Is Deleted And Added For Existing Profile For Ethernet Network
+    [Documentation]    Verify that Connection Is Deleted And Added For Existing Profile For Ethernet Network
+    [Tags]    PE    API    Automated1    FLM
+    #[Setup]   Set Library Search Order    fusion_api_resource    ssh    fusion_api_appliance_teardown    server_profile    common    fusion_api_appliance_setup    server_hardware    fusion_api_appliance_teardown
+    [Setup]   Set Library Search Order    fusion_api_resource    ssh    server_hardware    fusion_api_appliance_teardown    common    fusion_api_appliance_setup
+    # Get the server Profile, delete/edit the connections, update the server profile, verify connection is deleted
+    Power off Servers in Profiles    ${ServerProfile}
+    ${resp}=   Remove Server Profiles from variable    ${ServerProfile}
+    Run Keyword If  ${resp} is not ${null}     Wait For Task2  ${resp}   timeout=1800    interval=60
+    ${resp}=  Add Server Profiles from variable    ${ServerProfile}
+    Run Keyword If  ${resp} is not ${null}     Wait For Task2  ${resp}   timeout=1800    interval=60    
+    ${server_info}=    Get Server Information    ${Adapter_Bay}
+    ${profile_info}=    Get Server Profile Info    ${server_info}
+    # v600 API
+    ${connection} =     Get From Dictionary    ${profile_info['connectionSettings']}    connections
+    Should Not Be Empty    ${connection}    msg=connection not available
+    :FOR    ${profile}    IN    @{ServerProfile}
+    \    ${profile_info} =  copy dictionary  ${profile}    
+    \    ${connection} =    Create List
+    \    Set to Dictionary     ${profile_info['connectionSettings']}    connections    ${connection}
+    \    ${responses}=    Edit Server Profile    ${profile_info}
+    \    Run Keyword If  ${responses} is not ${null}     Wait For Task2  ${responses}   timeout=1800    interval=60
+    \    ${server_info}=    Get Server Information    ${Adapter_Bay}
+    \    ${profile_info}=    Get Server Profile Info    ${server_info}
+    \    ${connection} =     Get From Dictionary    ${profile_info['connectionSettings']}    connections
+    \    Should Be Empty    ${connection}    msg=connection not empty
+    \    # Retain original connections
+    \    ${responses}=    Edit Server Profile    ${profile}
+    \    Run Keyword If  ${responses} is not ${null}     Wait For Task2  ${responses}   timeout=1800    interval=60
+    \    ${server_info}=    Get Server Information    ${Adapter_Bay}
+    \    ${profile_info}=    Get Server Profile Info    ${server_info}
+    \    # v600 API
+    \    ${connection} =     Get From Dictionary    ${profile_info['connectionSettings']}    connections
+    \    Should Not Be Empty    ${connection}    msg=connection not available
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Power off Servers in Profiles    ${ServerProfile}    
+    ...    AND    Remove Server Profiles from variable    ${ServerProfile}    AND    Sleep    120
+    ...    AND    Add Server Profiles from variable    ${ServerProfile}    AND    Sleep    180
+    
+TC07:: EM Ethernet Network: Validate Uplink Set Is Deleted And Updated Using Upload From Group
+    [Documentation]    Test Verify that Uplink Set Is Deleted And Updated Using Upload From Group
+    [Tags]    PE    API    Automated1    FLM
+    [Setup]   Set Library Search Order    fusion_api_resource    ssh    fusion_api_appliance_setup    tasks
+    ${resp} =   Fusion Api Get Uplink Set
+    :FOR    ${uplinkset}   IN    @{resp['members']}
+    \       ${uri} =     Get From Dictionary    ${uplinkset}    uri
+    \       ${name} =     Get From Dictionary    ${uplinkset}    name
+    \       ${us_name}=   Get From Dictionary    ${UplinkSets[0]}    name
+    \       Continue For Loop If   '${name}'!='${us_name}'
+    \       ${resp}=   Remove Uplinkset By Uri     uri=${uri}
+    \       ${task} =   Wait For Task   ${resp}     240s    2s
+    \       Run Keyword If  ${resp['status_code']} !=202    fail    msg=UpLinkset ${name} deletion failed
+    \       ...         ELSE    Log to console and logfile  UpLinkset ${name} deleted succesfully !
+    \       ${resp_uri}=    Get Uplink Set URI    ${us_name}
+    \       Should Not Be Equal As Strings    ${name}    ${resp_uri}
+    \       ${resp}=    Update Logical Enclosure from Group    ${LE_Data}    True
+    [Teardown]    Run Keyword If Test Failed    Update Logical Enclosure from Group    ${LE_Data}    True
+
+TC08:: EM Ethernet Network: Validate Server Profile Status not OK When Assigned Ethernet Network Is Deleted
+    [Documentation]    Verify that Server Profile Status not OK When Assigned Ethernet Network Is Deleted
+    [Tags]    PE    API    Automated1    FLM
+    [Setup]   Set Library Search Order    fusion_api_resource    ssh    tasks    fusion_api_appliance_setup
+    ${server_info}=    Get Server Information    ${Adapter_Bay}
+    ${profile_info}=    Get Server Profile Info    ${server_info}
+    ${conn} =     Get From Dictionary    ${profile_info['connectionSettings']}    connections
+    :FOR    ${connection}    IN    @{conn}
+    \    ${neturi}=     Get From Dictionary     ${connection}    networkUri
+    \    Continue For Loop If    '${neturi}'=='' or '${neturi}'=='${None}'
+    \    #Get network uri to delete it 
+    \    ${resp} =     Fusion Api Delete Ethernet Network    uri=${netUri}
+    \    ${task} =     Wait For Task    ${resp}     240s    2s
+    \    ${profile_info}=    Get Server Profile Info    ${server_info}    
+    \    ${sp_status}=     Get From Dictionary     ${profile_info}      status
+    \    Should Not Be Equal     ${sp_status}    OK     msg= "Server profile status is not OK"
+    \    # Edit the server profile to be OK status
+    \    Set To Dictionary    ${enet_connection['connections'][0]}    networkUri    ETH:${Ethernet_Name}

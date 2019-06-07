@@ -1,0 +1,235 @@
+*** Settings ***
+Library                RoboGalaxyLibrary
+Library                FusionLibrary
+Library                OperatingSystem
+Library                BuiltIn
+Library                Collections
+Library                XML
+Library                SSHLibrary
+Library                String
+Library                Dialogs
+Resource               ./../../../../Resources/api/fusion_api_resource.txt
+Resource               ../global_variables.robot
+
+*** Keywords ***
+Login And Upload Firmware Bundle
+    [Documentation]  Login and upload firmware bundle
+    [Arguments]    ${SPP}=${None}
+    Fusion Api Login Appliance         ${APPLIANCE_IP}        ${admin_credentials}
+    Run Keyword And Ignore Error    Power off ALL servers   PressAndHold
+
+Clear Test Environtment
+    [Documentation]  Clear Test Environtment
+    Log    Power Off Servers and remove all profiles    console=true
+    Run Keyword And Ignore Error    Wait For ALL Enclosures Complete Refresh
+    Run Keyword And Ignore Error    Wait For ALL Server Profile In Normal State
+    Run Keyword And Ignore Error    Power off ALL servers   PressAndHold
+    Run Keyword And Ignore Error    Wait For ALL Servers Complete Refresh
+
+Update server firmware when create profile
+    [Arguments]    ${payload}    ${isForce}=${False}
+    [Documentation]    Create server profile with firmware baseline
+    Log    Update server firmware when create profile    console=true
+    Clear Test Environtment
+    Run Keyword And Ignore Error    Remove All Server Profiles
+    ${profilelist} =    Generate profile body   ${payload}  ${isForce}
+    ${resps} =   Add Server Profiles from variable   ${profilelist}
+    Wait Firmware Update Task   ${resps}
+
+Update server firmware when edit profile
+    [Arguments]    ${payload}    ${isForce}=${False}
+    [Documentation]    Edit server profile with firmware baseline
+    Log    Update server firmware when edit profile    console=true
+    Clear Test Environtment
+    ${profilelist} =    Generate profile body   ${payload}  ${isForce}
+    ${resps} =   Edit Server Profiles from variable   ${profilelist}
+    Wait Firmware Update Task   ${resps}
+
+Update server firmware and config localstorage when create profile
+    [Arguments]    ${baseLine}    ${isForce}=${False}      ${method}=${HPSUT}
+    [Documentation]    Create server profile with firmware baseline
+    Clear Test Environtment
+    Run Keyword And Ignore Error    Remove All Server Profiles
+    Log    Update server firmware with baseline ${baseLine} when create profile    console=true
+    ${profilelist} =    Generate profile body   ${createFullProfiles}   ${baseLine}     ${isForce}
+    ${resps} =   Add Server Profiles from variable   ${profilelist}
+    Validate Firmware Update Task   ${resps}    ${method}
+
+Generate profile body
+    [Arguments]    ${profiles}    ${isForce}=${False}
+    [Documentation]    Generate profile body
+    ${profilelist} =    Create List
+    :FOR    ${profile}    IN    @{profiles}
+    \    ${profile} =     Copy dictionary     ${profile}
+    \    ${firmware} =     Get from Dictionary    ${profile}    firmware
+    \    ${firmwareBaseline} =    Get from Dictionary  ${firmware}   firmwareBaselineUri
+    \    ${firmwareURI} =    Get Firmware Bundle By Version  ${firmwareBaseline}
+    \    Set to Dictionary    ${firmware}    firmwareBaselineUri    ${firmwareURI}
+    \    Set to Dictionary    ${firmware}    forceInstallFirmware    ${isForce}
+    \    Set to Dictionary    ${profile}    firmware    ${firmware}
+    \    append to list    ${profilelist}    ${profile}
+    [Return]    ${profilelist}
+
+Create empty server profile
+    [Arguments]    ${profiles}
+    [Documentation]    Create empty server profile with given name
+    Clear Test Environtment
+    Log   Create empty server profile    console=true
+    Run Keyword And Ignore Error    Remove All Server Profiles
+    ${profilelist} =    Create List
+    : FOR    ${profile}    IN    @{profiles}
+    \    ${name} =    Get From Dictionary        ${profile}    name
+    \    ${uri} =    Get From Dictionary        ${profile}    serverHardwareUri
+    \    ${firmwareURI} =    Get Server Hardware URI By ILO IP  ${uri}
+    \    Set to Dictionary    ${emptyprofile}    name    ${name}
+    \    Set to Dictionary    ${emptyprofile}    serverHardwareUri    ${uri}
+    \    append to list    ${profilelist}    ${emptyprofile}
+    ${resps} =   Add Server Profiles from variable   ${profilelist}
+    :FOR    ${resp}    IN    @{resps}
+    \    ${task} =    Wait For Task2     ${resp}     200    2
+
+Validate Firmware Update Method
+    [Arguments]    ${taskUri}    ${method}=${IP}
+    [Documentation]    Validate firmware update by HPE Intelligent Provisioning or HPSUT
+    Log    Validate Firmware Update Method    console=true
+    ${task} =    Get Task By Param   param=?filter='parentTaskUri'='${taskUri}'&sort=created:descending&count=1
+    Log    ${task}    console=true
+    ${multiprogress} =     Get From Dictionary        ${task}     progressUpdates
+    ${result} =    Run Keyword If     "${method}"=="${HPSUT}"   Validate Profile Task Without Intelligent Provisioning     ${multiprogress}
+    Run Keyword If  "${result}"!="${None}"     Should Match    ${result}    Expected
+    :FOR    ${progress}    IN    @{multiprogress}
+    \    ${status} =     Get From Dictionary        ${progress}     statusUpdate
+    \    ${words} =     Fetch From Left    ${status}    ${method}
+    \    ${status} =     Replace String  ${status}   \"  ${EMPTY}
+    \    ${words} =      Replace String  ${words}    \"  ${EMPTY}
+    \    Return From Keyword If    "${words}"!="${status}"    Expected
+    [Return]    Firmware Update is not by ${method}
+
+Wait Firmware Update Task
+    [Arguments]    ${resps}
+    [Documentation]    Validate firmware task complete
+    Log    Validate firmware task complete    console=true
+    :FOR    ${resp}    IN    @{resps}
+    \    Log    ${resp}    console=true
+    \    ${task} =    Wait For Task     ${resp}     100min    5s
+    \    ${taskStatus} =    Get From Dictionary        ${task}     taskStatus
+    \    ${taskState} =    Get From Dictionary        ${task}     taskState
+    \    Log    ${taskStatus}    console=true
+    \    Log    ${taskState}    console=true
+    \    Should Match    ${taskState}    Completed
+
+Validate Firmware Baseline Invalid
+    [Arguments]    ${task}
+    [Documentation]    Validate firmware baseline is invalid
+    Log    Validate firmware baseline is invalid    console=true
+    ${errorCode} =    Get From Dictionary        ${task['taskErrors'][0]}   errorCode
+    Should Match    ${errorCode}    FWBASELINE_NOT_FOUND
+
+Validate Firmware Baseline Invalid Task
+    [Arguments]    ${resps}
+    [Documentation]    Validate task include Firmware Baseline Invalid error
+    Log    Validate task include Firmware Baseline Invalid error    console=true
+    :FOR    ${resp}    IN    @{resps}
+    \    ${task} =    Wait For Task     ${resp}     10s    2s
+    \    ${taskStatus} =    Get From Dictionary        ${task}     taskStatus
+    \    ${taskState} =    Get From Dictionary        ${task}     taskState
+    \    Log    ${taskStatus}    console=true
+    \    Log    ${taskState}    console=true
+    \    Validate Firmware Baseline Invalid     ${task}
+
+Validate Profile Task Without Intelligent Provisioning
+    [Arguments]    ${multiprogress}
+    [Documentation]    Validate profile apply without HPE Intelligent Provisioning
+    :FOR    ${progress}    IN    @{multiprogress}
+    \    ${status} =     Get From Dictionary        ${progress}     statusUpdate
+    \    ${words} =     Fetch From Left    ${status}    ${IP}
+    \    ${status} =     Replace String  ${status}   \"  ${EMPTY}
+    \    ${words} =      Replace String  ${words}    \"  ${EMPTY}
+    \    Return From Keyword If    "${words}"!="${status}"    Firmware Update should not use ${IP}
+    [Return]    Expected
+
+Validate Profile Firmware Version
+    [Arguments]    ${profiles}  ${baseline}
+    [Documentation]    Validate if firmware update success
+    :FOR    ${profile}    IN    @{profiles}
+    \    ${hardware} =   Get from Dictionary    ${profile}    serverHardwareUri
+    \    ${model} =   Get from Dictionary    ${profile}    description
+    \    Log    ${hardware}    console=true
+    \    Power On Server    ${hardware}
+    \    ${expectedFirmwares} =     Get from Dictionary    ${firmwares}    ${baseline}
+    \    ${expectedFirmware} =     Get from Dictionary    ${expectedFirmwares}    ${model}
+    \    Wait Until Keyword Succeeds    600s    15s    Server Hardware Firmware Version Correct    ${hardware}    ${expectedFirmware}
+    \    Log    Firmware update success!    console=true
+
+Server Hardware Firmware Version Correct
+    [Documentation]    Server Hardware Firmware Version Correct
+    [Arguments]    ${hardware}    ${expectedFirmware}
+    Set Log Level    TRACE
+    ${firmware} =   Get Server Hardware Firmware    ${hardware}
+    Validate Firmware Version   ${firmware}     ${expectedFirmware}
+
+Validate Firmware Version
+    [Arguments]    ${firmware}  ${expectedFirmware}
+    [Documentation]    Check if firmware version update to expected value
+    Log    Check if firmware version update to expected value    console=true
+    Log    Actual firmware:\n${firmware}    console=true
+    Log    Expected firmware:\n${expectedFirmware}    console=true
+    :FOR    ${checkFirmware}    IN    @{expectedFirmware}
+    \    ${name} =   Get from Dictionary     ${checkFirmware}    componentName
+    \    ${version} =   Get from Dictionary  ${checkFirmware}    componentVersion
+    \    ${hardwareVersion} =    Search Firmware Version     ${firmware}     ${name}
+    \    Should Be Equal     ${hardwareVersion}  ${version}  Firmware update failed,${name} should be ${version}, but actually ${hardwareVersion}
+    \    Log    ${name} validate success    console=true
+
+Search Firmware Version
+    [Documentation]    Search Firmware Version
+    [Arguments]    ${firmware}  ${name}
+    :FOR    ${component}    IN    @{firmware}
+    \    ${componentName} =   Get from Dictionary    ${component}    componentName
+    \    ${version} =   Get from Dictionary  ${component}    componentVersion
+    \    Return From Keyword If    "${name}"=="${componentName}"     ${version}
+    [Return]    Firmware ${name} not found!
+
+Validate Firmware Installed
+    [Arguments]    ${serverProfiles}  ${firmwareBaseline}
+    [Documentation]    Check if firmware updated
+    Log    Check if firmware update    console=true
+    ${firmwareID} =    Get Firmware Bundle UUID By Version    ${firmwareBaseline}
+    :FOR    ${profile}    IN    @{serverProfiles}
+    \    ${hardware} =   Get from Dictionary    ${profile}    serverHardwareUri
+    \    Log    Validating ${hardware}    console=true
+    \    ${firmwareComponents} =    Get Server Hardware Firmware Compliance    ${hardware}    ${firmwareID}
+    \    Log    Validating ${firmwareComponents}    console=true
+    \    Run Keyword And Continue On Failure    Validate Firmware Components    ${firmwareComponents['componentMappingList']}
+    \    Log    Firmware update success!    console=true
+
+Validate Firmware Components
+    [Arguments]    ${firmwareComponents}
+    [Documentation]    Check if component firmware update required
+    :FOR    ${component}    IN    @{firmwareComponents}
+    \    ${required} =   Get from Dictionary    ${component}    componentFirmwareUpdateRequired
+    \    ${componentName} =   Get from Dictionary    ${component}    componentName
+    \    ${installedVersion} =   Get from Dictionary    ${component}    installedVersion
+    \    ${baselineVersion} =   Get from Dictionary    ${component}    baselineVersion
+    \    Should Not Be True    ${required}    Component ${componentName} verify failed! Installed: ${installedVersion}. Baseline: ${baselineVersion}.
+
+Validate Profiles Firmware Applied
+    [Documentation]  Validate Profiles Firmware Applied
+    [Arguments]    ${profiles}
+    :FOR    ${profile}    IN    @{profiles}
+    \    Wait Until Keyword Succeeds    4000    10    Validate Firmware Applied    ${profile}
+
+Validate Firmware Applied
+    [Documentation]  Validate Firmware Applied
+    [Arguments]    ${profile}
+    ${state} =   Get Server Profile Firmware Install State    ${profile}
+    Should be equal    ${state}    Activated
+
+Reset iLO and Update Server ILO Firmware
+    [Arguments]            ${servers}
+    [Documentation]    Reset iLO and Update Server ILO Firmware
+    :FOR    ${SERVER}   IN  @{servers}
+    \   Log    Reset iLO for ${SERVER['iloIP']}    console=True
+    \   Run Keyword And Ignore Error    Run cpqlocfg and Reset iLO      ${SERVER['iloIP']}
+    Sleep  60
+    Run Keyword And Ignore Error    Update Server ILO Firmware      ${servers}

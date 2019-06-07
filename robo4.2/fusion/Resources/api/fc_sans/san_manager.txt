@@ -1,0 +1,99 @@
+*** Settings ***
+Library				RoboGalaxyLibrary
+Library				FusionLibrary
+Library				OperatingSystem
+Library				BuiltIn
+Library				Collections
+Library				XML
+Library		        SSHLibrary
+Library				String
+Library				Dialogs
+Documentation       Data File Example
+...                 san_managers = [{'connectionInfo': [ {'name': 'Type', 'value': 'Brocade Network Advisor'},
+...            							                 {'name': 'Host', 'value': '10.0.0.20'},
+...            							                 {'name': 'Port', 'value': 5989},
+...            							                 {'name': 'Username', 'value': 'Administrator'},
+...            							                 {'name': 'Password', 'value': 'Cosmos123'},
+...            							                 {'name': 'UseSsl', 'value': True}]
+...         						}]
+
+
+*** Keywords ***
+Add San Manager
+	[Documentation]    Add San Manager and return the response.
+    [Arguments]		 ${sanManager}  ${status_code}=202
+	${connectionInfo} =  Get From Dictionary  ${sanManager}  connectionInfo
+    ${provider} =  set variable  ${connectionInfo[0]['value']}
+    ${uri}=  Get Provider URI  ${provider}
+    # remove Type in the payload
+    remove from list  ${connectionInfo}  0
+    ${resp}=  Fusion API Add SAN Manager  ${sanManager}  uri=${uri}
+    Run keyword and continue on failure  Should Be Equal As Integers   ${resp['status_code']}  ${status_code}
+    [Return]	${resp}
+
+Add San Managers Async
+    [Documentation]    Add San Managers and return the responses.
+    [Arguments]  ${sanManagers}    ${VERIFY}=${FALSE}  ${expected_san_managers}=@empty  ${status_code}=202
+    ${toAdd} =  Create List
+    :FOR    ${sm}    IN    @{sanManagers}
+    \   ${name} =  set variable  ${sm['connectionInfo'][1]['value']}
+    \   ${status} =  Check Resource Existing  SANManager:${name}
+    \       Run Keyword If    ${status}=='FAIL'  Append To List   ${toAdd}  ${sm}
+    \   Run Keyword If    ${status}=='PASS'   Log   San Manager ${name} already exist   WARN
+    ${resplist} =  Create List
+    :FOR    ${sm}    IN    @{toAdd}
+    \   ${name} =  set variable  ${sm['connectionInfo'][1]['value']}
+    \   Log  Adding SAN Manager ${name}   console=True
+    \   ${resp} =  Add San Manager  ${sm}
+    \   continue for loop if    '${resp['status_code']}'!='${status_code}'
+    \   Append To List  ${resplist}  ${resp}
+    Run Keyword If  ${resplist} is not ${null}     Wait For Task2   ${resplist}   timeout=120    interval=5
+    Run Keyword If   ${VERIFY}==${TRUE}    Verify Resources for List  ${expected_san_managers}
+    [Return]    ${resplist}
+
+Get San Manager URI
+    [Documentation]    Get SAN Manager URI by Name
+    [Arguments]  ${name}
+    Log    Getting SAN MANAGER URI for ${name}
+    ${resp} =    Fusion API Get SAN Manager  param=?query=name eq '${name}'
+	${count} =  Get From Dictionary  ${resp}  count
+	Return From Keyword If  ${count}==0  /rest/san_manager__uri_${name}_not_found
+	${uri} = 	Get From Dictionary		${resp['members'][0]}	uri
+	[Return]	${uri}
+
+Remove ALL San Managers Async
+    [Documentation]  Query the appliance for all san managers, remove them, and return the responses.
+    [Arguments]  ${VERIFY}=${FALSE}  ${RETURN_CODE}=404
+    Log  Removing ALL SAN MANAGERS    console=True
+    ${actualsm} =  create list
+    ${response} =  create list
+    ${storageManagers} =  Fusion Api Get San Manager
+    ${count}=    Convert To String  ${storageManagers['count']}
+    Run Keyword If  '${count}'=='0'   Log  San Manager doesn't exists   WARN
+    :FOR  ${sm}  IN  @{storageManagers['members']}
+    \    Log  Removing SAN Manager ${sm['name']}    console=True
+    \    ${resp} =   Fusion API Remove SAN Manager   uri=${sm['uri']}
+    \    ${deleteInfo} =  Create Dictionary
+    \    Set To Dictionary  ${deleteInfo}  name=${sm['name']}
+	\    Set To Dictionary  ${deleteInfo}  uri=${sm['uri']}
+	\    Set To Dictionary  ${deleteInfo}  resp=${resp}
+    \    append to list    ${actualsm}   ${deleteInfo}
+    \    append to list    ${response}   ${resp}
+    Wait For Task2  ${response}  240  2
+    :FOR  ${sm}  IN  @{actualsm}
+    \   Continue For Loop If   ${VERIFY}==${FALSE}
+    \   ${resp} =    Fusion Api Get Resource   uri=${sm['uri']}
+    \   Run Keyword If  ${resp['status_code']}!=${RETURN_CODE}  Run Keyword And Continue On Failure  FAIL  msg=SAN Manager ${sm['name']} is not Deleted
+
+San Manager Attribute ${attribute} Should Have Value ${value}
+    [Documentation]    San Manager attribute Should be expected
+    ...    Fail the test if attribute is other than expected
+    ${storageManagers} =  Fusion Api Get San Manager
+    Run Keyword If  '${storageManagers['count']}'=='0'  Fail  No San Manager found
+    ${res} =  Set Variable  ${empty}
+    :FOR  ${sm}  IN  @{storageManagers['members']}
+    \  ${res} =  Run Keyword If  '${sm['${attribute}']}' != '${value}'  Catenate  ${res}
+    ...     \nSan Manager name [${sm['name']}] Expected ${attribute} ${value} but found ${sm['${attribute}']}
+    \  ...  ELSE  Set Variable  ${res}
+    ${count} =  Get Length  ${res}
+    Run Keyword If  '${count}' > '0'  Fail  ${res}

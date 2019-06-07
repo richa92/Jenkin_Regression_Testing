@@ -1,0 +1,394 @@
+*** Settings ***
+Documentation		Large Network Set Features Tests - SuiteName: LNS 
+Resource            ../../../../../resources/api/fusion_api_resource.txt
+Resource            ../FVT/fvt-keywords.txt
+Resource			../FVT/Resources/fvt_resource.txt	
+
+Library				FusionLibrary
+Library				../FVT/fvt_api.py
+
+Suite Setup			Login User
+
+*** Variables ***
+${minVlan}	2
+${maxVlan}	3966
+${large_networks}	3000
+${small_networks}	3
+${large_lns}	7
+${small_lns}	56
+${rns}	4
+${Profile}	${Profiles[-1]['payload']['name']}
+
+*** Keywords ***
+Login User
+	[Documentation]	Login Administrator and set variables based on input configuration
+	Set Log Level	TRACE
+	Fusion Api Login Appliance	${appliance_ip}	${admin_credentials}
+	[Return]
+
+Create Bulk Ethernet Networks
+	[Documentation]	Create All Networks To Be used
+	Set To Dictionary	${networks}	vlanIdRange	${minVlan}-${maxVlan}
+	${task} =	Fusion Api Create Ethernet Bulk Networks	${networks}
+	Should Be Equal As Integers	${task['status_code']}	202
+	${task} =	Wait For Task	${task}	timeout=120m	interval=5s	
+	[Return]
+	
+Create Large Network Sets With Over 3000 Networks
+	[Documentation]	Create Large Network Sets With Over 3000 Networks
+	Set To Dictionary	${ns_dto}	networkSetType	Large
+	${list} =	Get Slice From List	${netlist}	0	${large_networks}
+	${start} =	Evaluate	${large_networks} + 1
+	:FOR	${i}	IN RANGE	1	${large_lns}+1
+	\	Set To Dictionary	${ns_dto}	name	LNS_${i}
+	\	Set To Dictionary	${ns_dto}	networkUris	${list}
+	\	Create Network Set	${ns_dto}	timeout=10m	interval=1s
+	\	${resp} =	Fvt Api Get Network Set By Name	LNS_${i}
+	\	Should Be Equal As Strings	${resp['name']}	LNS_${i}
+	\	${start} =	Evaluate	${start} + 1
+	\	Append To List	${list}	net_${start}
+	[Return]
+	
+Create Large Network Sets
+	[Documentation]	Create Large Network Sets With 3 Networks
+	Set To Dictionary	${ns_dto}	networkSetType	Large
+	${start} =	Evaluate	${large_lns}+${large_networks}
+	:FOR	${i}	IN RANGE	${large_lns}+1	${large_lns}+${small_lns}+1
+	\	Set To Dictionary	${ns_dto}	name	LNS_${i}
+	\	${list} =	Create Networks List	${start}	
+	\	Set To Dictionary	${ns_dto}	networkUris	${list}
+	\	Create Network Set	${ns_dto}	timeout=5m	interval=1s
+	\	${resp} =	Fvt Api Get Network Set By Name	LNS_${i}
+	\	Should Be Equal As Strings	${resp['name']}	LNS_${i}
+	\	${start} =	Evaluate	${start} + ${small_networks}
+	[Return]
+	
+Create Regular Network Sets
+	[Documentation]	Create Regular Network Sets
+	Set To Dictionary	${ns_dto}	networkSetType	Regular
+	${start} =	Evaluate	${large_lns}+${small_lns}*${small_networks}+${large_networks}
+	:FOR	${i}	IN RANGE	1	${rns}+1
+	\	Set To Dictionary	${ns_dto}	name	RNS_${i}
+	\	${list} =	Create Networks List	${start}	
+	\	Set To Dictionary	${ns_dto}	networkUris	${list}
+	\	Create Network Set	${ns_dto}	timeout=5m	interval=1s
+	\	${resp} =	Fvt Api Get Network Set By Name	RNS_${i}
+	\	Should Be Equal As Strings	${resp['name']}	RNS_${i}
+	\	${start} =	Evaluate	${start} + ${small_networks}
+	[Return]
+	
+Create Networks List
+	[Documentation]	Create A Networks List
+	[Arguments]	${start}
+	${netlist} =	Create List
+	:FOR	${i}	IN RANGE	0	${small_networks}
+	\	Append To List	${netlist}	net_${start}
+	\	${start} =	Evaluate	${start} + 1
+	[Return]	${netlist}
+
+Convert Network Set Type
+	[Documentation]	Convert Network Set Type. e.g. Large <-> Regular
+	[Arguments]	${networkset}	${type}	${timeout}=0	${interval}=0
+	${resp} =	Fvt Api Get Network Set By Name	${networkset}
+	Set to Dictionary	${resp}	networkSetType	${type}
+	${task} =	Fusion Api Edit Network Set	body=${resp}	uri=${resp['uri']}
+	Return From Keyword If	'${timeout}' == '0'	${task}
+	Should Be Equal As Integers	${task['status_code']}	202
+	${task} =	Wait For Task	${task}	${timeout}	${interval}
+	[Return]	${task}
+
+Power Off Server
+	[Documentation]	Power Off Server
+	[Arguments]	${server}
+	${resp}	Fvt Api Get Server Hardware By Name	${server}
+	${uri} =	Set Variable	${resp['uri']}
+	${payload} =	Create Dictionary	powerState=Off	powerControl=PressAndHold	
+	${task}	Fusion Api Edit Server Hardware Power State	uri=${uri}	body=${payload}
+	Should Be Equal As Integers	${task['status_code']}	202
+	${task} =	Wait For Task	${task} 	10m	1
+	${resp}	Fvt Api Get Server Hardware By Name	${server}
+	Should Be Equal As Strings	${resp['powerState']}	Off
+	[Return]
+
+Power On Server
+	[Documentation]	Power On Server
+	[Arguments]	${server}
+	${resp}	Fvt Api Get Server Hardware By Name	${server}
+	${uri} =	Set Variable	${resp['uri']}
+	${payload} =	Create Dictionary	powerState=On	powerControl=MomentaryPress	
+	${task}	Fusion Api Edit Server Hardware Power State	uri=${uri}	body=${payload}
+	Should Be Equal As Integers	${task['status_code']}	202
+	${task} =	Wait For Task	${task} 	10m	1
+	${resp}	Fvt Api Get Server Hardware By Name	${server}
+	Should Be Equal As Strings	${resp['powerState']}	On
+	[Return]
+	
+Wait For Server To Be Pingable
+	[Documentation]	Poll Server To Be Pingable For Maximum 10 minutes 
+	[Arguments]		${ip}
+	Log To Console	\n Waiting For Server, IP = ${ip}, To Be Pingable
+	:FOR	${x}   IN RANGE	0	10
+	\	${result} =	Run Process	ping	${ip}
+	\	Exit For Loop If	${result.rc} == 0
+	\	Sleep	1m
+	[Return]
+	
+*** Test Cases ***
+Create Complete Networks List
+	Pass Execution	Skip Create Complete Networks List
+	Set Suite Variable	@{netlist}	@{EMPTY}
+	:For	${i}	IN RANGE	${minVlan}	${maxVlan}+1
+	\	Append To List	${netlist}	net_${i}
+	Pass Execution	Finished Create Complete Networks List
+	
+Create Networks And Network Sets
+	Pass Execution	Skip Create Networks And Network Sets
+	Create Bulk Ethernet Networks
+	Create Large Network Sets With Over 3000 Networks	
+	Create Large Network Sets
+	Create Regular Network Sets	
+	Pass Execution	Create Networks And Network Sets
+	
+Create Logical Enclosure
+	Pass Execution	Skip Create Logical Enclosure
+	Set To Dictionary	${uplink_set}	networkUris	${netlist}
+	Add Logical Interconnect Group	${lig}	timeout=10m	interval=1s
+	FVT Add Enclosure Group		${enc_group}
+	Add Logical Enclosure	${les}	timeout=90m	interval=1m
+	Sleep	10s
+	${resp}	Fvt Api Get Logical Enclosure By Name	${les['name']}
+	Should Be Equal As Strings	${resp['status']}	OK
+	Should Be Equal As Strings	${resp['state']}	Consistent
+	${resp}	Fvt Api Get Logical Interconnect BY Name	${les['name']}-${lig['name']}
+	Should Be Equal As Strings	${resp['consistencyStatus']}	CONSISTENT
+	FVT Verify Interconnects In LI	${les['name']}-${lig['name']}
+	Pass Execution	Finished Create Logical Enclosure ${les['name']}
+	
+Create Server Profiles
+	Pass Execution	Skip Create Server Profilea
+	:FOR	${x} 	IN	@{profiles}
+	\	Power Off Server	${x['payload']['serverHardwareUri']}
+	\	${task} =	fvt-keywords.Add Server Profile	${x['payload']}
+	\	Should Be Equal As Integers	${task['status_code']}	202
+	\	Set To Dictionary	${x}	task	${task}
+	:FOR	${x} 	IN	@{profiles}
+	\	${task} =	Get From Dictionary	${x}	task
+	\	${task} =	Wait For Task	${task} 	120m	1m
+	\	${resp} =	Fvt Api Get Server Profile By Name	${x['payload']['name']}
+	\	Run Keyword And Continue On Failure	Should Be Equal As Strings	${resp['status']}	OK
+	\	Run Keyword If	'${x['payload']['name']}' != '${profile}'	Power On Server	${x['payload']['serverHardwareUri']}
+	Pass Execution	Finished Create Server Profiles
+
+Start Server Profile Ping Process
+	Pass Execution	Skip Start Server Profile Ping Process
+	${profile} =	Get From List	${profiles}	0
+	${ip} =	Get From Dictionary	${profile}	IP
+	Wait For Server To Be Pingable	${ip}
+	${name} =	Get From Dictionary	${profile['payload']}	name
+	${handle} =	Start Process	ping	-t	${ip}	stdout=${name}.out
+	Set To Dictionary	${profile}	handle	${handle}
+	Sleep	5m
+	Pass Execution	Finished Start Server Profile Ping Process
+	
+Add Unique Connection To Profile To Exceed Limit
+	Pass Execution	Skip Add Unique Connection To Profile To Exceed Limit
+	${connection} =	FVT Copy Dictionary	${add_connection2}
+	${resp} =	Fvt Api Get Server Profile By Name	${Profile}
+	${networkset} =	Fvt Api Get Network Set By Name	${connection['networkUri']}
+	Set To Dictionary	${connection}	networkUri	${networkset['uri']}
+	Append To List	${resp['connectionSettings']['connections']}	${connection}
+	${task} =	Fusion Api Edit Server Profile	body=${resp}	uri=${resp['uri']}
+	${task} =	Wait For Task	${task}	10m	1s
+	Should Be Equal As Strings	${task['taskState']}	Error
+	${errorcode} =	Get From Dictionary	${task['taskErrors'][0]}	errorCode
+	Should Be Equal As Strings	${errorcode}	MaxNumberOfLNS	
+	Pass Execution	Finished Add Unique Connection To Profile To Exceed Limit 
+	
+Delete Connection From Profile
+	Pass Execution	Skip Delete Connection To Profile
+	${resp} =	Fvt Api Get Server Profile By Name	${Profile}
+	Remove From List	${resp['connectionSettings']['connections']}	-1
+	${task} =	Fusion Api Edit Server Profile	body=${resp}	uri=${resp['uri']}
+	Should Be Equal As Integers	${task['status_code']}	202
+	${task} =	Wait For Task	${task}	10m	1s
+	Should Be Equal As Strings	${task['taskState']}	Completed
+	Pass Execution	Finished Add Connection To Profile
+	
+Add Two Unique Connection To Profile To Exceed Limit
+	Pass Execution	Skip Add Two Unique Connection To Profile To Exceed Limit
+	${connection1} =	FVT Copy Dictionary	${add_connection}
+	${connection2} =	FVT Copy Dictionary	${add_connection2}
+	${resp} =	Fvt Api Get Server Profile By Name	${Profile}
+	${networkset} =	Fvt Api Get Network Set By Name	${connection1['networkUri']}
+	Set To Dictionary	${connection1}	networkUri	${networkset['uri']}
+	Append To List	${resp['connectionSettings']['connections']}	${connection1}
+	${networkset} =	Fvt Api Get Network Set By Name	${connection2['networkUri']}
+	Set To Dictionary	${connection2}	networkUri	${networkset['uri']}
+	Append To List	${resp['connectionSettings']['connections']}	${connection2}
+	${task} =	Fusion Api Edit Server Profile	body=${resp}	uri=${resp['uri']}
+	${task} =	Wait For Task	${task}	10m	1s
+	Should Be Equal As Strings	${task['taskState']}	Error
+	${errorcode} =	Get From Dictionary	${task['taskErrors'][0]}	errorCode
+	Should Be Equal As Strings	${errorcode}	MultipleMaxNumberOfLNS	
+	Pass Execution	Finished Add Two Unique Connection To Profile To Exceed Limit
+
+Add Unique Connection To Profile Without Exceeding Limit
+	Pass Execution	Skip Add Unique Connection To Profile Without Exceeding Limit
+	${connection} =	FVT Copy Dictionary	${add_connection}
+	${resp} =	Fvt Api Get Server Profile By Name	${Profile}
+	${networkset} =	Fvt Api Get Network Set By Name	${connection['networkUri']}
+	Set To Dictionary	${connection}	networkUri	${networkset['uri']}
+	Append To List	${resp['connectionSettings']['connections']}	${connection}
+	${task} =	Fusion Api Edit Server Profile	body=${resp}	uri=${resp['uri']}
+	Should Be Equal As Integers	${task['status_code']}	202
+	${task} =	Wait For Task	${task}	10m	1s
+	Should Be Equal As Strings	${task['taskState']}	Completed
+	Pass Execution	Finished Add Unique Connection To Profile Without Exceeding Limit 	
+	
+Add Duplicate Connection To Profile Without Exceeding Limit
+	Pass Execution	Skip Add Duplicate Connection To Profile Without Exceeding Limit
+	${connection} =	FVT Copy Dictionary	${duplicate_connection}
+	${resp} =	Fvt Api Get Server Profile By Name	${Profile}
+	${networkset} =	Fvt Api Get Network Set By Name	${connection['networkUri']}
+	Set To Dictionary	${connection}	networkUri	${networkset['uri']}
+	Append To List	${resp['connectionSettings']['connections']}	${connection}
+	${task} =	Fusion Api Edit Server Profile	body=${resp}	uri=${resp['uri']}
+	Should Be Equal As Integers	${task['status_code']}	202
+	${task} =	Wait For Task	${task}	10m	1s
+	Should Be Equal As Strings	${task['taskState']}	Completed
+	Pass Execution	Finished Add Duplicate Connection To Profile Without Exceeding Limit 	
+
+Replace Unique Connection With Unique Connection Without Exceeding Limit
+	Pass Execution	Skip Replace Unique Connection With Unique Connection Without Exceeding Limit
+	${resp} =	Fvt Api Get Server Profile By Name	${Profile}
+	${len} = 	Get Length	${resp['connectionSettings']['connections']}
+	:FOR	${x}	IN RANGE	0	${len}	
+	\	${name} =	Get From Dictionary	${resp['connectionSettings']['connections'][${x}]}	name
+	\	Exit For Loop If	'${name}' == 'conn1'
+	Should Be Equal As Strings	${name}	conn1
+	${networkset} =	Fvt Api Get Network Set By Name	LNS_63
+	Set To Dictionary	${resp['connectionSettings']['connections'][${x}]}	networkUri	${networkset['uri']}
+	${task} =	Fusion Api Edit Server Profile	body=${resp}	uri=${resp['uri']}
+	Should Be Equal As Integers	${task['status_code']}	202
+	${task} =	Wait For Task	${task}	10m	1s
+	Should Be Equal As Strings	${task['taskState']}	Completed
+	Pass Execution	Finished Replace Unique Connection With Unique Connection Without Exceeding Limit
+	
+Replace Duplicate Connection With Unique Connection To Exceed Limit
+	Pass Execution	Skip Replace Duplicate Connection With Unique Connection To Exceed Limit
+	${resp} =	Fvt Api Get Server Profile By Name	${Profile}
+	${len} = 	Get Length	${resp['connectionSettings']['connections']}
+	:FOR	${x}	IN RANGE	0	${len}	
+	\	${name} =	Get From Dictionary	${resp['connectionSettings']['connections'][${x}]}	name
+	\	Exit For Loop If	'${name}' == 'duplicate_connection'
+	Should Be Equal As Strings	${name}	duplicate_connection
+	${networkset} =	Fvt Api Get Network Set By Name	${add_connection2['networkUri']}
+	Set To Dictionary	${resp['connectionSettings']['connections'][${x}]}	networkUri	${networkset['uri']}
+	${task} =	Fusion Api Edit Server Profile	body=${resp}	uri=${resp['uri']}
+	Should Be Equal As Integers	${task['status_code']}	202
+	${task} =	Wait For Task	${task}	10m	1s
+	Should Be Equal As Strings	${task['taskState']}	Error
+	${errorcode} =	Get From Dictionary	${task['taskErrors'][0]}	errorCode
+	Should Be Equal As Strings	${errorcode}	MaxNumberOfLNS	
+	Pass Execution	Finished Replace Duplicate Connection With Unique Connection To Exceed Limit 	
+
+Convert Large Network Set Over 3000 Networks To Regular Network Set
+	Pass Execution	Skip Convert Large Network Set To Regular Network Set
+	${task} =	Convert Network Set Type	LNS_2	Regular
+	Should Be Equal As Integers	${task['status_code']}	400	
+	Should Be Equal As Strings	${task['errorCode']}	CRM_DOMAIN_NETWORK_SET_LIMIT_EXCEEDED	
+	Pass Execution	Finished Convert Large Network Set To Regular Network Set
+	
+Convert Large Network Set With 3 Networks To Regular Network Set
+	Pass Execution	Skip Convert Large Network Set To Regular Network Set
+	${task} =	Convert Network Set Type	${add_connection['networkUri']}	Regular	10m	1s
+	${resp} =	Fvt Api Get Network Set By Name	${add_connection['networkUri']}
+	Should Be Equal As Strings	${resp['networkSetType']}	Regular
+	Pass Execution	Finished Convert Large Network Set To Regular Network Set
+	
+Convert Regular Network Set To Large Network Set Without Exceeding Limit
+	Pass Execution	Skip Convert Regular Network Set To Large Without Execeeding Limit
+	${task} =	Convert Network Set Type	${add_connection['networkUri']}	Large	10m	1s
+	${resp} =	Fvt Api Get Network Set By Name	${add_connection['networkUri']}
+	Should Be Equal As Strings	${resp['networkSetType']}	Large
+	Pass Execution	Finished Convert Regular Network Set To Large Without Execeeding Limit
+
+Convert Regular Network Set To Large To Exceed Limit
+	Pass Execution	Skip Convert Regular Network Set To Large To Execeed Limit
+	${task} =	Convert Network Set Type	RNS_1	Large
+	Should Be Equal As Integers	${task['status_code']}	400
+	Should Be Equal As Strings	${task['errorCode']}	CRM_MAX_LARGE_NETWORK_SET_UPDATE_VIOLATION	
+	${resp} =	Fvt Api Get Network Set By Name	RNS_1
+	Should Be Equal As Strings	${resp['networkSetType']}	Regular
+	Pass Execution	Finished Convert Regular Network Set To Large To Execeed Limit
+
+Stop Profile Ping Process
+	Pass Execution	Skip Stop Profile Ping Process
+	Sleep	5m
+	${profile} =	Get From List	${profiles}	0
+	${handle} =	Get From Dictionary	${profile}	handle
+	Terminate Process	${handle}
+	Process Should Be Stopped	${handle}
+	${ret} =	Grep File	${profile['payload']['name']}.out	Lost = * (0% loss)
+	Run Keyword And Continue On Failure	Should Not Be Empty	${ret}	
+	Remove File	${profile['payload']['name']}.out
+	Pass Execution	Finished Stop Profile Ping Process
+
+Delete Server Profiles
+	Pass Execution	Skip Delete Server Profilea
+	:FOR	${x} 	IN	@{profiles}
+	\	${task}	Fusion Api Delete Server Profile	name=${x['payload']['name']}	param=?force=true	
+	\	Should Be Equal As Integers	${task['status_code']}	202
+	\	Set To Dictionary	${x}	task	${task}	
+	:FOR	${x} 	IN	@{profiles}
+	\	${task} =	Get From Dictionary	${x}	task
+	\	${task} =	Wait For Task	${task} 	120m	1m
+	\	${resp} =	Fvt Api Get Server Profile By Name	${x['payload']['name']}
+	\	Should Be Equal As Strings	${resp}	None
+	Pass Execution	Finished Delete Server Profiles
+	
+Delete LE And EG And LIG
+	Pass Execution	Skip Delete LE And EG And LIG
+	${resp} =	Fusion Api Get Server Profiles
+	Should Be Equal As Integers	${resp['count']}	0 
+	Fvt Delete Logical Enclosure	${les['name']}
+	${resp}	FVT Api Get Logical Enclosure By Name	${les['name']}
+	Should Be Equal As Strings	${resp}	None
+	${resp}	Fvt Api Get Logical Interconnect BY Name	${les['name']}-${lig['name']}
+	Should Be Equal As Strings	${resp}	None
+	FVT Delete Enclosure Group	${enc_group['name']}
+	${resp}	Fvt Api Get Enclosure Group BY Name	${enc_group['name']}
+	Should Be Equal As Strings	${resp}	None	
+	FVT Delete Logical Interconnect Group	${lig['name']}
+	${resp}	Fvt Api Get Logical Interconnect Group BY Name	${lig['name']}
+	Should Be Equal As Strings	${resp}	None
+	Pass Execution	Finished Delete LE And EG And LIG
+
+Delete Network Sets
+	Pass Execution	Skip Delete Network Sets
+	Set Log Level	WARN
+	${resp}	FVT Api Get Logical Enclosure By Name	${les['name']}
+	Should Be Equal As Strings	${resp}	None
+	:FOR	${x}	IN RANGE	1	${large_lns}+${small_lns}+1
+	\	Fusion Api Delete Network Set	name=LNS_${x}
+	:FOR	${x}	IN RANGE	1	${rns}+1
+	\	${task} =	Fusion Api Delete Network Set	name=RNS_${x}
+	\	Should Be Equal As Integers	${task['status_code']}	202
+	\	${task} =	Wait For Task	${task}	1m	1s
+	${resp} =	Fusion Api Get Network Set
+	Should Be Equal As Integers	${resp['count']}	0
+	Pass Execution	Finished Delete Network Sets
+	
+Delete Bulk Ethernet Networks
+	Pass Execution	Skip Create Ethernet Networks
+	${resp}	Fusion Api Get Network Set
+	Should Be Equal As Integers	${resp['count']}	0	
+	:FOR	${i}	IN RANGE	${minVlan}	${maxVlan}+1
+	\	${task}=	Fusion Api Delete Ethernet Network	name=net_${i}
+	:For	${i}	IN RANGE	0	100
+	\	${resp} =	Fusion Api Get Ethernet Networks
+	\	Exit For Loop If	${resp['count']} == 0
+	\	Sleep	1m
+	Should Be Equal As Integers	${resp['count']}	0
+	Pass Execution	Finished Delete Ethernet Networks
+

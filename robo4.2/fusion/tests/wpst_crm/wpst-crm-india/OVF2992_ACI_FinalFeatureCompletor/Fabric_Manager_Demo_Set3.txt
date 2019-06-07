@@ -1,0 +1,132 @@
+*** Settings ***
+Documentation          This set of test cases is to test/verify Fabric Manager-ACI sync up during OV reboot.
+Variables              data_variables4.py
+Resource               ../../../../Resources/api/fusion_api_resource.txt
+Library                Collections
+# APIC Libraries and Resources
+Library                APICOperations.py
+Library                json
+Resource               ACI-Resources.txt
+Resource               ../../../../Resources/api/networking/fabric_manager.txt
+
+Suite Setup            Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+Suite Teardown         Fusion Api Logout Appliance
+
+*** Variables ***
+${APPLIANCE_IP}                  192.168.144.199
+${LIG_Name}                      ${ligs['name']}
+${LI_Name}                       ${logical_encl[0]['name']}-${ligs['name']}
+${US_Missing_NW_VLAN}            ${fm_variables['us_expected_nw_absent'][0]}
+${US_Remove_NW_VLAN}             ${fm_variables['us_unexpected_nw_present'][0]}
+${US_Remove_NW}                  us_unexpected_nw_present_1
+${NS_Missing_NW_VLAN}            ${fm_variables['ns_expected_nw_absent'][0]}
+${FM_NS_Test_EPG_NAME}           FM_NS_Test_EPG_New
+
+*** Test cases ***
+
+Setup: Cleanup
+    [Tags]    FM    Cleanup
+    [Setup]    Set Suite Variable    ${WFT2_CONTINUE_ON_ERROR}    TRUE
+    # Delete all FM Alerts
+    Delete All Fabric Manager Alerts
+    # Remove All OV Resources
+    Delete Fabric Manager    ${fabric_manager_create['name']}
+    Remove All LEs    force=${True}    timeout=1800    interval=10
+    Remove All Enclosure Groups
+    Remove All LIGs
+    Remove All Network Sets
+    Remove All Ethernet Networks
+    Remove All FC Networks
+
+Setup: Add Base Resources
+    [Tags]    Setup1
+    [Setup]
+    Run Keyword If    ${ethernet_networks_present} is not ${null}      Add Ethernet Networks from variable async    ${ethernet_networks_present}
+    Run Keyword If    ${ligs} is not ${null}   Add LIG from variable async   ${ligs}
+    Run Keyword If    ${encl_group} is not ${null}      Add Enclosure Group from variable async    ${encl_group}
+    Run Keyword If    ${logical_encl} is not ${null}      Add Logical Enclosure from lists Async    ${logical_encl}
+
+Setup: Add Fabric Manager
+    [Tags]  FM    Setup2
+    [Setup]
+    # Add Fabric Manager
+    Add Fabric Manager    ${fabric_manager_create}
+    ${resp1}=    Fusion Api Get Fabric Manager    param=?filter="'name'=='${fabric_manager_create['name']}'"
+    Run Keyword If     '${resp1['count']}'=='0'
+    ...    FAIL   msg=Fabric Manager ${fabric_manager_create['name']} Not Created
+    Sleep  30Sec
+
+Setup: Add Tenant to the Fabric Manager
+    [Tags]  FM    Setup3
+    ${fm_uri}=   Get Fabric Manager URI   ${fabric_manager_edit['name']}
+    ${payload}=    Create Fabric Manager Edit Payload    ${fabric_manager_edit}
+    # Edit Fabric Manager to add the Tenant
+    ${resp} =    Fusion Api Edit Fabric Manager    ${payload}   ${fm_uri}
+    Wait For Task2   ${resp}
+
+Test-a OV Restart
+    [Tags]    OV-Restart
+    [Setup]
+    Log To Console And Logfile    Restarting Appliance
+    Fusion Api Appliance Shutdown    REBOOT
+    Sleep  60Sec
+    Wait For Appliance To Become Pingable    ${APPLIANCE_IP}    timeout=10 min	interval=10 s
+
+Test-b APIC Operations While Restart
+    [Tags]    OV-Restart-APIC
+    [Setup]    Get ACI APIC session  ${APIC_URL}  ${APIC_USERNAME}  ${APIC_PASSWORD}
+    Attach staticBinding interface to EPG
+    Sleep  60Sec
+    Attach staticBinding interface virtual portchannel to EPG with existing policy group  ${fm_variables['FM_Edit_Tenant_name']}  RV_AppProfile1  Dynamic_EPG
+    Sleep  60Sec
+    Create Tenant in APIC    ${tenants_details2}
+    Sleep  10Sec
+
+Test-c Verify Sync Up After Restart
+    [Tags]     OV-Restart-Verify
+    [Setup]    Fabric Manager Test Setup    ${fabric_manager_create['name']}     ${fm_variables['FM_Edit_Tenant_name']}
+    Wait For Appliance To Be Ready           appliance=    timeout=60 min	interval=30 s
+    # Verify VPC Missing Uplink Set Inconsistency
+    ${USNW_Inconsistency_list}=    Get Uplink Set Inconsistency List From Compliance Report    ${fm_tenant_uri}    null
+    ${status}    ${remediate_dict}=    Compare Compliance Report Inconsistency Dictionary List   ${USNW_Inconsistency_list}    ${fm_inconsistencies2['Manual_US_Missing_VirtualPortChannel']}
+    Run keyword If    '${status}'=='False'    FAIL    msg= Missing uplink set inconsistency (VPC) does not Exist.
+    ...    ELSE     Log to Console and Logfile    Missing uplink set inconsistency (VPC) is present.
+    ${USNW_Inconsistency_list2}=    Get Uplink Set Inconsistency List From Compliance Report    ${fm_tenant_uri}    null
+    # Verify the Inconsistency List to the Expected inconsistency from datafile
+    ${status2}    ${remediate_dict}=    Compare Compliance Report Inconsistency Dictionary List   ${USNW_Inconsistency_list2}    ${fm_inconsistencies2['Manual_US_Missing_PortGroup']}
+    Run keyword If    '${status2}'=='False'    FAIL    msg= Missing uplink set inconsistency (Access Port Group) does not Exist.
+    ...    ELSE     Log to Console and Logfile    Missing uplink set inconsistency (Access Port Group) is present.
+
+Test-d Add the New Tenant to FM
+    [Setup]
+    [Tags]    FM    OV-Restart-Add-Tenant
+    ${fm_uri}=    Get Fabric Manager URI    ${fabric_manager_create['name']}
+    ${payload}=    Create Fabric Manager Edit Payload    ${fabric_manager_edit2}
+    # Edit FM to add the newly created tenant to FM
+    ${resp} =    Fusion Api Edit Fabric Manager    ${payload}    ${fm_uri}
+    Wait For Task2    ${resp}
+    # Verify tenant added to FM
+    ${tenant_exists}=   Check Tenant Exists in Fabric Manager    ${fm_uri}    ${fm_variables['FM_Edit_Tenant_name2']}
+    Run Keyword If    '${tenant_exists}'!='True'
+    ...    FAIL    msg=Tenant ${fm_variables['FM_Edit_Tenant_name2']} not added to Fabric Manager.
+    ...    ELSE    Log to Console and Logfile    Tenant ${fm_variables['FM_Edit_Tenant_name2']} added to Fabric Manager Successfully.
+
+Test-c APIC Operations Cleanup
+    [Tags]    OV-Restart-APIC-Cleanup
+    [Setup]    Get ACI APIC session  ${APIC_URL}  ${APIC_USERNAME}  ${APIC_PASSWORD}
+    Remove staticBinding interface from EPG
+    Sleep  10Sec
+    Remove staticBinding interface virtual portchannel to EPG with existing policy group      ${fm_variables['FM_Edit_Tenant_name']}  RV_AppProfile1  Dynamic_EPG
+    Sleep  60Sec
+    Delete Tenant in APIC    ${tenants_details2}
+    Sleep  10Sec
+
+*** Keywords ***
+
+Fabric Manager Test Setup
+    [Documentation]  Gets the FM and Tenant URIs from the given names and sets them as Suite Variables.
+    [Arguments]    ${fm_name}    ${tenant_name}
+    ${fm_uri}=    Get Fabric Manager URI    ${fm_name}
+    ${fm_tenant_uri}=    Get Fabric Manager Tenant URI    ${fm_uri}    ${tenant_name}
+    Set Suite Variable    ${fm_uri}
+    Set Suite Variable    ${fm_tenant_uri}

@@ -1,0 +1,309 @@
+*** Settings ***
+Library				RoboGalaxyLibrary
+Library				FusionLibrary
+Library				OperatingSystem
+Library				BuiltIn
+Library				Collections
+Library				XML
+Library		        SSHLibrary
+Library				String
+Library				Dialogs
+Resource             ./../../../../Resources/api/fusion_api_resource.txt
+
+*** Keywords ***
+
+
+Login And Clear Test Environtment
+    [Arguments]    ${APPLIANCE_IP}    ${admin_credentials}
+    [Documentation]    Login And Clear Test Environtment
+    Should Not Be Equal    ${APPLIANCE_IP}    ${None}    msg=The appliance IP must be defined, Example:'APPLIANCE_IP:16.114.218.154'
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    Log To Console    \nPower Off Servers and remove all profiles
+    Power off ALL servers    PressAndHold
+    Wait For All Servers Complete Refresh
+    Remove All Server Profiles
+
+
+Validate Server Profile Applied Successfully
+    [Arguments]    ${resps}
+    [Documentation]    Validate Server Profile Applied Successfully
+    :FOR    ${resp}    IN    @{resps}
+    \    log to console   resp_is_${resp}
+    \    ${task} =    Wait For Task    ${resp}    20min    5s
+    \    ${taskState} =    Get From Dictionary    ${task}    taskState
+    \    Should Match    ${taskState}    Completed
+    \    ${taskUri} =    Get From Dictionary    ${task}    uri
+    \    ${result} =    Validate Successfully Applied Server Settings For Profile     ${taskUri}
+    \    Should Be True    ${result}
+
+
+Validate Successfully Applied Server Settings For Profile
+    [Arguments]    ${taskUri}
+    [Documentation]    Validate Successfully Applied Server Settings For Profile
+    ${task} =    Get Task By Param    param=?filter='parentTaskUri'='${taskUri}'&sort=created:descending&count=1
+    ${status} =    Get From Dictionary    ${task}    taskStatus
+    Log To Console    Create_Server_Profile_Task_Status_is:_${status}
+    @{status_list} =    Split String    ${status}    :
+    ${result_string} =    Get From List    ${status_list}    0
+    ${profile_name} =    Get From List    ${status_list}    1
+    Run Keyword If      '${result_string}'!='Successfully applied server settings for profile '
+    ...                  FAIL   Profile failed to apply to server
+    [Return]    True
+
+
+Validate Server Profile Primary Connection And Volume Boot Status
+    [Arguments]    ${createProfile}    ${sub_section}    ${expected_info}    ${volumeCheckFlag}=${True}
+    [Documentation]    Validate Server Profile Primary Connection And Volume Boot Status
+    :FOR    ${profile}    IN    @{createProfile}
+    \       log to console   sp_name_is_${profile['name']}
+    \       ${server_profile_uri} =    Get Server Profile URI    ${profile['name']}
+    \       Log To Console    Server_Profile_URI_is_:_${server_profile_uri}
+    \       ${primary_connection_id} =    Expected Server Profile Primary Connection Id    ${profile['connections']}
+    \       Log To Console     primary_connecetion_id_is_${primary_connection_id}
+    \       ${result} =    Validate Server Profile Connection Detail Info     True    ${serverprofileUri}    ${sub_section}    ${primary_connection_id}    ${expected_info}
+    \       Should Be True    ${result}
+    \       ${boot_volume_id} =    Run Keyword And Return If    ${volumeCheckFlag}    Expected Server Profile Boot Volume Id    ${profile['sanStorage']['volumeAttachments']}
+    \       Run Keyword And Return If    ${volumeCheckFlag}    Validate Server Profile San Storage Boot Volume Boot Status    ${server_profile_uri}    ${boot_volume_id}
+    [Return]    True
+
+
+
+Validate Server Profile Connections Bandwidth Applied
+    [Arguments]    ${createProfile}
+    [Documentation]    Validate Server Profile New Connections Bandwidth Applied
+    :FOR    ${profile}    IN    @{createProfile}
+    \       ${server_profile_uri} =    Get Server Profile URI    ${profile['name']}
+    \       ${connections_list} =    Get From Dictionary    ${profile}    connections
+    \       Log To Console    Server_Profile_URI_is_:_${server_profile_uri}
+    \       ${result} =    Validate Server Profile Connections Bandwidth As Expected    ${server_profile_uri}    ${connections_list}
+    \       Should Be True    ${result}
+    [Return]    True
+
+
+Validate Server Profile Connections Bandwidth As Expected
+    [Arguments]    ${serverprofileUri}    ${expected_connections_list}
+    [Documentation]    Validate Connection Bandwidth As Expected in Created Profile
+    ${resp} = 	Fusion Api Get Server Profiles		uri=${serverprofileUri}
+    ${connection_dict} =    Get From Dictionary    ${resp}     connections
+    :FOR    ${connection}   IN    @{connection_dict}
+    \       ${id} =    Get From Dictionary    ${connection}    id
+    \       Log To Console    Current_Connection_ID_is: ${id}
+    \       ${requestedMbps} =    Get From Dictionary    ${connection}     requestedMbps
+    \       Log To Console    The_connection_requestedMbps_is_:_${requestedMbps}
+    \       ${expected_connection} =    Get From List    ${expected_connections_list}    ${id-1}
+    \       Return From Keyword If     '${requestedMbps}'!='${expected_connection['requestedMbps']}'     FAIL_Connection_requestedMbps_is_not_set_as_required
+    [Return]    True
+
+
+Delete Server Profile And Validate The Deletion
+    [Arguments]    ${createProfile}    ${forceFlag}=${False}
+    [Documentation]    Delete Server Profile And Validate The Deletion
+    :FOR    ${profile}    IN    @{createProfile}
+    \       ${resp} =     Remove Server Profile    ${profile}    ${forceFlag}
+    \       ${task} =    Wait For Task    ${resp}    10min    5s
+    \       ${task_state} =    Get From Dictionary    ${task}    taskState
+    \       ${status}  ${return} =    Run Keyword and Ignore Error    Get From Dictionary  ${task}    taskErrors
+    \       ${task_error} =    Set Variable If  '${status}'=='PASS'  ${return}  task state [${task_state}] is not warning or completed
+    \       Should Match Regexp    ${task_state}    ((?i)Warning|Completed)    msg=${task_error}
+    \       ${resp} =    Fusion Api Get Server Profiles    param=?filter="'name'=='${profile['name']}'"
+    \       Return From Keyword If    '${resp['count']}' == '0'    PASS
+    [Return]    Failed to Server Profile Validate Deletion
+
+
+Validate Server Profile Creation Or Edit Failed As Expected
+    [Arguments]    ${resps}    ${action_type}    ${error_type}
+    [Documentation]    Validate Server Profile Creation Failed As Expected
+    :FOR    ${resp}    IN    @{resps}
+    \    ${task} =    Wait For Task     ${resp}    20min    5s
+    \    ${taskStatus} =    Get From Dictionary    ${task}    taskStatus
+    \    ${taskState} =    Get From Dictionary    ${task}    taskState
+    \    ${taskErrors} =    Get From Dictionary    ${task}    taskErrors
+    \    Log To Console    Get_Task_Status_Is:_${taskStatus}
+    \    Log To Console    Get_Task_State_Is:_${taskState}
+    \    Should Match    ${taskState}    Error
+    \    ${results_info} =    Split String    ${taskStatus}    :
+    \    ${result_string} =    Get From List    ${results_info}    0
+    \    Run Keyword If    '${result_string}'!='Unable to ${action_type} server profile'
+    \    ...                FAIL    Invaild rest api action failed for other reason
+    \    ${result} =    Validate Unable To Create Profile For Special Reason    ${taskErrors}    ${error_type}
+    \    Should Be True    ${result}
+
+
+Validate Unable To Create Profile For Special Reason
+    [Arguments]    ${errors}    ${error_msg}
+    [Documentation]    Validate Unable To Create Profile For Special Reason
+    :For   ${error}     IN    @{errors}
+    \    ${errorCode} =    Get From Dictionary    ${error}    errorCode
+    \    Log To Console    Error_Code_Is:_${errorCode}
+    \    Run Keyword If    '${errorCode}'!='${error_msg}'
+    \    ...                FAIL    Test failed not because of ${error_msg}
+    [Return]    True
+
+
+Validate Server Profile Connection Detail Info
+    [Arguments]    ${primary_flag}    ${serverprofileUri}    ${sub_section}    ${primary_connection_id}    ${expected_info}
+    [Documentation]    Validate Connection Detail Info in Created Profile
+    log to console   primaru_flag_is_${primary_flag}
+    log to console   server_profile__is_${serverprofileUri}
+    log to console   sub_section_is_${sub_section}
+    log to console   primary_connection_id_is_${primary_connection_id}
+    log to console   expected_info_is_${expected_info}
+    ${resp} = 	Fusion Api Get Server Profiles		uri=${serverprofileUri}
+    ${connection_dict} =    Get From Dictionary    ${resp}     connections
+    :FOR    ${connection}   IN    @{connection_dict}
+    \       ${id} =    Get From Dictionary    ${connection}    id
+    \       Log To Console    Current_Connection_ID_is:_${id}
+    \       Run Keyword If    '${primary_flag}'=='True'    Continue For Loop If    '${id}' != '${primary_connection_id}'
+    \       ${boot_info} =    Get From Dictionary    ${connection}     boot
+    \       ${detail_info} =    Get From Dictionary    ${boot_info}     ${sub_section}
+    \       Log To Console    The_Actual_Connection_Detail_Info_Is_:_${detail_info}
+    \       Return From Keyword If     '${detail_info}'!='${expected_info}'     FAIL_Get_Different_Connection_Detail_Info
+    [Return]    True
+
+
+Expected Server Profile Primary Connection Id
+    [Arguments]    ${connection_section}
+    [Documentation]    Get Expected Primary Connection Id From Input File
+    :FOR    ${expected_connection}    IN    @{connection_section}
+    \       ${boot} =    Get From Dictionary    ${expected_connection}    boot
+    \       log to console     expected_info_list_is_@{connection_section}
+    \       ${priority} =    Get From Dictionary    ${boot}    priority
+    \       log to console   priority_is_${priority}
+    \       Continue For Loop If    '${priority}' != 'Primary'
+    \       ${connection_id} =    Get From Dictionary    ${expected_connection}    id
+    \       Log To Console     expected_connection_id_is_${connection_id}
+    [Return]  ${connection_id}
+
+
+Expected Server Profile Boot Volume Id
+    [Arguments]    ${volumeAttachments_section}
+    [Documentation]    Get Expected Boot Volume Id From Input File
+    :FOR    ${expected_storage}    IN    @{volumeAttachments_section}
+    \       ${boot_status} =    Get From Dictionary    ${expected_storage}    isBootVolume
+    \       ${boot_string} =    Convert To String    ${boot_status}
+    \       Log To Console    boot_string_is_${boot_string}
+    \       Continue For Loop If    '${boot_string}' != 'True'
+    \       ${boot_id} =    Get From Dictionary    ${expected_storage}    id
+    \       Log To Console     expected_boot_volume_id_is_${boot_id}
+    [Return]  ${boot_id}
+
+
+Validate Server Profile San Storage Boot Volume Boot Status
+    [Arguments]    ${serverprofileUri}    ${boot_id}
+    [Documentation]    Validate Volume Info in Created Profile
+    ${resp} = 	Fusion Api Get Server Profiles		uri=${serverprofileUri}
+    ${sanstorage_dict} =    Get From Dictionary    ${resp}     sanStorage
+    ${volumes_list} =    Get From Dictionary    ${sanstorage_dict}     volumeAttachments
+    :FOR    ${volume}    IN    @{volumes_list}
+    \       ${id} =    Get From Dictionary    ${volume}    id
+    \       Log To Console    Current_Volume_ID_is:_${id}
+    \       Continue For Loop If    '${id}' != '${boot_id}'
+    \       ${boot_status} =    Get From Dictionary    ${volume}    isBootVolume
+    \       Log To Console    The_Primary_Volume_Boot_Status_is_:_${boot_status}
+    \       Return From Keyword If     '${boot_status}' != 'True'    FAIL_Boot_status_is_False
+    [Return]    True
+
+
+Server Profile Special Section Check After Created Or Edited
+    [Arguments]    ${resp}    ${check_section}    ${expected_info}
+    [Documentation]    Check Server Profile Special Section Info
+    ${taskState} =    Get From Dictionary    ${resp}    taskState
+    ${taskStatus} =    Get From Dictionary    ${resp}    taskStatus
+    ${ass_resource} =    Get From Dictionary    ${resp}    associatedResource
+    ${sp_name} =    Get From Dictionary    ${ass_resource}    resourceName
+    ${sp_uri} =    Get From Dictionary    ${ass_resource}    resourceUri
+    log to console    taskstatus_is_:${taskStatus}
+    log to console    sp_uri_is:${sp_uri}
+    Should Match    ${taskState}    Completed
+    Run Keyword If    '${taskStatus}' == 'Edited server profile: ${sp_name}.' or '${taskStatus}' == 'Successfully applied server settings for profile : ${sp_name}.'    Validate Server Profile Section Info    ${sp_uri}    ${check_section}    ${expected_info}
+
+
+Validate Server Profile Section Info
+    [Arguments]    ${uri}    ${check_section}    ${expected_info}
+    [Documentation]    Validate Server Profile Special Section Info
+    log to console  uri_is_${uri}Validate Server Profile Connections Bandwidth
+    log to console  cehck_section_is_${check_section}
+    log to console  expected_info_is_${expected_info}
+    ${resp} = 	Fusion Api Get Server Profiles		uri=${uri}
+
+    ${get_section} =    Run Keyword If    '${check_section}' == 'lunType' or '${check_section}' == 'isBootVolume'   Get From Dictionary    ${resp}    sanStorage
+    ...                 ELSE IF           '${check_section}' == 'mode'    Get From Dictionary    ${resp}    bootMode
+    ...                 ELSE IF           '${check_section}' == 'portId' or '${check_section}' == 'name'    Get From Dictionary    ${resp}    connections
+    ...                 ELSE               Get From Dictionary    ${resp}     ${check_section}
+    ${vol_list} =    Run Keyword If    '${check_section}' == 'sanStorage' or '${check_section}' == 'lunType' or '${check_section}' == 'isBootVolume'   Get From Dictionary    ${get_section}    volumeAttachments
+    Run Keyword If    '${check_section}' == 'sanStorage' or '${check_section}' == 'lunType'    Log To Console      vol_list_is:${vol_list}
+
+    ${check_info} =    Run Keyword If    '${check_section}' == 'sanStorage'    Get Length    ${vol_list}
+    ...                ELSE IF    '${check_section}' == 'connections'    Get Length    ${get_section}
+    ...                ELSE IF    '${check_section}' == 'mode'    Get From Dictionary    ${get_section}    mode
+    ...                ELSE IF    '${check_section}' == 'lunType' or '${check_section}' == 'isBootVolume'    Get The Volume Info    ${vol_list}    ${check_section}
+    ...                ELSE IF    '${check_section}' == 'portId' or '${check_section}' == 'name'    Get The Connections Info    ${get_section}    ${check_section}
+    ${check_string} =    Convert To String    ${check_info}
+    Log To Console    check_info_is:${check_info}
+    Log To Console    check_section_is:${check_section}
+    Run Keyword If    '${check_section}' == 'portId' or '${check_section}' == 'name'     Lists Should Be Equal     ${check_info}   ${expected_info}
+    ...                ELSE    Should Be Equal    ${check_string}    ${expected_info}
+
+
+Get Server Profile Boot Volume Uri Or Check Other Info
+    [Arguments]    ${uri}    ${check_section}    ${expected_info}    ${boot_flag}=${True}
+    [Documentation]    Validate Server Profile Info
+    ${resp} = 	Fusion Api Get Server Profiles		uri=${uri}
+    log to console    fusion_api_get_server_profiles_api_is_${resp}
+    ${check_list} =    Run Keyword If    '${check_section}' == 'volumeUri'    Get From Dictionary    ${resp}    sanStorage
+    ...                ELSE    Get From Dictionary    ${resp}     ${check_section}
+    ${vol_list} =    Run Keyword If    '${check_section}' == 'sanStorage' or '${check_section}' == 'volumeUri'    Get From Dictionary    ${check_list}    volumeAttachments
+    Run Keyword If    '${check_section}' == 'sanStorage' or '${check_section}' == 'volumeUri'    log to console      vol_list_is:${vol_list}
+    ${check_info} =   Get The Volume Info    ${vol_list}    ${check_section}    ${boot_flag}
+    ${check_string} =    Convert To String    ${check_info}
+    Run Keyword If    ${expected_info}    Should Be Equal    ${check_string}    ${expected_info}
+    [Return]  ${check_string}
+
+
+Validate Server Profile Volume Info
+    [Arguments]    ${uri}    ${check_section}    ${expected_info}
+    [Documentation]    Validate Server Profile Volume Info
+    ${resp} = 	Fusion Api Get Storage Volumes		uri=${uri}
+    ${check_info} =     Get From Dictionary    ${resp}    ${check_section}
+    ${check_string} =    Convert To String    ${check_info}
+    Should Be Equal    ${check_string}    ${expected_info}
+
+
+Get The Connections Info
+    [Arguments]    ${connection_list}    ${check_section}
+    [Documentation]    Get The Connections check section info
+    ${check_list} =    Create List
+    :FOR    ${connection_info}    IN    @{connection_list}
+    \       ${check_info} =    Get From Dictionary    ${connection_info}     ${check_section}
+    \       Append To List    ${check_list}    ${check_info}
+    [Return]     ${check_list}
+
+
+Get The Volume Info
+    [Arguments]    ${vol_list}    ${check_section}    ${boot_flag}=${True}
+    [Documentation]    Get The Boot/Non Boot Volume check section info
+    :FOR    ${vol_info}    IN    @{vol_list}
+    \       ${boot_status} =    Get From Dictionary    ${vol_info}     isBootVolume
+    \       ${status_string} =    Convert To String    ${boot_status}
+    \       Run Keyword If    ${boot_flag}    Continue For Loop If     '${status_string}' == 'False'
+    \       Run Keyword Unless    ${boot_flag}    Continue For Loop If     '${status_string}' == 'True'
+    \       ${check_info} =    Get From Dictionary    ${vol_info}     ${check_section}
+    [Return]     ${check_info}
+
+
+Get Volume Payload
+    [Arguments]    ${uri}
+    [Documentation]    Get Volume payload
+    ${resp} = 	Fusion Api Get Storage Volumes		uri=${uri}
+    [Return]     ${resp}
+
+
+Update Volume With Payload
+    [Arguments]    ${payload}    ${value}    ${update_info}    ${uri}
+    [Documentation]    Update Volume with updated payload
+    ${body} =    Convert To Dictionary    ${payload}
+    Set To Dictionary    ${body}     ${value}    ${update_info}
+    ${new_size} =    get from dictionary  ${body}    ${value}
+    log to console   new_size_in_dic_is_${new_size}
+    ${resp} = 	Fusion Api Update Storage Volume 	body=${body}    uri=${uri}
+    [Return]    ${resp}

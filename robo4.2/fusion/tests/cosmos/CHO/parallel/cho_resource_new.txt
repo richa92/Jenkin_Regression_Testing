@@ -1,0 +1,168 @@
+*** Settings ***
+Documentation		Configures an appliance with resources found in supplied data file. Pass in specific tags with pybot -i <tag(s)> to limit processing
+Library                         FusionLibrary
+Library           				AltairLibrary
+Library                         RoboGalaxyLibrary
+Library                         OperatingSystem
+Library                         BuiltIn
+Library                         Collections
+Library                         XML
+Library                         String
+Library                         json
+Library							DateTime
+Library							Dialogs
+Library           				SSHLibrary
+
+
+Resource						../../../../Resources/api/fusion_api_resource.txt
+
+Variables 		    			cho_data.py
+#Variables 		    			../cho_prerequisites_data.py
+
+*** Variables ***
+${X-API-VERSION}			    300
+${APPLIANCE_IP}     			10.38.1.15
+${VERIFY}                      	${TRUE}
+${ALTAIR_IP}     				10.38.11.4
+${ALTAIR_USERNAME}				Administrator
+${ALTAIR_PASSWORD}				Cosmos123
+${DATAFILE}                     C:\\RGWorkSpace\\altair\\tests\\altair\\CHO\\cho_data.xml
+${USERNAME}						root    
+${PASSWORD}						ChangeMe123!
+
+
+*** Keywords ***
+
+Login And Load Test Data
+	Fusion Api Login Appliance  ${appliance_ip}     ${admin_credentials}
+	Altair API Login Appliance	${ALTAIR_IP}	${ALTAIR_USERNAME}	${ALTAIR_PASSWORD}
+	Load Test Data 	${DATAFILE}
+
+
+Logout Appliance
+	Fusion Api Logout Appliance
+	Altair Api Logout Appliance
+
+
+Add Server using ILO
+	[Documentation]	Add server to Altair using ILO
+	[Arguments]		${server_profile}	 ${ILOIP}	${ILOUsername}		${ILOPassword}
+	${checkServer}=		Check Server in Altair		${server_profile}	${ILOIP}
+	#Run Keyword If	${checkServer}		Pause Execution    message=Server with ILO IP - ${ILOIP} is already present in Altair. Press OK to continue
+	Run Keyword If	${checkServer}		Fail	Server with ILO IP - ${ILOIP} is already present in Altair
+	${response}		${jobUri}=	Altair Api Add Server	${ILOUsername}	${ILOPassword}	${ILOIP}
+	${status}=		Get From Dictionary		${response}		status
+	[Return]	${status}	${jobUri}
+
+
+Wait For Task And Verify
+	[Documentation]	Wait for the task to complete (fail or pass)
+	[Arguments]		${jobid}	${timeout}
+	${response}=	Altair API Wait For Task	${jobid}	${timeout}	
+	${jobStatus}=		Get From Dictionary		${response}		status
+	${jobState}=		Get From Dictionary		${Response}		state
+	[Return]	${jobStatus}	${jobState}
+
+
+Check Server in Altair
+	[Documentation]	Check if Server with a given Enclosure name and bay num is present in Altair 
+	[Arguments]		${server_profile}	${ILOIP}
+	
+	${serialNum}=	Get Server Virtual Serial Number from Profile	${server_profile}
+	${status}	${response}=	Run Keyword And Ignore Error	Altair Api Get Server Info
+	#Run Keyword If	'${status}'=='FAIL'		Pause Execution    message=Altair API Get Server Info keyword has failed for server with ILO IP ${ILOIP}. Press OK to continue
+	Run Keyword If	'${status}'=='FAIL'		Fail	Altair API Get Server Info keyword has failed for server with ILO IP ${ILOIP}
+	
+	${members}=		Get From Dictionary		${response}		members
+	Return from keyword if	${response['count']}==0		${False}
+	
+	:FOR  ${server}  in  @{members}
+	\	${serverSerialNum}=	Get From Dictionary		${server}	serialNumber
+	\	Exit For Loop if	'${serverSerialNum}'=='${serialNum}'
+	Return From keyword if	'${serverSerialNum}'=='${serialNum}'		${True}
+	...					ELSE	${False}
+	[Return]	
+
+
+Get Server Virtual Serial Number from Profile
+	[Documentation]	Get the Virtual Serial Number from Server Profile 
+	[Arguments]		${server_profile}
+	${profileName}=		Get From Dictionary		${server_profile}	name
+	${resp} = 	Fusion Api Get Server Profiles		param=?filter="'name'=='${profileName}'"
+	
+	${members}=		Get From Dictionary		${resp}		members
+	Run Keyword If	${resp['count']}==0		Fail	No Profiles with Name ${profileName} is returned from Get Server Profile Info keyword.
+	
+	${status}	${serialNumber} = 	Run Keyword And Ignore Error	Get From Dictionary		${resp['members'][0]}	serialNumber
+	#Run Keyword If	'${status}'=='FAIL' and '${serialNumber}'=='${null}'	Pause Execution		message=Failed to get Serial Number from Server Profile with name ${profileName}. Press OK to continue
+	Run Keyword If	'${status}'=='FAIL' and '${serialNumber}'=='${null}'	Fail	  Failed to get Serial Number from Server Profile with name ${profileName}
+	[Return]	${serialNumber}	
+
+
+Get Server Management IP using Serial Number
+	[Documentation]	Get Management IP of server present in Altair using its serial number 
+	[Arguments]		${server_profile}	${Enclosure}	${Bay}
+	
+	${serialNum}=	Get Server Virtual Serial Number from Profile	${server_profile}
+	${status}	${response}=	Run Keyword And Ignore Error	Altair Api Get Server Info
+	#Run Keyword If	'${status}'=='FAIL'		Pause Execution    message=Altair API Get Server Info keyword has failed for server in Enclosure ${Enclosure} and bay ${bay}. Press OK to continue
+	Run Keyword If	'${status}'=='FAIL'		Fail	Altair API Get Server Info keyword has failed for server in Enclosure ${Enclosure} and bay ${bay}
+	
+	${members}=		Get From Dictionary		${response}		members
+	#Run keyword if	${response['count']}==0		Pause Execution    message=No Members are returned from Altair API Get Server Info keyword. Press OK to continue
+	Run Keyword If	${response['count']}==0		Fail	No Members are returned from Altair API Get Server Info keyword.
+	
+	:FOR  ${server}  in  @{members}
+	\	${serverSerialNum}=	Get From Dictionary		${server}	serialNumber
+	\	${ipv4addr}=		Run Keyword If		'${serverSerialNum}'=='${serialNum}'	Get From Dictionary		${server}	managementIP
+	\	Exit For Loop If	'${serverSerialNum}'=='${serialNum}'
+	#Run Keyword If	'${ipv4addr}'=='${null}'	Pause Execution		message=Failed to get Management IP for Server with Serial Number ${serialNum}. Press OK to continue
+	Run Keyword If	'${ipv4addr}'=='${null}'	Fail	Failed to get Management IP for Server with Serial Number ${serialNum}
+	[Return]	${ipv4addr}
+
+
+Run OSBP
+	[Documentation]	Execute OS Build Plan on the server already present in Altair 
+	[Arguments]		${server_profile}	${OSBP}		${Enclosure}	${Bay}
+	${serialNum}=	Get Server Virtual Serial Number from Profile	${server_profile}
+	
+	${serverStatus}		${serverUri}=	Run Keyword And Ignore Error	Altair API Get Server Uri	${serialNum}
+	#Run Keyword If	'${serverStatus}'=='FAIL' and '${serverUri}'=='Server URI not found'	Pause Execution		message=Failed to get Server uri. OSBP will not be installed on server in ${Enclosure} ${Bay}. Press OK to continue
+	Run Keyword If	'${serverStatus}'=='FAIL' and '${serverUri}'=='Server URI not found'	Fail	  Failed to get Server uri. OSBP will not be installed on server in ${Enclosure} ${Bay}.	
+	
+	${osbpStatus}		${osbpUri}=		Run Keyword And Ignore Error	Altair API Get OSBP Uri		${OSBP}
+	#Run Keyword If	'${osbpStatus}'=='FAIL' 	Pause Execution		message=Failed to get OSBP uri. OSBP will not be installed on server in ${Enclosure} ${Bay}. Press OK to continue
+	Run Keyword If	'${osbpStatus}'=='FAIL' 	Fail	  Failed to get OSBP uri. OSBP will not be installed on server in ${Enclosure} ${Bay}.
+	
+	${response}		${jobUri}=	Altair API Run OS Buildplan		${serverUri}	${osbpUri}
+	${jobStatus}	${jobState}=	Wait For Task And Verify	${jobUri}	7200
+	[Return]	${jobStatus}	${jobState}
+
+
+Delete Server From Altair
+	[Documentation]	Delete Server from Altair 
+	[Arguments]		${server_profile}	${enclosureName}	${bayNumber}
+	${serialNum}=	Get Server Virtual Serial Number from Profile	${server_profile}
+		
+	${serverStatus}		${serverUri}=	Run Keyword And Ignore Error	Altair API Get Server Uri	${serialNum}
+	#Run Keyword If	'${serverStatus}'=='FAIL' and '${serverUri}'=='Server URI not found'	Pause Execution		message=Failed to get Server uri. Server in ${enclosureName} ${bayNumber} will not be deleted from Altair. Press OK to continue
+	Run Keyword If	'${serverStatus}'=='FAIL' and '${serverUri}'=='Server URI not found'	Fail	  Failed to get Server uri. Server in ${enclosureName} ${bayNumber} will not be deleted from Altair
+	
+	${response}=	Altair Api Delete Server	${serverUri}
+	[Return]	${response}
+
+
+Power Off Server if On
+	[Documentation]		Power Off the T-Bird server if On 
+    [Arguments]		${server_profile}		${pause}=${True}
+    ${server_hardware}=		Get From Dictionary		${server_profile}		serverHardwareUri 
+    #${server_hardware}=		replace string using regexp  ${server_hardware}  SH:  ${EMPTY}
+    
+    ${server_powerstate}=	Get Server Power	${server_hardware}
+    Return From keyword if		'${server_powerstate}'=='Off'		${True}	
+    #Run Keyword If	'${pause}'=='${True}'	Pause Execution		message=${server_hardware} - is On. Press OK to continue. Server will now Power Off
+    
+    ${powerStatus}=		Run Keyword And Return Status	Power off Server	${server_hardware}
+    #Run Keyword If		'${powerStatus}'=='False'	Pause Execution    message=Failed to power Off the server - ${server_hardware}. Press OK to continue
+	Run Keyword If		'${powerStatus}'=='False'	Fail 	Failed to power Off the server- ${server_hardware}
+	[Return]

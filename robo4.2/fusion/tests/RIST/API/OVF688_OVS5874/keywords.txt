@@ -1,0 +1,78 @@
+*** Settings ***
+Library    RoboGalaxyLibrary
+Library    FusionLibrary
+Library    OperatingSystem
+Library    BuiltIn
+Library    Collections
+Library    XML
+Library    SSHLibrary
+Library    String
+Library    Dialogs
+Resource    ../../../../Resources/api/fusion_api_resource.txt
+Resource    ../global_variables.robot
+Variables    ${DATA_FILE}
+
+*** Keywords ***
+Generate Certificate Chain Payload
+    [Documentation]    Gnerate certificate payload
+    [Arguments]    ${HOST}    ${payload}    ${ROOT_CRT}    ${aliasname}=${None}
+    Log    Generate certificate payload    console=true
+    ${cert} =    Fusion Api Get Remote Certificate     ${HOST}
+    ${body} =    Copy Dictionary    ${payload}
+    Set To Dictionary    ${body['certificateDetails'][0]}   base64Data    ${ROOT_CRT}
+    set to dictionary     ${body['certificateDetails'][0]}   aliasName    ${aliasname}
+    set to dictionary    ${body['certificateDetails'][1]}   base64Data    ${cert['certificateDetails'][0]['base64Data']}
+    [Return]    ${body}
+
+Generate Certificate Payload
+    [Documentation]   Generate Certificate Payload
+    [Arguments]       ${HOST}  ${payload}  ${aliasname}=${None}
+    ${cert} =    Fusion Api Get Remote Certificate     ${HOST}
+    ${body} =    Copy Dictionary    ${payload}
+    Set To Dictionary    ${body['certificateDetails'][0]}    base64Data    ${cert['certificateDetails'][0]['base64Data']}
+    Run Keyword If  '${aliasname}' != '${None}'   set to dictionary    ${body['certificateDetails'][0]}  aliasName   ${aliasname}
+    [Return]    ${body}
+
+Verify Leaf Certificate Exist By Aliasname
+    [Documentation]  Verify if leaf certificate is existed by GET /rest/certifciates/servers/aliasname
+    [Arguments]      ${aliasname}   ${expected}=${True}
+    ${resp} =  Fusion Api Get Server Certificate  ${aliasname}
+    Run Keyword If  ${expected} == ${True}      should be equal as integers   ${resp['status_code']}  200   msg="${aliasname} does not exist"
+    Run Keyword If  ${expected}!=${True}   should not be equal as integers ${resp['status_code']}  200   msg="${aliasname} was already existd"
+    Log   certificate is existed:${expected}    console=True
+
+Verify Server Certificate Exist In Leafcertbks
+    [Documentation]  Verify remote server certificate is in all-certificates.bks
+    [Arguments]     ${HOST}  ${expected}=${True}
+    ${resp} =   Fusion Api Get Remote Certificate  ${HOST}
+    ${command}=    set variable   ${CMD} ${resp['certificateDetails'][0]['sha256Fingerprint']}
+    ${output}=    Execute SSH Command    ${command}
+    Run Keyword If  ${expected} != ${True}     should be equal   ${output[0]}    0    msg= "Remote server certificate exists in all-certificates.bks"
+    Run Keyword If  ${expected} == ${True}     should be equal   ${output[0]}    1    msg= "Remote server certificate does not exists in all-certificates.bks"
+    Log  ${HOST} certificate exists in all-certificates.bks:${expected}    console=True
+
+Verify Server Certificate Trust Status
+     [Documentation]  Verify remote server certificate trust status as expected, True or False
+     [Arguments]     ${HOST}  ${expected}
+     ${resp} =   Fusion Api Get Remote Certificate  ${HOST}
+     Log     ${resp}
+     should be equal as strings    ${resp['certificateStatus']['trusted']}    ${expected}
+     Log  ${HOST} trust status is ${expected}    console=True
+
+Clear env
+    [Documentation]   Clear up env certificate
+    [Arguments]      ${cert_type}  ${aliasname}
+    ${resp}=      Run Keyword If   '${cert_type}' == 'server'  Fusion Api Delete Server Certificate  ${aliasname}
+    ...           ELSE     fusion api remove external ca certificates   ${aliasname}
+    Run Keyword And Ignore Error     Wait For Task2  ${resp}      300     10
+
+Start remote SSL Server
+    [Documentation]   Trigger remote Light Weight Server
+    [Arguments]      ${Host_Port_combo}    ${cmd1}=${START_SERVER1}    ${cmd2}=${START_SERVER2}
+    @{IP}=    split String    ${Host_Port_combo}    :
+    ${status}    ${resp}=    Run Keyword And Ignore Error    Open Connection    ${IP[0]}
+    Run Keyword If    '${status}'=='FAIL'        Fail    Failed to Open SSH Connection to the server with IP ${IP[0]}
+    ${newstatus}    ${resp}=    Run Keyword And Ignore Error    Login    ${FUSION_SSH_USERNAME}    ${FUSION_SSH_PASSWORD}
+    Run Keyword If    '${newstatus}'=='FAIL'        Fail    Failed to do SSH Login to the server with IP ${IP[0]}
+    ${command}=    set variable   ${cmd1} ${IP[1]} ${cmd2}
+    Start Command    ${command}

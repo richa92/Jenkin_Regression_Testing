@@ -1,0 +1,1617 @@
+*** Settings ***
+Documentation     F223-LIG_LI Compliance Reporting:Multi_Compliance
+Library         OperatingSystem
+Library         FusionLibrary
+Library         RoboGalaxyLibrary
+Library         Collections
+Library         Telnet
+Library         SSHLibrary
+Library         C7k_data_variables
+Variables       C7k_data_variables.py
+Resource        ../../../resource/fusion_api_all_resource_files.txt
+Library         String
+Variables       Expected_messages.py
+Library         Multialert.py
+
+*** Variables ***
+${APPLIANCE_IP}    15.212.136.137
+
+*** Test Cases ***
+Initial Setup
+    [Documentation]    Initial Setup
+    Set Log Level    TRACE
+    ${Login_resp}    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    Run keyword unless  ${Login_resp[0]['status_code']}== 200   Fail    "Unable to Login"
+
+    Remove All Enclosures
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove All Network Sets
+    Remove ALL Ethernet Networks
+    Remove ALL FC Networks
+    Remove ALL FCoE Networks
+
+    :For    ${Enet}    IN    @{Ethernet}
+    \    ${Enet1_resp}    Fusion Api Create Ethernet Network    ${Enet}
+    \    Run keyword unless    ${Enet1_resp['status_code']}== 202    Fail    "Unable to Create Ethernet network"
+
+    :For    ${Fcnet}    IN    @{FcNet}
+    \    ${Fcnet_resp}    Fusion Api Create Fc Network    ${Fcnet}
+    \    Run keyword unless ${Fcnet_resp['status_code']}== 202  Fail    "Unable to Create Fc network"
+
+    :For    ${Fcoe_net}    IN    @{FcoeNet}
+    \    ${Fcoenet_resp}    Fusion Api Create Fcoe Network    ${Fcoe_net}
+    \    Run keyword unless ${Fcoenet_resp['status_code']}== 202    Fail    "Unable to Create Fcoe network"
+
+    ${body} =   Build LIG body      ${LIGS_TB}
+    Log to console and logfile    ${body}
+    Set To Dictionary    ${body}    snmpConfiguration    ${Snmp_V1_V2}
+    ${lig_resp}    Fusion Api Create LIG    ${body}
+    ${task} =   Wait For Task    ${lig_resp}    400s    2s
+    Run Keyword If  '${lig_resp['status_code']}' != '202'   fail    ELSE    Log to Console  \n-LIG  created successfully
+
+    ${eg_resp}    Add Enclosure Group from variable    ${enc_group}
+    Log to console    \n Resp is : ${eg_resp}
+    Run Keyword If  '${eg_resp['status_code']}' != '201'  Fail    ELSE  log to console   \n-EG created successfully
+
+    Add Enclosures from variable     ${encs}
+    Log to console and logfile    Enclosure imported succesfully
+
+    ${li_uri} =     Get LI URI   ${LE}-${LIG_1}
+    Set Global Variable    ${LIURI}    ${li_uri}
+
+#### Multi compliance#####
+OVF223_TC_1_2 LIG_Multi_1_COMPLIANCE_EVENT LIG_Multi_1_COMPLIANCE_ALERT
+
+    [Documentation]    Edit LIG-Check for Multi one Compliance Event and Alerts
+
+    ${Add_Net_1_uri}    Create List
+    ${Add_Net_2_uri}    Create List
+    :For    ${x}    INRANGE    1    3
+    \   ${Get_Network_uri}    Fusion Api Get Ethernet Networks    param=?filter="'name'=='Net_${x}'"
+    \   ${Enet_uri}    Get Variable Value    ${Get_Network_uri['members'][0]['uri']}
+    \   ${Network_uri}    convert_unicode_to_string    ${Enet_uri}
+    \   Append to List    ${Add_Net_${x}_uri}    ${Network_uri}
+    Set Global Variable    ${Net1_uri}    ${Add_Net_1_uri}
+    Set Global Variable    ${Net2_uri}    ${Add_Net_2_uri}
+
+    ${Edit_lig_body}    ${lig_uri}    Build Edit LIG Body    ${LIGS_TB_HA}    ${Edit_Lig}
+    Set To Dictionary    ${Edit_lig_body['uplinkSets'][0]}    networkUris    ${Net1_uri}
+    Set To Dictionary    ${Edit_lig_body}    qosConfiguration    ${Qos_Fcoe}
+    Set To Dictionary    ${Edit_lig_body['snmpConfiguration']}    enabled    ${Snmp_True}
+    Set To Dictionary    ${Edit_lig_body['snmpConfiguration']}    readCommunity    ${Public}
+
+    ${Add_US}    Fusion Api Edit Lig    ${Edit_lig_body}    ${lig_uri}
+    ${task} =   Wait For Task    ${Add_US}    400s    2s
+
+    Verify LI/LIG Consistent Status    ${Expected_Non_Consistency_Status}    ${LE}-${LIG_1}
+
+    ${Alert_list}    Create list
+
+    ${msg1}    Replace String Using Regexp   ${QOS_CONFIG_TYPE_MODIFIED}    XXX    ${PASSTHROUGH}
+    ${msg2}    Replace String Using Regexp   ${msg1}    YYY    ${CUSTOM_WITH_FCOE}
+    ${Qos_Passthrough_Fcoe}    Replace String Using Regexp   ${msg2}    ZZZ    ${ACTIVE_QOS_CONFIGURATION}
+
+    Append to list    ${Alert_list}    ${Qos_Passthrough_Fcoe}
+
+    ${lig_uri} =     Get LIG URI   ${LIGS_TB_HA['name']}
+    ${getresp} =    Fusion Api Get Lig   ${lig_uri}
+    ${uplinkSets} =     Get From Dictionary     ${getresp}  uplinkSets
+    Log to console and logfile    ${uplinkSets[0]['name']}
+
+    ${uplink_set_added}    Replace String Using Regexp   ${LOGICAL_UPLINK_ADDED}    XXX    ${uplinkSets[0]['name']}
+
+    Append to list    ${Alert_list}    ${uplink_set_added}
+
+    ${snmpConfiguration} =     Get From Dictionary     ${getresp}  snmpConfiguration
+    Log to console and logfile    ${snmpConfiguration['readCommunity']}
+    ${snmp_alert}    Replace String Using Regexp   ${SNMP_V1_V2_ENABLE_WITH_READ_COMMUNITY}    XXX    ${snmpConfiguration['readCommunity']}
+    #Log to console and logfile    ${snmp_alert}
+
+    Append to list    ${Alert_list}    ${snmp_alert}
+
+    Sort list    ${Alert_list}
+
+    ${Alert_message}    Get Alert and Multi Compliance Message    ${Alert_list}    ${Multi_count[0]}    ${Multi_one_Compliance_list}
+
+    ${Edit_lig_body}    ${lig_uri}    Build Edit LIG Body    ${LIGS_TB_HA}    ${Edit_Lig_no_us}
+    Set To Dictionary    ${Edit_lig_body['snmpConfiguration']}    enabled    ${Snmp_False}
+    Set To Dictionary    ${Edit_lig_body}    qosConfiguration    ${Qos_Passthrough}
+
+    ${Add_US}    Fusion Api Edit Lig    ${Edit_lig_body}    ${lig_uri}
+    ${task} =   Wait For Task    ${Add_US}    400s    2s
+
+    :For    ${x}    INRANGE    1    3
+    \    Wait Until Keyword Succeeds    650s   35 s    Verify Interconnect State    ${Interconnect_${x}}    ${IC_Configured}
+
+    ${Edit_snmp_li}    Fusion Api Update snmp configuration    ${SNMP_Config_public}    ${LIURI}
+    ${task} =   Wait For Task    ${Edit_snmp_li}    400s    2s
+
+    Verify LI/LIG Consistent Status    ${Expected_Consistency_Status}    ${LE}-${LIG_1}
+
+    ${Clear_alerts}    fusion_api_delete_alert
+
+OVF223_TC_3 LIG_Multi_2_compliance_alert
+
+    [Documentation]    Edit LIG-Check for Multi two Compliance Event and Alerts
+
+    Set To Dictionary    ${Ethernet_settings_2['ethernetSettings']}    enableIgmpSnooping    ${Igmp_enable}
+    Set To Dictionary    ${Utilization_sampling_2['telemetryConfiguration']}    sampleInterval    ${Sample_interval}
+
+    ${Edit_lig_body}    ${lig_uri}    Build Edit LIG Body    ${LIGS_TB_HA}    ${Edit_Lig_no_us}
+    Set To Dictionary    ${Edit_lig_body}    ethernetSettings    ${Ethernet_settings_2['ethernetSettings']}
+    Set To Dictionary    ${Edit_lig_body}    telemetryConfiguration    ${Utilization_sampling_2['telemetryConfiguration']}
+    Set To Dictionary    ${Edit_lig_body}    internalNetworkUris    ${Net1_uri}
+
+    ${Add_US}    Fusion Api Edit Lig    ${Edit_lig_body}    ${lig_uri}
+    ${task} =   Wait For Task    ${Add_US}    400s    2s
+
+    Verify LI/LIG Consistent Status    ${Expected_Non_Consistency_Status}    ${LE}-${LIG_1}
+
+    ${Alert_list}    Create list
+    ${lig_uri} =     Get LIG URI   ${LIGS_TB_HA['name']}
+    ${getresp} =    Fusion Api Get Lig   ${lig_uri}
+    ${Ethernet_settings} =     Get From Dictionary     ${getresp}  ethernetSettings
+    ${Ethernet_settings_interval} =    Get From Dictionary     ${Ethernet_settings}   igmpIdleTimeoutInterval
+    ${Ethernet_settings_IGMP_interval}    Convert To String    ${Ethernet_settings_interval}
+
+    ${es} =     Get From Dictionary     ${getresp}  telemetryConfiguration
+    ${lig_sampleint} =    Get From Dictionary     ${es}   sampleInterval
+    ${lig_sampleint1}    Convert To String    ${lig_sampleint}
+
+    ${li_uri} =     Get LI URI   ${LE}-${LIG_1}
+    ${getresp} =    Fusion Api Get Li   ${li_uri}
+    ${es} =     Get From Dictionary     ${getresp}  telemetryConfiguration
+    ${li_sampleint} =    Get From Dictionary     ${es}   sampleInterval
+    ${li_sampleint1}    Convert To String    ${li_sampleint}
+
+    ${IGMP_Snooping_alert}    Replace String Using Regexp   ${IGMP_SNOOPING_ENABLED_WITH_INTERVAL}    XXX    ${Ethernet_settings_IGMP_interval}
+
+    Append to list    ${Alert_list}    ${IGMP_Snooping_alert}
+
+    ${msg2}    Replace String Using Regexp   ${TELEMETRY_SAMPLE_INTERVAL_COLLECTION_COMPLIANCE_MESSAGE}    XXX    ${li_sampleint1}
+    ${Telemetry_alert}    Replace String Using Regexp   ${msg2}    YYY    ${lig_sampleint1}
+
+    Append to list    ${Alert_list}    ${Telemetry_alert}
+
+    ${Internal_net_alert}    Replace String Using Regexp   ${INTENRAL_NETWORK_TO_BE_ADDED_COUNT}    XXX    Net_1
+    Append to list    ${Alert_list}    ${Internal_net_alert}
+
+    Sort list    ${Alert_list}
+
+    #${Alert_message}    Get Alert and Multi Compliance Message    ${Multi_2_compliance_lig}    ${Multi_count[1]}    ${Multi_two_Compliance_list}
+    ${Alert_message}    Get Alert and Multi Compliance Message    ${Alert_list}    ${Multi_count[0]}    ${Multi_two_Compliance_list}
+
+    Set To Dictionary    ${Ethernet_settings_2['ethernetSettings']}    enableIgmpSnooping    ${Igmp_disable}
+    Set To Dictionary    ${Utilization_sampling_2['telemetryConfiguration']}    sampleInterval    300
+
+    ${Edit_lig_body}    ${lig_uri}    Build Edit LIG Body    ${LIGS_TB_HA}    ${Edit_Lig_no_us}
+    Set To Dictionary    ${Edit_lig_body['snmpConfiguration']}    enabled    ${Snmp_False}
+    #Set To Dictionary    ${Edit_lig_body['snmpConfiguration']}    readCommunity    ${None_Value}
+    Set To Dictionary    ${Edit_lig_body}    ethernetSettings    ${Ethernet_settings_2['ethernetSettings']}
+    Set To Dictionary    ${Edit_lig_body}    telemetryConfiguration    ${Utilization_sampling_2['telemetryConfiguration']}
+
+    ${Add_US}    Fusion Api Edit Lig    ${Edit_lig_body}    ${lig_uri}
+    ${task} =   Wait For Task    ${Add_US}    400s    2s
+
+    :For    ${x}    INRANGE    1    3
+    \    Wait Until Keyword Succeeds    650s   35 s    Verify Interconnect State    ${Interconnect_${x}}    ${IC_Configured}
+
+    ${Edit_snmp_li}    Fusion Api Update snmp configuration    ${SNMP_Config_public}    ${LIURI}
+    ${task} =   Wait For Task    ${Edit_snmp_li}    400s    2s
+
+    Verify LI/LIG Consistent Status    ${Expected_Consistency_Status}    ${LE}-${LIG_1}
+
+    ${Clear_alerts}    fusion_api_delete_alert
+
+
+OVF223_TC_5_6_17 LIG_ALL_COMPLIANCE_EVENT LIG_ALL_COMPLIANCE_ALERT LI_ALL_COMPLIANCE_UPDATEFROMGROUP
+
+    [Documentation]    Edit LIG-Edit all events-Check for Compliance alert in LI-Update from Group-Check for Consistent Status
+
+    Set To Dictionary    ${Ethernet_settings_2['ethernetSettings']}    enableIgmpSnooping    ${Igmp_enable}
+    Set To Dictionary    ${Utilization_sampling_2['telemetryConfiguration']}    sampleInterval    ${Sample_interval}
+
+    ${Edit_lig_body}    ${lig_uri}    Build Edit LIG Body    ${LIGS_TB_HA}    ${Edit_Lig}
+    Set To Dictionary    ${Edit_lig_body['uplinkSets'][0]}    networkUris    ${Net1_uri}
+    Set To Dictionary    ${Edit_lig_body}    qosConfiguration    ${Qos_Fcoe}
+    Set To Dictionary    ${Edit_lig_body['snmpConfiguration']}    enabled    ${Snmp_True}
+    Set To Dictionary    ${Edit_lig_body['snmpConfiguration']}    readCommunity    ${Public}
+    Set To Dictionary    ${Edit_lig_body}    ethernetSettings    ${Ethernet_settings_2['ethernetSettings']}
+    Set To Dictionary    ${Edit_lig_body}    telemetryConfiguration    ${Utilization_sampling_2['telemetryConfiguration']}
+    Set To Dictionary    ${Edit_lig_body}    internalNetworkUris    ${Net2_uri}
+
+    ${Add_US}    Fusion Api Edit Lig    ${Edit_lig_body}    ${lig_uri}
+    ${task} =   Wait For Task    ${Add_US}    400s    2s
+
+    Verify LI/LIG Consistent Status    ${Expected_Non_Consistency_Status}    ${LE}-${LIG_1}
+
+    ${Alert_list}    Create list
+    ${lig_uri} =     Get LIG URI   ${LIGS_TB_HA['name']}
+    ${getresp} =    Fusion Api Get Lig   ${lig_uri}
+    ${Ethernet_settings} =     Get From Dictionary     ${getresp}  ethernetSettings
+    ${Ethernet_settings_interval} =    Get From Dictionary     ${Ethernet_settings}   igmpIdleTimeoutInterval
+    ${Ethernet_settings_IGMP_interval}    Convert To String    ${Ethernet_settings_interval}
+
+    ${es} =     Get From Dictionary     ${getresp}  telemetryConfiguration
+    ${lig_sampleint} =    Get From Dictionary     ${es}   sampleInterval
+    ${lig_sampleint1}    Convert To String    ${lig_sampleint}
+
+    ${li_uri} =     Get LI URI   ${LE}-${LIG_1}
+    ${getresp} =    Fusion Api Get Li   ${li_uri}
+    ${es} =     Get From Dictionary     ${getresp}  telemetryConfiguration
+    ${li_sampleint} =    Get From Dictionary     ${es}   sampleInterval
+    ${li_sampleint1}    Convert To String    ${li_sampleint}
+
+    ${IGMP_Snooping_alert}    Replace String Using Regexp   ${IGMP_SNOOPING_ENABLED_WITH_INTERVAL}    XXX    ${Ethernet_settings_IGMP_interval}
+
+    Append to list    ${Alert_list}    ${IGMP_Snooping_alert}
+
+    ${msg2}    Replace String Using Regexp   ${TELEMETRY_SAMPLE_INTERVAL_COLLECTION_COMPLIANCE_MESSAGE}    XXX    ${li_sampleint1}
+    ${Telemetry_alert}    Replace String Using Regexp   ${msg2}    YYY    ${lig_sampleint1}
+
+    Append to list    ${Alert_list}    ${Telemetry_alert}
+
+    ${Internal_net_alert}    Replace String Using Regexp   ${INTENRAL_NETWORK_TO_BE_ADDED_COUNT}    XXX    Net_2
+    Append to list    ${Alert_list}    ${Internal_net_alert}
+
+    ${msg1}    Replace String Using Regexp   ${QOS_CONFIG_TYPE_MODIFIED}    XXX    ${PASSTHROUGH}
+    ${msg2}    Replace String Using Regexp   ${msg1}    YYY    ${CUSTOM_WITH_FCOE}
+    ${Qos_Passthrough_Fcoe}    Replace String Using Regexp   ${msg2}    ZZZ    ${ACTIVE_QOS_CONFIGURATION}
+
+    Append to list    ${Alert_list}    ${Qos_Passthrough_Fcoe}
+
+    ${lig_uri} =     Get LIG URI   ${LIGS_TB_HA['name']}
+    ${getresp} =    Fusion Api Get Lig   ${lig_uri}
+    ${uplinkSets} =     Get From Dictionary     ${getresp}  uplinkSets
+    Log to console and logfile    ${uplinkSets[0]['name']}
+
+    ${uplink_set_added}    Replace String Using Regexp   ${LOGICAL_UPLINK_ADDED}    XXX    ${uplinkSets[0]['name']}
+
+    Append to list    ${Alert_list}    ${uplink_set_added}
+
+    ${snmpConfiguration} =     Get From Dictionary     ${getresp}  snmpConfiguration
+    Log to console and logfile    ${snmpConfiguration['readCommunity']}
+    ${snmp_alert}    Replace String Using Regexp   ${SNMP_V1_V2_ENABLE_WITH_READ_COMMUNITY}    XXX    ${snmpConfiguration['readCommunity']}
+    #Log to console and logfile    ${snmp_alert}
+
+    Append to list    ${Alert_list}    ${snmp_alert}
+
+    Sort list    ${Alert_list}
+
+    #${Multi_compliance_alert}    Built the Alert list    ${Multi_3_compliance_lig}
+
+    ${Alert_message}    Get Alert and Multi Compliance Message    ${Alert_list}    ${Multi_count[0]}    ${Multi_three_compliance_list}
+
+    Perform an LI Update From Group    ${LIURI}
+
+    Verify LI/LIG Consistent Status    ${Expected_Consistency_Status}    ${LE}-${LIG_1}
+
+    ${Clear_alerts}    fusion_api_delete_alert
+
+OVF223_TC_13_14_18 LI_ALL_COMPLIANCE_EVENT LI_ALL_COMPLIANCE_ALERT LIG_LI_ALL_COMPLIANCE_SAMECHANGE
+
+    [Documentation]    Edit LI-Edit all events-Check for Compliance alert in LI-Edit LIG same change-Check for Consistent Status
+
+    ${US_Body}    Copy Dictionary    ${Edit_LI_US}
+    ${uplink_resp}    Fusion Api Get Uplink Set
+    ${upset_members}    Get Variable Value    ${uplink_resp['members'][0]}
+    ${upset_uri}    Get Variable Value    ${upset_members['uri']}
+    Set To Dictionary    ${US_Body}    uri    ${upset_uri}
+    Set To Dictionary    ${US_Body}    logicalInterconnectUri    ${LIURI}
+
+    ${Delete_uplink}    Fusion Api Delete Uplink Set    name=${Edit_Lig['uplinkSets'][0]['name']}
+    ${task} =   Wait For Task    ${Delete_uplink}    400s    2s
+
+    ${Internal_network}    Fusion Api Update LI Internal Networks    ${Internal_networks}    ${LIURI}
+    ${task} =   Wait For Task    ${Internal_network}    900s    2s
+
+    ${Edit_snmp_li}    Fusion Api Update snmp configuration    ${SNMP_Config}    ${LIURI}
+    ${task} =   Wait For Task    ${Edit_snmp_li}    400s    2s
+
+    ${Qos_Edit}    Fusion Api Update qos aggregated configuration    ${Qos_Passthrough}    ${LIURI}
+    ${task} =   Wait For Task    ${Qos_Edit}    400s    2s
+
+    ${Get_telementry_config}    Fusion Api Get Li
+    ${Telementry_Uri}    Get Variable Value    ${Get_telementry_config['members'][0]['telemetryConfiguration']['uri']}
+    Remove from Dictionary    ${Utilization_sampling_2['telemetryConfiguration']}    category
+    Set To Dictionary    ${Utilization_sampling_2['telemetryConfiguration']}    sampleInterval    300
+    Log to console    \n\nTelemetry REsponse: ${Utilization_sampling_2}
+
+    ${Edit_telementry_li}    Fusion Api Update LI Telemetry Configuration    ${Utilization_sampling_2['telemetryConfiguration']}    ${Telementry_Uri}
+    Log to console    \n\nTelemetry Output: ${Edit_telementry_li}
+
+    ${task} =   Wait For Task    ${Edit_telementry_li}    400s    2s
+    Log to console    \n\nTask error: ${task}
+
+    ${Get_ethernet_settings}    Fusion Api Get Li Ethernet Settings    ${LIURI}
+    ${ICM_setting_uri}    Get Variable Value    ${Get_ethernet_settings['uri']}
+    ${ICM_setting_body}    Build Ethernet Setting LIG body    ${Ethernet_settings}    ${Igmp_disable}
+    ${Edit_ICM_Setting_li}    Fusion Api Update LI Ethernet Settings    ${ICM_setting_body['ethernetSettings']}    ${LIURI}
+    #${Edit_ICM_Setting_li}    Fusion Api Update LI Ethernet Settings    ${Ethernet_settings_2['ethernetSettings']}    ${ICM_setting_uri}
+    ${task} =   Wait For Task    ${Edit_ICM_Setting_li}    400s    2s
+
+    Verify LI/LIG Consistent Status    ${Expected_Non_Consistency_Status}    ${LE}-${LIG_1}
+
+    ${Alert_list}    Create list
+    ${lig_uri} =     Get LIG URI   ${LIGS_TB_HA['name']}
+    ${getresp} =    Fusion Api Get Lig   ${lig_uri}
+    ${Ethernet_settings} =     Get From Dictionary     ${getresp}  ethernetSettings
+    ${Ethernet_settings_interval} =    Get From Dictionary     ${Ethernet_settings}   igmpIdleTimeoutInterval
+    ${Ethernet_settings_IGMP_interval}    Convert To String    ${Ethernet_settings_interval}
+
+    ${es} =     Get From Dictionary     ${getresp}  telemetryConfiguration
+    ${lig_sampleint} =    Get From Dictionary     ${es}   sampleInterval
+    ${lig_sampleint1}    Convert To String    ${lig_sampleint}
+
+    ${li_uri} =     Get LI URI   ${LE}-${LIG_1}
+    ${getresp} =    Fusion Api Get Li   ${li_uri}
+    ${es} =     Get From Dictionary     ${getresp}  telemetryConfiguration
+    ${li_sampleint} =    Get From Dictionary     ${es}   sampleInterval
+    ${li_sampleint1}    Convert To String    ${li_sampleint}
+
+    ${IGMP_Snooping_alert}    Replace String Using Regexp   ${IGMP_SNOOPING_ENABLED_WITH_INTERVAL}    XXX    ${Ethernet_settings_IGMP_interval}
+
+    Append to list    ${Alert_list}    ${IGMP_Snooping_alert}
+
+    ${msg2}    Replace String Using Regexp   ${TELEMETRY_SAMPLE_INTERVAL_COLLECTION_COMPLIANCE_MESSAGE}    XXX    ${li_sampleint1}
+    ${Telemetry_alert}    Replace String Using Regexp   ${msg2}    YYY    ${lig_sampleint1}
+
+    Append to list    ${Alert_list}    ${Telemetry_alert}
+
+    ${Get_Network_name}    Fusion Api Get Ethernet Networks    param=?filter="'name'=='Net_2'"
+    ${Enet_name}    Get Variable Value    ${Get_Network_name['members'][0]['name']}
+
+    ${Internal_net_alert}    Replace String Using Regexp   ${INTENRAL_NETWORK_TO_BE_ADDED_COUNT}    XXX    ${Enet_name}
+    Append to list    ${Alert_list}    ${Internal_net_alert}
+
+    ${msg1}    Replace String Using Regexp   ${QOS_CONFIG_TYPE_MODIFIED}    XXX    ${PASSTHROUGH}
+    ${msg2}    Replace String Using Regexp   ${msg1}    YYY    ${CUSTOM_WITH_FCOE}
+    ${Qos_Passthrough_Fcoe}    Replace String Using Regexp   ${msg2}    ZZZ    ${ACTIVE_QOS_CONFIGURATION}
+
+    Append to list    ${Alert_list}    ${Qos_Passthrough_Fcoe}
+
+    ${lig_uri} =     Get LIG URI   ${LIGS_TB_HA['name']}
+    ${getresp} =    Fusion Api Get Lig   ${lig_uri}
+    ${uplinkSets} =     Get From Dictionary     ${getresp}  uplinkSets
+    Log to console and logfile    ${uplinkSets[0]['name']}
+
+    ${uplink_set_added}    Replace String Using Regexp   ${LOGICAL_UPLINK_ADDED}    XXX    ${uplinkSets[0]['name']}
+
+    Append to list    ${Alert_list}    ${uplink_set_added}
+
+    ${snmpConfiguration} =     Get From Dictionary     ${getresp}  snmpConfiguration
+    Log to console and logfile    ${snmpConfiguration['readCommunity']}
+    ${snmp_alert}    Replace String Using Regexp   ${SNMP_V1_V2_ENABLE_WITH_READ_COMMUNITY}    XXX    ${snmpConfiguration['readCommunity']}
+    #Log to console and logfile    ${snmp_alert}
+
+    Append to list    ${Alert_list}    ${snmp_alert}
+
+    Sort list    ${Alert_list}
+
+    #${Multi_compliance_alert}    Built the Alert list    ${Multi_all_compliance_alert_li}
+
+    ${Alert_message}    Get Alert and Multi Compliance Message    ${Alert_list}    ${Multi_count[0]}    ${Multi_three_compliance_list}
+
+    Set To Dictionary    ${Ethernet_settings_2['ethernetSettings']}    enableIgmpSnooping    ${Igmp_disable}
+
+    ${Edit_lig_body}    ${lig_uri}    Build Edit LIG Body    ${LIGS_TB_HA}    ${Edit_Lig_no_us}
+    Set To Dictionary    ${Edit_lig_body}    snmpConfiguration    ${Snmp_V1_V2}
+    Set To Dictionary    ${Edit_lig_body}    ethernetSettings    ${Ethernet_settings_2['ethernetSettings']}
+    Set To Dictionary    ${Edit_lig_body}    telemetryConfiguration    ${Utilization_sampling_2['telemetryConfiguration']}
+    Set To Dictionary    ${Edit_lig_body}    qosConfiguration    ${Qos_Passthrough}
+
+    ${Add_US}    Fusion Api Edit Lig    ${Edit_lig_body}    ${lig_uri}
+    ${task} =   Wait For Task    ${Add_US}    400s    2s
+
+    :For    ${x}    INRANGE    1    3
+    \    Wait Until Keyword Succeeds    650s   35 s    Verify Interconnect State    ${Interconnect_${x}}    ${IC_Configured}
+
+    Verify LI/LIG Consistent Status    ${Expected_Consistency_Status}    ${LE}-${LIG_1}
+
+    ${Clear_alerts}    fusion_api_delete_alert
+
+
+OVF223_TC_9_10 LI_MULTI_1_COMPLIANCE_ALERT LI_MULTI_1_COMPLIANCE_EVENT
+
+    [Documentation]    Edit LI-Check for Multi one Compliance Event and Alert
+
+    ${US_Body}    Copy Dictionary    ${Edit_LI_US}
+    Set To Dictionary    ${US_Body}    logicalInterconnectUri    ${LIURI}
+    Set To Dictionary    ${US_Body}    networkUris    ${Net1_uri}
+    ${Create_uplink}    Fusion Api Create Uplink Set    ${US_Body}
+    ${task} =   Wait For Task    ${Create_uplink}    1100s    10s
+
+    ${Edit_snmp}    Build SNMP LI body    ${SNMP_Config}    ${Snmp_True}
+    Set To Dictionary    ${Edit_snmp}    readCommunity    ${Public}
+    ${Edit_snmp_li}    Fusion Api Update snmp configuration    ${Edit_snmp}    ${LIURI}
+    ${task} =   Wait For Task    ${Edit_snmp_li}    1100s    10s
+
+    ${Qos_Edit}    Fusion Api Update qos aggregated configuration    ${Qos_Fcoe}    ${LIURI}
+    ${task} =   Wait For Task    ${Qos_Edit}    1100s    10s
+
+    Verify LI/LIG Consistent Status    ${Expected_Non_Consistency_Status}    ${LE}-${LIG_1}
+
+    ${Alert_list}    Create list
+
+    ${msg1}    Replace String Using Regexp   ${QOS_CONFIG_TYPE_MODIFIED}    XXX    ${CUSTOM_WITH_FCOE}
+    ${msg2}    Replace String Using Regexp   ${msg1}    YYY    ${PASSTHROUGH}
+    ${Qos_Passthrough_Fcoe}    Replace String Using Regexp   ${msg2}    ZZZ    ${ACTIVE_QOS_CONFIGURATION}
+
+    ${uplink_resp}    Fusion Api Get Uplink Set
+    ${upset_members}    Get Variable Value    ${uplink_resp['members'][0]}
+    ${upset_name}    Get Variable Value    ${upset_members['name']}
+
+    ${uplink_set_added}    Replace String Using Regexp   ${LOGICAL_UPLINK_REMOVED}    XXX    ${upset_name}
+
+    Append to list    ${Alert_list}    ${uplink_set_added}
+    Append to list    ${Alert_list}    ${Qos_Passthrough_Fcoe}
+    Append to list    ${Alert_list}    ${SNMP_V1_V2_DISABLE}
+
+    Sort list    ${Alert_list}
+
+    ${Alert_message}    Get Alert and Multi Compliance Message    ${Alert_list}    ${Multi_count[0]}    ${Multi_one_Compliance_list}
+
+    Perform an LI Update From Group    ${LIURI}
+
+    :For    ${x}    INRANGE    1    3
+    \    Wait Until Keyword Succeeds    650s   35 s    Verify Interconnect State    ${Interconnect_${x}}    ${IC_Configured}
+
+    Verify LI/LIG Consistent Status    ${Expected_Consistency_Status}    ${LE}-${LIG_1}
+
+    ${Clear_alerts}    fusion_api_delete_alert
+
+OVF223_TC_11 LI_MULTI_2_COMPLIANCE_EVENT
+
+    [Documentation]    Edit LI-Check for Multi two Compliance Event and Alert
+
+    ${Get_telementry_config}    Fusion Api Get Li
+    ${Telementry_Uri}    Get Variable Value    ${Get_telementry_config['members'][0]['telemetryConfiguration']['uri']}
+    Remove from Dictionary    ${Utilization_sampling_2['telemetryConfiguration']}    category
+    Set To Dictionary    ${Utilization_sampling_2['telemetryConfiguration']}    sampleInterval    ${Sample_interval}
+    ${Edit_telementry_li}    Fusion Api Update LI Telemetry Configuration    ${Utilization_sampling_2['telemetryConfiguration']}    ${Telementry_Uri}
+    ${task} =   Wait For Task    ${Edit_telementry_li}    400s    2s
+
+    ${Get_ethernet_settings}    Fusion Api Get Li Ethernet Settings    ${LIURI}
+    ${ICM_setting_uri}    Get Variable Value    ${Get_ethernet_settings['uri']}
+    ${ICM_setting_body}    Build Ethernet Setting LIG body    ${Ethernet_settings}    ${Igmp_enable}
+    ${Edit_ICM_Setting_li}    Fusion Api Update LI Ethernet Settings    ${ICM_setting_body['ethernetSettings']}    ${LIURI}
+    #${Edit_ICM_Setting_li}    Fusion Api Update LI Ethernet Settings    ${Ethernet_settings_2['ethernetSettings']}    ${ICM_setting_uri}
+    ${task} =   Wait For Task    ${Edit_ICM_Setting_li}    400s    2s
+
+    Verify LI/LIG Consistent Status    ${Expected_Non_Consistency_Status}    ${LE}-${LIG_1}
+
+    ${Alert_list}    Create list
+    ${lig_uri} =     Get LIG URI   ${LIGS_TB_HA['name']}
+    ${getresp} =    Fusion Api Get Lig   ${lig_uri}
+    ${Ethernet_settings} =     Get From Dictionary     ${getresp}  ethernetSettings
+    ${Ethernet_settings_interval} =    Get From Dictionary     ${Ethernet_settings}   igmpIdleTimeoutInterval
+    ${Ethernet_settings_IGMP_interval}    Convert To String    ${Ethernet_settings_interval}
+
+    ${es} =     Get From Dictionary     ${getresp}  telemetryConfiguration
+    ${lig_sampleint} =    Get From Dictionary     ${es}   sampleInterval
+    ${lig_sampleint1}    Convert To String    ${lig_sampleint}
+
+    ${li_uri} =     Get LI URI   ${LE}-${LIG_1}
+    ${getresp} =    Fusion Api Get Li   ${li_uri}
+    ${es} =     Get From Dictionary     ${getresp}  telemetryConfiguration
+    ${li_sampleint} =    Get From Dictionary     ${es}   sampleInterval
+    ${li_sampleint1}    Convert To String    ${li_sampleint}
+
+    ${msg2}    Replace String Using Regexp   ${TELEMETRY_SAMPLE_INTERVAL_COLLECTION_COMPLIANCE_MESSAGE}    XXX    ${li_sampleint1}
+    ${Telemetry_alert}    Replace String Using Regexp   ${msg2}    YYY    ${lig_sampleint1}
+
+    Append to list    ${Alert_list}    ${Telemetry_alert}
+    Append to list    ${Alert_list}    ${IGMP_SNOOPING_DISABLED}
+
+    Sort list    ${Alert_list}
+
+    ${Alert_message}    Get Alert and Multi Compliance Message    ${Alert_list}    ${Multi_count[0]}    ${Multi_two_Compliance_list}
+
+    Perform an LI Update From Group    ${LIURI}
+
+    :For    ${x}    INRANGE    1    3
+    \    Wait Until Keyword Succeeds    650s   35 s    Verify Interconnect State    ${Interconnect_${x}}    ${IC_Configured}
+
+    Verify LI/LIG Consistent Status    ${Expected_Consistency_Status}    ${LE}-${LIG_1}
+
+    ${Clear_alerts}    fusion_api_delete_alert
+
+OVF223_TC_7_LIG_MULTI_LI_1_ALL_COMPLIANCE_ALERT
+
+    [Documentation]    Create Multi LI Setup-Edit LI-All compliance event in LIG1-Check for Multi one Compliance Event and Alert
+
+    Set Log Level    TRACE
+    Fusion Api Login Appliance         ${APPLIANCE_IP}        ${admin_credentials}
+
+    ${Add_Net_1_uri}    Create List
+    ${Add_Net_2_uri}    Create List
+    :For    ${x}    INRANGE    1    3
+    \   ${Get_Network_uri}    Fusion Api Get Ethernet Networks    param=?filter="'name'=='Net_${x}'"
+    \   ${Enet_uri}    Get Variable Value    ${Get_Network_uri['members'][0]['uri']}
+    \   ${Network_uri}    convert_unicode_to_string    ${Enet_uri}
+    \   Append to List    ${Add_Net_${x}_uri}    ${Network_uri}
+    Set Global Variable    ${Net1_uri}    ${Add_Net_1_uri}
+    Set Global Variable    ${Net2_uri}    ${Add_Net_2_uri}
+
+    ${body} =   Build LIG body      ${LIGS_TB_Non_Redundant_A}
+    Log to console and logfile    ${body}
+    ${lig_resp}    Fusion Api Create LIG    ${body}
+    ${task} =   Wait For Task    ${lig_resp}    400s    2s
+    Run Keyword If  '${lig_resp['status_code']}' != '202'   fail    ELSE    Log to Console  \n-LIGA  created successfully
+
+    ${body} =   Build LIG body      ${LIGS_TB_Non_Redundant_B}
+    Log to console and logfile    ${body}
+    ${lig_resp}    Fusion Api Create LIG    ${body}
+    Log to console    \n\nResponse:${lig_resp}
+    ${task} =   Wait For Task    ${lig_resp}    400s    2s
+    Log to console    \n\nTask Error is:${task}
+    Run Keyword If  '${lig_resp['status_code']}' != '202'   fail    ELSE    Log to Console  \n-LIGB  created successfully
+
+    ${resp_1} =    fusion_api_get_headers
+    Log to console and logfile    ${resp_1}
+    Set To Dictionary    ${resp_1}    ${key}    ${value}
+    ${resp_head}    Copy Dictionary    ${resp_1}
+    Log to console and logfile    ${resp_head}
+
+    ${eg_resp}    Edit Enclosure Group from variable    ${Edit_Enc_group}    ${resp_head}
+    Run Keyword If  '${eg_resp['status_code']}' != '200'  Fail    ELSE  log to console   \n-EG Edited successfully
+
+    ${le_uri}    Get LE URI    ${LE}
+    ${Le_update_resp}    Perform an LE Update    ${le_uri}
+
+    ${li_uri} =     Get LI URI   ${LE}-${LIG_A}
+    Set Global Variable    ${LI_A_URI}    ${li_uri}
+
+    Set To Dictionary    ${Ethernet_settings_2['ethernetSettings']}    enableIgmpSnooping    ${Igmp_enable}
+    Set To Dictionary    ${Utilization_sampling_2['telemetryConfiguration']}    sampleInterval    ${Sample_interval}
+
+    ${Edit_lig_body}    ${lig_uri}    Build Edit LIG Body    ${LIGS_TB_Non_Redundant_A}    ${Edit_Lig}
+    Set To Dictionary    ${Edit_lig_body['uplinkSets'][0]}    networkUris    ${Net1_uri}
+    Set To Dictionary    ${Edit_lig_body}    qosConfiguration    ${Qos_Fcoe}
+    Set To Dictionary    ${Edit_lig_body['snmpConfiguration']}    enabled    ${Snmp_True}
+    Set To Dictionary    ${Edit_lig_body['snmpConfiguration']}    readCommunity    ${Public}
+    Set To Dictionary    ${Edit_lig_body}    redundancyType    ${Non_Reduntant_A}
+    Set To Dictionary    ${Edit_lig_body}    name    ${LIG_A}
+    Set To Dictionary    ${Edit_lig_body}    ethernetSettings    ${Ethernet_settings_2['ethernetSettings']}
+    Set To Dictionary    ${Edit_lig_body}    telemetryConfiguration    ${Utilization_sampling_2['telemetryConfiguration']}
+    Set To Dictionary    ${Edit_lig_body}    internalNetworkUris    ${Net2_uri}
+
+    ${Add_US}    Fusion Api Edit Lig    ${Edit_lig_body}    ${lig_uri}
+    ${task} =   Wait For Task    ${Add_US}    400s    2s
+
+    Verify LI/LIG Consistent Status    ${Expected_Non_Consistency_Status}    ${LE}-${LIG_A}
+
+    ${Alert_list}    Create list
+
+    ${msg1}    Replace String Using Regexp   ${QOS_CONFIG_TYPE_MODIFIED}    XXX    ${PASSTHROUGH}
+    ${msg2}    Replace String Using Regexp   ${msg1}    YYY    ${CUSTOM_WITH_FCOE}
+    ${Qos_Passthrough_Fcoe}    Replace String Using Regexp   ${msg2}    ZZZ    ${ACTIVE_QOS_CONFIGURATION}
+
+    Append to list    ${Alert_list}    ${Qos_Passthrough_Fcoe}
+
+    ${lig_uri} =     Get LIG URI   ${LIGS_TB_Non_Redundant_A['name']}
+    ${getresp} =    Fusion Api Get Lig   ${lig_uri}
+    ${uplinkSets} =     Get From Dictionary     ${getresp}  uplinkSets
+    ${Uplinkset_A_name}    Convert To String    ${uplinkSets[0]['name']}
+
+    ${uplink_set_added}    Replace String Using Regexp   ${LOGICAL_UPLINK_ADDED}    XXX    ${Uplinkset_A_name}
+
+    Append to list    ${Alert_list}    ${uplink_set_added}
+
+    ${Get_Network_name}    Fusion Api Get Ethernet Networks    param=?filter="'name'=='Net_2'"
+    ${Enet_name}    Get From Dictionary    ${Get_Network_name['members'][0]}    name
+    ${Network_name}    Convert To String    ${Enet_name}
+
+    ${Internal_net_alert}    Replace String Using Regexp   ${INTENRAL_NETWORK_TO_BE_ADDED_COUNT}    XXX    ${Network_name}
+    Append to list    ${Alert_list}    ${Internal_net_alert}
+
+    ${snmpConfiguration} =     Get From Dictionary     ${getresp}  snmpConfiguration
+    Convert To String    ${snmpConfiguration['readCommunity']}
+    ${snmp_alert}    Replace String Using Regexp   ${SNMP_V1_V2_ENABLE_WITH_READ_COMMUNITY}    XXX    ${snmpConfiguration['readCommunity']}
+    #Log to console and logfile    ${snmp_alert}
+
+    Append to list    ${Alert_list}    ${snmp_alert}
+
+    ${lig_uri} =     Get LIG URI   ${LIGS_TB_Non_Redundant_A['name']}
+    ${getresp} =    Fusion Api Get Lig   ${lig_uri}
+    ${Ethernet_settings} =     Get From Dictionary     ${getresp}  ethernetSettings
+    ${Ethernet_settings_interval} =    Get From Dictionary     ${Ethernet_settings}   igmpIdleTimeoutInterval
+    ${Ethernet_settings_IGMP_interval}    Convert To String    ${Ethernet_settings_interval}
+
+    ${es} =     Get From Dictionary     ${getresp}  telemetryConfiguration
+    ${lig_sampleint} =    Get From Dictionary     ${es}   sampleInterval
+    ${lig_sampleint1}    Convert To String    ${lig_sampleint}
+
+    ${li_uri} =     Get LI URI   ${LE}-${LIG_A}
+    ${getresp} =    Fusion Api Get Li   ${li_uri}
+    ${es} =     Get From Dictionary     ${getresp}  telemetryConfiguration
+    ${li_sampleint} =    Get From Dictionary     ${es}   sampleInterval
+    ${li_sampleint1}    Convert To String    ${li_sampleint}
+
+    ${IGMP_Snooping_alert}    Replace String Using Regexp   ${IGMP_SNOOPING_ENABLED_WITH_INTERVAL}    XXX    ${Ethernet_settings_IGMP_interval}
+
+    Append to list    ${Alert_list}    ${IGMP_Snooping_alert}
+
+    ${msg2}    Replace String Using Regexp   ${TELEMETRY_SAMPLE_INTERVAL_COLLECTION_COMPLIANCE_MESSAGE}    XXX    ${li_sampleint1}
+    ${Telemetry_alert}    Replace String Using Regexp   ${msg2}    YYY    ${lig_sampleint1}
+
+    Append to list    ${Alert_list}    ${Telemetry_alert}
+
+    Sort list    ${Alert_list}
+
+    ${Alert_message}    Get Alert and Multi Compliance Message    ${Alert_list}    ${Multi_count[0]}    ${Multi_three_compliance_list}
+
+    Set To Dictionary    ${Ethernet_settings_2['ethernetSettings']}    enableIgmpSnooping    ${Igmp_disable}
+    Set To Dictionary    ${Utilization_sampling_2['telemetryConfiguration']}    sampleInterval    300
+
+    ${lig_uri} =     Get LIG URI   ${LIGS_TB_Non_Redundant_A['name']}
+    ${Edit_lig_body}    ${ligA_uri}    Build Edit LIG Body    ${LIGS_TB_Non_Redundant_A}    ${Edit_Lig_no_us}
+    Set To Dictionary    ${Edit_lig_body}    snmpConfiguration    ${Snmp_V1_V2}
+    Set To Dictionary    ${Edit_lig_body}    qosConfiguration    ${Qos_Passthrough}
+    Set To Dictionary    ${Edit_lig_body}    redundancyType    ${Non_Reduntant_A}
+    Set To Dictionary    ${Edit_lig_body}    ethernetSettings    ${Ethernet_settings_2['ethernetSettings']}
+    Set To Dictionary    ${Edit_lig_body}    telemetryConfiguration    ${Utilization_sampling_2['telemetryConfiguration']}
+    Set To Dictionary    ${Edit_lig_body}    name    ${LIG_A}
+
+    ${Add_US}    Fusion Api Edit Lig    ${Edit_lig_body}    ${ligA_uri}
+    ${task} =   Wait For Task    ${Add_US}    600s    2s
+
+    :For    ${x}    INRANGE    1    3
+    \    Wait Until Keyword Succeeds    650s   35 s    Verify Interconnect State    ${Interconnect_${x}}    ${IC_Configured}
+
+    Verify LI/LIG Consistent Status    ${Expected_Consistency_Status}    ${LE}-${LIG_A}
+
+    ${Clear_alerts}    fusion_api_delete_alert
+
+OVF223_TC_8_LIG_MULTI_LI_2_ALL_COMPLIANCE_ALERT
+
+    [Documentation]    Edit LIG-Edit both LIG-Check for Multi two Compliance Event and Alert
+
+    ${li_uri} =     Get LI URI   ${LE}-${LIG_B}
+    Set Global Variable    ${LI_B_URI}    ${li_uri}
+
+    Set To Dictionary    ${Ethernet_settings_2['ethernetSettings']}    enableIgmpSnooping    ${Igmp_disable}
+    Set To Dictionary    ${Utilization_sampling_2['telemetryConfiguration']}    sampleInterval    300
+
+    ${lig_uri} =     Get LIG URI   ${LIGS_TB_Non_Redundant_A['name']}
+    ${Edit_lig_body}    ${ligA_uri}    Build Edit LIG Body    ${LIGS_TB_Non_Redundant_A}    ${Edit_Lig_no_us}
+    Set To Dictionary    ${Edit_lig_body}    snmpConfiguration    ${Snmp_V1_V2}
+    Set To Dictionary    ${Edit_lig_body}    qosConfiguration    ${Qos_Passthrough}
+    Set To Dictionary    ${Edit_lig_body}    redundancyType    ${Non_Reduntant_A}
+    Set To Dictionary    ${Edit_lig_body}    ethernetSettings    ${Ethernet_settings_2['ethernetSettings']}
+    Set To Dictionary    ${Edit_lig_body}    telemetryConfiguration    ${Utilization_sampling_2['telemetryConfiguration']}
+    Set To Dictionary    ${Edit_lig_body}    name    ${LIG_A}
+
+    ${Add_US}    Fusion Api Edit Lig    ${Edit_lig_body}    ${ligA_uri}
+    ${task} =   Wait For Task    ${Add_US}    600s    2s
+
+    :For    ${x}    INRANGE    1    3
+    \    Wait Until Keyword Succeeds    650s   35 s    Verify Interconnect State    ${Interconnect_${x}}    ${IC_Configured}
+
+    Verify LI/LIG Consistent Status    ${Expected_Consistency_Status}    ${LE}-${LIG_A}
+
+    ${Clear_alerts}    fusion_api_delete_alert
+
+    Set To Dictionary    ${Ethernet_settings_2['ethernetSettings']}    enableIgmpSnooping    ${Igmp_enable}
+    Set To Dictionary    ${Utilization_sampling_2['telemetryConfiguration']}    sampleInterval    ${Sample_interval}
+
+    ${Edit_lig_body_A}    ${ligA_uri}    Build Edit LIG Body    ${LIGS_TB_Non_Redundant_A}    ${Edit_Lig}
+    Set To Dictionary    ${Edit_lig_body_A['uplinkSets'][0]}    networkUris    ${Net1_uri}
+    Set To Dictionary    ${Edit_lig_body_A['uplinkSets'][0]}    name    ${Uplinkset_A}
+    Set To Dictionary    ${Edit_lig_body_A}    qosConfiguration    ${Qos_Fcoe}
+    Set To Dictionary    ${Edit_lig_body_A['snmpConfiguration']}    enabled    ${Snmp_True}
+    Set To Dictionary    ${Edit_lig_body_A['snmpConfiguration']}    readCommunity    ${Public}
+    Set To Dictionary    ${Edit_lig_body_A}    redundancyType    ${Non_Reduntant_A}
+    Set To Dictionary    ${Edit_lig_body_A}    internalNetworkUris    ${Net2_uri}
+    Set To Dictionary    ${Edit_lig_body_A}    name    ${LIG_A}
+    Set To Dictionary    ${Edit_lig_body_A}    telemetryConfiguration    ${Utilization_sampling_2['telemetryConfiguration']}
+
+    ${Add_US}    Fusion Api Edit Lig    ${Edit_lig_body_A}    ${ligA_uri}
+    ${task} =   Wait For Task    ${Add_US}    400s    2s
+
+    Set To Dictionary    ${Utilization_sampling_2['telemetryConfiguration']}    sampleInterval    ${Sample_interval_2}
+    ${Edit_lig_body_B}    ${ligB_uri}    Build Edit LIG Body    ${LIGS_TB_Non_Redundant_B}    ${Edit_Lig}
+    Set To Dictionary    ${Edit_lig_body_B['uplinkSets'][0]}    name    ${Uplinkset_B}
+    Set To Dictionary    ${Edit_lig_body_B}    redundancyType    ${Non_Reduntant_B}
+    Set To Dictionary    ${Edit_lig_body_B}    name    ${LIG_B}
+    Set To Dictionary    ${Edit_lig_body_B}    snmpConfiguration    ${Snmp_V1_V2}
+    Set To Dictionary    ${Edit_lig_body_B}    ethernetSettings    ${Ethernet_settings_2['ethernetSettings']}
+    Set To Dictionary    ${Edit_lig_body_B}    telemetryConfiguration    ${Utilization_sampling_2['telemetryConfiguration']}
+
+    ${Add_US}    Fusion Api Edit Lig    ${Edit_lig_body_B}    ${ligB_uri}
+    ${task} =   Wait For Task    ${Add_US}    400s    2s
+
+    Verify LI/LIG Consistent Status    ${Expected_Non_Consistency_Status}    ${LE}-${LIG_A}
+
+    Verify LI/LIG Consistent Status    ${Expected_Non_Consistency_Status}    ${LE}-${LIG_B}
+
+    ${Alert_list}    Create list
+
+    ${msg1}    Replace String Using Regexp   ${QOS_CONFIG_TYPE_MODIFIED}    XXX    ${PASSTHROUGH}
+    ${msg2}    Replace String Using Regexp   ${msg1}    YYY    ${CUSTOM_WITH_FCOE}
+    ${Qos_Passthrough_Fcoe}    Replace String Using Regexp   ${msg2}    ZZZ    ${ACTIVE_QOS_CONFIGURATION}
+
+    Append to list    ${Alert_list}    ${Qos_Passthrough_Fcoe}
+
+    ${lig_uri} =     Get LIG URI   ${LIGS_TB_Non_Redundant_A['name']}
+    ${getresp} =    Fusion Api Get Lig   ${lig_uri}
+    ${uplinkSets} =     Get From Dictionary     ${getresp}  uplinkSets
+    ${Uplinkset_A_name}    Convert To String    ${uplinkSets[0]['name']}
+
+    ${uplink_set_A_added}    Replace String Using Regexp   ${LOGICAL_UPLINK_ADDED}    XXX    ${Uplinkset_A}
+
+    Append to list    ${Alert_list}    ${uplink_set_A_added}
+
+    ${Get_Network_name}    Fusion Api Get Ethernet Networks    param=?filter="'name'=='Net_2'"
+    ${Enet_name}    Get From Dictionary    ${Get_Network_name['members'][0]}    name
+    ${Network_name}    Convert To String    ${Enet_name}
+
+    ${Internal_net_alert}    Replace String Using Regexp   ${INTENRAL_NETWORK_TO_BE_ADDED_COUNT}    XXX    ${Network_name}
+    Append to list    ${Alert_list}    ${Internal_net_alert}
+
+    ${snmpConfiguration} =     Get From Dictionary     ${getresp}  snmpConfiguration
+    Convert To String    ${snmpConfiguration['readCommunity']}
+    ${snmp_alert}    Replace String Using Regexp   ${SNMP_V1_V2_ENABLE_WITH_READ_COMMUNITY}    XXX    ${snmpConfiguration['readCommunity']}
+
+    Append to list    ${Alert_list}    ${snmp_alert}
+
+    ${lig_uri} =     Get LIG URI   ${LIGS_TB_Non_Redundant_A['name']}
+    ${getresp} =    Fusion Api Get Lig   ${lig_uri}
+
+    ${es} =     Get From Dictionary     ${getresp}  telemetryConfiguration
+    ${ligA_sampleint} =    Get From Dictionary     ${es}   sampleInterval
+    ${ligA_sampleint1}    Convert To String    ${ligA_sampleint}
+
+    ${li_uri} =     Get LI URI   ${LE}-${LIG_A}
+    ${getresp} =    Fusion Api Get Li   ${li_uri}
+    ${es} =     Get From Dictionary     ${getresp}  telemetryConfiguration
+    ${liA_sampleint} =    Get From Dictionary     ${es}   sampleInterval
+    ${liA_sampleint1}    Convert To String    ${liA_sampleint}
+
+    ${msg1}    Replace String Using Regexp   ${TELEMETRY_SAMPLE_INTERVAL_COLLECTION_COMPLIANCE_MESSAGE}    XXX    ${liA_sampleint1}
+    ${Telemetry_alert_LIGA}    Replace String Using Regexp   ${msg1}    YYY    ${ligA_sampleint1}
+
+    Append to list    ${Alert_list}    ${Telemetry_alert_LIGA}
+
+    ${uplink_set_B_added}    Replace String Using Regexp   ${LOGICAL_UPLINK_ADDED}    XXX    ${Uplinkset_B}
+
+    Append to list    ${Alert_list}    ${uplink_set_B_added}
+
+    ${lig_uri} =     Get LIG URI   ${LIGS_TB_Non_Redundant_B['name']}
+    ${getresp} =    Fusion Api Get Lig   ${lig_uri}
+    ${Ethernet_settings} =     Get From Dictionary     ${getresp}  ethernetSettings
+    ${Ethernet_settings_interval} =    Get From Dictionary     ${Ethernet_settings}   igmpIdleTimeoutInterval
+    ${Ethernet_settings_IGMP_interval}    Convert To String    ${Ethernet_settings_interval}
+
+    ${es} =     Get From Dictionary     ${getresp}  telemetryConfiguration
+    ${ligB_sampleint} =    Get From Dictionary     ${es}   sampleInterval
+    ${ligB_sampleint1}    Convert To String    ${ligB_sampleint}
+
+    ${li_uri} =     Get LI URI   ${LE}-${LIG_B}
+    ${getresp} =    Fusion Api Get Li   ${li_uri}
+    ${es} =     Get From Dictionary     ${getresp}  telemetryConfiguration
+    ${liB_sampleint} =    Get From Dictionary     ${es}   sampleInterval
+    ${liB_sampleint1}    Convert To String    ${liB_sampleint}
+
+    ${IGMP_Snooping_alert}    Replace String Using Regexp   ${IGMP_SNOOPING_ENABLED_WITH_INTERVAL}    XXX    ${Ethernet_settings_IGMP_interval}
+
+    Append to list    ${Alert_list}    ${IGMP_Snooping_alert}
+
+    ${msg2}    Replace String Using Regexp   ${TELEMETRY_SAMPLE_INTERVAL_COLLECTION_COMPLIANCE_MESSAGE}    XXX    ${liB_sampleint1}
+    ${Telemetry_alert_LIGB}    Replace String Using Regexp   ${msg2}    YYY    ${ligB_sampleint1}
+
+    Append to list    ${Alert_list}    ${Telemetry_alert_LIGB}
+
+    Sort list    ${Alert_list}
+
+    ${Alert_message}    Get Alert and Multi Compliance Message    ${Alert_list}    ${Multi_count[1]}    ${Multi_three_compliance_list}
+
+    Perform an LI Update From Group    ${LI_A_URI}
+    Perform an LI Update From Group    ${LI_B_URI}
+
+    Verify LI/LIG Consistent Status    ${Expected_Consistency_Status}    ${LE}-${LIG_A}
+    Verify LI/LIG Consistent Status    ${Expected_Consistency_Status}    ${LE}-${LIG_B}
+
+    ${Clear_alerts}    fusion_api_delete_alert
+
+
+OVF223_TC_16_LIG_MULTI_LI_2_ALL_COMPLIANCE_ALERT
+
+    [Documentation]    Edit LI-Edit both LI-Check for Multi two Compliance Event and Alert-Edit LIG same change-Check for compliance alerts are cleared
+
+    ${US_Body}    Copy Dictionary    ${Edit_LI_US}
+    ${uplink_resp}    Fusion Api Get Uplink Set
+    ${Uplink_set_length}    Get Length    ${uplink_resp['members']}
+    :For    ${x}    INRANGE    0    ${Uplink_set_length}
+    \    ${upset_members}    Get Variable Value    ${uplink_resp['members'][${x}]}
+    \    ${US_name}    Get Variable Value    ${upset_members['name']}
+    \    Run Keyword If    '${Uplinkset_A}' != '${US_name}'    Continue for loop
+    \    ${upset_uri}    Get Variable Value    ${upset_members['uri']}
+
+    Set To Dictionary    ${US_Body}    uri    ${upset_uri}
+    Set To Dictionary    ${US_Body}    name    ${Uplinkset_A}
+    Set To Dictionary    ${US_Body}    logicalInterconnectUri    ${LI_A_URI}
+
+    ${resp_1} =    fusion_api_get_headers
+    Log to console and logfile    ${resp_1}
+    Set To Dictionary    ${resp_1}    ${key}    ${value}
+    ${resp_head}    Copy Dictionary    ${resp_1}
+    Log to console and logfile    ${resp_head}
+
+    ${Internal_Networks_LI}    Edit LI Internal Networks    ${LE}-${LIG_A}    ${Internal_networks}    ${resp_head}
+
+    ${Delete_uplink}    Fusion Api Delete Uplink Set    uri=${upset_uri}
+    ${task} =   Wait For Task    ${Delete_uplink}    400s    2s
+
+    ${Edit_snmp_li}    Fusion Api Update snmp configuration    ${SNMP_Config}    ${LI_A_URI}
+    ${task} =   Wait For Task    ${Edit_snmp_li}    400s    2s
+
+    ${Qos_Edit}    Fusion Api Update qos aggregated configuration    ${Qos_Passthrough}    ${LI_A_URI}
+    ${task} =   Wait For Task    ${Qos_Edit}    400s    2s
+
+    ${US_Body}    Copy Dictionary    ${Edit_LI_US}
+    ${uplink_resp}    Fusion Api Get Uplink Set
+    ${Uplink_set_length}    Get Length    ${uplink_resp['members']}
+    :For    ${x}    INRANGE    0    ${Uplink_set_length}
+    \    ${upset_members}    Get Variable Value    ${uplink_resp['members'][${x}]}
+    \    ${US_name}    Get Variable Value    ${upset_members['name']}
+    \    Run Keyword If    '${Uplinkset_B}' != '${US_name}'    Continue for loop
+    \    ${upset_uri}    Get Variable Value    ${upset_members['uri']}
+
+    Set To Dictionary    ${US_Body}    uri    ${upset_uri}
+    Set To Dictionary    ${US_Body}    name    ${Uplinkset_B}
+    Set To Dictionary    ${US_Body}    logicalInterconnectUri    ${LI_B_URI}
+
+    ${Delete_uplink}    Fusion Api Delete Uplink Set    uri=${upset_uri}
+    ${task} =   Wait For Task    ${Delete_uplink}    400s    2s
+
+    ${Get_telementry_config}    Fusion Api Get Li
+    ${l} =  Get Length  ${Get_telementry_config['members']}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${Telementry_Uri}    Get Variable Value    ${Get_telementry_config['members'][${x}]['telemetryConfiguration']['uri']}
+    \   Remove from Dictionary    ${Utilization_sampling_2['telemetryConfiguration']}    category
+    \   ${Edit_telementry_li}    Fusion Api Update LI Telemetry Configuration    ${Utilization_sampling_2['telemetryConfiguration']}    ${Telementry_Uri}
+    \   ${task} =   Wait For Task    ${Edit_telementry_li}    400s    2s
+
+    ${ICM_setting_body}    Build Ethernet Setting LI body    ${Ethernet_settings}    ${Igmp_disable}    ${LE}-${LIG_B}
+    ${Edit_ICM_Setting_li}    Fusion Api Update LI Ethernet Settings    ${ICM_setting_body['ethernetSettings']}    ${LI_B_URI}
+    #${Edit_ICM_Setting_li}    Fusion Api Update LI Ethernet Settings    ${Ethernet_settings_2['ethernetSettings']}    ${ICM_setting_uri}
+    ${task} =   Wait For Task    ${Edit_ICM_Setting_li}    400s    2s
+
+    Verify LI/LIG Consistent Status    ${Expected_Non_Consistency_Status}    ${LE}-${LIG_A}
+    Verify LI/LIG Consistent Status    ${Expected_Non_Consistency_Status}    ${LE}-${LIG_B}
+
+    ${Alert_list}    Create list
+
+    ${msg1}    Replace String Using Regexp   ${QOS_CONFIG_TYPE_MODIFIED}    XXX    ${PASSTHROUGH}
+    ${msg2}    Replace String Using Regexp   ${msg1}    YYY    ${CUSTOM_WITH_FCOE}
+    ${Qos_Passthrough_Fcoe}    Replace String Using Regexp   ${msg2}    ZZZ    ${ACTIVE_QOS_CONFIGURATION}
+
+    Append to list    ${Alert_list}    ${Qos_Passthrough_Fcoe}
+
+    ${lig_uri} =     Get LIG URI   ${LIGS_TB_Non_Redundant_A['name']}
+    ${getresp} =    Fusion Api Get Lig   ${lig_uri}
+    ${uplinkSets} =     Get From Dictionary     ${getresp}  uplinkSets
+    ${Uplinkset_A_name}    Convert To String    ${uplinkSets[0]['name']}
+
+    ${uplink_set_A_added}    Replace String Using Regexp   ${LOGICAL_UPLINK_ADDED}    XXX    ${Uplinkset_A}
+
+    Append to list    ${Alert_list}    ${uplink_set_A_added}
+
+    ${Internal_net_add_alert}    Replace String Using Regexp   ${INTENRAL_NETWORK_TO_BE_ADDED_COUNT}    XXX    Net_2
+    Append to list    ${Alert_list}    ${Internal_net_add_alert}
+
+    ${Internal_net_remove_alert}    Replace String Using Regexp   ${INTENRAL_NETWORK_TO_BE_REMOVED_COUNT}    XXX    Net_1
+    Append to list    ${Alert_list}    ${Internal_net_remove_alert}
+
+    ${snmpConfiguration} =     Get From Dictionary     ${getresp}  snmpConfiguration
+    Convert To String    ${snmpConfiguration['readCommunity']}
+    ${snmp_alert}    Replace String Using Regexp   ${SNMP_V1_V2_ENABLE_WITH_READ_COMMUNITY}    XXX    ${snmpConfiguration['readCommunity']}
+
+    Append to list    ${Alert_list}    ${snmp_alert}
+
+    ${lig_uri} =     Get LIG URI   ${LIGS_TB_Non_Redundant_A['name']}
+    ${getresp} =    Fusion Api Get Lig   ${lig_uri}
+
+    ${es} =     Get From Dictionary     ${getresp}  telemetryConfiguration
+    ${ligA_sampleint} =    Get From Dictionary     ${es}   sampleInterval
+    ${ligA_sampleint1}    Convert To String    ${ligA_sampleint}
+
+    ${li_uri} =     Get LI URI   ${LE}-${LIG_A}
+    ${getresp} =    Fusion Api Get Li   ${li_uri}
+    ${es} =     Get From Dictionary     ${getresp}  telemetryConfiguration
+    ${liA_sampleint} =    Get From Dictionary     ${es}   sampleInterval
+    ${liA_sampleint1}    Convert To String    ${liA_sampleint}
+
+    ${msg1}    Replace String Using Regexp   ${TELEMETRY_SAMPLE_INTERVAL_COLLECTION_COMPLIANCE_MESSAGE}    XXX    ${liA_sampleint1}
+    ${Telemetry_alert_LIGA}    Replace String Using Regexp   ${msg1}    YYY    ${ligA_sampleint1}
+
+    Append to list    ${Alert_list}    ${Telemetry_alert_LIGA}
+
+    ${uplink_set_B_added}    Replace String Using Regexp   ${LOGICAL_UPLINK_ADDED}    XXX    ${Uplinkset_B}
+
+    Append to list    ${Alert_list}    ${uplink_set_B_added}
+
+    ${lig_uri} =     Get LIG URI   ${LIGS_TB_Non_Redundant_B['name']}
+    ${getresp} =    Fusion Api Get Lig   ${lig_uri}
+    ${Ethernet_settings} =     Get From Dictionary     ${getresp}  ethernetSettings
+    ${Ethernet_settings_interval} =    Get From Dictionary     ${Ethernet_settings}   igmpIdleTimeoutInterval
+    ${Ethernet_settings_IGMP_interval}    Convert To String    ${Ethernet_settings_interval}
+
+    ${es} =     Get From Dictionary     ${getresp}  telemetryConfiguration
+    ${ligB_sampleint} =    Get From Dictionary     ${es}   sampleInterval
+    ${ligB_sampleint1}    Convert To String    ${ligB_sampleint}
+
+    ${li_uri} =     Get LI URI   ${LE}-${LIG_B}
+    ${getresp} =    Fusion Api Get Li   ${li_uri}
+    ${es} =     Get From Dictionary     ${getresp}  telemetryConfiguration
+    ${liB_sampleint} =    Get From Dictionary     ${es}   sampleInterval
+    ${liB_sampleint1}    Convert To String    ${liB_sampleint}
+
+    ${IGMP_Snooping_alert}    Replace String Using Regexp   ${IGMP_SNOOPING_ENABLED_WITH_INTERVAL}    XXX    ${Ethernet_settings_IGMP_interval}
+
+    Append to list    ${Alert_list}    ${IGMP_Snooping_alert}
+
+    ${msg2}    Replace String Using Regexp   ${TELEMETRY_SAMPLE_INTERVAL_COLLECTION_COMPLIANCE_MESSAGE}    XXX    ${liB_sampleint1}
+    ${Telemetry_alert_LIGB}    Replace String Using Regexp   ${msg2}    YYY    ${ligB_sampleint1}
+
+    Append to list    ${Alert_list}    ${Telemetry_alert_LIGB}
+
+    Sort list    ${Alert_list}
+
+    ${Alert_message}    Get Alert and Multi Compliance Message    ${Alert_list}    ${Multi_count[1]}    ${Multi_three_compliance_list}
+
+    ${Edit_lig_A_body}    ${lig_A_uri}    Build Edit LIG Body    ${LIGS_TB_Non_Redundant_A}    ${Edit_Lig_no_us}
+    Set To Dictionary    ${Edit_lig_A_body}    snmpConfiguration    ${Snmp_V1_V2}
+    Set To Dictionary    ${Edit_lig_A_body}    internalNetworkUris    ${Net1_uri}
+    Set To Dictionary    ${Edit_lig_A_body}    redundancyType    ${Non_Reduntant_A}
+    Set To Dictionary    ${Edit_lig_A_body}    name    ${LIG_A}
+    Set To Dictionary    ${Edit_lig_A_body}    qosConfiguration    ${Qos_Passthrough}
+    Set To Dictionary    ${Edit_lig_A_body}    ethernetSettings    ${Ethernet_settings_2['ethernetSettings']}
+    Set To Dictionary    ${Edit_lig_A_body}    telemetryConfiguration    ${Utilization_sampling_2['telemetryConfiguration']}
+
+    ${Edit_lig_B_body}    ${lig_B_uri}    Build Edit LIG Body    ${LIGS_TB_Non_Redundant_B}    ${Edit_Lig_no_us}
+    Set To Dictionary    ${Edit_lig_B_body}    snmpConfiguration    ${Snmp_V1_V2}
+    Set To Dictionary    ${Edit_lig_B_body}    redundancyType    ${Non_Reduntant_B}
+    Set To Dictionary    ${Edit_lig_B_body}    name    ${LIG_B}
+    Set To Dictionary    ${Edit_lig_B_body}    ethernetSettings    ${Ethernet_settings_2['ethernetSettings']}
+    Set To Dictionary    ${Edit_lig_B_body}    telemetryConfiguration    ${Utilization_sampling_2['telemetryConfiguration']}
+
+    ${Add_US}    Fusion Api Edit Lig    ${Edit_lig_A_body}    ${lig_A_uri}
+    ${task} =   Wait For Task    ${Add_US}    400s    2s
+
+    ${Add_US}    Fusion Api Edit Lig    ${Edit_lig_B_body}    ${lig_B_uri}
+    ${task} =   Wait For Task    ${Add_US}    400s    2s
+
+    :For    ${x}    INRANGE    1    3
+    \    Wait Until Keyword Succeeds    650s   35 s    Verify Interconnect State    ${Interconnect_${x}}    ${IC_Configured}
+
+    Verify LI/LIG Consistent Status    ${Expected_Consistency_Status}    ${LE}-${LIG_A}
+    Verify LI/LIG Consistent Status    ${Expected_Consistency_Status}    ${LE}-${LIG_B}
+
+    ${Clear_alerts}    fusion_api_delete_alert
+
+OVF223_TC_15_LI_MULTI_LI_1_ALL_COMPLIANCE_ALERT
+
+    [Documentation]    Edit LI-Check for Multi one Compliance Event and Alert
+
+    Set To Dictionary    ${Ethernet_settings_2['ethernetSettings']}    enableIgmpSnooping    ${Igmp_enable}
+    Set To Dictionary    ${Utilization_sampling_2['telemetryConfiguration']}    sampleInterval    ${Sample_interval}
+
+    ${US_Body}    Copy Dictionary    ${Edit_LI_US}
+    Set To Dictionary    ${US_Body}    logicalInterconnectUri    ${LI_A_URI}
+    ${Create_uplink}    Fusion Api Create Uplink Set    ${US_Body}
+    ${task} =   Wait For Task    ${Create_uplink}    400s    2s
+
+    ${Internal_network}    Fusion Api Update LI Internal Networks    ${Net2_uri}    ${LI_A_URI}
+    ${task} =   Wait For Task    ${Internal_network}    900s    2s
+
+    ${Edit_snmp}    Build SNMP LI body    ${SNMP_Config}    ${Snmp_True}
+    Set To Dictionary    ${Edit_snmp}    readCommunity    ${Public}
+    ${Edit_snmp_li}    Fusion Api Update snmp configuration    ${Edit_snmp}    ${LI_A_URI}
+    ${task} =   Wait For Task    ${Edit_snmp_li}    400s    2s
+
+    ${Qos_Edit}    Fusion Api Update qos aggregated configuration    ${Qos_Fcoe}    ${LI_A_URI}
+    ${task} =   Wait For Task    ${Qos_Edit}    1100s    2s
+
+    ${Get_telementry_config}    Fusion Api Get Li
+    ${l} =  Get Length  ${Get_telementry_config['members']}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Run Keyword If     '${Get_telementry_config['members'][${x}]['name']}' != '${LE}-${LIG_A}'     Continue For Loop
+    \   ${Telementry_Uri}    Get Variable Value    ${Get_telementry_config['members'][${x}]['telemetryConfiguration']['uri']}
+    Remove from Dictionary    ${Utilization_sampling_2['telemetryConfiguration']}    category
+    ${Edit_telementry_li}    Fusion Api Update LI Telemetry Configuration    ${Utilization_sampling_2['telemetryConfiguration']}    ${Telementry_Uri}
+    ${task} =   Wait For Task    ${Edit_telementry_li}    400s    2s
+
+    ${ICM_setting_body}    Build Ethernet Setting LI body    ${Ethernet_settings}    ${Igmp_disable}    ${LE}-${LIG_A}
+    ${Edit_ICM_Setting_li}    Fusion Api Update LI Ethernet Settings    ${ICM_setting_body['ethernetSettings']}    ${LI_A_URI}
+    #${Edit_ICM_Setting_li}    Fusion Api Update LI Ethernet Settings    ${Ethernet_settings_2['ethernetSettings']}    ${ICM_setting_uri}
+    ${task} =   Wait For Task    ${Edit_ICM_Setting_li}    400s    2s
+
+    Verify LI/LIG Consistent Status    ${Expected_Non_Consistency_Status}    ${LE}-${LIG_A}
+
+    ${Alert_list}    Create list
+
+    ${msg1}    Replace String Using Regexp   ${QOS_CONFIG_TYPE_MODIFIED}    XXX    ${CUSTOM_WITH_FCOE}
+    ${msg2}    Replace String Using Regexp   ${msg1}    YYY    ${PASSTHROUGH}
+    ${Qos_Passthrough_Fcoe}    Replace String Using Regexp   ${msg2}    ZZZ    ${ACTIVE_QOS_CONFIGURATION}
+
+    Append to list    ${Alert_list}    ${Qos_Passthrough_Fcoe}
+
+    ${uplink_resp}    Fusion Api Get Uplink Set
+    ${upset_members}    Get Variable Value    ${uplink_resp['members'][0]}
+    ${US_name}    Get Variable Value    ${upset_members['name']}
+    ${Uplinkset_name}    Convert To String    ${US_name}
+
+    ${uplink_set_A_added}    Replace String Using Regexp   ${LOGICAL_UPLINK_REMOVED}    XXX    ${Uplinkset_name}
+
+    Append to list    ${Alert_list}    ${uplink_set_A_added}
+
+    ${Internal_net_add_alert}    Replace String Using Regexp   ${INTENRAL_NETWORK_TO_BE_ADDED_COUNT}    XXX    Net_1
+    Append to list    ${Alert_list}    ${Internal_net_add_alert}
+
+    ${Internal_net_remove_alert}    Replace String Using Regexp   ${INTENRAL_NETWORK_TO_BE_REMOVED_COUNT}    XXX    Net_2
+    Append to list    ${Alert_list}    ${Internal_net_remove_alert}
+
+    Append to list    ${Alert_list}    ${SNMP_V1_V2_DISABLE}
+
+    Sort list    ${Alert_list}
+
+    ${Alert_message}    Get Alert and Multi Compliance Message    ${Alert_list}    ${Multi_count[0]}    ${Multi_three_compliance_list}
+
+
+*** Keywords ***
+Build Edit LIG Body
+    [Documentation]    Build LIG Body for LIG Edit operation
+    [Arguments]    ${LIGS_TB}    ${Edit_Lig}
+    ${Get_lig}    Fusion Api Get Lig    param=?filter="'name'=='${LIGS_TB['name']}'"
+    ${lig_uri}    Get From Dictionary    ${Get_lig['members'][0]}    uri
+    ${Get_lig_body}    Copy Dictionary    ${Get_lig['members']}
+    ${Edit_lig_body}    Copy Dictionary    ${Edit_Lig}
+    Set To Dictionary    ${Edit_lig_body}    snmpConfiguration    ${Get_lig_body[0]['snmpConfiguration']}
+    Set To Dictionary    ${Edit_lig_body}    telemetryConfiguration    ${Get_lig_body[0]['telemetryConfiguration']}
+    Set To Dictionary    ${Edit_lig_body}    ethernetSettings    ${Get_lig_body[0]['ethernetSettings']}
+    Set To Dictionary    ${Edit_lig_body}    qosConfiguration    ${Get_lig_body[0]['qosConfiguration']}
+    Set To Dictionary    ${Edit_lig_body}    fabricUri    ${Get_lig_body[0]['fabricUri']}
+    Set To Dictionary    ${Edit_lig_body}    interconnectMapTemplate    ${Get_lig_body[0]['interconnectMapTemplate']}
+    Set To Dictionary    ${Edit_lig_body}    scopesUri    ${Get_lig_body[0]['scopesUri']}
+    Set To Dictionary    ${Edit_lig_body}    created    ${Get_lig_body[0]['created']}
+    Set To Dictionary    ${Edit_lig_body}    eTag    ${Get_lig_body[0]['eTag']}
+    Set To Dictionary    ${Edit_lig_body}    modified    ${Get_lig_body[0]['modified']}
+    Set To Dictionary    ${Edit_lig_body}    uri    ${Get_lig_body[0]['uri']}
+    Sleep    10
+    [Return]    ${Edit_lig_body}    ${lig_uri}
+
+Get Alert and Compliance Message
+    [Documentation]    Get Alert and compliance messages from LI
+    [Arguments]    ${Alert_list}    ${Compliance_name_list}
+    #${Alert_list} =    Built the Alert list    ${Alert_message_compliance}
+    #Sort List    ${Alert_list}
+    ${Get_Alerts}    Fusion Api Get Alerts
+    ${Get_alert_count}    Get From Dictionary    ${Get_Alerts}    count
+    :For    ${x}    INRANGE    0    ${Get_alert_count}
+    \    ${Alertstate}    Get From Dictionary    ${Get_Alerts['members'][${x}]}    alertState
+    \    Run Keyword If    '${Alertstate}' != 'Active'    Continue For Loop
+    \    ${AlertID}    Get From Dictionary    ${Get_Alerts['members'][${x}]}    alertTypeID
+    \    Run Keyword If    '${AlertID}' != 'crm.complianceChange'    Continue For Loop
+    \    ${Event_uri}    Get From Dictionary    ${Get_Alerts['members'][${x}]}    associatedEventUris
+    \    ${Get_event_details}    Fusion Api Get Alerts    ${Event_uri[0]}
+    \    Log to console and logfile    ${Get_event_details}
+    \    ${Event_Details}    Get From Dictionary    ${Get_event_details}    eventDetails
+    \    ${Count}    Get Length    ${Event_Details}
+    \    ${Event_item_value}    Get Event Item Value    ${Count}    ${Event_Details}    ${Compliance_name_list}
+    \    Lists Should Be Equal    ${Event_item_value}    ${Alert_list}
+    [Return]    ${Event_item_value}
+
+Get Event Item Value
+    [Documentation]    Get the Event name corresponding to the compliance
+    [Arguments]    ${count}    ${event_details}    ${Compliance_name_list}
+    :For    ${x}    INRANGE    0    ${count}
+    \    ${Get_event_name}    Get From Dictionary    ${event_details[${x}]}    eventItemName
+    \    Run Keyword If    '${Get_event_name}' != '${Compliance_name_list}'    Continue For Loop
+    \    ${Event_item_value}    Get From Dictionary    ${event_details[${x}]}    eventItemValue
+    \    Log to console and logfile    ${Event_item_value}
+    \    ${actual_alert}    Built the Alert list    ${Event_item_value}
+    [Return]    ${actual_alert}
+
+Build SNMP LI body
+    [Documentation]    Build SNMP body for LI Edit
+    [Arguments]    ${Snmp_body}    ${True_false}
+    ${Get_li}    Fusion Api Get Li
+    ${Get_li_body}    Copy Dictionary    ${Get_li['members']}
+    Set To Dictionary    ${Snmp_body}    modified   ${Get_li_body[0]['snmpConfiguration']['modified']}
+    Set To Dictionary    ${Snmp_body}    created    ${Get_li_body[0]['snmpConfiguration']['created']}
+    Set To Dictionary    ${Snmp_body}    enabled    ${True_False}
+
+
+    [Return]    ${Snmp_body}
+
+Build Ethernet Setting LIG body
+    [Documentation]    Build Ethernet Setting body for LIG Edit
+    [Arguments]    ${Edit_lig_body}    ${True_False}
+    ${Get_lig}    Fusion Api Get Li
+    ${Get_lig_body}    Copy Dictionary    ${Get_lig['members']}
+    ${Modified}    Get Variable Value   ${Get_lig_body[0]['ethernetSettings']['modified']}
+    ${Created}    Get Variable Value   ${Get_lig_body[0]['ethernetSettings']['created']}
+    ${Id}    Get Variable Value   ${Get_lig_body[0]['ethernetSettings']['id']}
+    ${Name}    Get Variable Value   ${Get_lig_body[0]['ethernetSettings']['name']}
+    ${Uri}    Get Variable Value   ${Get_lig_body[0]['ethernetSettings']['uri']}
+    ${DependentResourceUri}    Get Variable Value   ${Get_lig_body[0]['ethernetSettings']['dependentResourceUri']}
+    Set To Dictionary    ${Edit_lig_body['ethernetSettings']}    modified   ${Modified}
+    Set To Dictionary    ${Edit_lig_body['ethernetSettings']}    created    ${Created}
+    Set To Dictionary    ${Edit_lig_body['ethernetSettings']}    id    ${Id}
+    Set To Dictionary    ${Edit_lig_body['ethernetSettings']}    name    ${Name}
+    Set To Dictionary    ${Edit_lig_body['ethernetSettings']}    uri    ${Uri}
+    Set To Dictionary    ${Edit_lig_body['ethernetSettings']}    dependentResourceUri    ${DependentResourceUri}
+    Set To Dictionary    ${Edit_lig_body['ethernetSettings']}    enableIgmpSnooping    ${True_False}
+
+    [Return]    ${Edit_lig_body}
+
+Build Telementry Configuration LIG body
+    [Documentation]    Build Telementry Configuration body for LIG Edit
+    [Arguments]    ${Edit_lig_body}
+    ${Get_lig}    Fusion Api Get Lig    param=?filter="'name'=='${LIGS_TBird['name']}'"
+    ${Get_lig_body}    Copy Dictionary    ${Get_lig['members']}
+    ${Modified}    Get Variable Value   ${Get_lig_body[0]['telemetryConfiguration']}     modified
+    ${Created}    Get Variable Value   ${Get_lig_body[0]['telemetryConfiguration']}     created
+    ${Uri}    Get Variable Value   ${Get_lig_body[0]['telemetryConfiguration']}     uri
+    Set To Dictionary    ${Edit_lig_body['telemetryConfiguration']}    modified   ${Modified}
+    Set To Dictionary    ${Edit_lig_body['telemetryConfiguration']}    created   ${Created}
+    Set To Dictionary    ${Edit_lig_body['telemetryConfiguration']}    uri   ${Uri}
+
+    [Return]    ${Edit_lig_body}
+
+Edit Enclosure Group from variable
+
+    [Documentation]    Adds an Enclosure Group to an appliance from a variable which contains  a list of dicts with the entire payload
+    [Arguments]     ${enc_group}    ${headers}
+    fusion_api_appliance_setup.Log to console and logfile   \nAdding ENCLOSURE GROUP ${enc_group['name']}
+    ${l} =  Get Length  ${enc_group['interconnectBayMappings']}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${liguri} =     Get From Dictionary ${enc_group['interconnectBayMappings'][${x}]}   logicalInterconnectGroupUri
+    \   Continue For Loop If    '${liguri}' == 'None'
+    \   @{words} =  Split String    ${liguri}   :
+    \   ${type} =   Get From List   ${words}    0
+    \   ${eg} =     Get From List   ${words}    1
+    \   ${liguri} =     Get LIG URI ${eg}
+    \   Set to dictionary   ${enc_group['interconnectBayMappings'][${x}]}   logicalInterconnectGroupUri     ${liguri}
+    ${Get_EG}    Fusion Api Get Enclosure Groups
+    ${EG_uri}    Get Variable Value    ${Get_EG['members'][0]['uri']}
+    ${Modified}    Get Variable Value   ${Get_EG['members'][0]['modified']}
+    ${Created}    Get Variable Value   ${Get_EG['members'][0]['created']}
+    ${Associate_uri}    Get Variable Value   ${Get_EG['members'][0]['associatedLogicalInterconnectGroups']}
+    ${Scopes_Uri}    Get Variable Value   ${Get_EG['members'][0]['scopesUri']}
+    ${Etag}    Get Variable Value   ${Get_EG['members'][0]['eTag']}
+    Set To Dictionary    ${enc_group}    modified   ${Modified}
+    Set To Dictionary    ${enc_group}    created   ${Created}
+    Set To Dictionary    ${enc_group}    associatedLogicalInterconnectGroups   ${Associate_uri}
+    Set To Dictionary    ${enc_group}    eTag   ${Etag}
+    Set To Dictionary    ${enc_group}    scopesUri   ${Scopes_Uri}
+    Set To Dictionary    ${enc_group}    uri   ${EG_uri}
+    ${resp} =   fusion_api_edit_enclosure_group    body=${enc_group}    uri=${EG_uri}    headers=${headers}
+    [Return]   ${resp}
+
+Build Ethernet Setting LI body
+    [Documentation]    Build Ethernet Setting body for LI Edit
+    [Arguments]    ${Ether_settings}    ${True_False}    ${li}=${LE}-${LIG}
+    ${Get_ICMsetting_config}    Fusion Api Get Li
+    ${l} =  Get Length  ${Get_ICMsetting_config['members']}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   Run Keyword If  '${Get_ICMsetting_config['members'][${x}]['name']}' != '${li}'      Continue For Loop
+    \   ${ICM_setting_Uri}    Get Variable Value    ${Get_ICMsetting_config['members'][${x}]['ethernetSettings']['uri']}
+    \   ${Modified}    Get Variable Value   ${Get_ICMsetting_config['members'][${x}]['ethernetSettings']['modified']}
+    \   ${Created}    Get Variable Value   ${Get_ICMsetting_config['members'][${x}]['ethernetSettings']['created']}
+    \   ${Id}    Get Variable Value   ${Get_ICMsetting_config['members'][${x}]['ethernetSettings']['id']}
+    \   ${Name}    Get Variable Value   ${Get_ICMsetting_config['members'][${x}]['ethernetSettings']['name']}
+    \   ${DependentResourceUri}    Get Variable Value   ${Get_ICMsetting_config['members'][${x}]['ethernetSettings']['dependentResourceUri']}
+    Set To Dictionary    ${Ether_settings['ethernetSettings']}    modified   ${Modified}
+    Set To Dictionary    ${Ether_settings['ethernetSettings']}    created    ${Created}
+    Set To Dictionary    ${Ether_settings['ethernetSettings']}    id    ${Id}
+    Set To Dictionary    ${Ether_settings['ethernetSettings']}    name    ${Name}
+    Set To Dictionary    ${Ether_settings['ethernetSettings']}    uri    ${ICM_setting_Uri}
+    Set To Dictionary    ${Ether_settings['ethernetSettings']}    dependentResourceUri    ${DependentResourceUri}
+    Set To Dictionary    ${Ether_settings['ethernetSettings']}    enableIgmpSnooping    ${True_False}
+
+    [Return]    ${Ether_settings}
+
+Build Qos body
+    [Documentation]    Build for LI/LIG Edit
+    [Arguments]    ${Qos_Fcoe}    ${Qos_classname}    ${Share}    ${Total_band}    ${class_enable}    ${Dot1p_value}
+    ${Qos_body}    Copy Dictionary    ${Qos_Fcoe}
+    ${Qos_traffic_count}    Get Length    ${Qos_body['activeQosConfig']['qosTrafficClassifiers']}
+    :For    ${x}    INRANGE    0    ${Qos_traffic_count}
+    \     ${Class_name}    Get From Dictionary    ${Qos_body['activeQosConfig']['qosTrafficClassifiers'][${x}]['qosTrafficClass']}    className
+    \     Run Keyword If    '${Class_name}'!='${Qos_classname}'    Continue for loop
+    \     Set To Dictionary    ${Qos_body['activeQosConfig']['qosTrafficClassifiers'][${x}]['qosTrafficClass']}    bandwidthShare    ${Share}
+    \     Set To Dictionary    ${Qos_body['activeQosConfig']['qosTrafficClassifiers'][${x}]['qosTrafficClass']}    enabled    ${class_enable}
+    \     Set To Dictionary    ${Qos_body['activeQosConfig']['qosTrafficClassifiers'][${x}]['qosTrafficClass']}    egressDot1pValue    ${Dot1p_value}
+    Set To Dictionary    ${Qos_body['activeQosConfig']['qosTrafficClassifiers'][0]['qosTrafficClass']}    bandwidthShare    ${Total_band}
+    [Return]    ${Qos_body}
+
+Perform an LI Update From Group
+    [Documentation]    Perform an LI Update From Group
+    ...             Example:
+    ...             Perform an LI Update From Group    ${li}    ${interval}
+    [Arguments]       ${li}=${LE}-${LIG1}     ${timeout}=45 min    ${interval}=15s
+    ${resp} =       Fusion Api Update from group    ${li}
+    ${task} =       Wait For Task       ${resp}     ${timeout}        ${interval}
+    ${valDict} =    Create Dictionary   status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response    ${task}    ${valDict}
+
+Verify LI/LIG Consistent Status
+    [Documentation]    Get LI for Verification of LI/LIG Consistency status
+    [Arguments]    ${Expected_Consistency_Status}    ${li}=${LE}-${LIG}
+    Sleep    90
+    ${Li_resp}= Fusion Api Get Li
+    ${l} =  Get Length  ${Li_resp['members']}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   Run Keyword If  '${Li_resp['members'][${x}]['name']}' != '${li}'        Continue For Loop
+    \   Should Be Equal As Strings  ${Li_resp['members'][${x}]['consistencyStatus']}    ${Expected_Consistency_Status}
+    Log to console and logfile    LI/LIG are ${Expected_Consistency_Status}.
+
+Verify Interconnect State
+    [Documentation]    Verify the interconnect state
+    ...             Example:
+    ...             Verify Interconnect State    ${interconnectname_1}    ${IC_Configured}
+    [Arguments]        ${interconnectname_1}        ${IC_Configured}
+    ${ic} =    Get IC    ${interconnectname_1}
+    ${State} =    Get From IC        ${ic}    state
+    Log to Console and logfile    ${State}
+    Log to console and logfile    Interconnect state is ${interconnectname_1}:${State}
+    Should Be Equal As Strings    ${State}    ${IC_Configured}
+
+Get IC
+    [Documentation]    Get IC by name
+    ...             Example:
+    ...             Get IC    ${ICM_NAME}
+    [Arguments]        ${ICM_NAME}
+    ${resp} =   fusion api get interconnect
+    Log        ${resp}
+    ${ics} =     Get From Dictionary     ${resp}    members
+    ${l} =     Get Length    ${ics}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \   ${ic} =     Get From List   ${ics}    ${x}
+    \     Exit For Loop If     '${ic['name']}' == '${ICM_NAME}'
+    [Return]    ${ic}
+
+Get from IC
+    [Documentation]    Get the required element from the interconnect
+    ...             Example:
+    ...             Get from IC    ${ic}    ${element}
+    [Arguments]     ${ic}   ${element}
+    ${return} =     Get From Dictionary     ${ic}   ${element}
+    [Return]    ${return}
+
+Edit LIG Internal Networks
+    [Documentation]    Editing LIG
+    ...             Example:
+    ...             Edit LIG    ${lig}
+    [Arguments]    ${lig}
+    ${body} =   Build LIG body    ${lig}
+    log to console  Editing Li with snmp ${body}
+    #${lig} =        Get LIG Member      ${LIGname}
+    #${lig_uri} =    Get LIG Uri         ${LIGname}
+    #${resp} =   Fusion Api Edit LIG    body=${body}    uri=${lig_uri}
+    [Return]    ${body}
+
+Create LIG
+    [Documentation]    Suite Setup Tasks
+    [Arguments]        ${body1}
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    Log to console and logfile    \n-Creating LIG ${body1}
+    ${body}    Build LIG body    ${body1}
+    Log to console and logfile    \n-Creating LIG ${body}
+    ${resp}    Fusion Api Create LIG    ${body}
+    ${task} =   Wait For Task   ${resp}    60s  2s
+    [Return]    ${resp}
+
+Get LIG member
+    [Documentation]    Get LIG member
+    [Arguments]    ${LIG1}
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    ${lig_get}    Fusion Api Get Lig    param=?filter=name=${LIG1}
+    ${lig_edit}    Get Variable Value    ${lig_get['members'][0]}
+    [Return]    ${lig_edit}
+
+Edit LIG
+    [Documentation]   Edits LIG
+    [Arguments]        ${lig}
+    Fusion Api Login Appliance         ${APPLIANCE_IP}        ${admin_credentials}
+    ${body} =   Build LIG body      ${lig}
+    ${lig} =         Get LIG Member      ${LIG1}
+    ${lig_uri} =    Get LIG Uri         ${LIG1}
+    ${resp} =     Fusion Api Edit LIG    body=${body}        uri=${lig_uri}
+    Log to console and logfile    ${resp}
+    ${task} =    Wait For Task     ${resp}     120s
+    ${valDict} =     Create Dictionary    status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response    ${task}    ${valDict}
+
+Validate LIG LI Consistency
+    [Documentation]    Validating LIG LI Consistency status
+    ...             Example:
+    ...             Validate LIG LI Consistency    ${Consistency_State[0]}
+    [Arguments]         ${expected}
+    ${IC}=    Fusion Api Get LI
+    Log to Console    \n ${IC}
+    Run Keyword If  '${IC['members'][0]['consistencyStatus']}' != '${expected}'     Fail
+
+Edit LI
+    [Documentation]    Edits LI
+    [Arguments]    ${body}
+    ${li_uri} =     Get LI URI   ${LE}-${LIG_1}
+    ${resp} =     Fusion Api Get Li    ${li_uri}
+    Log    ${resp}
+    ${tc} =     Get From Dictionary        ${resp}    telemetryConfiguration
+    ${uri} =     Get From Dictionary        ${tc}        uri
+    #Set to Dictionary    ${body}    uri    ${uri}
+    #Log    ${body}
+    ${resp1} =     fusion_api_update_li_telemetry_configuration    body=${body}        uri=${uri}
+    Log    ${resp1}
+    ${task} =    Wait For Task     ${resp1}     600s
+    ${valDict} =     Create Dictionary    status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response    ${task}    ${valDict}
+
+Perform an Update From Group
+    [Documentation]    Performs an LI update form group
+    [Arguments]        ${li_uri}    ${timeout}=45 min     ${interval}=15s
+    # ${li_uri} =    Get LI URI    ${li}
+    ${resp} =         Fusion Api Update from group    ${li_uri}
+    ${task} =        Wait For Task     ${resp}     ${timeout}        ${interval}
+    ${valDict} =     Create Dictionary    status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response    ${task}    ${valDict}
+
+ValidateLI Telemetryconfig
+    [Documentation]    ValidateLI utilization sampling-Telemetry configuration
+    [Arguments]     ${li}   ${US_val}
+    ${li_uri} =     Get LI URI   ${li}
+    ${getresp} =    Fusion Api Get Li   ${li_uri}
+    Log to console and logfile     ${getresp}
+    ${es} =     Get From Dictionary     ${getresp}  telemetryConfiguration
+    Log to console and logfile    ${es}
+    ${enableTelemetry} =    Get From Dictionary     ${es}   enableTelemetry
+    Should Be Equal As Strings    ${US_val}    ${enableTelemetry}
+    Log to console and logfile    Utilization sampling <${US_val}> compared with utilization sampling in LI <${enableTelemetry}>
+
+
+ValidateLIG Telemetryconfig
+    [Documentation]    ValidateLIG utilization sampling-Telemetry configuration
+    [Arguments]     ${lig}   ${US_val}
+    ${lig_uri} =     Get LIG URI   ${lig}
+    ${getresp} =    Fusion Api Get Lig   ${lig_uri}
+    Log to console and logfile     ${getresp}
+    ${es} =     Get From Dictionary     ${getresp}  telemetryConfiguration
+    Log to console and logfile    ${es}
+    ${enableTelemetry} =    Get From Dictionary     ${es}   enableTelemetry
+    Should Be Equal As Strings    ${US_val}    ${enableTelemetry}
+    Log to console and logfile    Utilization sampling <${US_val}> compared with utilization sampling in LIG <${enableTelemetry}>
+
+Perform an LE Update
+    [Documentation]    Performing an LE update from group
+    [Arguments]       ${le}     ${timeout}=45 min    ${interval}=25s
+    ${resp} =       Fusion Api Update Logical Enclosure from Group    ${le}
+    ${task} =       Wait For Task       ${resp}     ${timeout}        ${interval}
+    ${valDict} =    Create Dictionary   status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response    ${task}    ${valDict}
+
+Get Qos Classifiers Value
+    [Documentation]    Get Qos Classifiers Value for LIG Edit
+    [Arguments]    ${Class_Name_qos}    ${Parameter}
+    ${Get_lig}    Fusion Api Get Lig    param=?filter="'name'=='${LIGS_TBird['name']}'"
+    ${Get_lig_body}    Copy Dictionary    ${Get_lig['members'][0]['qosConfiguration']['activeQosConfig']['qosTrafficClassifiers']}
+    ${Qos_classifier_count}    Get Length    ${Get_lig_body}
+
+    :For    ${x}    INRANGE    0    ${Qos_classifier_count}
+    \    ${classname}    Get From Dictionary    ${Get_lig_body[${x}]['qosTrafficClass']}    className
+    \    Run Keyword If    '${classname}' != '${Class_Name_qos}'    Continue For Loop
+    \    ${Qos_traffic_Value}    Get From Dictionary    ${Get_lig_body[${x}]['qosTrafficClass']}    ${Parameter}
+    \    ${Qos_traffic_classifier_Value}    Convert To String    ${Qos_traffic_Value}
+
+    [Return]    ${Qos_traffic_classifier_Value}
+
+Get Qos Classifiers Value LI
+    [Documentation]    Get Qos Classifiers Value for LI Edit
+    [Arguments]    ${Class_Name_qos}    ${Parameter}
+    ${Get_li}    Fusion Api Get Li
+    ${Get_li_body}    Copy Dictionary    ${Get_li['members'][0]['qosConfiguration']['activeQosConfig']['qosTrafficClassifiers']}
+    ${Qos_classifier_count}    Get Length    ${Get_li_body}
+
+    :For    ${x}    INRANGE    0    ${Qos_classifier_count}
+    \    ${classname}    Get From Dictionary    ${Get_li_body[${x}]['qosTrafficClass']}    className
+    \    Run Keyword If    '${classname}' != '${Class_Name_qos}'    Continue For Loop
+    \    ${Qos_traffic_Value}    Get From Dictionary    ${Get_li_body[${x}]['qosTrafficClass']}    ${Parameter}
+    \    ${Qos_traffic_classifier_Value}    Convert To String    ${Qos_traffic_Value}
+
+    [Return]    ${Qos_traffic_classifier_Value}
+
+Edit LI Ethernet Settings
+    [Documentation]    Edits LI
+    [Arguments]        ${body}
+    Fusion Api Login Appliance         ${APPLIANCE_IP}        ${admin_credentials}
+    #${body} =    Build LI body    ${body}
+    Log    ${body}
+    ${li_uri} =     Get LI URI   ${LE}-${LIG_1}
+    ${resp} =     Fusion Api Get Li    ${li_uri}
+    Log    ${resp}
+    ${es} =     Get From Dictionary        ${resp}    ethernetSettings
+    ${uri} =     Get From Dictionary        ${es}        uri
+    ${id} =     Get From Dictionary        ${es}        id
+    Log        ${id}
+    Set to Dictionary    ${body}    id    ${id}
+    Log    ${body}
+
+    ${resp1} =     Fusion Api Update LI Ethernet Settings    body=${body}        uri=${li_uri}
+    Log    ${resp1}
+    ${task} =    Wait For Task     ${resp1}     600s
+    ${valDict} =     Create Dictionary    status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response    ${task}    ${valDict}
+
+Build LI body
+    [Documentation]    Builds LI body
+    [Arguments]        ${liedit}
+    ${liedit} =     Copy Dictionary    ${liedit}
+    ${type} =                       Get Variable Value  ${liedit['type']}
+    ${enableTaggedLldp} =              Get Variable Value  ${liedit['enableTaggedLldp']}
+    ${lldpIpAddressMode} =              Get Variable Value  ${liedit['lldpIpAddressMode']}
+    ${enableIgmpSnooping} =              Get Variable Value  ${liedit['enableIgmpSnooping']}
+    ${body} =     Create Dictionary                type=${type}
+    ...                                         enableTaggedLldp=${enableTaggedLldp}
+    ...                                         lldpIpAddressMode=${lldpIpAddressMode}
+    ...                                         enableIgmpSnooping=${enableIgmpSnooping}
+    [Return]    ${body}
+
+ValidateLI IGMPsnooping
+    [Documentation]    ValidateLI IGMP snooping attribute
+    [Arguments]     ${li}   ${IS_val}
+    ${li_uri} =     Get LI URI   ${li}
+    ${getresp} =    Fusion Api Get Li   ${li_uri}
+    Log to console and logfile     ${getresp}
+    ${es} =     Get From Dictionary     ${getresp}  ethernetSettings
+    Log to console and logfile    ${es}
+    ${enableIgmpSnooping} =    Get From Dictionary     ${es}   enableIgmpSnooping
+    Should Be Equal As Strings    ${IS_val}    ${enableIgmpSnooping}
+    Log to console and logfile    IgmpSnoopingvalue <${IS_val}> compared with enableIgmpSnooping in LI <${enableIgmpSnooping}>
+
+ValidateLIG IGMPsnooping
+    [Documentation]    ValidateLIG IGMP snooping attribute
+    [Arguments]     ${lig}   ${IS_val}
+    ${lig_uri} =     Get LIG URI   ${lig}
+    ${getresp} =    Fusion Api Get Lig   ${lig_uri}
+    Log to console and logfile     ${getresp}
+    ${es} =     Get From Dictionary     ${getresp}  ethernetSettings
+    Log to console and logfile    ${es}
+    ${enableIgmpSnooping} =    Get From Dictionary     ${es}   enableIgmpSnooping
+    Should Be Equal As Strings    ${IS_val}    ${enableIgmpSnooping}
+    Log to console and logfile    IgmpSnoopingvalue <${IS_val}> compared with enableIgmpSnooping in LIG <${enableIgmpSnooping}>
+
+Build SNMP body
+    [Documentation]    Build SNMP body for LIG Edit
+    [Arguments]    ${Edit_lig_body}     ${True_False}
+    ${Get_lig}    Fusion Api Get Lig    param=?filter="'name'=='${LIGS_TB['ligs'][0]['name']}'"
+    ${Get_lig_body}    Copy Dictionary    ${Get_lig['members']}
+    Set To Dictionary    ${Edit_lig_body['snmpConfiguration']}    modified   ${Get_lig_body[0]['snmpConfiguration']['modified']}
+    Set To Dictionary    ${Edit_lig_body['snmpConfiguration']}    created    ${Get_lig_body[0]['snmpConfiguration']['created']}
+    Set To Dictionary    ${Edit_lig_body['snmpConfiguration']}    enabled    ${True_False}
+    #Set To Dictionary    ${Edit_lig_body['snmpConfiguration']}    readCommunity    ${Public}
+
+    [Return]    ${Edit_lig_body}
+
+Login to OneView via REST
+    [Documentation]     Login to the appliance with the credentials
+    [Tags]  add   POSITIVE
+    Set Log Level    TRACE
+    ${resp}     Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+
+Get Alert and Multi Compliance Message
+    [Documentation]    Get Alert Messages from Multi Compliance Alerts
+    [Arguments]    ${Alert_message_compliance}    ${Multi_count}    ${Compliance_name_list}
+    ${Crm_Compliance}    Create list
+    ${Associate_uri_list}    Create list
+    ${Each_Compliance_Alert_list}    Create list
+    ${Get_Alerts}    Fusion Api Get Alerts
+    ${Get_alert_count}    Get From Dictionary    ${Get_Alerts}    count
+    :For    ${x}    INRANGE    0    ${Get_alert_count}
+    \    ${Alertstate}    Get From Dictionary    ${Get_Alerts['members'][${x}]}    alertState
+    \    Run Keyword If    '${Alertstate}' != 'Active'    Continue For Loop
+    \    ${AlertID}    Get From Dictionary    ${Get_Alerts['members'][${x}]}    alertTypeID
+    \    Run Keyword If    '${AlertID}' != 'crm.complianceChange'    Continue For Loop
+    \    Append to list    ${Crm_Compliance}    ${AlertID}
+    \    ${Event_uri}    Get From Dictionary    ${Get_Alerts['members'][${x}]}    associatedEventUris
+    \    Append to list    ${Associate_uri_list}    ${Event_uri[0]}
+    Log to console and logfile    ${Associate_uri_list}
+
+    ${Compliance_count}    Get Length    ${Crm_Compliance}
+    Run Keyword If    '${Compliance_count}' == '${Multi_count}'    Log to console and logfile    Multi_${Compliance_count}_Compliance    ELSE    Fail
+
+    ${Complete_Compliance_alert_list}    Create list
+    :For    ${x}    INRANGE    0    ${Compliance_count}
+    \   ${Get_event_details}    Fusion Api Get Alerts    ${Associate_uri_list[${x}]}
+    \    ${Event_Details}    Get From Dictionary    ${Get_event_details}    eventDetails
+    \    ${Count}    Get Length    ${Event_Details}
+    \    ${Event_item_value}    Get Multi Event Item Value    ${Count}    ${Event_Details}    ${Compliance_name_list}
+    \    ${Alerts_each_complaince_count}    Get Length    ${Event_item_value}
+    \    ${Combined_list_each_compliance}    combine_sublist    ${Event_item_value}
+    \    Append to list    ${Complete_Compliance_alert_list}    ${Combined_list_each_compliance}
+
+    ${Complete_Compliance_alert_message}    combine_sublist    ${Complete_Compliance_alert_list}
+
+    ${Combined_list_count}    Get Length    ${Complete_Compliance_alert_message}
+    ${Compliance_list_count}    Get Length    ${Compliance_name_list}
+    Run Keyword If    '${Combined_list_count}' != '${Compliance_list_count}'  Remove Duplicates    ${Complete_Compliance_alert_message}    ELSE    Sort list    ${Complete_Compliance_alert_message}
+
+    Sort list    ${Complete_Compliance_alert_message}
+
+    #Remove Duplicates    ${Complete_Compliance_alert_message}
+
+    List Should Not Contain Duplicates    ${Complete_Compliance_alert_message}
+
+    Lists Should Be Equal    ${Complete_Compliance_alert_message}    ${Alert_message_compliance}
+
+Get Multi Event Item Value
+    [Documentation]    Get Event Item Values from Multi Compliance Alert
+    [Arguments]    ${count}    ${event_details}    ${Compliance_name_list}
+    ${Alerts_each_Compliance}    Create list
+    :For    ${x}    INRANGE    0    ${count}
+    \    ${Get_event_name}    Get From Dictionary    ${event_details[${x}]}    eventItemName
+    \    Run Keyword If    '${Get_event_name}' == 'correctiveAction' or '${Get_event_name}' == 'resourceUri'  Continue For Loop
+    \    List Should Contain Value    ${Compliance_name_list}    ${Get_event_name}
+    \    ${Event_item_value}    Get From Dictionary    ${event_details[${x}]}    eventItemValue
+    \    ${Actual_Alert}    Built the Alert list    ${Event_item_value}
+    \    Append to list    ${Alerts_each_Compliance}    ${Actual_Alert}
+
+    [Return]    ${Alerts_each_Compliance}
+
+Built the Alert list
+
+    [Documentation]    Building the Alert list for Compliance alert verification
+    [Arguments]    ${Qos_compliance_alert}
+
+    ${Line_count}    Get Line Count    ${Qos_compliance_alert}
+    ${Alert_List}    Create List
+    :For    ${x}    INRANGE    0    ${Line_count}
+    \    ${Get_line}    Get Line    ${Qos_compliance_alert}    ${x}
+    \    Append to list    ${Alert_List}    ${Get_line}
+    Sort List    ${Alert_List}
+    Log to console and logfile    ${Alert_List}
+
+    [Return]    ${Alert_List}
+
+Edit LI Internal Networks
+    [Documentation]    Performing edit LI in Internal Networks Event
+    [Arguments]        ${li}        ${li_body}     ${headers}
+    ${li_uri} =     Get LI URI   ${li}
+    ${resp} =    Fusion Api Get Li    ${li_uri}
+    ${respl} =    Fusion Api Update LI Internal Networks    body=${li_body}    uri=${li_uri}    headers=${headers}
+    #log to console  Editing Li with internal networks ${respl}
+    ${task} =  Wait For Task   ${respl}    300s    2s
+    [Return]    ${respl}
+
+Build SNMP LIG body
+    [Documentation]    Build SNMP body for LIG Edit
+    [Arguments]    ${Edit_lig_body}
+    ${Get_lig}    Fusion Api Get Lig    param=?filter="'name'=='${LIGS_TB['name']}'"
+    ${Get_lig_body}    Copy Dictionary    ${Get_lig['members']}
+    Set To Dictionary    ${Edit_lig_body['snmpConfiguration']}    modified   ${Get_lig_body[0]['snmpConfiguration']['modified']}
+    Set To Dictionary    ${Edit_lig_body['snmpConfiguration']}    created    ${Get_lig_body[0]['snmpConfiguration']['created']}
+
+    [Return]    ${Edit_lig_body}
+
+Build Uplink set body
+
+    [Documentation]    Build Uplink set body for LI Edit
+    [Arguments]    ${Edit_LI_US}    ${LIURI}
+
+    ${uplink_resp}    Fusion Api Get Uplink Set    param=?filter="'name'=='${Edit_LI_US['name']}'"
+    ${upset_members}    Get Variable Value    ${uplink_resp['members'][0]}
+    ${upset_uri}    Get Variable Value    ${upset_members['uri']}
+    ${US_Body}    Copy Dictionary    ${Edit_LI_US}
+    Set To Dictionary    ${US_Body}    uri    ${upset_uri}
+    Set To Dictionary    ${US_Body}    logicalInterconnectUri    ${LIURI}
+
+    [Return]    ${US_Body}    ${upset_uri}

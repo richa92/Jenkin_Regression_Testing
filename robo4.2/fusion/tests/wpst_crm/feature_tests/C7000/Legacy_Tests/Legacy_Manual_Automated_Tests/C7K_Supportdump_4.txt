@@ -1,0 +1,176 @@
+*** Settings ***
+Documentation      C7K_SupportDump4
+Library            json
+Library            FusionLibrary
+Library            RoboGalaxyLibrary
+Variables          data_variables.py
+Resource           ../../../../resources/resource.txt
+#Library            SSHLibrary
+#Library               Telnet
+Library            Sdumpfunctions
+Library            Dialogs
+
+
+***variables***
+${filename}    ci_dfrm_supportdump
+${LEuri}     /rest/logical-enclosures/
+${file}     ${CURDIR}/support_dump/ci_dfrm_supportdump.sdmp
+${decyrpt_file}     ${CURDIR}/support_dump/Decrypted/ci_dfrm_supportdump.sdmp
+${dump_file_path}       ${CURDIR}/support_dump
+${decryptor_path}       Decryptor
+
+
+
+*** Testcase***
+1. Login
+    Set Log Level    TRACE
+    ${resp}    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    Run Keyword If  '${resp[0]['status_code']}' != '200'    Fail    ELSE  Log to console  \nSuccessfully logged into the appliance
+    #Initial Cleanup
+    Clean OV
+
+2.Creating LIG,EG and importing enclosure
+    ${enc_resp}=    Fusion Api Import Server Hardware Type For Enclosure    ${Preview_body_76}    ${Preview_uri}
+    Log to console and logfile    ${enc_resp}
+    ${interconnectMapTemplate}      Set Variable    ${enc_resp['logicalInterconnectGroup']['interconnectMapTemplate']}
+    Set Global Variable   ${interconnectMapTemplate_Global}    ${interconnectMapTemplate}
+    Set To Dictionary    ${lig_sd_4}    interconnectMapTemplate    ${interconnectMapTemplate_Global}
+    ${resp_lig} =   Fusion Api Create LIG    ${lig_sd_4}
+    Run keyword unless  ${resp_lig['status_code']}== 202    Fail    ${resp_lig['message']}
+    ${task} =   Wait For Task   ${resp_lig}     120s    2s
+    Log to console and logfile    LIG created successfully
+    ${uri} =    Get From Dictionary    ${task['associatedResource']}    resourceUri
+    Set Global Variable    ${LIG_uri}    ${uri}
+    Log to console and logfile    ${LIG_uri}
+    ${Test_dict} =    Create Dictionary
+    :FOR    ${x}    IN RANGE    0    8
+    \    ${permittedInterconnectTypeUri} =    Get From Dictionary    ${interconnectMapTemplate_Global['interconnectMapEntryTemplates'][${x}]}   permittedInterconnectTypeUri
+    \    Run Keyword If    '${interconnectMapTemplate_Global['interconnectMapEntryTemplates'][${x}]['logicalLocation']['locationEntries'][0]['type']}'=='Bay'    Set To Dictionary    ${Test_dict}    ${interconnectMapTemplate_Global['interconnectMapEntryTemplates'][${x}]['logicalLocation']['locationEntries'][0]['relativeValue']}    ${permittedInterconnectTypeUri}
+    \    Run Keyword If    '${interconnectMapTemplate_Global['interconnectMapEntryTemplates'][${x}]['logicalLocation']['locationEntries'][1]['type']}'=='Bay'    Set To Dictionary    ${Test_dict}    ${interconnectMapTemplate_Global['interconnectMapEntryTemplates'][${x}]['logicalLocation']['locationEntries'][1]['relativeValue']}    ${permittedInterconnectTypeUri}
+    Log to console and logfile    ${Test_dict}
+    ${Keys}=    Get Dictionary Keys    ${Test_dict}
+    Log to console and logfile    ${Keys}
+    ${Values}=    Get Dictionary Values    ${Test_dict}
+    Log to console and logfile    ${Values}
+    :FOR    ${y}    IN RANGE    0    8
+    \    Set To Dictionary    ${eg_body_sd_4['interconnectBayMappings'][${y}]}    interconnectBay    ${Keys[${y}]}
+    \    Run Keyword If    '${Values[${y}]}' != 'None'    Set To Dictionary    ${eg_body_sd_4['interconnectBayMappings'][${y}]}    logicalInterconnectGroupUri    ${LIG_uri}
+    Log to console and logfile    ${eg_body_sd_4}
+
+    ${eg_resp}=    Fusion Api Create Enclosure Group    ${eg_body_sd_4}
+    Run keyword unless  ${eg_resp['status_code']}== 201    Fail    ${eg_resp['message']}
+    Set Global Variable    ${EG_uri}    ${eg_resp['uri']}
+    Log to console and logfile    EG created successfully
+    Set To Dictionary    ${enc_body_sd_4}    enclosureGroupUri    ${EG_uri}
+    ${resp_enc}=    Fusion Api Add Enclosure    ${enc_body_sd_4}
+    Run keyword unless  ${resp_enc['status_code']}== 202    Fail    ${resp_lig['message']}
+    ${task} =   Wait For Task   ${resp_enc}     500s    30s
+    Log to console and logfile    Enclosure imported successfully
+
+3.logical enclosure support dump
+    Create Directory     ${dump_file_path}
+    #${LEResp}=    Fusion Api Get Resource          uri=${LEuri}
+    ${LEResp}=    Fusion Api Get Logical Enclosure
+    Set Global Variable    ${LEuri}    ${LEResp['members'][0]['uri']}
+    Log to console and logfile    ${LEuri}
+    logger      LE response : ${LEResp}     DEBUG
+    Run Keyword If      '${LEResp['count']}' == '0'     Pass With Warnings      msg=Since LE is not available support dump is not created and test case is skipped
+    ${LE_id} =  Get from dictionary     ${LEResp['members'][0]} uri
+    ${LE_id} =  Split String From Right     ${LE_id}    /   1
+    logger      Le id is : ${LE_id[-1]}
+    ${payload} =    Build support dump payload      Mydump      ${true}
+    ${resp}     Fusion Api Get Logical Enclosure Support Dump       ${payload}      ${LE_id[-1]}
+    ${task} =    Wait For Task    ${resp}     15min    1min
+    Logger      LE support dump response : ${resp}      DEBUG
+    #${task_resp} = Wait Until Keyword Succeeds     10 min  10 sec      Validate the response       ${resp}
+    ${uri}=     Get From Dictionary     ${task['associatedResource']}       resourceUri
+    Logger      The downloadable dump file ${uri}
+    Empty Directory     ${dump_file_path}
+    ${resp}=    Fusion Api Download Support Dump    uri=${uri}          localfile=${file}
+    appending_line    ${file}
+    Sleep    5s
+    decryptor_error    ${filename}    ${dump_file_path}    ${decryptor_path}
+
+4.Downloading and validating decrypted support dump from Appliance settings page
+    [Documentation]     Create an appliance support dump, decrypt it, extract and validate for the existence of files
+    ${dump_file_path} =     Catenate    SEPARATOR=/     ${dump_file_path}       Decrypted
+    ${decryptor_path} =     Set Variable            #Making the path as null since encryption not required
+    logger      \n Location of Dump files : ${dump_file_path}
+    Create Directory     ${dump_file_path}
+    Empty Directory     ${dump_file_path}
+    ${resp}    Fusion Api Create Support Dump    ${sdmp_body_sd_4}
+    Log to console and logfile    ${resp}
+    Logger      Appliance support dump response : ${resp}       DEBUG
+    ${uri}=     Get From Dictionary     ${resp}     uri
+    Logger      The downloadable dump file ${uri}
+    Empty Directory     ${dump_file_path}
+    ${resp}=    Fusion Api Download Support Dump    uri=${uri}          localfile=${decyrpt_file}
+    appending_line    ${file}
+    Sleep    5s
+    decryptor_error    ${filename}    ${dump_file_path}    ${decryptor_path}
+
+5.Final Cleanup
+    Clean OV
+***keywords***
+
+Logger
+    [Documentation]     Logs the messages for particular level mentioned. Eg: Logger *messages  DEBUG   | Now supporting INFO and DEBUG
+    [Arguments]     ${message}      ${Arg_log}=None
+    Run Keyword If      '${Arg_log}'=='None'    Log to console      ${message}
+    Run Keyword If      '${Arg_log}'=='DEBUG' and '${LOG_LEVEL}'=='DEBUG'       Log to console      ${message}
+
+
+Build support dump payload
+    [Arguments]     ${name}     ${encrypt}
+    ${payload_dict}=   Create Dictionary  errorCode=${name}
+    ...                                   encrypt=${encrypt}
+    ...                                   excludeApplianceDump=false
+    Logger      The support dump payload is : ${payload_dict}       DEBUG
+    [return]    ${payload_dict}
+
+
+Validate the response
+    [Arguments]     ${resp}
+    ${resp_uri} =   Get from dictionary     ${resp}     uri
+    #Wait Until Keyword Succeeds  ${timeout}    ${polling_time}  Validate computedPercentComplete   ${resp}
+    ${resp} =   Fusion api get resource     ${resp_uri}
+    ${taskstate} =      Get from dictionary     ${resp}     taskState
+    logger      ${taskstate}        DEBUG
+    ${taskerror} =      Get from dictionary     ${resp}     taskErrors
+    Run keyword If      '${taskstate}' != 'New'      Task Error     ${taskerror}    ${resp_uri}
+    [return]    ${resp}
+
+
+Task Error
+    [Arguments]     ${taskerror}    ${resp_uri}
+    Logger  taskeror : ${taskerror}     DEBUG
+    ${error_code} =     Get from dictionary     ${taskerror}    errorCode
+    ${message} =    Get from dictionary     ${taskerror}        message
+    Fail    msg= Failed for the uri ${resp_uri} due to ${error_code} \n Additional Info : ${message}
+
+
+Pass With Warnings
+    [Arguments]     ${msg}
+    Log     ${msg}      WARN
+    Pass Execution      Test case skipped, check the above warning message for info
+
+
+Get LE URI
+                [Arguments]                      ${le}
+                ${resp} =              Fusion Api Get Logical Enclosure                                param=?filter="'name'=='${le}'"
+                ${uri} = Get From Dictionary                        ${resp['members'][0]}   uri
+                [Return]               ${uri}
+
+Clean OV
+    [Documentation] Cleans the appliance
+    Log to console    \nCleaning the OV
+    Power off ALL Servers
+    Remove All Server Profiles
+    Remove ALL Enclosures
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove ALL Ethernet Networks
+    Remove ALL FC Networks
+    Remove ALL FCoE Networks
+    Remove ALL Network Sets
+    Remove ALL Users

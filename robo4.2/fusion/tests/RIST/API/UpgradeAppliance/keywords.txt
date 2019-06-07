@@ -1,0 +1,126 @@
+*** Settings ***
+Library                   FusionLibrary
+Library                   RoboGalaxyLibrary
+Library                   BuiltIn
+Library                   robot.api.logger
+Library                   Collections
+Library                   OperatingSystem
+Resource                  ./../../../../Resources/api/fusion_api_resource.txt
+
+
+*** Keywords ***
+Remove Upgrade BIN File
+    [Documentation]  Remove downloaded upgrade bin file
+    Run Keyword And Ignore Error    Remove File    ${EXECDIR}\\${update_bin_filename}
+
+Set Appliance Version Variable
+    [Documentation]   Set the X-API-VERSION variable based on appliance vesion
+    ${resp}=   Fusion Api Get Appliance Version
+    Run Keyword If    ${resp["compatibility"]}==3.00  Set Global Variable  ${X-API-VERSION}  300
+    ...   ELSE IF     ${resp["compatibility"]}==3.10  Set Global Variable  ${X-API-VERSION}  500
+    ...   ELSE IF     ${resp["compatibility"]}==4.00  Set Global Variable  ${X-API-VERSION}  600
+    ...   ELSE IF     ${resp["compatibility"]}==4.10  Set Global Variable  ${X-API-VERSION}  800
+    ...   ELSE        Fatal Error   msg=--Appliance with a error version: <OneView ${resp["compatibility"]}>, fail all upgrade tests...
+
+Set Data Version Variable
+    [Documentation]   Set the data version variable based on appliance vesion
+    ${resp}=   Fusion Api Get Appliance Version
+    Run Keyword If    ${resp["compatibility"]}==3.00  Set Global Variable  ${Version}  OneView_300
+    ...   ELSE IF     ${resp["compatibility"]}==3.10  Set Global Variable  ${Version}  OneView_310
+    ...   ELSE IF     ${resp["compatibility"]}==4.00  Set Global Variable  ${Version}  OneView_400
+    ...   ELSE IF     ${resp["compatibility"]}==4.10  Set Global Variable  ${Version}  OneView_410
+    ...   ELSE        Fatal Error   msg=--Appliance with a error version: <OneView ${Version["compatibility"]}>, fail all upgrade tests...
+
+Setup TBird Env Befre Upgrade
+    [Documentation]         Add/Create all necessary resources like Licenses/Users/Networks/Network sets/LIGs/EGs
+    ...                     that will be used by feature tests or regression tests
+    [Arguments]             ${Ring}
+    ...                     ${Add_User}=true
+    ...                     ${Add_LE}=false
+    ...                     ${Add_Storage}=false
+    ...                     ${Version}=OneView_310
+    Set Log Level            TRACE
+
+    Add Licenses From Variable    ${${Version}.licenses}
+    Add Users From Variable    ${${Version}.users}
+    ${resplist} =   Add San Managers Async          ${${Version}.SAN_Managers}
+    Wait for task2  ${resplist}  timeout=120  interval=10
+    Add Ethernet Networks from variable  ${${Version}.ethernet_networks}
+    Remove All FC Networks Async
+    Add FC Networks from variable    ${${Version}.fc_networks}
+    Add FCoE Networks from variable    ${${Version}.fcoe_networks}
+    Remove All Network Sets
+    Add Network Sets from variable    ${${Version}.network_sets}
+    Add LIG from list    ${${Version}.LIG}
+    Add SAS LIG from list    ${${Version}.SAS_LIG}
+    Add Enclosure Group from list    ${${Version}.EG}
+    Add Logical Enclosure from variable    ${${Version}.LE}
+    ${resplist} =  Add Storage Systems Async    ${${Version}.StorageSystems_Put}
+    Wait For Task2  ${resplist}  timeout=300  interval=10
+    Edit Storage Systems Async                ${${Version}.StorageSystems_Put}
+    Wait For Task2  ${resplist}  timeout=300  interval=10
+    Add Storage Volume Templates Async    ${${Version}.VolumeTemplates}
+    Add Storage Volumes Async       ${${Version}.Volumes}
+    Run Keyword And Ignore Error    Remove All Firmware Bundles
+    Upload Firmware Bundle By Curl    fw_absolute_path=${fw_bundle}
+
+Issue Appliance Certificate by CSR
+    [Documentation]    Issue the csr by external CA to get appliance certificate
+    [Arguments]    ${csr}   ${IssuerIP}    ${ssh_credentials}
+    Log    Signing appliance certificate by specified CA    console=Yes
+    Log    Save csr to csr.csr file on CA server    console=Yes
+    Run ssh cmd  ${IssuerIP}  ${ssh_credentials['userName']}  ${ssh_credentials['password']}    echo "${csr}" > /tmp/csr.csr
+    Log    \nGenerate Certificate chain used to issue certificate
+    Run ssh cmd  ${IssuerIP}  ${ssh_credentials['userName']}  ${ssh_credentials['password']}    /root/automation_tools/cert_tool/script1_generate9depthca.sh
+    Log    \nIssue certificate by CA chain
+    Run ssh cmd  ${IssuerIP}  ${ssh_credentials['userName']}  ${ssh_credentials['password']}    /root/automation_tools/cert_tool/script2_signcsr_xiaobo.sh
+    Log    \nGet certificate chain and leaf cert for web server
+    ${resp} =  Run ssh cmd  ${IssuerIP}  ${ssh_credentials['userName']}  ${ssh_credentials['password']}    cat /root/automation_tools/cert_tool/signed_certificate/server_client.cer /root/automation_tools/cert_tool/chain_certs/concatenated.cer
+    Run ssh cmd  ${IssuerIP}  ${ssh_credentials['userName']}  ${ssh_credentials['password']}    /root/automation_tools/cert_tool/clean.sh
+    [Return]    ${resp}
+
+Verify Firmwares Exist
+    [Arguments]        ${ExpectedFirmware}    ${Existed}=${TRUE}
+    [Documentation]    Verify Firmwares Exist
+    Log    Verifying Firmware Exist is ${Existed}...    console=Yes
+    ${resp} =     Fusion Api Get Firmware Driver
+    Run Keyword And Return If  ${resp['count']}==0  Fail    Firmware Not Found
+    ${FVersions} =  Create List
+    :FOR    ${firmware}    IN    @{resp['members']}
+    \   Append To List  ${FVersions}    ${firmware['version']}
+    :FOR    ${FirmwareVersion}   IN  @{ExpectedFirmware}
+    \   Run Keyword If    ${Existed}==${TRUE}    Should Contain   ${FVersions}   ${FirmwareVersion}
+    \   ...    ELSE    Should Not Contain   ${FVersions}   ${FirmwareVersion}
+    \   Log    Firmware repo verified: ${FirmwareVersion}    console=Yes
+
+Verify Firmwares Status
+    [Arguments]        ${firmwares}    ${status}
+    [Documentation]    Verify Firmwares Status
+    Log    Verifying Firmare Status...    console=Yes
+    :FOR   ${fwVersion}   IN  @{firmwares}
+    \   Log    Firmware bundle version is ${fwversion}    console=Yes
+    \   ${uri} =    Get Firmware Bundle By Version  ${fwVersion}
+    \   ${firmware} =    Get Firmware Bundle   ${uri}
+    \   Should Be Equal    ${firmware['status']}   ${status}    msg=${firmware['name']} status verify failed
+
+Add Dirctory Server and Assign Roles
+    [Arguments]        ${RequestBody}    ${AssignRoles}
+    [Documentation]    Add Dirctory Server and Assign Roles
+    ${directoryServers} =    Get From Dictionary    ${RequestBody}    directoryServers
+    ${directoryServerIpAddress} =    Get From Dictionary    ${directoryServers[0]}    directoryServerIpAddress
+    ${directoryServerIpAddress_Port} =    Set Variable    ${directoryServerIpAddress}:636
+    ${base64Data} =    Get Remote Sever Cert    ${directoryServerIpAddress_Port}
+    Set to Dictionary    ${directoryServers[0]}    directoryServerCertificateBase64Data    ${base64Data}
+    Set to Dictionary    ${RequestBody}    directoryServers    ${directoryServers}
+    ${resp} =    Fusion Api Add Directory     ${RequestBody}
+    Should Be Equal As Numbers  ${resp['status_code']}  201
+    ${resp} =    Fusion Api Assign Roles To Directory Group    ${AssignRoles}
+    Should Be Equal As Numbers  ${resp['status_code']}  201
+
+Get Remote Sever Cert
+    [Arguments]        ${Server_IP}
+    [Documentation]    Get the remote server cert
+    ${resp} =    Fusion Api Get Remote Certificate    ${Server_IP}
+    ${certificateDetails} =    Get From Dictionary    ${resp}    certificateDetails
+    ${base64Data} =    Get From Dictionary    ${certificateDetails[0]}   base64Data
+    [Return]    ${base64Data}

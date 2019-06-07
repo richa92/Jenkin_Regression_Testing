@@ -1,0 +1,115 @@
+*** Settings ***
+Documentation    Test Suite to add enclosure managed by VC to OV in monitored mode
+
+...    = GENERIC USAGE =
+...    | pybot | -c Critical | -v ENC_SERIAL_NO:[enclosure serial #] | -v APPLIANCE_IP:<ipv4> |-v GIT_REPO_ROOT: | 01_AC1_Add_Enclosure_Monitored.txt |
+...    = Variables =
+...    | GIT_REPO_ROOT |      Required: Repo root path if NOT defined in environment variable this is mgmtfw root location|
+...    | ENC_SERIAL_NO |      Optional: If omitted, will use the 1st enclosure detected in OV |
+...    | APPLIANCE_IP |       Required: OneView IPv4 address |
+
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/data_variables.py
+Resource          ${GIT_REPO_ROOT}/fusion/tests/wpst_crm/crm_austin/resources/keywords.txt
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Library           RoboGalaxyLibrary
+Library           MgmtFWLibrary
+Library           FusionLibrary
+Library           Collections
+Library           Selenium2Library
+
+Suite Setup       Run Keywords    Set Library Search Order    keywords    common    AND    Set VC Configuration Variables    AND    Login to OneView Via REST    AND    Suite Setup Tasks
+Test Setup        Test Setup Tasks
+
+*** Variables ***
+${saveConfig}                   ${False}
+${IsCompare}                    ${False}
+${OV_IP}                        ${APPLIANCE_IP}
+${profile_basic_enet}           config/profile_enet.txt
+${vc_config_showDomain}         ../../../wpst_crm/crm_austin/Common/config/vc_showDomain.txt
+${vc_config_removeAll}          ../../../wpst_crm/crm_austin/Common/config/vc_removeAll.txt
+*** Test Cases ***
+
+TC 01 : AC1 - Configure VC
+    [Documentation]    This test Configure VC
+    [Tags]    Monitored    Import/Export    C7000    Automated
+    CleanOV
+    CleanVC
+    Import VC
+    Delete VC Config
+    Config VC   ${profile_basic_enet}
+
+TC 02 : AC1 - Add Enclosure to OV in Monitored Mode and Verify Health Status
+    [Documentation]    This test adds enclosure managed by VC to OV in monitored mode
+    [Tags]    Monitored    Import/Export    C7000    Automated
+    [Setup]   Run Keywords    Set Library Search Order    common    AND    Login to Fusion Via REST
+    Add Monitored Enclosures from variable     ${add_monitored_enclosure_body}
+    # Verify health status of Servers
+    ${present_server_list}    ${absent_server_list}=    Get Device Bay Present And Absent List    ${BladeDevice_EM}
+    : FOR    ${server_bay}    IN    @{present_server_list}
+    \    #Retrieve the Server health status and state from Fusion
+    \    ${server_health}=    Get Fusion Device Health Status    ${BladeDevice_EM}    ${server_bay}
+    \    Should Be Equal    ${server_health}    OK
+    \    ${server_resp}=    Get Server Information    ${server_bay}
+    \    ${server_state}=    Get From Dictionary    ${server_resp}    state
+    \    Should Be Equal    ${server_state}    Monitored
+    # Verify health status of Fan Bays
+    ${present_fan_list}    ${absent_fan_list}=    Get Device Bay Present And Absent List    ${FANDevice_EM}
+    ${initial_len}=    Get Length    ${present_fan_list}
+    : FOR    ${fan_bay}    IN    @{present_fan_list}
+    \    #Retrieve the Server health status from Fusion
+    \    ${fan_health}=    Get Fusion Device Health Status    ${FANDevice_EM}    ${fan_bay}
+    \    Should Be Equal    ${fan_health}    OK
+    # Verify health status of Power Supplies
+    ${present_Ps_list}    ${absent_PS_list}=    Get Device Bay Present And Absent List    ${PSDevice_EM}
+    ${initial_len}=    Get Length    ${present_PS_list}
+    : FOR    ${PS_bay}    IN    @{present_PS_list}
+    \    #Retrieve the Server health status from Fusion
+    \    ${health_status}=    Get Fusion Device Health Status    ${PSDevice_EM}    ${PS_bay}
+    \    Should Be Equal    ${health_status}    OK
+    # Verify health status and state for Enclosure
+    ${enclosure_resp}=    Fusion Api Get Enclosures
+    ${enclosure_health}=    Get From Dictionary    ${enclosure_resp['members'][0]}    status
+    Should Be Equal    ${enclosure_health}    OK
+    ${enclosure_state}=    Get From Dictionary    ${enclosure_resp['members'][0]}    state
+    Should Be Equal    ${enclosure_state}    Monitored
+    #Verify health status of Interconnects
+    ${present_ICM_list}    ${absent_ICM_list}=   Get Interconnect Bay Present And Absent List
+    ${initial_len}=    Get Length    ${present_ICM_list}
+    : FOR    ${ICM_bay}    IN    @{present_ICM_list}
+    \    #Retrieve the ICM health status and state from Fusion
+    \    ${ICM_health}=    Get Fusion Device Health Status    ${ICMDevice_EM}    ${ICM_bay}
+    #\    Should Be Equal    ${ICM_health}    OK
+    \    ${icm_resp}=    Get ICM Information    ${ICM_bay}
+    \    ${ICM_state}=    Get From Dictionary    ${icm_resp}    state
+    \    Should Be Equal    ${ICM_state}    Inventory
+    [Teardown]    Logout of Fusion Via REST
+
+TC 03 : AC1 - Verify Server Profiles Cannot Be Created After Adding Monitored Enclosure
+    [Documentation]    This test verifies That Server Profile Cannot Be Created After Adding Monitored Enclosure
+    [Tags]    Monitored    Import/Export    C7000    Automated
+    [Setup]   Run Keywords    Set Library Search Order    common    keywords    AND    Login to Fusion Via REST
+    Add Ethernet Networks from variable   ${enet_networks_8pf}
+    Add LIG from variable    ${lig_c7000}
+    Add Enclosure Group from variable    ${encl_group_c7000}
+    ${present_server_list}    ${absent_server_list}=    Get Device Bay Present And Absent List    ${BladeDevice_EM}
+    ${server_bay}=    Evaluate    random.sample(${present_server_list}, 1)   random
+    ${server_profile_body}=    Build Ethernet Server Profile body     ${server_bay[0]}    ${server_profiles[0]}
+    ${resp}=    Fusion Api Create Server Profile    body=${server_profile_body}
+    ${task} =    Wait For TaskType Success State    ${resp}     timeout=20 mins    interval=20s
+    ${task_state} =     Get From dictionary     ${task}     taskState
+    Should Match Regexp    ${task_state}   ((?i)Error)
+    [Teardown]    Logout of Fusion Via REST
+
+**** keywords ****
+
+Set VC Configuration Variables
+    [Documentation]    This Keyword Prepares Variables for VC Migration Keywords
+    ${OA_CREDENTIAL_DATA}=    Create Dictionary    oaIpAddress=${OA_IP}    oaUsername=${OA_USERNAME}    oaPassword=${OA_Password}
+    ${VC_CREDENTIAL_DATA}=    Create Dictionary    vcmIpAddress=${VC_IP}    vcmUsername=${VC_USERNAME}    vcmPassword=${VC_PASSWORD}
+    ${ADMIN_CREDENTIALS}=    Create Dictionary    userName=${OA_USERNAME}    password=${OA_Password}
+    ${OAVC_CREDENTIALS}=    Create Dictionary    &{OA_CREDENTIAL_DATA}    &{VC_CREDENTIAL_DATA}
+    Set Suite Variable    ${OA_CREDENTIAL_DATA}
+    Set Suite Variable    ${VC_CREDENTIAL_DATA}
+    Set Suite Variable    ${OAVC_CREDENTIALS}
+    Set Suite Variable    ${ADMIN_CREDENTIALS}

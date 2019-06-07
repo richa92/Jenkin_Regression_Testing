@@ -1,0 +1,87 @@
+*** Settings ***
+Library                         FusionLibrary
+Library                         RoboGalaxyLibrary
+Library                         OperatingSystem
+Library                         BuiltIn
+Library                         Collections
+Library                         XML
+Library                         String
+Library                         json
+Library                         Dialogs
+Library                         SSHLibrary
+Variables                       ./HoustonRig_data.py
+
+Resource                        ../../../../../Resources/api/fusion_api_resource.txt
+
+*** Variables ***
+${APPLIANCE_IP}                 10.122.1.15
+#${X-API-VERSION}                500
+${DATA}                         HoustonRig_data.py
+${VERBOSE}                      False
+${VERIFY}                       True
+${spp}                          E:\\RG\\fusion\\tests\\epic\\MAT\\Add-Spp.ps1
+${dhcp}                         E:\\RG\\fusion\\tests\\epic\\MAT\\Get-DHCPAddress.ps1
+${del_spp}                      E:\\RG\\fusion\\tests\\epic\\MAT\\Remove-Spp.ps1
+
+*** Keywords ***
+MAT Suite Setup
+    [Documentation]    Suite Setup for MAT
+    [Arguments]     ${credentials}
+    Set Log Level   TRACE
+    #Appliance is pingable   ${APPLIANCE_IP}
+    #Check if Appliance is reachable
+    ${Output}=    Run    ping -n 1 ${APPLIANCE_IP}
+    Log    ${Output}
+    Should Contain    ${Output}    TTL=
+    Fusion Api Login Appliance  ${appliance_ip}     ${credentials}
+
+MAT Suite Teardown
+    [Documentation]    Suite teardown for MAT
+    Fusion Api Logout Appliance
+
+Upload SPP to Fusion
+    [Documentation]    Upload SPP to Fusion appliance
+    [Arguments]     ${host}     ${user}     ${password}     ${spppath}
+    ${Output}=   Run and return RC and output    powershell.exe -ExecutionPolicy Unrestricted -file ${spp} ${host} ${user} ${password} ${spppath}
+
+Delete SPP From Fusion
+    [Documentation]    Delete SPP from Fusion appliance
+    [Arguments]     ${host}     ${user}     ${password}     ${spp}
+    ${Output}=   Run and return RC and output    powershell.exe -ExecutionPolicy Unrestricted ${del_spp} ${host} ${user} ${password} ${spp}
+
+Get Ethernet Connections IPs from Server Profiles and Ping
+    [Documentation]    Get Ethernet Connections IPs from Server Profiles and Ping the Connection IPs
+    [Arguments]     ${profile}
+    :FOR    ${connection}  IN  @{profile['connections']}
+    \   Run Keyword Unless  '${connection['functionType']}' == 'Ethernet'     Continue For Loop
+    \   ${uri} =    Get From Dictionary     ${connection}  networkUri
+    \   ${net} =    Fusion Api Get Ethernet Networks    ${uri}
+    \   ${vlan} =    Get From Dictionary     ${net}  vlanId
+    \   ${dhcp_detail} =   Get DHCP Server     ${vlan}
+    \   Run Keyword If  ${dhcp_detail} == []   Continue For Loop
+    \   ${mac} =    Get From Dictionary     ${connection}  mac
+    \   ${ip} =     Get IP From DHCP    ${mac}  ${dhcp_detail[0]}  ${dhcp_detail[1]}   ${dhcp_detail[2]}    ${dhcp_detail[3]}
+    \   ${RC}   ${output} =     Run and return RC and Output    ping ${ip}
+    \   Run Keyword and Continue on Failure     Should be equal     ${RC}   ${0}     Host ${ip} unreachable. Reason:\n${output}
+
+Get DHCP Server
+    [Documentation]    Get DHCP Server
+    [Arguments]     ${vlan}
+    ${dhcp_details} =   Create List
+    :FOR    ${dhcpserver}   IN  @{dhcpservers}
+    \   Run Keyword Unless  '${dhcpserver['vlanid']}' == '${vlan}'      Continue For Loop
+    \   ${dhcpserver_ip} =  Get From Dictionary     ${dhcpserver}   ip
+    \   Append To List  ${dhcp_details}     ${dhcpserver_ip}
+    \   ${dhcpserver_scope} =  Get From Dictionary     ${dhcpserver}   scope
+    \   Append To List  ${dhcp_details}     ${dhcpserver_scope}
+    \   ${dhcpserver_user} =  Get From Dictionary     ${dhcpserver}   username
+    \   Append To List  ${dhcp_details}     ${dhcpserver_user}
+    \   ${dhcpserver_password} =  Get From Dictionary     ${dhcpserver}   password
+    \   Append To List  ${dhcp_details}     ${dhcpserver_password}
+    [Return]    ${dhcp_details}
+
+Get IP From DHCP
+    [Documentation]    Get IP from DHCP Server
+    [Arguments]     ${mac}  ${dhcp_ip}  ${dhcp_scope}   ${dhcp_user}    ${dhcp_password}
+    ${Output}=   Run    powershell.exe -ExecutionPolicy Unrestricted -file ${dhcp} ${mac} ${dhcp_ip} ${dhcp_scope} ${dhcp_user} ${dhcp_password}
+    [Return]    ${Output}

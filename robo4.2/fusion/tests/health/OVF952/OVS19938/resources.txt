@@ -1,0 +1,87 @@
+*** Settings ***
+Resource        ../../../../Resources/api/fusion_api_resource.txt
+Library        ../../../DEA/resource/iLO/ILOAPIKeywords.py
+
+
+*** Keywords ***
+Compare ILO and OV BIOS versions
+    [Documentation]     keyword to compare ILO and OV BIOS versions
+    [Arguments]     ${server_name}  ${server_family}    ${ilo_credentials}
+    ${OV_bios_version}=    Get Bios version in Oneview  ${server_family}
+    ${ilo_bios_version}=    Get Bios version from ilo   ${server_name}   ${ilo_credentials}
+    ${OV_version} =    Run keyword if   '${OV_bios_version}'!='None'    Fetch From Right    ${OV_bios_version},    .v
+    ${ilo_version} =    Fetch From Right    ${ilo_bios_version}    .v
+    ${OV_version} =    Run keyword if   '${OV_bios_version}'!='None'    Fetch From Left    ${OV_version},    .json
+    Run keyword if   '${OV_bios_version}'!='None'   Log    OV_version:${OV_version}    console=True
+    Log    ilo_version:${ilo_version}    console=True
+    ${OV}=    Run keyword if   '${OV_bios_version}'!='None'     Remove string    ${OV_version}    _
+    ${ilo}=    Remove string    ${ilo_version}    _
+    Run keyword if   '${OV_bios_version}'=='None'   Return from keyword    ${True}
+    Run keyword if    ${ilo} > ${OV}    Return from keyword    ${True}
+    [Return]    ${False}
+
+Get Bios version in Oneview
+    [Documentation]     Get Bios version in Oneview
+    [Arguments]     ${server_family}
+    Open Connection    ${APPLIANCE_IP}
+    Login    ${FUSION_SSH_USERNAME}    ${FUSION_SSH_PASSWORD}
+    ${command}=     Set variable    cd /ci/data/registries/bios/${server_family} && ls | sort
+    ${stdout}    ${stderr}    ${rc}=    Execute command    ${command}    return_stdout=True    return_stderr=True    return_rc=True
+    Should Be Equal    '${rc}'    '0'    ${command} has errored with ${stderr}
+    ${locale_result}=     Split String    ${stdout}    \n
+    ${locale}=      Set Variable    ${locale_result[0]}
+    ${command}=     Set variable    cd /ci/data/registries/bios/${server_family}/${locale}/ && ls -1 | sort -r
+    ${stdout}    ${stderr}    ${rc}=    Execute command    ${command}    return_stdout=True    return_stderr=True    return_rc=True
+    Should Be Equal    '${rc}'    '0'    ${command} has errored with ${stderr}
+    ${resultlist}=     Split String    ${stdout}    \n
+    :FOR    ${fn}    in    @{resultlist}
+    \    ${OV_bios_version} =    Run keyword if    ${fn.startswith('BiosAttributeRegistry')} == True    Set Variable    ${fn}
+    \    Exit for loop if    ${fn.startswith('BiosAttributeRegistry')} == True
+    ${status}=  Check bios version files in all language directories    ${server_family}
+    Run keyword if  '${status}'=='${False}'     Fail    Bios version files under all language directories are not matching
+    Close connection
+    [Return]    ${OV_bios_version}
+
+Get Bios version from ilo
+    [Documentation]     Get Bios version from ilo
+    [Arguments]     ${server_name}   ${ilo_credentials}
+    ${ilo_ip}=      Get Server Hardware iLO IP      ${server_name}
+    ${resp}    ${sessionID}=    login_ilo_ipv4    ${ilo_ip}    ${ilo_credentials}
+    ${resp}=    ilo_ris_get_object    /redfish/v1/Systems/1/bios/
+    ${ilo_bios_version}=    Set Variable    ${resp['AttributeRegistry']}
+    [Return]    ${ilo_bios_version}
+
+Check bios version files in all language directories
+    [Documentation]     Check bios version files in all language directories
+    [Arguments]     ${family}
+    ${command}=     Set variable    cd /ci/data/registries/bios/${family} && ls
+    ${stdout}    ${stderr}    ${rc}=    Execute command    ${command}    return_stdout=True    return_stderr=True    return_rc=True
+    Should Be Equal    '${rc}'    '0'    ${command} has errored with ${stderr}
+    ${language_list}=     Split String    ${stdout}    \n
+    ${val_list}     Create list
+    :FOR    ${lan}  in  @{language_list}
+    \   ${command}=     Set variable    cd /ci/data/registries/bios/${family}/${lan} && ls | sort
+    \   ${stdout}    ${stderr}    ${rc}=    Execute command    ${command}    return_stdout=True    return_stderr=True    return_rc=True
+    \   Should Be Equal    '${rc}'    '0'    ${command} has errored with ${stderr}
+    \   ${bios_list}=     Split String    ${stdout}    \n
+    \   Append to list  ${val_list}     ${bios_list}
+    ${versions}=    Compare bios versions under each language directory     ${val_list}     ${language_list}
+    :FOR    ${i}    in  @{versions}
+    \   ${count}=   Get match count     ${versions}     ${i}
+    \   Run keyword if    ${count}!=len(${language_list})    Return from keyword    ${False}
+    [Return]    ${True}
+
+Compare bios versions under each language directory
+    [Documentation]     Compare bios versions under each language directory
+    [Arguments]     ${val_list}     ${language_list}
+    :FOR    ${i}    in  @{val_list}
+    \   ${f_list}=  Add values of each language     ${i}    ${val_list}
+    \   Remove values from list    ${val_list}     ${i}
+    [Return]    ${f_list}
+
+Add values of each language
+    [Documentation]     Add values of each language
+    [Arguments]     ${v_list}     ${l_list}
+    :FOR    ${v}    in  @{v_list}
+    \   Append to list  ${l_list}   ${v}
+    [Return]    ${l_list}

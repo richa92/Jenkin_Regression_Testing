@@ -1,0 +1,144 @@
+*** Settings ***
+Documentation      Importing Enclosure with firmwareBundle
+Library            json
+Library            FusionLibrary
+Library            RoboGalaxyLibrary
+Variables          data_variables.py
+Resource           ../../../../../resource/fusion_api_all_resource_files.txt
+Library            Dialogs
+
+***Test cases***
+1. Login
+    Set Log Level    TRACE
+    ${resp}    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    Run Keyword If  '${resp[0]['status_code']}' != '200'  Fail  ELSE  Log to console  \nSuccessfully logged into the appliance
+    #Initial Cleanup
+    Clean OV
+2.Create LIG,EG
+    ${enc_resp}=    Fusion Api Import Server Hardware Type For Enclosure    ${Preview_body_79}    ${Preview_uri}
+    Log to console and logfile    ${enc_resp}
+    ${interconnectMapTemplate}      Set Variable    ${enc_resp['logicalInterconnectGroup']['interconnectMapTemplate']}
+    Set Global Variable   ${interconnectMapTemplate_Global}    ${interconnectMapTemplate}
+    Set To Dictionary    ${lig_10_269}    interconnectMapTemplate    ${interconnectMapTemplate_Global}
+    ${resp_lig} =   Fusion Api Create LIG    ${lig_10_269}
+    Run keyword unless  ${resp_lig['status_code']}== 202    Fail    ${resp_lig['message']}
+    ${task} =   Wait For Task   ${resp_lig}     120s    2s
+    Log to console and logfile    LIG created successfully
+    ${uri} =    Get From Dictionary    ${task['associatedResource']}    resourceUri
+    Set Global Variable    ${LIG_uri}    ${uri}
+    Log to console and logfile    ${LIG_uri}
+
+    ${Test_dict} =    Create Dictionary
+    :FOR    ${x}    IN RANGE    0    8
+    \    ${permittedInterconnectTypeUri} =    Get From Dictionary    ${interconnectMapTemplate_Global['interconnectMapEntryTemplates'][${x}]}   permittedInterconnectTypeUri
+    \    Run Keyword If    '${interconnectMapTemplate_Global['interconnectMapEntryTemplates'][${x}]['logicalLocation']['locationEntries'][0]['type']}'=='Bay'    Set To Dictionary    ${Test_dict}    ${interconnectMapTemplate_Global['interconnectMapEntryTemplates'][${x}]['logicalLocation']['locationEntries'][0]['relativeValue']}    ${permittedInterconnectTypeUri}
+    \    Run Keyword If    '${interconnectMapTemplate_Global['interconnectMapEntryTemplates'][${x}]['logicalLocation']['locationEntries'][1]['type']}'=='Bay'    Set To Dictionary    ${Test_dict}    ${interconnectMapTemplate_Global['interconnectMapEntryTemplates'][${x}]['logicalLocation']['locationEntries'][1]['relativeValue']}    ${permittedInterconnectTypeUri}
+    Log to console and logfile    ${Test_dict}
+
+    ${Keys}=    Get Dictionary Keys    ${Test_dict}
+    Log to console and logfile    ${Keys}
+    ${Values}=    Get Dictionary Values    ${Test_dict}
+    Log to console and logfile    ${Values}
+    :FOR    ${y}    IN RANGE    0    8
+    \    Set To Dictionary    ${eg_body_10_269['interconnectBayMappings'][${y}]}    interconnectBay    ${Keys[${y}]}
+    \    Run Keyword If    '${Values[${y}]}' != 'None'    Set To Dictionary    ${eg_body_10_269['interconnectBayMappings'][${y}]}    logicalInterconnectGroupUri    ${LIG_uri}
+    Log to console and logfile    ${eg_body_10_269}
+
+    ${eg_resp}=    Fusion Api Create Enclosure Group    ${eg_body_10_269}
+    Run keyword unless  ${eg_resp['status_code']}== 201    Fail    ${eg_resp['message']}
+    Set Global Variable    ${EG_uri}    ${eg_resp['uri']}
+    Log to console and logfile    EG created successfully
+
+3.Importing Enclosure
+    Set To Dictionary    ${enc_body_10_269}    enclosureGroupUri    ${EG_uri}
+    ${SPP_uri}=    Get Firmware URI    ${SPP_269}
+    Set To Dictionary    ${enc_body_10_269}    firmwareBaselineUri    ${SPP_uri}
+    ${resp_enc}=    Fusion Api Add Enclosure    ${enc_body_10_269}
+    Run keyword unless  ${resp_enc['status_code']}== 202    Fail    ${resp_enc['message']}
+    ${task} =   Wait For Task   ${resp_enc}     1500s   30s
+    Log to console and logfile    Enclosure imported successfully
+
+4.Validating the interconnect firmware after Enclosure update
+    ${count}    Get Interconnects Count    ${ENCLOSURE_IP_79}    ${OA_USER_10_269}    ${OA_PASS_10_269}
+    ${IC_count}    Evaluate    ${count}+1
+    Log to console    ${IC_count}
+    :FOR     ${x}   IN RANGE   1   ${IC_count}
+    \    ${IC_info}    SHOW INTERCONNECT    ${ENCLOSURE_IP_79}    ${OA_USER_10_269}    ${OA_PASS_10_269}    ${x}
+    \    ${string}    Convert To String    ${IC_info}
+    \    ${match}   ${IC_version}    Should Match Regexp    ${string}    Firmware\\s+Version:\\s+(\\d.\\d+)
+    \    Log to Console    \nFirmware version is ${IC_version}
+    \    Run Keyword If   '${IC_version}' == '${VC_ver}'     Log to console    \n Successfully the firmware version is changed    ELSE    Fail
+
+5.Validating the OA version after Enclosure update
+    ${oa_info}    SHOW OA    ${ENCLOSURE_IP_79}    ${OA_USER_10_269}    ${OA_PASS_10_269}
+    ${string}    Convert To String    ${oa_info}
+    ${match}   ${OA_version}    Should Match Regexp    ${string}     Firmware\\s+Ver.\\s:\\s+(\\d.\\d+)
+    Log to Console    \nFirmware version is ${OA_version}
+    Run Keyword If   '${OA_version}' == '${OA_ver}'     Log to console    \n Successfully the OA version is changed    ELSE    Fail
+#Final Cleanup
+    Clean OV
+
+***keywords***
+Get Firmware URI
+                [Arguments]    ${SPP}
+                ${resp} =    Fusion Api Get Firmware Driver    param=?filter="'name'=='${SPP}'"
+                ${uri} =    Get From Dictionary    ${resp['members'][0]}   uri
+                [Return]               ${uri}
+
+Get Interconnects Count
+    [Arguments]         ${OA_HOST}    ${OA_USER}    ${OA_PASS}
+    Open Connection     ${OA_HOST}     prompt=>    timeout=20s
+    Login               ${OA_USER}     ${OA_PASS}
+    Write    show interconnect list
+    Sleep    10s
+    ${resp}=    Read
+    ${string}    Convert To String    ${resp}
+    ${match}   ${count}    Should Match Regexp    ${string}    Totals:\\s+(\\d+)\\s+interconnect\\s+modules
+    Log to Console    \nip is ${count}
+    Close All Connections
+    [Return]    ${count}
+
+
+SHOW INTERCONNECT
+    [Documentation]    issues an EFUSE Action to the given Device\Bay.
+    ...   {DEVICE} = <BLADE|IOM|NETTRAY|SWM|FAN|OA|EM>
+    ...   {BAY} = desired bay for given device
+    [Arguments]         ${OA_HOST}    ${OA_USER}    ${OA_PASS}    ${BAY_NO}
+    Open Connection     ${OA_HOST}     prompt=>    timeout=20s
+    Login               ${OA_USER}     ${OA_PASS}
+    Sleep    20s
+    ${resp}    Read
+    Log to console    ${resp}
+    Write    show interconnect info ${BAY_NO}
+    Sleep    10s
+    ${ic_info}=    Read
+    Log to console    ${ic_info}
+    Close All Connections
+    [Return]    ${ic_info}
+
+SHOW OA
+    [Documentation]    checking the OA version
+    [Arguments]    ${OA_HOST}    ${OA_USER}    ${OA_PASS}
+    Open Connection     ${OA_HOST}     prompt=>    timeout=20s
+    Login               ${OA_USER}     ${OA_PASS}
+
+    Write    show oa info
+    Sleep    10s
+    ${oa_info}=    Read
+    Log to console    ${oa_info}
+    Close All Connections
+    [Return]    ${oa_info}
+
+Clean OV
+    [Documentation] Cleans the appliance
+    Log to console    \nCleaning the OV
+    Power off ALL Servers
+    Remove All Server Profiles
+    Remove ALL Enclosures
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove ALL Ethernet Networks
+    Remove ALL FC Networks
+    Remove ALL FCoE Networks
+    Remove ALL Network Sets
+    Remove ALL Users

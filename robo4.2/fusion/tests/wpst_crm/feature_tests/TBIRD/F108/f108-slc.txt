@@ -1,0 +1,187 @@
+*** Settings ***
+Documentation   Feature Test: F108 Switch Life Cycle
+Variables       ./data_variables.py
+Variables       ./cl20_data.py   
+Resource        /rg-fusion/fusion/tests/resource/fusion_api_all_resource_files.txt
+Resource        /saw/sandbox/rg-fvt/resources/l-keywords.txt
+Resource        /saw/sandbox/rg-fvt/resources/fvt-keywords.txt
+
+Library     FusionLibrary
+Library     FVTFusionLibrary
+
+*** Keywords ***
+Initialize Globals
+	[Arguments]	${frame}
+	Set Global Variable	${LIG}	enc${frame}-LIG
+	Set Global Variable	${EG}	enc${frame}-EG
+	Set Global Variable	${LE}	enc${frame}-LE
+	Set Global Variable	${LI}	enc${frame}-LI
+
+Create LIG
+	[Documentation]	Create LIG 
+	[Arguments]		${lig}	${timeout}=3 m	${interval}=1 m
+	
+	${resp} =	Add LIG from variable	${lig}
+	Should Be Equal As Integers	${resp['status_code']}	202
+	Wait For Task	${resp}	${timeout}	${interval}
+	
+	${resp}	Fvt Api Get Logical Interconnect Group By Name	${lig['name']}
+	Should Be Equal As Strings	${resp['name']}	${lig['name']}
+
+Create EG
+	[Documentation]	Create EG
+	[Arguments]		${eg}	${timeout}=3 m	${interval}=1 m
+	${resp} =	Add Enclosure Group from variable	${eg}
+	
+	${resp}	Fvt Api Get Enclosure Group By Name	${eg['name']}
+	
+	Should Be Equal As Strings	${resp['status']}	OK
+	Should Be Equal As Strings	${resp['name']}	${eg['name']}
+
+Create LE
+	[Documentation]	Create LE
+	[Arguments]		${le}	${timeout}=30 m	${interval}=1 m
+	${resp} =	Add Logical Enclosure from variable	${le}
+		
+	${resp}	Fvt Api Get Logical Enclosure By Name	${le['name']}
+	
+	Should Be Equal As Strings	${resp['name']}	${le['name']}
+	Should Match Regexp	${resp['status']}	((?i)Warning|OK)
+	
+Create LE All
+	Local Create LIG	${ligs['${LIG}']}
+	Local Create EG	${enc_group['${EG}']}
+	Local Create LE	${les['${LE}']}
+	
+	${resp}  Fvt Api Get Logical Enclosure By Name	${LE}
+	Should Be Equal As Strings	${resp['status']}	OK
+	Should Be Equal As Strings	${resp['state']}	Consistent
+	${resp}	Fvt Api Get Logical Interconnect BY Name	 ${LI}
+	Should Be Equal As Strings	${resp['consistencyStatus']}	CONSISTENT
+	
+Edit LIG
+	[Arguments]	${ligs_dict}
+	${us} =	Copy Dictionary	${ligs_dict['${LIG}']}
+	${body} =	Build US body	${us}	${LI_URI}
+	${resp} =	Fusion Api Edit Lig	body=${body}	uri=${LIG_URI}
+	${task} =	Wait For Task	${resp}	5 min	15s
+	Sleep	5m
+
+Update From Group
+	${resp} =	Fusion Api Update From Group	${LI_URI}
+	Should Be Equal As Integers	${resp['status_code']}	202
+	${task} =	Wait For Task	${resp}	15 min	15s
+	Sleep	5m
+
+ICM Efuse
+	[Arguments]	${enc}	${bay}	${onOff}
+	Get EM IP	${enc}
+	Get EM Token	${enc}
+	Efuse ICM	EFuse${onOff}	${bay}
+	
+All ICM Efuse
+	[Arguments]	${frame}	${bay}	${icmstate}
+	:FOR    ${x}   IN RANGE	${frame}+1
+	\    FVT ICM Efuse	enc${x} ${bay}	${icmstate}
+	
+Check Interconnect State
+	[Arguments]	${frame}	${bay}	${state}
+	:FOR	${x}	IN RANGE	1 	${frame}+1
+    \   ${icm} =	Set Variable	${enc${x}_bay${bay}_icm}
+    \   ${resp} =	Fvt Api Get Interconnect By Name	${icm}
+    \   ${icm_uri} =	Set Variable	${resp['uri']}
+    \   Wait Until Keyword Succeeds	3 min	30s	IC reached state	${icm_uri}	${state}
+
+	
+*** Variables ***
+${LIG}	None
+${EG}	None
+${LE}	None
+${LI}	None
+${LI_uri}	None
+
+${enc1_bay2_icm}	${enc1}, interconnect 2
+${enc1_bay5_icm}	${enc1}, interconnect 5
+${enc2_bay2_icm}	${enc2}, interconnect 2
+${enc2_bay5_icm}	${enc2}, interconnect 5
+${enc3_bay2_icm}	${enc3}, interconnect 2
+${enc3_bay5_icm}	${enc3}, interconnect 5
+
+${enc1_bay1_server}	${enc1}, bay 1
+${enc1_bay2_server}	${enc1}, bay 2
+${enc2_bay1_server}	${enc2}, bay 1
+${enc2_bay2_server}	${enc2}, bay 2
+${enc3_bay1_server}	${enc3}, bay 1
+
+${frame}	3
+
+*** Test Cases ***
+Login In User
+	Set Log Level	TRACE
+	Fusion Api Login Appliance	${APPLIANCE_IP}	${admin_credentials}
+	Pass Execution	"Finished Login User"
+
+Create Ethernet Networks
+	Pass Execution	"Passed Create Ethernet Networks"
+	Create Ethernet Networks	 ${ethernet_networks}
+	Pass Execution	"Finished Create Ethernet Networks"
+
+Main 
+	#Pass Execution "Skipped Main Function"
+	Initialize Globals	${frame}
+	
+	####
+	# We will always look at enc1 bay 2, encl 2 bay 2 and encl 3 bay 2 for state transition
+	# We need to get uris  of these interconnects here
+	####
+	Check Interconnect State	${frame}	2	Monitored
+	Create LE
+	Check Interconnect State	${frame}	2	Configured
+	All ICM Efuse	${frame}	2	On
+	Check Interconnect State	${frame}	2	Absent
+	All ICM Efuse	${frame}	2	Off
+	Check Interconnect State	${frame}	2	Configured
+
+	# Setup LI and LIG uris in gloabals for use later
+	${resp}	Fvt Api Get Logical Interconnect By Name	${LI}
+	Run Keyword If	${resp} != None	Set Global Variable	${LI_URI}	${resp['uri']}
+	
+	${resp}	Fvt Api Get Logical Interconnect Group By Name	${LI}
+	Run Keyword If	${resp} != None	Set Global Variable	${LIG_URI}	${resp['uri']}
+	
+	### Edit LIG so it has CL10 in place of CL20. Needed to simulate Unmanaged state
+	Edit LIG	unmanaged_ligs
+	
+	Update From Group
+	Check Interconnect State	NOT_CONSISTENT
+	
+	Check Interconnect State	${frame}	2	Unmanaged
+	All ICM Efuse	${frame}	2	On
+	Check Interconnect State	${frame}	2	Absent
+	All ICM Efuse	${frame}	2	Off
+	
+	### Edit LIG so it has all the right interconnects ###
+	Edit LIG	ligs
+	
+	Update From Group
+	Check Interconnect State CONSISTENT
+	Check Interconnect State	${frame}	2	Configured
+	Delete Logical Enclosure       ${LE}
+	Check Interconnect State	${frame}	2	Monitored
+	All ICM Efuse	${frame}	2	On
+	All ICM Efuse	${frame}	2	Off
+	Check Interconnect State	${frame}	2	Monitored
+	
+	${resp}               Fvt Api Get Logical Interconnect BY Name              ${LI}
+	Should Be Equal As Strings          ${resp}  None
+	
+Clean Up
+	Delete Enclosure Group       ${EG}
+	${resp}               Fvt Api Get Enclosure Group BY Name       ${EG}
+	Should Be Equal As Strings          ${resp}  None
+
+	Delete Logical Interconnect Group  ${LIG}
+	${resp}               Fvt Api Get Logical Interconnect Group BY Name  ${LIG}
+	Should Be Equal As Strings          ${resp}  None
+	
+	Pass Execution   "Finished F108 Switch Life Cycle Testing"

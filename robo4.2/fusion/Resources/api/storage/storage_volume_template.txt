@@ -1,0 +1,209 @@
+*** Settings ***
+Library				RoboGalaxyLibrary
+Library				FusionLibrary
+Library				OperatingSystem
+Library				BuiltIn
+Library				Collections
+Library				XML
+Library		        SSHLibrary
+Library				String
+Library				Dialogs
+Documentation       Data File Example:
+...                {"name":"storeserv1-pool1-private-thin","description":"",
+...                     "rootTemplateUri":"QUERY"
+...                     "description":"Private thin volume template for storeserv1 pool1",
+...                     "properties":{
+...                           "name":{"title":"Volume name","description":"A volume name between 1 and 100 characters",
+...                                   "type":"string","minLength":1,"maxLength":100,"required":True,
+...                                    "meta":{"locked":False}},
+...                            "description":{"title":"Description","description":"A description for the volume",
+...                                           "type":"string","minLength":0,"maxLength":2000,"default":"",
+...                                           "meta":{"locked":False}},
+...                            "storagePool":{"title":"Storage Pool","description":"A common provisioning group URI reference",
+...                                           "type":"string","required":True,"format":"x-uri-reference",
+...                                           "meta":{"locked":False,"createOnly":True,"semanticType":"device-storage-pool"},
+...                                           "default":STORESERV1_POOL1
+...                            },
+...                            "size":{"title":"Capacity","description":"The capacity of the volume in bytes",
+...                                    "type":"integer","required":True,"minimum":1073741824,"maximum":17592186044416,
+...                                    "meta":{"locked":False,"semanticType":"capacity"},
+...                                    "default":1073741824,},
+...                            "isShareable":{"title":"Is Shareable","description":"The shareability of the volume",
+...                                           "type":"boolean","meta":{"locked":False},
+...                                           "default":False,},
+...                            "provisioningType":{"title":"Provisioning Type","description":"The provisioning type for the volume",
+...                                                "type":"string","enum":["Thin","Full"],"meta":{"locked":True,"createOnly":True},
+...                                                "default":"Thin"},
+...                            "snapshotPool":{"title":"FC_wpst16_r1","description":"A URI referenceto the common provisioning group used to create snapshots",
+...                                            "type":"string","format":"x-uri-reference","meta":{"locked":True,"semanticType":"device-snapshot-storage-pool"},
+...                                            "default":STORESERV1_POOL1,}
+...                            }},
+...               {"name":"vsa1-raid5-private","description":"",
+...                "rootTemplateUri":"Volume root template for StoreVirtual 1.2",
+...                "initialScopeUris": ["Scope:Test", "Scope:Production"},
+...                "properties": {
+...                "name":{"title":"Volume name","description":"A volume name between 1 and 100 characters",
+...                        "type":"string","minLength":1,"maxLength":100,"required":True,"meta":{"locked":False}},
+...                "description":{"title":"Description","description":"A description for the volume",
+...                              "type":"string","minLength":0,"maxLength":2000,"default":"VSA1 RAID5 private","meta":{"locked":False}},
+...                "storagePool":{"title":"Storage Pool","description":"StoragePoolURI the volume should be added to",
+...                               "type":"string","format":"x-uri-reference","required":True,
+...                               "meta":{"locked":False,"createOnly":True,"semanticType":"device-storage-pool"},
+...                               "default":STOREVIRTUAL1_POOL},
+...                "size":{"title":"Capacity","description":"Capacity of the volume in bytes",
+...                        "type":"integer","minimum":4194304,"required":True,"default":1073741824,
+...                        "meta":{"locked":False,"semanticType":"capacity"}},
+...                "dataProtectionLevel":{"title":"Data Protection Level","description":"Indicates the number and configuration of data copies in the Storage Pool",
+...                                       "type":"string","enum":["NetworkRaid0None","NetworkRaid5SingleParity","NetworkRaid10Mirror2Way","NetworkRaid10Mirror3Way","NetworkRaid10Mirror4Way","NetworkRaid6DualParity"],
+...                                       "default":"NetworkRaid5SingleParity",
+...                                       "required":True,"meta":{"locked":True,"semanticType":"device-dataProtectionLevel"}},
+...                "provisioningType":{"title":"Provisioning Type","description":"The provisioning type for the volume",
+...                                    "type":"string","enum":["Thin","Full"],
+...                                    "default":"Thin",
+...                                    "meta":{"locked":True,"createOnly":"True","semanticType":"device-provisioningType"}},
+...                "isAdaptiveOptimizationEnabled":{"title":"Adaptive Optimization","description":"",
+...                                                 "type":"boolean","default":True,"meta":{"locked":True}},
+...                "isShareable":{"title":"Is Shareable","description":"The shareability of the volume",
+...                               "type":"boolean","default":False,"meta":{"locked":False}}
+...                  },
+...               },
+
+*** Keywords ***
+Add Storage Volume Template
+	[Documentation]	Add storage Volume template and return the response.
+	[Arguments]		 ${svt}
+	${payload} =  Create Storage Volume Template POST Payload  ${svt}
+	${resp} =   Fusion Api Create Storage Volume Template    body=${payload}
+	[return]  ${resp}
+
+Add Storage Volume Templates Async
+	[Documentation]	Add a list of storage Volume templates and return the responses.
+    [Arguments]     ${svts}  ${svt_status_code}=201
+    ${toAdd} =  Create List
+    :FOR	${svt}	IN	@{svts}
+    \	${status} =  Check Resource Existing  SVT:${svt['name']}
+    \   Run Keyword If    ${status}=='PASS'  Log   Storage Volume Template ${svt['name']} Already Exists     WARN
+	\	Run Keyword If    ${status}=='FAIL'  Append To List   ${toAdd}  ${svt}
+
+	${resplist} =  Create List
+	:FOR	${svt}	IN	@{toAdd}
+	\       Log  Adding Storage volume Template ${svt['name']}   console=True
+	\   	${resp} =   Add Storage Volume Template  ${svt}
+	\   Run Keyword If  ${resp['status_code']}!=${svt_status_code}    Run Keyword And Continue On Failure     FAIL     Adding Storage Volume Template ${svt['name']} failed
+    \   Continue For Loop If    ${resp['status_code']}!=${svt_status_code}
+	\		Append To List  ${resplist}  ${resp}
+	[Return]	${resplist}
+
+Create Storage Volume Template POST Payload
+	[Documentation]	Create POST payload to add storage volume template.
+	[Arguments]		 ${svt}
+	${payload} =  copy dictionary  ${svt}
+	${properties} =  get from dictionary  ${svt}  properties
+	# set storagePool in properties
+	${storagePool} =  get from dictionary  ${properties}  storagePool
+	${storageSystem} =  Evaluate   ${properties}.get('storageSystem', ${None})
+	${storagePoolName} =  set variable  ${storagePool['default']}
+	${storagePoolUri} =  Get Storage Pool URI  ${storagePoolName}    ${storageSystem}
+	set to dictionary  ${storagePool}  default  ${storagePoolUri}
+	set to dictionary  ${properties}  storagePool  ${storagePool}
+	Remove From Dictionary    ${properties}    storageSystem
+	# set rootTemplateURI in payload
+	${rootTemplateUri} =  Get Root Template URI by Storage Pool  ${storagePoolName}
+	set to dictionary  ${payload}  rootTemplateUri  ${rootTemplateUri}
+    # set snapshotPool in properties for StoreServ
+	${status}  ${rtn} =  Run Keyword and Ignore Error  Get From Dictionary  ${properties}  snapshotPool
+	${snapshotPool} =  set variable if  '${status}'=='PASS'  ${rtn}  create dictionary
+	${snapshotPoolUri} =  Run keyword if  '${status}'=='PASS'  Get Storage Pool URI  ${snapshotPool['default']}    ${storageSystem}
+	Run keyword if  '${status}'=='PASS'  set to dictionary  ${snapshotPool}  default  ${snapshotPoolUri}
+    Run keyword if  '${status}'=='PASS'  set to dictionary  ${properties}  snapshotPool  ${snapshotPool}
+    # set properties in payload
+    set to dictionary  ${payload}  properties  ${properties}
+
+    # Initial Scope process.
+    ${initialScopeUris}=  Pop From Dictionary  ${payload}  initialScopeUris  default=${None}
+    ${scopeUris}=       Run Keyword If    ${initialScopeUris} != ${None}
+    ...                 Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    Run Keyword If      ${initialScopeUris} != ${None}
+    ...                 Set To Dictionary    ${payload}  initialScopeUris  ${scopeUris}
+
+	[Return]  ${payload}
+
+Get Root Template URI by Storage Pool
+    [Documentation]	Get root template URI by storage pool name.
+	[Arguments]		${spName}
+	${spUri} =  Get Storage Pool URI  ${spName}
+	${spDto} =  fusion api get resource  ${spUri}
+	${ssDto} =  fusion api get resource  ${spDto['storageSystemUri']}
+	${uri} =  Get Storage System Template URI  ${ssDto['name']}  param=?query=isRoot EQ true
+	[Return]	${uri}
+
+Get Storage Volume Template URI
+	[Documentation]	Get storage volume template URI by name.
+	[Arguments]		${svtName}
+	${resp} = 	Fusion Api Get Storage Volumes Template  param=?filter="'name'=='${svtName}'"
+	Return From Keyword If  ${resp['count']}==0  /rest/storage_volume_template_uri_${svtName}_not_found
+	${uri} = 	Get From Dictionary		${resp['members'][0]}	uri
+	[Return]	${uri}
+
+Remove ALL Storage Volume Templates Async
+    [Documentation]  Query the appliance for all storage volume templates, remove them, and return the responses.
+    [Arguments]  ${status_code}=404
+    Log  Removing Storage Volume Templates  console=yes
+    ${svts} =  Fusion Api Get Storage Volumes Template  param=?filter="isroot EQ false"
+    :FOR  ${svt}  IN  @{svts['members']}
+    \   Log  Remove storage volume template ${svt['name']}  console=yes
+    \   ${headers} =  fusion api get headers
+    \   set to dictionary  ${headers}  If-Match  ${svt['eTag']}
+    \   ${resp} =  Fusion Api Delete Storage Volume template  uri=${svt['uri']}  headers=${headers}
+    \   ${resp} =  Fusion Api Get Resource  ${svt['uri']}
+    \   Run Keyword If  ${resp['status_code']}!=${status_code}  Run Keyword And Continue On Failure  FAIL  msg=SVT ${svt['name']} is not Deleted
+
+Edit Storage Volume Template
+	[Documentation]	Edit storage Volume template and return the response.
+	[Arguments]		 ${svt}
+	log  Editing Storage Volume Template: ${svt['name']}  console=True
+	${payload} =  Create Storage Volume Template PUT Payload  ${svt}
+	${name} =  Get From Dictionary  ${svt}  name
+	${uri} =  Get Storage Volume Template URI  ${name}
+	${resp} =   Fusion Api Edit Storage Volume Template  body=${payload}  uri=${uri}
+	[return]  ${resp}
+
+Edit Storage Volume Templates
+	[Documentation]	Edits storage Volume templates from a dictionary of SVT's and return a response list.
+	[Arguments]		 ${svts}
+	${resplist} =  Create List
+	:FOR  ${svt}  IN  @{svts}
+	\   ${resp} =   Edit Storage Volume Template    ${svt}
+	\   Append to List  ${resplist}  ${resp}
+	[return]  ${resplist}
+
+Create Storage Volume Template PUT Payload
+	[Documentation]	Create PUT payload to add storage volume template.
+	[Arguments]		 ${svt}
+	${svt} =   Copy Dictionary   ${svt}
+	${name} =  Get from Dictionary  ${svt}  name
+	${uri} =  Get Storage Volume Template URI  ${name}
+	${payload} =  fusion api get resource  ${uri}
+	Remove From Dictionary  ${payload}  headers
+    Remove From Dictionary  ${payload}  status_code
+	${properties} =  get from dictionary  ${svt}  properties
+	# set storagePool in properties
+	${storagePool} =  get from dictionary  ${properties}  storagePool
+	${storageSystem} =  Evaluate   ${properties}.get('storageSystem', ${None})
+	${storagePoolName} =  set variable  ${storagePool['default']}
+	${storagePoolUri} =  Get Storage Pool URI  ${storagePoolName}    ${storageSystem}
+	set to dictionary  ${storagePool}  default  ${storagePoolUri}
+	set to dictionary  ${properties}  storagePool  ${storagePool}
+	Remove From Dictionary    ${properties}    storageSystem
+	# set rootTemplateURI in payload
+	${rootTemplateUri} =  Get Root Template URI by Storage Pool  ${storagePoolName}
+	set to dictionary  ${payload}  rootTemplateUri  ${rootTemplateUri}
+    # set snapshotPool in properties for StoreServ
+	${status}  ${rtn} =  Run Keyword and Ignore Error  Get From Dictionary  ${properties}  snapshotPool
+	${snapshotPool} =  set variable if  '${status}'=='PASS'  ${rtn}  create dictionary
+	${snapshotPoolUri} =  Run keyword if  '${status}'=='PASS'  Get Storage Pool URI  ${snapshotPool['default']}    ${storageSystem}
+	Run keyword if  '${status}'=='PASS'  set to dictionary  ${snapshotPool}  default  ${snapshotPoolUri}
+    Run keyword if  '${status}'=='PASS'  set to dictionary  ${properties}  snapshotPool  ${snapshotPool}
+    # set properties in payload
+    Set To Dictionary  ${payload}  properties  ${properties}
+	[Return]  ${payload}

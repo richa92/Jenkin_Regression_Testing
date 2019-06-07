@@ -1,0 +1,154 @@
+*** Settings ***
+Documentation    Test suite to validate blade related events on OneView and FLM
+...    It covers testing of:
+...        BladeIloFruFault
+...        BladeIloOperationalStatusWarning
+...        BladeIloOperationalStatusCleared
+...        BladeManagerWarning
+...        BladeManagerOk
+...    = GENERIC USAGE =
+...    | pybot | -v ENC_SERIAL_NO:[enclosure serial #] | -v APPLIANCE_IP:<ipv4> | -v CIM_Linux_IP:<ipv4> |-v GIT_REPO_ROOT: | Blade_ilo_event.txt |
+...    = Variables =
+...    | GIT_REPO_ROOT |      Required: Repo root path if NOT defined in environment variable this is mgmtfw root location|
+...    | ENC_SERIAL_NO |      Optional: If omitted, will use the 1st enclosure detected in OV |
+...    | APPLIANCE_IP |       Required: OneView IPv4 address |
+...    | CIM_Linux_IP |       Required:CI Manager ipv4 under test |
+
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Library           RoboGalaxyLibrary
+Library           MgmtFWLibrary
+Library           json
+
+Suite Setup       Configure Events Test Environment
+Suite Teardown    Run Keywords  Logout of EM RIS   AND    Logout of Fusion Via REST
+
+*** Test Case ***
+TC 01: Verify BladeILOFRUFault Event Generated With FruReadBlockInjection
+    [Documentation]    Verify BladeILOFRUFault Event gets generated with the FruReadBlockInjection Mechanism
+    [Tags]    Blade    Alert    Events    FLM2.00     FLM1.01    OV3.10    Automated
+    ${occupied_blade_list}=    Get List of Occupied iLO Blade Bays
+    Should Not Be Empty    ${occupied_blade_list}    msg=No ilo blades present in the enlcosure
+    ${blade_bay}=    Get From List    ${occupied_blade_list}    0
+    ${last_fusion_event_id}=    get last fusion event ID
+    EM API Get Diags    FruReadBlockInjection/Baseboard/true
+    ${result}=    RIS EM Efuse Blade    ${blade_bay}    8
+    Sleep    8
+    # After Efuse the blade, wait for the FRU timeout.  Can be up to 800 secs.  Usually around 600 secs.
+    ${status}    ${result}=    Wait timeout for Device State    Blade    ${blade_bay}    SM_STATE_ILO_BASEBOARD_FRU_TIMEOUT    800
+    Should Be True    ${status}    msg=expected SM_STATE_ILO_BASEBOARD_FRU_TIMEOUT but got ${result}
+    Sleep    10    # Wait 10 secs here after we get the FRU timeout for the event to be logged to audit log and then check
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Status Change MessageID Event    ${EL_Blade_Critical}    ${Blade_Device}    ${blade_bay}    250
+    Verify Audit Log Alert Event    ${EL_Blade_iLOFruFault}    ${Blade_Device}    ${blade_bay}    250
+    Verify Fusion Event Sent By EM    ${EL_Blade_iLOFruFault}    ${last_fusion_event_id}
+    Sleep    5
+    EM API Get Diags    FruReadBlockInjection/Baseboard/false
+    ${result}=    RIS EM Efuse Blade    ${blade_bay}    8
+    Sleep    8
+    Wait for Device OK    ${Blade_Device}    ${blade_bay}
+    [Teardown]    Run Keyword if Test Failed    EM Clear BladeiLOFruFault Status    ${blade_bay}
+
+TC 02: Verify Events BladeManagerWarning BladeManagerOk BladeIloOperationalStatusCleared And BladeIloOperationalStatusWarning
+    [Documentation]    Validate the iLO Blade Health is Warning with IloOperationalStatus set and check events BladeManagerWarning and BladeManagerOk
+    [Tags]    Blade    Alert    Events    FLM2.00    FLM1.01    OV3.10    Automated
+    ${occupied_blade_list}=    Get List of Occupied iLO Blade Bays
+    Should Not Be Empty    ${occupied_blade_list}    msg=No ilo blades present in the enlcosure
+    : FOR    ${blade_bay}    IN    @{occupied_blade_list}
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${result}=    EM API Get Diags    BladeManagerFaultInjection/${blade_bay}/IloOpStatus/true
+    \    Should Contain  ${result}    IloOpStatus fault event sent
+    \    Log To Console    BladeManager fault injected sucessfully
+    \    Sleep    30
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${Blade_OPerational_Status_Warning}    ${Blade_Manager_Device}    ${blade_bay}    250
+    \    Verify Fusion Event Sent By EM    ${Blade_OPerational_Status_Warning}    ${last_fusion_event_id}
+    \    ${fault_status}=    Get Blade Fault Status    ${blade_bay}    BladeManager
+    \    Should Be Equal     ${fault_status}    ${HEALTH_WARNING}
+    \    ${blade_health}=    Get Blade Health    ${blade_bay}
+    \    Should Be Equal     ${blade_health}    ${HEALTH_WARNING}
+    \    ${result}=    EM API Get Diags    BladeManagerFaultInjection/${blade_bay}/IloOpStatus/false
+    \    Should Contain  ${result}    IloOpStatus fault event sent
+    \    Log To Console    BladeManager fault cleared sucessfully
+    \    Wait for Device OK    ${Blade_Device}    ${blade_bay}
+    \    Sleep    3
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_Blade_Ok}    ${Blade_Device}    ${blade_bay}    250
+    \    Verify Audit Log Alert Event    ${Blade_OPerational_Status_Cleared}    ${Blade_Manager_Device}    ${blade_bay}    250
+    \    Verify Fusion Event Sent By EM    ${Blade_OPerational_Status_Cleared}    ${last_fusion_event_id}
+    \    ${fault_status}=    Get Blade Fault Status    ${blade_bay}    BladeManager
+    \    Should Be Equal     ${fault_status}    ${HEALTH_OK}
+    \    ${blade_health}=    Get Blade Health    ${blade_bay}
+    \    Should Be Equal     ${blade_health}    ${HEALTH_OK}
+    [Teardown]    Run Keyword If Test Failed    Verify Blade Health OK
+    
+TC 03: Verify that BladeIloOperationalStatusCritical Event is generated
+    [Documentation]    Verifying the BladeIloOperationalStatusCritical Event gets generated
+    [Tags]    Blade    Alert    Events    FLM2.00    FLM1.01    OV3.10    Automated
+    Set Test Variable    ${device}    Blade
+    Set Test Variable    ${device_diag_response}    BLADE
+    ${last_fusion_event_id}=    get last fusion event ID
+    ${device_list}=    Get List of Occupied iLO Blade Bays
+    Should Not Be Empty    ${device_list}    msg=No Blades present in the enclosure
+    Log To Console    \rRemoving and Inserting the ${device} in bay: @{device_list}[0]
+    ${result}=    RIS EM Efuse On Blade    @{device_list}[0]
+    Should be True    ${result}
+    ${result}=    RIS EM Efuse Off Blade    @{device_list}[0]
+    Should be True    ${result}
+    Sleep    60
+    ${result}=    EM API Get Diags    ShowState/${device}/@{device_list}[0]
+    Should Contain    ${result}    State: SM_STATE_INTEGRATED
+    ${result}=    EM API Get Diags    deviceStateTransition/${device}/@{device_list}[0]/remove
+    Should Contain    ${result}    Successfully sent diag state transition event remove for ${device_diag_response} @{device_list}[0]
+    ${result}=    EM API Get Diags    ShowState/${device}/@{device_list}[0]
+    Should Contain    ${result}    State: SM_STATE_ABSENT
+    ${result}=    EM API Get Diags    deviceStateTransition/${device}/@{device_list}[0]/operational
+    Should Contain    ${result}    Successfully sent diag state transition event operational for ${device_diag_response} @{Device_list}[0]
+    ${status}    ${result}=    Wait timeout for Device State    ${device}    @{device_list}[0]    SM_STATE_OPERATIONAL    600
+    Should Be True    ${status}    msg=expected SM_STATE_OPERATIONAL but got ${result}
+    ${result}=    EM API Get Diags    deviceStateTransition/${device}/@{device_list}[0]/insert
+    Should Contain    ${result}    Successfully sent diag state transition event insert for ${device_diag_response} @{device_list}[0]
+    Sleep    10
+    ${result}=    EM API Get Diags    ShowState/${device}/@{device_list}[0]
+    Should Contain    ${result}    State: SM_STATE_INTEGRATED
+    Sleep    10
+    ${result}=    EM API Get Diags    deviceStateTransition/${device}/@{device_list}[0]/remove
+    Should Contain    ${result}    Successfully sent diag state transition event remove for ${device_diag_response} @{device_list}[0]
+    ${result}=    EM API Get Diags    ShowState/${device}/@{device_list}[0]
+    Should Contain    ${result}    State: SM_STATE_ABSENT
+    ${result}=    EM API Get Diags    deviceStateTransition/${device}/@{device_list}[0]/operational
+    Should Contain    ${result}    Successfully sent diag state transition event operational for ${device_diag_response} @{Device_list}[0]
+    ${result}=    EM API Get Diags    ShowState/${device}/@{device_list}[0]
+    Should Contain    ${result}    State: SM_STATE_OPERATIONAL
+    ${status}    ${result}=    Wait timeout for Device State    ${device}    @{device_list}[0]    SM_STATE_INSERTED_ERR    600
+    Should Be True    ${status}    msg=expectedSM_STATE_INSERTED_ERR but got ${result}
+    Sleep    30
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_Blade_iLO_OperationalStatusCritical}    ${device}    @{device_list}[0]    900
+    Verify Fusion Event Sent By EM    ${EL_Blade_iLO_OperationalStatusCritical}    ${last_fusion_event_id}
+    ${result}=    EM API Get Diags    deviceStateTransition/${device}/@{device_list}[0]/operational
+    Should Contain    ${result}    Successfully sent diag state transition event operational for ${device_diag_response} @{Device_list}[0]
+    ${result}=    EM API Get Diags    ShowState/${device}/@{device_list}[0]
+    Should Contain    ${result}    State: SM_STATE_INSERTED_ERR
+    ${result}=    EM API Get Diags    deviceStateTransition/${device}/@{device_list}[0]/insert
+    Should Contain    ${result}    Successfully sent diag state transition event insert for ${device_diag_response} @{device_list}[0]
+    Sleep    10
+    ${result}=    EM API Get Diags    ShowState/${device}/@{device_list}[0]
+    Should Contain    ${result}    State: SM_STATE_INTEGRATED
+    ${result}=     EM API Get Diags    BladeManagerFaultInjection/@{device_list}[0]/IloOpStatus/false
+    Should Contain    ${result}    IloOpStatus fault event sent
+    Sleep    30
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${Blade_OPerational_Status_Cleared}    ${device}    @{device_list}[0]    900
+    Verify Fusion Event Sent By EM    ${Blade_OPerational_Status_Cleared}    ${last_fusion_event_id}
+    [Teardown]    Run Keyword If Test Failed    RIS EM Efuse Blade    @{device_list}[0]    10

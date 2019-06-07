@@ -1,0 +1,159 @@
+*** Settings ***
+Documentation     Get and verifies Blade FRU information reported by HAL and EM
+...    = Usage =
+...    | pybot | -L DEBUG | get_blade_fru.txt | 
+...    = Variables =
+...    | FUSION IP        | Required; IP address of the FusionVM to use | 
+...    | EM IP            | Required; IP address of the EM to use | 
+...    = Preconditions =
+...    None
+
+Library           RoboGalaxyLibrary            # DVTs Robot Framework extensions
+Library           FusionLibrary                # DVTs Robot Framework extensions
+Library           OperatingSystem
+Variables         ../resources/variables.py    ${ENCLOSURE}
+Resource          ../resources/defaults.txt    # Comet-DVT default variables
+Resource          ../resources/hal_webapp.txt  # Comet-DVT HAL webapp extensions
+Resource          ../resources/compare_json.txt
+Resource          ../resources/fusion_api.txt  # Comet-DVT fusion API extensions
+Resource          ../resources/system_info.txt   # Comet-DVT fusion API extensions
+Suite Setup       Initialize	${filename}
+Suite Teardown    Logout of Fusion Via REST
+Force Tags        DCS  HW  HAL
+
+*** Variables ***
+${BLNO}		1
+${EMPTYBAY}	11
+${ILLEGALBAY}	99
+${filename} 	HpBBServerFru.1.0.0.json	# This comes directly from matrix.cce.hp.com (Morpheus)
+
+*** Test Cases ***
+Get Blade Bays
+    ${BladeBayURL}=      Set Variable If   ${DCS} == True    /rest/v1/Chassis/1/BladeBays     /rest/v1/BladeBays
+    ${Filled}   ${Unfilled}=   Find Filled Bays    ${BladeBayURL}
+    ${NoFilled}=    	 Get Length    ${Filled}
+    Run Keyword If       ${NoFilled} < 1
+    ...			 Fatal Error          No blades found, exiting..	  # Is there a graceful way to exit without FAIL?
+    ${EMPTYBAY}=  Run Keyword If       ${NoFilled} < 12
+    ...			 Select Random ELement From List    ${Unfilled}
+    Set Suite Variable   ${Filled}
+    Set Suite Variable   ${EMPTYBAY}
+
+Get Blade FRU Data
+    ${BLNO}=		 Set Variable	'0'
+    ${NoFilled}=    	 Get Length    ${Filled}
+    : For    ${BayNo}	      In Range	      ${NoFilled}
+    \	     ${BLNO}=         Select Random ELement From List    ${Filled}
+    \	     Remove Values From List 	      ${Filled}	     ${BLNO}
+    \	     ${Response}=    HAL API Get Resource   ${FUSION_IP}   ${EM_IP}    /rest/v1/BladeFru/${BLNO}
+    # Verify Return Code
+    \	     ${Status}       Get From Dictionary    ${Response}    status_code
+    # Ignore 2nd bay of 2 bay blades
+    \	     Continue For Loop If   '${Status}'=='0'
+    #
+    \	     Should be Equal As Strings    ${Status}   200    msg=Failed to perform REST call
+    \	     ${Resource}=    Get Resource from Response    ${Response}
+    \	     ${Name}=	     Get From Dictionary	   ${Resource}		Name
+    #	     Skip storage blades for now, check Name for DCS and HW
+    \	     Continue For Loop If   '${Name}'!='Blade Fru' and '${Name}'!='Blade'
+    #
+    \	     Set Suite Variable    ${BLNO}
+    \	     Set Suite Variable    ${EM Blade Fru}    ${Resource}
+    \	     Exit For Loop
+    Should Not Be Equal As Strings   ${BLNO}  0		msg=No non-storage blade found
+
+Get HAL Blade FRU
+    ${Bay}=    Convert To Integer   ${BLNO}
+    ${Parameters}=    Create Dictionary    BayNumber=${Bay}
+    Log Dictionary    ${Parameters}
+    ${Response}=    HAL API Perform Post Action    ${FUSION IP}    BladeFruRead    ${Parameters}
+    Log     ${Response}
+
+    ${Results}=     Find Errors in HAPI Response   BladeFru   ${Response}    performAction    BladeFruRead    ${Parameters}
+    Fail on Any Errors in HAPI Response   ${Results}
+
+    ${Response}=    Get From Dictionary    ${Response}    OperationResult
+    Set Suite Variable    ${HAL Blade Fru}    ${Response}
+
+Compare HAL Blade FRU to EM
+    Dictionaries Should Be Equal    ${HAL Blade Fru}    ${EM Blade Fru}    msg=EM and HAL Blade fru Resources do not match.
+
+Verify Blade Fru Preamble
+    ${ExpectFRU}=    Set Variable    ${JSON}
+    ${ExpPreamble}=    Get From Dictionary    ${ExpectFRU}    Preamble
+
+    # HAL Resource
+    ${HALFRU}=      Get From Dictionary    ${HAl Blade Fru}    Parsed
+    ${Preamble}=    Get From Dictionary    ${HALFRU}    Preamble
+
+    # Remove fields which are not verified
+    Remove From Dictionary    ${Preamble}    FactoryTimeStamp     LastModified
+
+    # Compare
+    ${Diffs}=    Check Large JSON Structure    ${ExpPreamble}    ${Preamble}
+    Log MisMatch Warning    Blade FRU Preamble   ${Diffs}
+    ${Len}=   Get Length   ${Diffs}
+    Run Keyword if   ${Len} > 0
+    ...	   Log   HAL Blade FRU Preamble does not match Spec FRU: Issue AM20    level=WARN
+
+   # Reset Compare JSON
+   ${Diffs}    Get Slice From List    ${Diffs}    ${None}
+
+Verify Blade Fru
+    ${ExpectFRU}=    Set Variable    ${JSON}
+    Remove From Dictionary    ${ExpectFRU}    Preamble
+
+    ${HALFRU}=      Get From Dictionary    ${Hal Blade Fru}    Parsed
+    Remove From Dictionary    ${HALFRU}    Preamble
+
+    # Compare Dictionaries
+    ${Ignore}=		Create List 	PortMap
+    ${Diffs}=    Check Large JSON Structure   ${ExpectFru}    ${HALFRU}   ${Ignore}
+    ${Len}=   Get Length   ${Diffs}
+    Run Keyword if   ${Len} > 0
+    ...	   Log   HAL Blade FRU does not match Spec FRU: Issue AM20    level=WARN
+
+Negative: Get HAL Blade FRU Empty Bay
+    Pass Execution If		${EMPTYBAY}		No unfilled bays available
+    ${Parameters}=    Create Dictionary    BayNumber=${EMPTYBAY}
+    ${Response}=    HAL API Perform Post Action    ${FUSION IP}    BladeFruRead    ${Parameters}
+    Log     ${Response}
+    ${PASS}   ${Result}=   Run Keyword and Ignore Error
+    ...    Check Response   ${Response}
+
+    Run Keyword if    '${PASS}' == 'FAIL'
+    ...	   Log   HAL web app returns blank response: Issue AM37    level=WARN
+
+Negative: Get HAL Blade FRU Illegal Bay
+    ${Parameters}=    Create Dictionary    BayNumber=${ILLEGALBAY}
+    ${Response}=    HAL API Perform Post Action    ${FUSION IP}    BladeFruRead    ${Parameters}
+    Log     ${Response}
+    ${PASS}  ${Result}=   Run Keyword and Ignore Error
+    ...    Check Response   ${Response}
+
+    Run Keyword if    '${PASS}' == 'FAIL'
+    ...	   Log   HAL web app returns blank response: Issue AM37    level=WARN
+
+*** Keywords ***
+Initialize
+    [Documentation]    TBD
+    [Arguments]    ${filename}
+    Login to Fusion Via REST
+    Load Resource    ${filename}
+
+Load Resource
+    [Documentation]    TBD
+    [Arguments]    ${filename}
+    ${output}=    OperatingSystem.Get File    ../data/${filename}
+    ${JSON}=    Evaluate    json.loads('''${output}''')    json
+    Log    ${JSON}
+    Set Suite Variable    ${JSON}    ${JSON}
+
+Check Response
+    [Arguments]    ${Response}
+    Log     ${Response}
+    # Verify Return Code
+    ${Status}       Get From Dictionary    ${Response}    status_code
+    Should be Equal As Strings    ${Status}    200    msg=Failed to perform Webapp REST call
+    ${Error}       Get From Dictionary    ${Response}    CallStatus
+    Should be Equal As Strings    ${Error}    ERROR     msg=Failed to perform Webapp REST call

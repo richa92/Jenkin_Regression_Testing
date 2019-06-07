@@ -1,0 +1,108 @@
+*** Settings ***
+Documentation       Keywords and variables for UPT
+Library             UPTHelpers.py
+Resource            ../bti_resource.txt
+
+*** Keywords ***
+Check Do Not Delete
+    [Documentation]  Check the flag
+    Should Be Equal  ${DO_NOT_DELETE}  ${False}  msg=DO_NOT_DELETE is set to True
+
+Download Update Hops Files
+    [Documentation]  Download Update Hops Files
+    ${updatebin_urls}=  Build Updatebin URLs  ${UPDATEBIN_URLS_FILE}
+    Set Global Variable  ${updatebin_urls}
+    Log  ${updatebin_urls}  console=True
+    ${hops} =  set variable  ${UPDATE_HOPS.split(',')}
+    Set Global Variable  ${hops}
+    ${check}=  Check Update Hops Urls  ${hops}  ${updatebin_urls}
+    Run Keyword If  ${check}==${False}  Fail  msg=Missing updatebin URLs for hops
+    Download Updatebin Files  ${UPDATEBIN_DIR}  ${hops}  ${updatebin_urls}
+
+Create Database Dump
+    [Documentation]  Create database dump on the appliance
+    [Arguments]  ${build}
+    Login to Fusion via SSH
+    ${command}=  Set Variable  pg_dump cidb -U postgres | gzip > /ci/logs/pgdump_${build}.gz
+    ${stdout}  ${stderr}  ${rc}=  execute command  ${command}  return_stderr=True  return_rc=True
+    Should Be Equal As Integers  ${rc}  0  msg=Failed to get database dump.
+    Logout of Fusion Via SSH
+
+Download Database Dumps
+    [Documentation]  Download the database dumps
+    [Arguments]  ${dir}
+    Login to Fusion via SSH
+    SSHLibrary.Get File  /ci/logs/pgdump*.gz  ${dir}
+    Logout of Fusion Via SSH
+
+Verify Storage Resources
+    [Documentation]  Verify Storae Resources
+    Verify Resources for List  ${expected_storage_systems}  state=Managed  status=OK
+    Verify Resources for List  ${expected_storage_pools}  state=Managed  status=OK
+    Verify Resources for List  ${expected_storage_volume_templates}  state=Configured  status=OK
+    Verify Resources for List  ${expected_storage_volumes}  state=REGEX:Managed|Refreshing  status=OK
+    Check Storage Systems Ports Status
+
+Check Storage Systems Ports Status
+    [Documentation]    Check Storage Systems Ports Status
+    :FOR  ${strsys}  IN  @{storeserv_systems_attributes}
+    \    check_storage_system_port_status   ${strsys}
+
+Update Remote Support File
+    [Documentation]  Update Remote Support File in OneView
+    [Arguments]  ${timeout}=200  ${interval}=10
+    #Login to Fusion via SSH
+    Execute SSH Command    sed -re 's?https://c4w23238.itcs.hpe.com?https://api-itg.support.hpe.com/v1/?' -i /ci/etc/rshpe.xml
+    Execute SSH Command    crm resource stop Jettycic2
+    Wait Until Keyword Succeeds    ${timeout}    ${interval}   Wait till status reaches to expected  resource Jettycic2 is NOT running
+    Execute SSH Command    crm resource start Jettycic2
+    Wait Until Keyword Succeeds    ${timeout}    ${interval}   Wait till status reaches to expected  resource Jettycic2 is running on
+    Sleep  200s
+
+Wait till status reaches to expected
+    [Documentation]  Log resources alerts
+    [Arguments]  ${state}
+    ${crmresponse} =  Execute SSH Command    crm resource status Jettycic2
+    Log to console  ${crmresponse}
+    ${rmvalue} =  Get Regexp Matches   ${crmresponse}    ${state}
+    ${count}=  Get Length  ${rmvalue}
+    Run keyword if    '${count}'=='0'   FAIL
+
+First Time Remote Support Registration
+    [Documentation]     First Time Remote Support Registration
+    [Arguments]    ${FUSION_IP}=${APPLIANCE_IP}  ${cred}=${ADMIN_CREDENTIALS}
+    ...            ${rem_supp_edit}=${REMOTESUPPORT_EDIT}
+    ...            ${time_out}=${REMOTE_SUPPORT_TIMEOUT}
+    Set Log Level    Trace
+    ${response}    ${sessionid}    Fusion Api Login Appliance  ${FUSION_IP}  ${cred}
+    Run Keyword If    ${response['status_code']}==200    Log    Successful login    console=True
+    ${state}=   Get HPE Remote Support Registration Status
+    Run Keyword If    ${state} == ${FALSE}    Enable HPE Remote Support
+    ...  ELSE     Run Keywords    Log    HPE Registration is already done.Now RS Enable and Disable Action should be performed   WARN   console=True
+    ...           AND   Enable HPE Remote Support   rem_supp_edit=${remotesupport_enable}
+
+Get HPE Remote Support Registration Status
+     [Documentation]   Validate if Remote Support is registered
+     Set Log Level    TRACE
+     ${response} =   Get Resource by URI   /rest/support/registration
+     Log    ${response}    console=True
+     [Return]  ${response['registered']}
+
+Enable HPE Remote Support
+    [Documentation]     Enable remote support registration to HPE
+    [Arguments]    ${rem_supp_edit}=${REMOTESUPPORT_EDIT}
+    ...            ${time_out}=${REMOTE_SUPPORT_TIMEOUT}
+    Set Log Level    Trace
+    ${response}=    Fusion Api Edit Remote Support    ${rem_supp_edit}
+    Log    ${response}
+    Run Keyword If  ${response['status_code']}==200  Log   Enabled Remote Support Successfully on oneview Appliance  console=True
+    ...    ELSE IF  ${response['status_code']}==202  Wait For Task2  ${response}  ${time_out}
+    ...    ELSE     Fail  msg=Failed to Enable Remote Support in oneview Settings
+
+Get Enclosure and verify remote support
+    [Documentation]    Get Enclosure and verify remote support is enabled
+    [Arguments]   ${enclosure}
+    :FOR  ${enc}  IN  @{enclosure}
+    \   ${getenc} =    Fusion Api Get Enclosures  param=?filter="'name'=='${enc['name']}'"
+    \   Run Keyword If  '${getenc['members'][0]['supportState']}' == 'Enabled'  Log  Remote Support for ${enc['name']} is ${getenc['members'][0]['supportState']}  console=yes
+    \   ...   ELSE  FAIL

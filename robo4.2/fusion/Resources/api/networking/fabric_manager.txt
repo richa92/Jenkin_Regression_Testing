@@ -1,0 +1,539 @@
+*** Settings ***
+Library                Collections
+Library                json
+
+*** Keywords ***
+Add Fabric Manager
+    [Documentation]    Adds Fabric Manager with Certificate
+    [Arguments]    ${fabric_manager_create}
+    ${fm_name}=     Set Variable    ${fabric_manager_create['name']}
+    ${apic_host_name}=    Set Variable    ${fabric_manager_create['fabricManagerClusterNodeInfo'][0]['oobMgmtAddr']}
+    Add APIC Server Certificate to OV    ${apic_host_name}    ${fm_name}
+    ${resp} =    Fusion Api Create Fabric Manager    ${fabric_manager_create}
+    Wait For Task2  ${resp}
+
+Add APIC Server Certificate to OV
+    [Documentation]  Adds APIC Server Certificate to OV
+    ...    Define the below dictionary in datafile
+    ...    CERT_BODY = {'type': "CertificateInfoV2", 'certificateDetails': [{'base64Data': '', 'aliasName': '', 'type': "CertificateDetailV2"}]}
+    [Arguments]    ${apic_host_name}    ${alias_name}
+    # Get APIC Server Certificate
+    ${resp}=    Fusion Api Get Remote Certificate    ip=${apic_host_name}
+    ${CERTIFICATE}=    Get From Dictionary    ${resp['certificateDetails'][0]}    base64Data
+    Set To Dictionary    ${CERT_BODY['certificateDetails'][0]}  base64Data    ${CERTIFICATE}
+    Set To Dictionary    ${CERT_BODY['certificateDetails'][0]}  aliasName    ${alias_name}
+    ${resp}=    Fusion Api Import Server Certificate   ${CERT_BODY}
+    Wait For Task2    ${resp}
+
+Get Fabric Manager URI
+    [Documentation]  Gets the Fabric Manager URI from OV for the give Fabric Manager name
+    [Arguments]    ${name}
+    ${resp}=    Fusion Api Get Fabric Manager    param=?filter="'name'=='${name}'"
+    ${Uri}    Get From Dictionary    ${resp['members'][0]}    uri
+    [Return]    ${Uri}
+
+Get Fabric Manager Tenant URI
+    [Documentation]  Gets the Tenant URI from OV for the given FM URI and Tenant name
+    [Arguments]     ${fm_uri}    ${tenant_name}
+    ${resp}=    Fusion Api Get Fabric Manager Tenants    ${fm_uri}
+    :FOR    ${dict}    IN     @{resp['members']}
+    \    Run Keyword If     '${dict['name']}'=='${tenant_name}'
+    \    ...    Return From Keyword   ${dict['uri']}
+    FAIL    msg=Tenant with name ${tenant_name} not found.
+
+Check Tenant Exists in Fabric Manager
+    [Documentation]  Checks if a Tenant with the given name is added to the Fabric Manager with given URI.
+    [Arguments]    ${fm_uri}   ${tenant_name}
+    ${resp}=    Fusion Api Get Fabric Manager Tenants    ${fm_uri}
+    :FOR    ${dict}    IN     @{resp['members']}
+    \    Run Keyword If     '${dict['name']}'!='${tenant_name}'
+    \    ...    Continue For Loop
+    \    Run Keyword If     '${dict['monitored']}'=='True'
+    \    ...    Return From keyword    True
+    [Return]    False
+
+Create Fabric Manager Edit Payload
+    [Documentation]  Creates the DTO/payload for the Fabric Manager EDIT/PUT using the body from datafile
+    [Arguments]    ${fm_body}
+    ${fm_uri}=    Get Fabric Manager URI    ${fm_body['name']}
+    ${tenants_body}=    Get From Dictionary    ${fm_body}    tenants
+    ${tenants_body_uri}=    Create List
+    :FOR    ${tenant}    IN    @{tenants_body}
+    \    ${tenant_uri}=    Get Fabric Manager Tenant URI    ${fm_uri}   ${tenant['name']}
+    \    Set to Dictionary   ${tenant}    uri    ${tenant_uri}
+    \    Append To List    ${tenants_body_uri}    ${tenant}
+    Set to Dictionary    ${fm_body}    tenants=${tenants_body_uri}    uri=${fm_uri}
+    [return]    ${fm_body}
+
+Get Fabric Manager Alerts
+    [Documentation]  Gets alerts for all the fabric manager resource type and given alert state and description like
+    [Arguments]    ${alertState}=Active    ${description}=None
+    ${alerts} =    Run Keyword If    '${description}'=='None'    fusion_api_get_alerts    /rest/alerts?filter="physicalResourceType='fabric-managers' and alertState='${alertState}'"
+    ...   ELSE    fusion_api_get_alerts    /rest/alerts?filter="physicalResourceType='fabric-managers' and alertState='${alertState}' and description like '${description}'"
+    [return]    ${alerts}
+
+Refresh Fabric Manager
+    [Documentation]  Refresh Fabric Manager
+    [Arguments]    ${fm_uri}
+    ${body}=   Create Dictionary
+    ${resp} =  Fusion API Fabric Manager Refresh     uri=${fm_uri}    body=${body}
+    Wait For Task2   ${resp}
+
+Delete Fabric Manager
+    [Documentation]   Deletes a Fabric Manager If it Exists along with its Certificate. Else Gives a Warning.
+    [Arguments]    ${fm_name}
+    ${resp}=    Fusion API Get Fabric Manager    param=?filter="'name'='${fm_name}'"
+    Run Keyword If     '${resp['count']}'=='0'    Run Keywords
+    ...    Log    Fabric Manager ${fm_name} does not exist    level=WARN
+    ...    AND    Return From Keyword
+    ${resp1}=    fusion_api_delete_fabric_manager    ${fm_name}
+    Wait For Task2   ${resp1}
+    Delete Fabric Manager APIC Server Certificate From OV    ${fm_name}
+
+Delete Fabric Manager APIC Server Certificate From OV
+    [Documentation]   Delete The Fabric Manager APIC Certificate if Exists.
+    [Arguments]    ${fm_name}
+    ${resp2}=    Fusion Api Get Server Certificate    ${fm_name}
+    ${Status}=    Run keyword And Return Status    Dictionary Should Contain Key    ${resp2}    certificateDetails
+    Run Keyword If     '${Status}'=='False'   Run Keywords
+    ...    Log    Certificate with name ${fm_name} does not exist    level=WARN
+    ...    AND    Return From Keyword
+    ${resp3} =     Fusion Api Delete Server Certificate    ${fm_name}
+    Wait For Task2   ${resp3}
+
+Check Fabric Manager Alerts Exists
+    [Documentation]  Checks whether a particular alert is Exist/Not. Alerts are listed and named in the fabric_manager_alerts dictionary in data file.
+    ...    Example: Check Fabric Manager Alerts Exists    ${fm_uri}    Application_Profile_Missing
+    [Arguments]    ${fm_uri}    ${alert_name}    ${alertState}
+    ${alerts} =    Get Fabric Manager Alerts    alertState=${alertState}
+    :FOR    ${alert}    IN    @{alerts['members']}
+    \    Run Keyword If    '${fm_uri}'!='${alert['resourceUri']}'    Continue For Loop
+    \    Log    Check If: ${fabric_manager_alerts['${alert_name}']} == ${alert['description']}    console=True
+    \    ${status}=    Run Keyword And Return Status     Should Be Equal As Strings    ${fabric_manager_alerts['${alert_name}']}    ${alert['description']}
+    \    Run keyword If     '${status}'=='True'    Run Keywords
+    \    ...    Log   Alert Exists    console=True    AND
+    \    ...    Return From Keyword    True
+    [Return]    False
+
+Delete All Fabric Manager Alerts
+    [Documentation]  Deletes all alerts for fabric manager in OneView
+    Remove All Alerts   param=?filter=physicalResourceType='fabric-managers'
+
+Check Fabric Manager Alert With Similar Description Exists
+    [Documentation]  Checks whether a particular alert is Exist/Not. Alerts are listed and named in the fabric_manager_alerts dictionary in data file.
+    ...    Example: Check Fabric Manager Alerts Exists    ${fm_uri}    Application_Profile_Missing
+    [Arguments]    ${fm_uri}    ${alert_name}    ${alertState}
+    ${alerts} =    Get Fabric Manager Alerts    alertState=${alertState}    description=${fabric_manager_alerts['${alert_name}']}
+    Return From Keyword If    '${alerts['count']}'=='0'    False
+    :FOR    ${alert}    IN    @{alerts['members']}
+    \    Run Keyword If    '${fm_uri}'=='${alert['resourceUri']}'    Return From Keyword    True
+    [Return]    False
+
+Add Tenant to Fabric Manager
+    [Documentation]  Adds the given tenant to FM. Requires FM body.
+    [Arguments]    ${fm_body}    ${tenant_name}
+    ${fm_uri}=    Get Fabric Manager URI    ${fm_body['name']}
+    ${fm_tenant_uri}=    Get Fabric Manager Tenant URI    ${fm_uri}    ${tenant_name}
+    ${tenant}=    Create Dictionary    name=${tenant_name}    uri=${fm_tenant_uri}    type=Tenant    monitored=true
+    ${tenant_body}=    Create List   ${tenant}
+    Set to Dictionary     ${fm_body}    tenants   ${tenant_body}
+    ${resp} =    Fusion Api Edit Fabric Manager    ${fm_body}   ${fm_uri}
+    Wait For Task2   ${resp}
+
+Remove Tenant from Fabric Manager
+    [Documentation]  Removes the given tenant from FM. Requires FM body.
+    [Arguments]    ${fm_body}    ${tenant_name}
+    ${fm_uri}=    Get Fabric Manager URI    ${fm_body['name']}
+    ${fm_tenant_uri}=    Get Fabric Manager Tenant URI    ${fm_uri}    ${tenant_name}
+    ${tenant}=    Create Dictionary    name=${tenant_name}    uri=${fm_tenant_uri}    type=Tenant    monitored=false
+    ${tenant_body}=    Create List   ${tenant}
+    Set to Dictionary     ${fm_body}    tenants   ${tenant_body}
+    ${resp} =    Fusion Api Edit Fabric Manager    ${fm_body}   ${fm_uri}
+    Wait For Task2   ${resp}
+
+Get Tenant Compliance Status from Report
+    [Documentation]  Gets the compliance status of the tenant from the compliance report.
+    [Arguments]    ${fm_tenant_uri}
+    ${report}=    Fusion API Get Fabric Manager Report    ${fm_tenant_uri}
+    [return]    ${report['complianceStatus']}
+
+Get LI LLDP Inconsistency From Compliance Report
+    [Documentation]  Gets the LLDP Inconsistency from the compliance report for the give Tenant and LI.
+    [Arguments]    ${fm_tenant_uri}    ${li_name}
+    ${resource_uri}=    Set Variable
+    ${remediate_dict}=    Create Dictionary
+    ${report}=    Fusion API Get Fabric Manager Report    ${fm_tenant_uri}
+    ${resource_uri}=    Run Keyword If    '${li_name}'=='null'    Set Variable    None
+    ...    ELSE    GET LI URI     ${li_name}
+    :FOR    ${resource}    IN    @{report['liComplianceList']}
+    \    Run Keyword If    '${resource['logicalInterconnectUri']}' != '${resource_uri}'    Continue For Loop
+    \    Run Keyword If    '${resource['complianceStatus']}' == 'COMPLIANT'    Run Keywords
+    \    ...    Return From Keyword    None
+    \    ${li_compliance_id}=    Get From Dictionary    ${resource}    logicalInterconnectComplianceId
+    \    ${li_property_list}=    Set Variable    ${resource['logicalInterconnectProperties']}
+    ${li_Property_Inconsistency_list}=    Create List
+    :FOR    ${li_property}   IN    @{li_property_list}
+    \    Run Keyword If    '${li_property['propertyName']}' != 'LLDP_TAGGING_ENABLED'    Continue For Loop
+    \    ${Inconsistency_dict}=    Copy Dictionary    ${li_property}
+    \    Append To List    ${li_Property_Inconsistency_list}    LLDP_TAGGING_ENABLED
+    \    ${remediate_dict}=    Run Keyword If    '${li_property['remediationAction']}'!='AUTO_UPDATE'    Create Dictionary
+    \    ...    ELSE    create_fabric_manager_remediate_body    ${fm_tenant_uri}    ${li_compliance_id}
+    \    Set To Dictionary    ${remediate_dict['tenants'][0]['logicalInterconnects'][0]}    logicalInterconnectProperties=${li_Property_Inconsistency_list}
+    \    Return From keyword     ${Inconsistency_dict}    ${remediate_dict}
+    [return]    None
+
+Get Uplink Set Network Inconsistency From Compliance Report
+    [Documentation]  Gets the uplink set network inconsistency details from the compliance report for a aprticular Tenant, LI, US, VLAN ID.
+    [Arguments]    ${fm_tenant_uri}    ${li_name}    ${us_name}    ${vlan_id}
+    ${nw_compliance_list}=    Create Dictionary
+    ${report}=    Fusion API Get Fabric Manager Report    ${fm_tenant_uri}
+    ${li_uri}=    GET LI URI     ${li_name}
+    ${us_uri}=    Get Uplink Set URI     ${us_name}
+    :FOR    ${resource}    IN    @{report['liComplianceList']}
+    \    Run Keyword If    '${resource['logicalInterconnectUri']}' != '${li_uri}'    Continue For Loop
+    \    Run Keyword If    '${resource['complianceStatus']}' == 'COMPLIANT'    Run Keywords
+    \    ...    Return From Keyword    None
+    \    ${li_compliance_id}=    Get From Dictionary    ${resource}    logicalInterconnectComplianceId
+    \    ${us_compliance_list}=    Get From Dictionary    ${resource}    uplinkSetComplianceList
+    # Get the NW Compliance list
+    :FOR    ${us_resource}    IN    @{us_compliance_list}
+    \    Run Keyword If    '${us_resource['uplinkSetUri']}' != '${us_uri}'    Continue For Loop
+    \    ${us_compliance_id}=    Get From Dictionary    ${us_resource}    uplinkSetComplianceId
+    \    ${nw_compliance_list}=    Get From Dictionary    ${us_resource}    networkComplianceList
+    # Get the compliance for the VLAN ID
+    :FOR    ${nw_resource}    IN    @{nw_compliance_list}
+    \    Run Keyword If    '${nw_resource['vlanId']}' != '${vlan_id}'    Continue For Loop
+    \    ${nw_compliance_id}=    Get From Dictionary    ${nw_resource}    uplinkSetNetworkComplianceId
+    \    ${remediate_dict}=    create_fabric_manager_remediate_body    ${fm_tenant_uri}    li_compliance_id=${li_compliance_id}    us_compliance_id=${us_compliance_id}     nw_compliance_id=${nw_compliance_id}
+    \    ${Inconsistency_dict}=    Copy Dictionary     ${nw_resource}
+    \    Return From Keyword     ${Inconsistency_dict}    ${remediate_dict}
+    [Return]    None
+
+Get Uplink Set Inconsistency List From Compliance Report
+    [Documentation]  Gets the list of all uplink set inconsistencies for a give Tenant and LI.
+    [Arguments]    ${fm_tenant_uri}    ${li_name}
+    ${nw_compliance_list}=    Create Dictionary
+    ${report}=    Fusion API Get Fabric Manager Report    ${fm_tenant_uri}
+    ${li_uri}=    Run Keyword If    '${li_name}'=='null'    Set Variable    None
+    ...    ELSE    GET LI URI     ${li_name}
+    :FOR    ${resource}    IN    @{report['liComplianceList']}
+    \    Run Keyword If    '${resource['logicalInterconnectUri']}' != '${li_uri}'    Continue For Loop
+    \    Run Keyword If    '${resource['complianceStatus']}' == 'COMPLIANT'    Run Keywords
+    \    ...    Return From Keyword    None
+    \    ${li_compliance_id}=    Get From Dictionary    ${resource}    logicalInterconnectComplianceId
+    \    ${us_compliance_list}=    Get From Dictionary    ${resource}    uplinkSetComplianceList
+    # Get the NW Compliance list
+    ${Inconsistency_list}=    Create List
+    :FOR    ${us_resource}    IN    @{us_compliance_list}
+    \    ${us_compliance_id}=    Get From Dictionary    ${us_resource}    uplinkSetComplianceId
+    \    ${nw_compliance_list}=    Get From Dictionary    ${us_resource}    networkComplianceList
+    \    ${remediate_dict}=    create_fabric_manager_remediate_body    ${fm_tenant_uri}    li_compliance_id=${li_compliance_id}    us_compliance_id=${us_compliance_id}
+    \    ${Inconsistency_dict}=    Copy Dictionary    ${us_resource}
+    \    ${dict}=    Create Dictionary    inconsistency=${Inconsistency_dict}    remediate=${remediate_dict}
+    \    Append to List    ${Inconsistency_list}    ${dict}
+    [Return]    ${Inconsistency_list}
+
+Get Uplink Set Port Inconsistency List From Compliance Report
+    [Documentation]  Gets the list of all port inconsistencies for a give Tenant, LI and uplink set.
+    [Arguments]    ${fm_tenant_uri}    ${li_name}    ${us_name}
+    ${report}=    Fusion API Get Fabric Manager Report    ${fm_tenant_uri}
+    ${li_uri}=    Run Keyword If    '${li_name}'=='null'    Set Variable    None
+    ...    ELSE    GET LI URI     ${li_name}
+    ${us_uri}=    Get Uplink Set URI     ${us_name}
+    :FOR    ${resource}    IN    @{report['liComplianceList']}
+    \    Run Keyword If    '${resource['logicalInterconnectUri']}' != '${li_uri}'    Continue For Loop
+    \    Run Keyword If    '${resource['complianceStatus']}' == 'COMPLIANT'    Run Keywords
+    \    ...    Return From Keyword    None
+    \    ${li_compliance_id}=    Get From Dictionary    ${resource}    logicalInterconnectComplianceId
+    \    ${us_compliance_list}=    Get From Dictionary    ${resource}    uplinkSetComplianceList
+    # Get the US Compliance list
+    :FOR    ${us_resource}    IN    @{us_compliance_list}
+    \    Run Keyword If    '${us_resource['uplinkSetUri']}' != '${us_uri}'    Continue For Loop
+    \    ${us_compliance_id}=    Get From Dictionary    ${us_resource}    uplinkSetComplianceId
+    \    ${port_compliance_list}=    Get From Dictionary    ${us_resource}    portComplianceList
+    # Get the US Port Compliance list
+    ${Inconsistency_list}=    Create List
+    :FOR    ${port_resource}   IN    @{port_compliance_list}
+    \    ${remediate_dict}=    create_fabric_manager_remediate_body    ${fm_tenant_uri}    li_compliance_id=${li_compliance_id}    us_compliance_id=${us_compliance_id}
+    \    ${Inconsistency_dict}=    Copy Dictionary    ${port_resource}
+    \    ${dict}=    Create Dictionary    inconsistency=${Inconsistency_dict}    remediate=${remediate_dict}
+    \    Append to List    ${Inconsistency_list}    ${dict}
+    [Return]    ${Inconsistency_list}
+
+Get Uplink Set PVLAN Inconsistency List From Compliance Report
+    [Documentation]  Gets the list of all PVLAN inconsistencies for a give Tenant, LI and uplink set.
+    [Arguments]    ${fm_tenant_uri}    ${li_name}    ${us_name}
+    ${report}=    Fusion API Get Fabric Manager Report    ${fm_tenant_uri}
+    ${li_uri}=    Run Keyword If    '${li_name}'=='null'    Set Variable    None
+    ...    ELSE    GET LI URI     ${li_name}
+    ${us_uri}=    Get Uplink Set URI     ${us_name}
+    :FOR    ${resource}    IN    @{report['liComplianceList']}
+    \    Run Keyword If    '${resource['logicalInterconnectUri']}' != '${li_uri}'    Continue For Loop
+    \    Run Keyword If    '${resource['complianceStatus']}' == 'COMPLIANT'    Run Keywords
+    \    ...    Return From Keyword    None
+    \    ${li_compliance_id}=    Get From Dictionary    ${resource}    logicalInterconnectComplianceId
+    \    ${us_compliance_list}=    Get From Dictionary    ${resource}    uplinkSetComplianceList
+    # Get the US Compliance list
+    :FOR    ${us_resource}    IN    @{us_compliance_list}
+    \    Run Keyword If    '${us_resource['uplinkSetUri']}' != '${us_uri}'    Continue For Loop
+    \    ${us_compliance_id}=    Get From Dictionary    ${us_resource}    uplinkSetComplianceId
+    \    ${pvlan_compliance_list}=    Get From Dictionary    ${us_resource}    privateVlanComplianceList
+    \    ${nw_compliance_list}=    Get From Dictionary    ${us_resource}    networkComplianceList
+    # Get the US PVLAN Compliance list
+    ${Inconsistency_list}=    Create List
+    :FOR    ${pvlan_resource}   IN    @{pvlan_compliance_list}
+    \    Continue For Loop IF    '${pvlan_resource['complianceStatus']}' == 'COMPLIANT'
+    \    ${pvlan_compliance_id}=    Get From Dictionary    ${pvlan_resource}    privateVlanComplianceId
+    \    ${pvlan_remediationAction}=    Get From Dictionary    ${pvlan_resource}    remediationAction
+    \    ${nw_compliance_id_list}=     Get PVLAN Dependent Network Compliance List    ${nw_compliance_list}    ${pvlan_remediationAction}
+    \    ${remediate_dict}=    create_fabric_manager_remediate_body     ${fm_tenant_uri}    li_compliance_id=${li_compliance_id}    us_compliance_id=${us_compliance_id}    pvlan_compliance_id=${pvlan_compliance_id}
+    \    ${Inconsistency_dict}=    Copy Dictionary    ${pvlan_resource}
+    \    ${dict}=    Create Dictionary    inconsistency=${Inconsistency_dict}    remediate=${remediate_dict}
+    \    Append to List    ${Inconsistency_list}    ${dict}
+    [Return]    ${Inconsistency_list}
+
+Get PVLAN Dependent Network Compliance List
+    [Documentation]    Get PVLAN Dependent Network Compliance List
+    [Arguments]         ${nw_compliance_list}    ${remediationAction}='AUTO_REMOVE'
+    ${nw_compliance_id_list}=    Create List
+    :FOR    ${nw_resource}    IN    @{nw_compliance_list}
+    \    Run Keyword If    '${nw_resource['remediationAction']}' != '${remediationAction}'    Continue For Loop
+    \    ${nw_compliance_id}=    Get From Dictionary    ${nw_resource}    uplinkSetNetworkComplianceId
+    \    Append to List    ${nw_compliance_id_list}    ${nw_compliance_id}
+    [Return]    ${nw_compliance_id_list}
+
+Get Network Set Inconsistency From Compliance Report
+    [Documentation]  Checks the given inconsistency to NW Set inconsistencies in the compliance report and returns status and remediattion dictionary.
+    [Arguments]    ${fm_tenant_uri}    ${FM_NW_SET_Inconsistency}
+    ${report}=    Fusion API Get Fabric Manager Report    ${fm_tenant_uri}
+    :FOR    ${nwset_resource}    IN    @{report['networkSets']}
+    \    Run Keyword If    '${nwset_resource['inconsistency']}' != '${FM_NW_SET_Inconsistency}'
+    \    ...    Continue For Loop
+    \    ${nw_set_compliance_id}=    Get From Dictionary    ${nwset_resource}    networkSetComplianceId
+    \    ${remediate_dict}=    create_fabric_manager_remediate_body    ${fm_tenant_uri}    nw_set_compliance_id=${nw_set_compliance_id}
+    \    Return From Keyword    True    ${remediate_dict}
+    [Return]    False    None
+
+Get Network Set Inconsistency List From Compliance Report
+    [Documentation]  Gets the list of NW set Inconsistencies from the compliance report for the given Tenant.
+    [Arguments]    ${fm_tenant_uri}
+    ${report}=    Fusion API Get Fabric Manager Report    ${fm_tenant_uri}
+    ${Inconsistency_list}=    Create List
+    :FOR    ${nwset_resource}    IN    @{report['networkSets']}
+    \    ${nw_set_compliance_id}=    Get From Dictionary    ${nwset_resource}    networkSetComplianceId
+    \    ${remediate_dict}=    create_fabric_manager_remediate_body    ${fm_tenant_uri}    nw_set_compliance_id=${nw_set_compliance_id}
+    \    ${Inconsistency_dict}=    Copy Dictionary    ${nwset_resource}
+    \    ${dict}=    Create Dictionary    inconsistency=${Inconsistency_dict}    remediate=${remediate_dict}
+    \    Append to List    ${Inconsistency_list}    ${dict}
+    [Return]    ${Inconsistency_list}
+
+Get Uplink Set Property Inconsistency List From Compliance Report
+    [Documentation]  Gets the list of all US property inconsistencies for a give Tenant, LI and uplink set.
+    [Arguments]    ${fm_tenant_uri}    ${li_name}    ${us_name}
+    ${report}=    Fusion API Get Fabric Manager Report    ${fm_tenant_uri}
+    ${li_uri}=    Run Keyword If    '${li_name}'=='null'    Set Variable    None
+    ...    ELSE    GET LI URI     ${li_name}
+    ${us_uri}=    Get Uplink Set URI     ${us_name}
+    :FOR    ${resource}    IN    @{report['liComplianceList']}
+    \    Run Keyword If    '${resource['logicalInterconnectUri']}' != '${li_uri}'    Continue For Loop
+    \    Run Keyword If    '${resource['complianceStatus']}' == 'COMPLIANT'    Run Keywords
+    \    ...    Return From Keyword    None
+    \    ${li_compliance_id}=    Get From Dictionary    ${resource}    logicalInterconnectComplianceId
+    \    ${us_compliance_list}=    Get From Dictionary    ${resource}    uplinkSetComplianceList
+    # Get the US Compliance list
+    :FOR    ${us_resource}    IN    @{us_compliance_list}
+    \    Run Keyword If    '${us_resource['uplinkSetUri']}' != '${us_uri}'    Continue For Loop
+    \    ${us_compliance_id}=    Get From Dictionary    ${us_resource}    uplinkSetComplianceId
+    \    ${property_list}=    Get From Dictionary    ${us_resource}    uplinkSetProperties
+    # Get the US Property Compliance list
+    ${Us_Property_Inconsistency_list}=    Create List
+    :FOR    ${us_property}   IN    @{property_list}
+    \    Run Keyword If    '${us_property['propertyName']}' != 'UPLINK_SET_TUNNEL_NETWORK'    Continue For Loop
+    \    ${Inconsistency_dict}=    Copy Dictionary    ${us_property}
+    \    Append To List    ${Us_Property_Inconsistency_list}    UPLINK_SET_TUNNEL_NETWORK
+    \    ${remediate_dict}=    Run Keyword If    '${us_property['remediationAction']}'!='AUTO_UPDATE'    Create Dictionary
+    \    ...    ELSE    create_fabric_manager_remediate_body    ${fm_tenant_uri}    li_compliance_id=${li_compliance_id}    us_compliance_id=${us_compliance_id}
+    \    Set To Dictionary    ${remediate_dict['tenants'][0]['logicalInterconnects'][0]['uplinkSets'][0]}    uplinkSetProperties=${Us_Property_Inconsistency_list}
+    \    Return From keyword     ${Inconsistency_dict}    ${remediate_dict}
+    [return]    None
+
+Create Remediate Dictionary Template
+    [Documentation]  Creates the remediate dictionary (body for remediate API) based on the given list of compliance IDs.
+    [Arguments]    ${fm_tenant_uri}    ${li_compliance_id}=${None}    ${us_compliance_id}=${None}     ${nw_compliance_id}=${None}    ${nw_set_compliance_id}=${None}    ${pvlan_compliance_id}=${None}
+    ${nw_compliance_list}=    Run Keyword If    '${nw_compliance_id}'=='${None}'    Create List
+    ...    ELSE    Create List    ${nw_compliance_id}
+    ${pvlan_compliance_list}=    Run Keyword If    '${pvlan_compliance_id}'=='${None}'    Create List
+    ...    ELSE    Create List    ${pvlan_compliance_id}
+    ${us_compliance_dict}=    Create Dictionary    networks=${nw_compliance_list}   uplinkSetComplianceId=${us_compliance_id}    privateVlansComplianceId=${pvlan_compliance_list}
+    ${us_compliance_list}=    Run Keyword If    '${nw_set_compliance_id}'=='${None}' and '${us_compliance_id}'=='${None}'    Create List
+    ...    ELSE    Create List    ${us_compliance_dict}
+    ${li_compliance_dict}=    Create Dictionary    logicalInterconnectComplianceId=${li_compliance_id}    uplinkSets=${us_compliance_list}
+    ${li_compliance_list}=    Run Keyword If    '${li_compliance_id}'=='${None}'    Create List
+    ...    ELSE    Create List    ${li_compliance_dict}
+    ${nw_set_list}=    Run Keyword If    '${nw_set_compliance_id}'=='${None}'    Create List
+    ...    ELSE    Create List     ${nw_set_compliance_id}
+    ${tenant_dict}=    Create Dictionary    tenantUri=${fm_tenant_uri}    networkSets=${nw_set_list}    logicalInterconnects=${li_compliance_list}
+    ${tenant_list}=    Create List    ${tenant_dict}
+    ${remediate_dict}=    Create Dictionary    tenants=${tenant_list}    type=RemediateFabricManagerV2
+    [Return]    ${remediate_dict}
+
+Compare Compliance Report Inconsistency Dictionaries
+    [Documentation]  Verifies the given inconsistency dictionary (from the compliance report) against a predefined inconsistency dictionary details from the datafile. Returns the status.
+    [Arguments]    ${Inconsistency_dict}    ${Inconsistency_details}
+    ${status}=    Run keyword And Return Status    Should Not Be Empty    ${Inconsistency_dict}
+    Return From Keyword If    '${status}'=='False'    False
+    ${keys}=    Get Dictionary Keys    ${Inconsistency_details}
+    :FOR    ${key}    IN    @{keys}
+    \    ${detail}=    Replace Variables     ${Inconsistency_details['${key}']}
+    \    Log    Check If: '${detail}' == '${Inconsistency_dict['${key}']}'    console=True
+    \    Return From Keyword IF    '${detail}' != '${Inconsistency_dict['${key}']}'    FALSE
+    Log    Inconsistency matches datafile. Iconsistency: ${Inconsistency_details['inconsistency']} exists.    console=True
+    [Return]    True
+
+Compare Compliance Report Inconsistency Dictionary List
+    [Documentation]  Verifies the given list inconsistency dictionaries (from the compliance report) against a predefined inconsistency dictionary details from the datafile. Returns the status and the remediate dictionary.
+    [Arguments]    ${Inconsistency_list}    ${Inconsistency_details}
+    :FOR    ${Inconsistency_dict}    IN    @{Inconsistency_list}
+    \    ${status}=    Compare Compliance Report Inconsistency Dictionaries    ${Inconsistency_dict['inconsistency']}    ${Inconsistency_details}
+    \    Run Keyword If    '${status}'=='True'     Return From Keyword    True    ${Inconsistency_dict['remediate']}
+    [Return]    False    ${None}
+
+Get Fabric Manager Networks Resource Mapping
+    [Documentation]    Gets Fabric Manager Networks Resource Mapping
+    [Arguments]    ${fm_tenant_uri}
+    ${report}=    Fusion API Get Fabric Manager Report    ${fm_tenant_uri}
+    ${nw_resource_list}=    Create List
+    ${status}=    Run keyword and Return Status    Dictionary Should Contain Key    ${report}    networks
+    Return From keyword If     '${status}'=='False'   None
+    :FOR    ${nw}    IN    @{report['networks']}
+    \    Run Keyword If    '${nw['complianceStatus']}' != 'COMPLIANT'    Continue For Loop
+    \    ${nw_resource}=   Create Dictionary    ${nw['networkName']}=${nw['fabricVlan']}
+    \    Append to List    ${nw_resource_list}    ${nw_resource}
+    ${nw_resource_dict}=    Create Dictionary
+    :FOR    ${nw_resource}   IN    @{nw_resource_list}
+    \    ${nw_resource}=    Get Dictionary Items    ${nw_resource}
+    \    Set To Dictionary    ${nw_resource_dict}    ${nw_resource[0]}=${nw_resource[1]}
+    [Return]    ${nw_resource_dict}
+
+Get Fabric Manager Network Set Resource Mapping
+    [Documentation]    Gets Fabric Manager Network Set Resource Mapping
+    [Arguments]    ${fm_tenant_uri}
+    ${report}=    Fusion API Get Fabric Manager Report    ${fm_tenant_uri}
+    ${nw_set_resource_list}=    Create List
+    ${status}=    Run keyword and Return Status    Dictionary Should Contain Key    ${report}    networkSets
+    Return From keyword If     '${status}'=='False'   None
+    :FOR    ${nw_set}    IN    @{report['networkSets']}
+    \    Run Keyword If    '${nw_set['complianceStatus']}' != 'COMPLIANT'    Continue For Loop
+    \    ${vlan_list}=    Get Network Set Network VLAN List From Fabric Manager Compliance Report    ${nw_set['networkSetVlans']}
+    \    ${nw_set_resource}=   Create Dictionary    ${nw_set['networkSetName']}=${vlan_list}
+    \    Append to List    ${nw_set_resource_list}    ${nw_set_resource}
+    ${nw_set_resource_dict}=    Create Dictionary
+    :FOR    ${ns_resource}   IN    @{nw_set_resource_list}
+    \    ${ns_resource}=    Get Dictionary Items    ${ns_resource}
+    \    Set To Dictionary    ${nw_set_resource_dict}    ${ns_resource[0]}=${ns_resource[1]}
+    [Return]         ${nw_set_resource_dict}
+
+Get Network Set Network VLAN List From Fabric Manager Compliance Report
+    [Documentation]    Get Network Set Network VLAN List From Fabric Manager Compliance Report
+    [Arguments]    ${nw_set_vlans}    ${compliance_status}='COMPLIANT'
+    ${vlan_list}=    Create List
+    :FOR    ${vlan}    IN     @{nw_set_vlans}
+    \    Run Keyword If    '${vlan['complianceStatus']}'!='COMPLIANT'    Continue For Loop
+    \    ${vlan_int}=    Convert to Integer    ${vlan['vlanId']}
+    \    Append To List    ${vlan_list}    ${vlan_int}
+    Sort List    ${vlan_list}
+    [Return]    ${vlan_list}
+
+Get Fabric Manager LI Resource Mapping List
+    [Documentation]    Get Fabric Manager LI Resource Mapping List from Compliance Report
+    [Arguments]    ${fm_tenant_uri}    ${li_name}    ${us_name}
+    ${report}=    Fusion API Get Fabric Manager Report    ${fm_tenant_uri}
+    ${li_uri}=    GET LI URI     ${li_name}
+    ${us_uri}=    Get Uplink Set URI     ${us_name}
+    ${li_resource_list}=   Create List
+    :FOR    ${li}    IN    @{report['liComplianceList']}
+    \    Run Keyword If    '${li['logicalInterconnectUri']}'!='${li_uri}'    Continue For Loop
+    \    ${us_compliance_list}=    Get From Dictionary    ${li}    uplinkSetComplianceList
+    :FOR    ${us}    IN    @{us_compliance_list}
+    \    Run Keyword If    '${us['uplinkSetUri']}' != '${us_uri}'    Continue For Loop
+    \    ${us_resources}=     Create Dictionary    compliantPortCount=${us['compliantPortCount']}
+    \    Append to List    ${li_resource_list}    ${us_resources}
+    \    ${us_properties_resources}=   Get Fabric Manager Uplink Set Property Resources Mapping List    ${us['uplinkSetProperties']}
+    \    ${us_port_resources}=    Get Fabric Manager Uplink Set Port Resources Mapping List    ${us['portComplianceList']}
+    \    ${us_nw_resources}=    Get Fabric Manager Uplink Set Network Resources Mapping List    ${us['networkComplianceList']}
+    \    ${li_resource_list}=     Combine Lists    ${li_resource_list}    ${us_properties_resources}    ${us_port_resources}    ${us_nw_resources}
+    ${li_resource_dict}=    Create Dictionary
+    :FOR    ${li_resource}   IN    @{li_resource_list}
+    \    ${li_resource}=    Get Dictionary Items    ${li_resource}
+    \    Set To Dictionary    ${li_resource_dict}    ${li_resource[0]}=${li_resource[1]}
+    [Return]    ${li_resource_dict}
+
+Get Fabric Manager Uplink Set Property Resources Mapping List
+    [Documentation]   Get Fabric Manager Uplink Set Property Resources Mapping List from Compliance Report
+    [Arguments]    ${uplinkSetProperties}
+    ${us_properties_resources}=    Create List
+    :FOR     ${property}    IN    @{uplinkSetProperties}
+    \    Run Keyword If    '${property['complianceStatus']}' != 'COMPLIANT'    Continue For Loop
+    \    ${property_resource}=    Create Dictionary    ${property['propertyName']}=${property['propertyValue']}
+    \    Append To List    ${us_properties_resources}    ${property_resource}
+    [Return]    ${us_properties_resources}
+
+Get Fabric Manager Uplink Set Port Resources Mapping List
+    [Documentation]    Get Fabric Manager Uplink Set Port Resources Mapping List from Compliance Report
+    [Arguments]    ${us_ports}
+    ${us_port_resources}=    Create List
+    :FOR     ${port}    IN    @{us_ports}
+    \    Run Keyword If    '${port['complianceStatus']}' != 'COMPLIANT'    Continue For Loop
+    \    ${port_resource}=    Create Dictionary    ${port['uplinkPortName']}=${port['fabricInterface']}
+    \    Append To List    ${us_port_resources}    ${port_resource}
+    [Return]    ${us_port_resources}
+
+Get Fabric Manager Uplink Set Network Resources Mapping List
+    [Documentation]    Get Fabric Manager Uplink Set Network Resources Mapping List from Compliance Report
+    [Arguments]    ${us_nws}
+    ${us_nw_resources}=    Create List
+    :FOR     ${nw}    IN    @{us_nws}
+    \    Run Keyword If    '${nw['complianceStatus']}' != 'COMPLIANT'    Continue For Loop
+    \    ${nw_resource}=    Create Dictionary    ${nw['networkName']}=${nw['vlanId']}
+    \    Append To List    ${us_nw_resources}    ${nw_resource}
+    [Return]    ${us_nw_resources}
+
+Get Resource Link
+    [Documentation]
+    ...    Example    ${link}=    Get Resource Link    ETH:ETH1
+    ...    Will return link in the following format:    {'name': 'ETH', 'uri':'uri_for_eth1'}
+    [Arguments]    ${metaName}
+    ${uri}=    Common URI Lookup by name    ${metaName}
+    ${category}    ${name} =    Split String    ${metaName}    :
+    Log    Name is: ${name}    console=True
+    ${link}=    Create Dictionary    name=${name}    uri=${uri}
+    [Return]    ${link}
+
+Verify Fabric Manager Resource Mapping
+    [Documentation]    Verify Fabric Manager Resource Mapping against datafile dictionaries
+    [Arguments]    ${Resource_Mapping_Datafile}     ${Resource_Mapping}
+    Log    VERIFYING FABRIC MANAGER RESOURCE MAPPING    console=True
+    ${resource_datafile_keys}=    Get Dictionary Keys    ${Resource_Mapping_Datafile}
+    ${resource_mapping_keys}=    Get Dictionary Keys    ${Resource_Mapping}
+    Sort List    ${resource_datafile_keys}
+    Sort List    ${resource_mapping_keys}
+    ${status}=    Run keyword and Return Status    Lists Should Be Equal   ${resource_datafile_keys}   ${resource_mapping_keys}
+    Return From keyword If     '${status}'=='False'   False
+    # Scan for URI keys
+    :FOR     ${key}   IN    @{resource_datafile_keys}
+    \    Run Keyword If    '${key}'!='UPLINK_SET_TUNNEL_NETWORK'    Continue For Loop
+    \    ${metaname}=   Set Variable    ${Resource_Mapping_Datafile['${key}']}
+    \    ${link}=   Get Resource Link    ${metaname}
+    \    ${key_value}=    Convert to String    ${link}
+    \    ${key_value}=    Replace String    ${key_value}    u'    '
+    \    ${key_value}=    Replace String    ${key_value}    '    "
+    \    ${key_value}=    Replace String    ${key_value}    ", "    ","
+    \    ${key_value}=    Replace String    ${key_value}    ": "    ":"
+    \    ${key_value}=    Set Variable    Tunnel network : ${key_value}
+    \    Set to Dictionary    ${Resource_Mapping_Datafile}    ${key}=${key_value}
+    :FOR     ${key}   IN    @{resource_datafile_keys}
+    \    Log    Verify Resoure ${key}.    console=True
+    \    Log    Check If : '${Resource_Mapping_Datafile['${key}']}'=='${Resource_Mapping['${key}']}'    console=True
+    \    Run Keyword If     '${Resource_Mapping_Datafile['${key}']}'!='${Resource_Mapping['${key}']}'
+    \    ...    Return From Keyword     False
+    [Return]    True

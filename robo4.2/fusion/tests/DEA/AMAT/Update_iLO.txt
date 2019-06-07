@@ -1,0 +1,187 @@
+*** Settings ***
+Documentation   This test will update firmware via hpilo (RIBCL). If current version matches specified update version (ilo_version, ilo_pass variables), update will not be performed.
+...             = USAGE =
+...             | pybot | -v ENCLOSURE:<enc> | -v iLO_URL:<url> | Update_iLO.txt | Updates all Blade iLOs |
+...             | pybot | -v ENCLOSURE:<enc> | -v iLO_URL:<url> | -v ROM_URL:<url> | -v CPLD_URL:<url> | Update_iLO.txt | Update Blade iLO, ROM, and CPLD via iLO |
+...             | pybot | -v ENCLOSURE:<enc> | -v iLO_URL:<url> | -v CIM_Update:True | Update_iLO.txt | Updates Blade and CIM iLO |
+...             | pybot | -v ENCLOSURE:<enc> | -v iLO_URL:<url> | -v CIM_Update:True | -v Blade_Update:False | Update_iLO.txt | Update only CIM iLO |
+...             | pybot | -v ENCLOSURE:<enc> | -v iLO_URL:<url> | -v BAY:1 | Update_iLO.txt | Updates BLADE 1 iLO |
+...             = Variables =
+...             | ENCLOSURE | Required. Dictionary key from variables.py representing the desired enclosure. |
+...             | iLO_URL | Required: FW URL for iLO update
+...             | iLO_Version | Optional: Version Number for update. Unset by default.
+...             | iLO_Pass | Optional: Pass Number for update. Unser by default.
+...             | BAY | Optional: Specific Blade Bay to be updated. Defaults to 'ALL'. Only CIM 1 is supported currently.
+
+Variables       ../resources/variables.py     ${ENCLOSURE}
+Resource        ../resources/system_info.txt
+Resource        ../resources/em_api.txt
+Resource        ../resources/fusion_ssh.txt
+Library         Collections
+Library         RoboGalaxyLibrary
+Library         String
+Library         XML
+
+Suite Setup     Login to EM
+Suite Teardown   Logout of Fusion Via SSH
+Force Tags      HW    iLO    FWU
+
+*** Variables ***
+@{Ignore bays}
+
+${iLO_URL}         ${None}      # Needs to be an ftp://. Cannot use http://jenkins.rsn.hp.com:8080/userContent/latest-ilo.bin
+${CPLD_URL}        ${None}
+${ROM_URL}         ${None}
+
+${ilo_version}     ${None}
+${ilo_pass}        ${None}
+
+${BAY}             ${None}
+
+${CIM_Update}      ${False}     # Default option does not update CIM
+${Blade_Update}    ${True}
+
+*** Test Cases ***
+Update Firmware on CIM iLO
+    Pass Execution If     '${CIM_Update}'=='${False}'    Skipping CIM iLO Update
+
+    # TODO: Get CIM iLO Version
+    # TODO: Get Update iLO Version
+    # TODO: Check iLO version. Only Update if needed.
+
+    # Update CPLD if specified
+    Run Keyword If    '${CPLD_URL}'!='${None}'    Log To Console    Updating CIM CPLD
+    Run Keyword If    '${CPLD_URL}'!='${None}'    Update CIM iLO    ${CPLD_URL}
+
+    # Efuse CIM after CPLD update.
+    # Run Keyword If    '${CPLD_URL}'!='${None}'    iLO Reset Server
+
+    # Update ROM if specified
+    Run Keyword If    '${ROM_URL}'!='${None}'    Log To Console    Updating CIM ROM
+    Run Keyword If    '${ROM_URL}'!='${None}'    Update CIM iLO    ${ROM_URL}
+
+    # Update iLO
+    Should Not Be True    '${iLO_URL}'=='${None}'    msg=Missing required 'iLO_URL' variable.
+    Log To Console    Updating CIM iLO
+    Update CIM iLO
+
+Update Firmware on Blade iLO
+    Pass Execution If     '${Blade_Update}'=='${False}'    Skipping Blade iLO Update
+
+    # TODO: Get Blade iLO Version
+    # TODO: Get Update iLO Version
+    # TODO: Check iLO version. Only Update if needed.
+
+    # Update CPLD if specified
+    Run Keyword If    '${CPLD_URL}'!='${None}'    Log To Console    Updating Blade CPLD
+    Run Keyword If    '${CPLD_URL}'!='${None}'    Update Blade iLO    ${CPLD_URL}
+
+    # Efuse Blade after CPLD update.
+    # Run Keyword If    '${CPLD_URL}'!='${None}'    iLO Reset Server
+
+    # Update ROM if specified
+    Run Keyword If    '${ROM_URL}'!='${None}'    Log To Console    Updating Blade ROM
+    Run Keyword If    '${ROM_URL}'!='${None}'    Update Blade iLO    ${ROM_URL}
+
+    # Update iLO
+    Should Not Be True    '${iLO_URL}'=='${None}'    msg=Missing required 'iLO_URL' variable.
+    Log To Console    Updating Blade iLO
+    Update Blade iLO
+
+*** Keywords ***
+Login to EM
+    Login to Fusion via SSH
+    ${EM_IP}    ${EMSessionID}    EM Api Create Session
+    ${Auth_Header}    Set Variable    "X-Auth-Token":"${EMSessionID}"
+    Set Suite Variable    ${Auth_Header}
+
+Get iLO Version
+    [Arguments]     ${IP}=${iLO IP}     ${USERNAME}=${iLO USERNAME}     ${PASSWORD}=${iLO PASSWORD}
+    # ILO Connect     ${IP}       ${USERNAME}         ${PASSWORD}
+    # ${fw}=    iLO Get FW Version
+    # [Return]    ${fw}
+
+    ${stdout}    ${rc}=    Execute Command    /ci/bin/ilo_get_health.sh -s ${IP} -u ${USERNAME} -p ${PASSWORD} -t FIRMWARE_INFORMATION    return_rc=True
+
+    ${fw_info}=    Parse XML    ${stdout}
+    ${index_1}=    Get Element    ${fw_info}    INDEX_1
+    ${version}=    Get Element Attribute    ${index_1}    VALUE    xpath=FIRMWARE_VERSION
+    Log To Console    iLO Firmware Version: ${version}
+    ${match}    ${version}    ${pass}=    Should Match Regexp    ${version}    (\\d+\\.\\d+) pass (\\d+).*
+    [Return]    ${version}    ${pass}
+
+Update CIM iLO
+    [Arguments]    ${FW_URL}=${ILO_URL}    ${BAY}=${Bay}
+
+    ${current_version}    ${current_pass}=    Get iLO Version    ${Blade Info['BLADE_ILO_IP4']}    ${Blade Info['BLADE_ILO_USER']}    ${Blade Info['BLADE_ILO_PW']}
+    # Skip update if already at specified version
+    Pass Execution If    '${current_version}'=='${ilo_version}' and '${current_pass}'=='${ilo_pass}'
+
+    Log to Console    Updating CIM Bay 1 to ${FW_URL}
+	Run Keyword If    '${Bay}'!='${None}'    Log    Ignoring specified bay. Only CIM bay 1 is supported.
+    # FW Update via hpiLO     ${FW_URL}
+
+Update Blade iLO
+    [Arguments]    ${FW_URL}=${ILO_URL}    ${BAY}=${Bay}
+    # Get Blade list from EM if Bay not specified
+    ${Bays}=    Run Keyword If    '${BAY}'=='${None}'    Get Existing Blades via EM
+    ...         ELSE IF    '${BAY}'=='ALL'    Get Existing Blades via EM
+    ...         ELSE    Create List    ${Bay}
+
+    :FOR    ${Bay}      IN      @{Bays}
+    \    ${Bay}    Convert To String    ${Bay}
+    \    ${Blade Info}=     Get From Dictionary    ${Blade Data}    ${Bay}
+    \    ${current_version}    ${current_pass}=    Get iLO Version    ${Blade Info['BLADE_ILO_IP4']}    ${Blade Info['BLADE_ILO_USER']}    ${Blade Info['BLADE_ILO_PW']}
+    \    # Skip update if already at specified version
+    \    Run Keyword If    '${current_version}'=='${ilo_version}' and '${current_pass}'=='${ilo_pass}'    Log to Console    Skipping iLO update on bay ${Bay}.
+    \    Continue For Loop If    '${current_version}'=='${ilo_version}' and '${current_pass}'=='${ilo_pass}'
+    \
+    \    Log to Console    Updating Blade Bay ${Bay} to ${FW_URL}
+    \    # Skip if in @{ignore bays}
+    \    ${ignore bay}=              Run Keyword and Return Status
+    \    ...                         List Should Contain Value   ${IGNORE BAYS}      ${Bay}
+    \    Return From Keyword If      ${ignore bay}
+    \
+    \    # Get Blade Type
+    \    ${type}     Get Blade Type via EM   ${Bay}
+    \    # Add lower bay to Ignore list if Redbird blade
+    \    ${Lower Bay}=       Evaluate            ${Bay} + 6
+    \    Run Keyword If      '${type}'=='Redbird'
+    \    ...                 Append to List      ${IGNORE BAYS}      ${Lower Bay}
+    \    
+    # \    FW Update via hpiLO    ${FW_URL}    ${Blade Info['BLADE_ILO_IP4']}    ${Blade Info['BLADE_ILO_USER']}    ${Blade Info['BLADE_ILO_PW']}
+
+Get Existing Blades via EM
+	${Populated Bays}       ${Empty Bays}=      Find Filled Bays    /rest/v1/BladeBays
+	[Return]    ${Populated Bays}
+
+Get Blade Type via EM
+    [Arguments]     ${Bay}
+
+    ${Response}=    HAL API Get EM RIS            ${FUSION_IP}    ${EM_IP}    /rest/v1/BladeFru/${Bay}    -H ${Auth_Header}
+    ${Resource}=    Get Resource from Response      ${Response}
+    ${Resource}=    Get From Dictionary             ${Resource}     Parsed
+    ${Resource}=    Get From Dictionary             ${Resource}     Preamble
+    ${Model}=       Get From Dictionary             ${Resource}     Model       # eg: "HP Redbird Gen9"
+    @{words}=       Split String                    ${Model}        ${SPACE}
+    ${type}=        Get From List                   ${words}        1
+    [Return]        ${type}
+
+FW Update via hpiLO
+    [Arguments]     ${FW URL}   ${IP}=${iLO IP}     ${USERNAME}=${iLO USERNAME}     ${PASSWORD}=${iLO PASSWORD}
+    ILO Connect     ${IP}       ${USERNAME}         ${PASSWORD}
+
+    Log     Updating via iLO (${IP}) to ${FW URL}
+
+    # Only returns iLO Version (2.20). No pass build number.
+    ${version}=     iLO Get FW Version
+
+    # Perform Update. Ilo is reset at the end of each update.
+    ${rc}=              iLO Update Firmware     ${FW URL}
+    Should Be True      ${rc}                   msg=Failed to update via iLO.
+
+    # Currently iLO Update Firmware function returns even if update has not completed.
+    # Waiting for 3 minutes to allow iLO Update to complete and reset.
+    Sleep   60 seconds
+
+    ${version}=     Wait Until Keyword Succeeds     5 minutes   1 minute    iLO Get FW Version

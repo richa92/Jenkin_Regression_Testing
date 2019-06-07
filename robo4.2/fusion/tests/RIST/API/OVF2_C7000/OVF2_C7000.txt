@@ -1,0 +1,366 @@
+*** Settings ***
+Library             RoboGalaxyLibrary
+Library             FusionLibrary
+Library             OperatingSystem
+Library             BuiltIn
+Library             Collections
+Library             XML
+Library             SSHLibrary
+Library             String
+Library             Dialogs
+Resource            ../global_variables.robot
+
+*** Variables ***
+${APPLIANCE_IP}      unknown
+
+*** Keywords ***
+
+Pre Condition
+    [Arguments]    ${directoryProfiles}=${None}
+    [Documentation]    Prepare the test case pre condition according to the profile
+    Fusion Api Login Appliance      ${APPLIANCE_IP}    ${admin_credentials}
+    Import AD Server Certificates    ${CERT_BODY}    ${AD_CERTIFICATE}    ${ALIAS_NAME}
+    Prepare Directories For Test   ${directoryProfiles}
+    Log To Console    Pre Condition DONE
+
+Prepare Directories For Test
+    [Arguments]    ${directory_profiles}
+    [Documentation]    Create directories and check the result
+    ${response} =     Add Active Directory    ${directory_profiles}
+    :FOR    ${resp}    IN    @{response}
+    \       Convert To String     ${resp}
+    \       log To Console       \n- create_directory_result_is_${resp}
+    \       ${status}=    Get From Dictionary    ${resp}    status_code
+    \       Should Be Equal    ${status}    ${201}
+
+Clear Test Environment
+    [Arguments]    ${userFlag}=${false}   ${directoryFlag}=${false}    ${scopeFlag}=${false}
+    [Documentation]    Prepare the test case pre condition according to the profile
+    Fusion Api Login Appliance      ${APPLIANCE_IP}    ${admin_credentials}
+    Run Keyword If    ${userFlag}    Remove All Users
+    Run Keyword If    ${directoryFlag}   Remove Directory and Certificate
+    Run Keyword If    ${scopeFlag}   Remove All Scopes
+    Log To Console    Successfully Removed User/Group/Directory As Required
+    Log To Console    Clear Task DONE
+
+Remove Directory and Certificate
+    [Documentation]  Remove the directory server and AD server related CA certificate
+    Remove All Directories Async
+    Run Keyword And Ignore Error     Remove CA By Allias Name    ${ALIAS_NAME}
+
+Credential Login
+    [Arguments]    ${credentials_list}
+    [Documentation]    Login as each credential, so can switch session for test needs
+    :FOR    ${credential}    IN    @{credentials_list}
+    \       Fusion Api Login Appliance    ${APPLIANCE_IP}    ${credential}
+    [Return]    ${True}
+
+Get All Scope URI
+    [Documentation]    Get All Scopes URIs and retur the list
+    ${resp} =    Fusion Api Get Scope
+    ${scope_uri_list} =    Create List
+    :FOR    ${scope}    IN    @{resp['members']}
+    \       Append To List     ${scope_uri_list}    ${scope["uri"]}
+    [Return]    @{scope_uri_list}
+
+Create New User With Scope Restricted
+    [Arguments]    ${userProfile}
+    [Documentation]    Create user according to the user profile
+    ${user_uri_list} =    Create List
+    ${scope_uri} =    Get All Scope URI
+    ${index} =    Set Variable    ${0}
+    :FOR    ${profile}    IN    @{userProfile}
+    \       ${permissions} =    Get From Dictionary    ${profile}    permissions
+    \       Set To Dictionary    ${permissions[0]}    scopeUri    ${scope_uri[${index}]}
+    \       ${index} =    Set Variable    ${index + 1}
+    \       Set To Dictionary    ${profile}     permissions    ${permissions}
+    \       ${resps} =    fusion api add user    ${profile}
+    \       ${status}=    Get From Dictionary    ${resps}    status_code
+    \       Should Be Equal    ${status}    ${200}
+    \       ${user_uri} =    Get From Dictionary    ${resps}    uri
+    \       Append To List    ${user_uri_list}    ${user_uri}
+    [Return]    ${user_uri_list}
+
+Create New Group With Scope Restricted
+    [Arguments]    ${groupProfile}
+    [Documentation]    Add Group in specify Directory according to the group profile
+    ${group_uri_list} =    Create List
+    ${scope_uri} =    Get All Scope URI
+    ${index} =    Set Variable    ${0}
+    :FOR    ${profile}    IN    @{groupProfile}
+    \       ${group2PermissionPerGroup} =   Get From Dictionary    ${profile}    group2PermissionPerGroup
+    \       ${permissions} =    Get From Dictionary    ${group2PermissionPerGroup}    permissions
+    \       Set To Dictionary    ${permissions[0]}    scopeUri    ${scope_uri[${index}]}
+    \       ${index} =    Set Variable    ${index + 1}
+    \       Set To Dictionary    ${group2PermissionPerGroup}     permissions    ${permissions}
+    \       Set To Dictionary    ${profile}     group2PermissionPerGroup    ${group2PermissionPerGroup}
+    \       ${resps} =  fusion api assign roles to directory group    ${profile}
+    \       ${status}=    Get From Dictionary    ${resps}    status_code
+    \       Should Be Equal    ${status}    ${201}
+    \       ${group_uri} =    Get From Dictionary    ${resps}    uri
+    \       Append To List    ${group_uri_list}    ${group_uri}
+    [Return]    ${group_uri_list}
+
+Validate User With Permissions
+    [Documentation]    Validate that user with permissions parameters
+    ${response} =     Fusion Api Get User
+    ${status_code} =    Get From Dictionary     ${response}    status_code
+    Should Be Equal     ${status_code}     ${200}   msg= Failed to get users
+    ${user_list} =    Get From Dictionary     ${response}    members
+    :FOR    ${user}    IN    @{user_list}
+    \       ${permissions} =    Get From Dictionary    ${user}    permissions
+    \       Log To Console     User_has_permission_priority!
+    [Return]    ${true}
+
+Validate Group With Permissions
+    [Documentation]    Validate that group with permissions parameters
+    ${response} =     Fusion_Api_Get_Group_Role_Assignment
+    log to console   get_group_resp_is_${response}
+    ${status_code} =    Get From Dictionary     ${response}    status_code
+    Should Be Equal     ${status_code}     ${200}   msg= Failed to get users
+    ${group_list} =    Get From Dictionary     ${response}    members
+    :FOR    ${group}    IN    @{group_list}
+    \       ${permissions} =    Get From Dictionary    ${group}    permissions
+    \       Log To Console     Group_has_permission_priority!
+    [Return]    ${true}
+
+List Categories And Actions
+    [Arguments]   ${resource_uri}=${empty}
+    [Documentation]    List all categories and actions for which the user/group is authorized
+    ${response} =    Fusion_Api_Get_Authorization_Category_Actions    resource_uri=${resource_uri}
+    Convert To String    ${response}
+    Log To Console       \n-Categories And Actions_return_is_${response}
+    Should Be Equal      '${response["status_code"]}'   '200'    msg= Failed to List Session Categories And Actions!
+    [Return]    ${true}
+
+List Specified Resource Auth Action
+    [Documentation]    List the Authorized Actions for a Specified Resource
+    ${uri_list} =    Get All Logical Interconnect Group Uris
+    :FOR   ${uri}    IN    @{uri_list}
+    \      ${resource_uri} =  Set Variable    ?resourceUri=${uri}
+    \      ${ret} =    List Categories And Actions    ${resource_uri}
+    \      Should Be True    ${ret}
+    [Return]  ${true}
+
+List Role Category Action
+    [Documentation]    Lists all roles and associated category and actions
+    ${response} =    Fusion_Api_Get_Authorization_Role_Category_Actions
+    Convert To String    ${response}
+    Log To Console     \n-Lists all roles and associated category and actions_return_is_${response}
+    Should Be Equal    '${response["status_code"]}'   '200'    msg= Failed to Lists all roles and associated category and actions!
+    [Return]    ${true}
+
+List Permission Category Action
+    [Documentation]    Lists the user session permissions that would authorize a particular action and resource category
+    ${category_action} =  Set Variable    ?category=appliance&action=Read&view=verbose&filter=active=true
+    ${response} =    Fusion_Api_Get_Authorization_Permission_Actions    category_action=${category_action}
+    Convert To String    ${response}
+    Log To Console     \n-Lists the user session permissions that would authorize a particular action and resource category_return_is_${response}
+    Should Be Equal    '${response["status_code"]}'   '200'    msg= Failed to List Session Categories And Actions!
+    [Return]    ${true}
+
+Validate Session Authorized Action
+    [Arguments]   ${body}=${None}
+    [Documentation]    Check Authorization for Resource Creation in a Specified Scope
+    ${response} =    Fusion_Api_Check_Authorization    body=${body}
+    Convert To String    ${response}
+    Log To Console     \n-List Categories And Actions_return_is_${response}
+    Should Be Equal    '${response["status_code"]}'   '200'    msg= Failed to Check Authorization for Resource Creation in a Specified Scope!
+    [Return]    ${true}
+
+Lists The Permission Scopes
+    [Arguments]    ${scope_flag}=${true}    ${resource_uri}=${None}
+    [Documentation]    Lists the permission scopes which authorize an action that includes an association change
+    ${scope_uri} =    Get All Scope URI
+    ${lig_uri} =      Get All Logical Interconnect Group Uris
+    ${uri} =    Run Keyword If  ${scope_flag}    Set Variable     ?initialScopeUris=${scope_uri[0]}${resource_uri}
+                ...         ELSE            Set Variable     ?resourceUri=${lig_uri[0]}${resource_uri}
+    ${response} =    Fusion_Api_list_Permission_Scopes    resource_uri=${uri}
+    Convert To String    ${response}
+    Log To Console     \n-List Permission Scopes_return_is_${response}
+    Should Be Equal    '${response["status_code"]}'   '200'    msg= Failed to Lists the permission scopes which authorize an action that includes an association change!
+    [Return]    ${true}
+
+Lists The Permission Scopes Auth Creation Resource
+    [Arguments]    ${resource_uri}=${None}
+    [Documentation]    Lists the permission scopes which authorize creation of a resource with an association to a specified resource
+    ${lig_uri} =      Get All Logical Interconnect Group Uris
+    ${uri} =   Set Variable     ?associatedResourceUri==${lig_uri[0]}${resource_uri}
+    ${response} =    Fusion Api list Permission Scopes Auth Creation Resource    resource_uri=${uri}
+    Convert To String    ${response}
+    Log To Console     \n-List Permission Scopes_return_is_${response}
+    Should Be Equal    '${response["status_code"]}'   '200'    msg= Failed to list permission scopes!
+    [Return]    ${true}
+
+Edit User Active Permission
+    [Arguments]   ${body}    ${current_username}
+    [Documentation]    Creates a new user session from an existing session, controlling which user assigned permissions are active and inactive
+    ${sessionID} =    Get Current SessionID    ${current_username}
+    Set To Dictionary    ${body}    sessionID    ${sessionID}
+    ${session_list} =     Create List
+    ${response} =    Fusion Api Modify Active Permissions    body=${body}
+    Convert To String    ${response}
+    ${sessionID} =    Get From Dictionary    ${response}    sessionID
+    Append To List    ${session_list}    ${sessionID}
+    Should Be Equal    '${response["status_code"]}'   '200'    msg= Failed to Modify session!
+    [Return]    ${session_list}
+
+Retrieve Sessions
+    [Arguments]    ${session_list}
+    [Documentation]    Retrieve sessions one by one
+    :FOR    ${session}    IN    @{session_list}
+    \       ${resp} =     Fusion Api Get Session Info   sessionID=${session}
+    \       Should Be Equal   '${resp["status_code"]}'   '200'    msg= Failed to Get session Info!
+    \       Should Be Equal   '${resp["sessionID"]}'   '${session}'    msg= Failed to Get correct session Info!
+    [Return]     ${true}
+
+Delete Sessions
+    [Arguments]    ${session_list}
+    [Documentation]    Delete sessions one by one
+    :FOR    ${session}    IN    @{session_list}
+    \       ${resp} =     Fusion Api Delete Session   sessionId=${session}
+    \       Should Be Equal   '${resp["status_code"]}'   '204'    msg= Failed to Delete session!
+    [Return]     ${true}
+
+Create Scope With Ethernet Resources In It
+    [Arguments]    ${scope}
+    [Documentation]    Create Scope with related resouces in it
+    ${uri_list} =   Get All Ethernet Networks Uris
+    Set To Dictionary     ${scope}    addedResourceUris    ${uri_list}
+    ${response} =    Fusion Api Create Scope    body=${scope}
+    Should Be Equal    '${response["status_code"]}'   '202'    msg= Failed to create scope!!!!!
+    ${task} =    Wait For Task    ${response}    20min    5s
+    ${taskState} =    Get From Dictionary    ${task}    taskState
+    Should Match    ${taskState}    Completed
+
+Create Scope With FC Resources In It
+    [Arguments]    ${scope}
+    [Documentation]    Create Scope with related resouces in it
+    ${uri_list} =    Get All FC Netowrk Uris
+    Set To Dictionary     ${scope}    addedResourceUris    ${uri_list}
+    ${response} =    Fusion Api Create Scope    body=${scope}
+    Should Be Equal    '${response["status_code"]}'   '202'    msg= Failed to create scope!!!!!
+    ${task} =    Wait For Task    ${response}    20min    5s
+    ${taskState} =    Get From Dictionary    ${task}    taskState
+    Should Match    ${taskState}    Completed
+
+Create Scope With FCoe Resources In It
+    [Arguments]    ${scope}
+    [Documentation]    Create Scope with related resouces in it
+    ${uri_list} =   Get All FCoE Netowrk Uris
+    Set To Dictionary     ${scope}    addedResourceUris    ${uri_list}
+    ${response} =    Fusion Api Create Scope    body=${scope}
+    Should Be Equal    '${response["status_code"]}'   '202'    msg= Failed to create scope!!!!!
+    ${task} =    Wait For Task    ${response}    20min    5s
+    ${taskState} =    Get From Dictionary    ${task}    taskState
+    Should Match    ${taskState}    Completed
+
+Create Scope With LIG Resources In It
+    [Arguments]    ${scope}
+    [Documentation]    Create Scope with related resouces in it
+    ${uri_list} =    Get All Logical Interconnect Group Uris
+    Set To Dictionary     ${scope}    addedResourceUris=${uri_list}
+    ${response} =    Fusion Api Create Scope    body=${scope}
+    Should Be Equal    '${response["status_code"]}'   '202'    msg= Failed to create scope!!!!!
+    ${task} =    Wait For Task    ${response}    20min    5s
+    ${taskState} =    Get From Dictionary    ${task}    taskState
+    Should Match    ${taskState}    Completed
+
+Create Scope With LI Resources In It
+    [Arguments]    ${scope}
+    [Documentation]    Create Scope with related resouces in it
+    ${uri_list} =    Get All Logical Interconnect Uris
+    Set To Dictionary     ${scope}    addedResourceUris    ${uri_list}
+    ${response} =    Fusion Api Create Scope    body=${scope}
+    Should Be Equal    '${response["status_code"]}'   '202'    msg= Failed to create scope!!!!!
+    ${task} =    Wait For Task    ${response}    20min    5s
+    ${taskState} =    Get From Dictionary    ${task}    taskState
+    Should Match    ${taskState}    Completed
+
+Create Scope With Interconnect Resources In It
+    [Arguments]    ${scope}
+    [Documentation]    Create Scope with related resouces in it
+    ${uri_list} =     Get All Interconnect Uris
+    Set To Dictionary     ${scope}    addedResourceUris    ${uri_list}
+    ${response} =    Fusion Api Create Scope    body=${scope}
+    Should Be Equal    '${response["status_code"]}'   '202'    msg= Failed to create scope!!!!!
+    ${task} =    Wait For Task    ${response}    20min    5s
+    ${taskState} =    Get From Dictionary    ${task}    taskState
+    Should Match    ${taskState}    Completed
+
+Create Scope With Server Hardware Resources In It
+    [Arguments]    ${scope}
+    [Documentation]    Create Scope with related resouces in it
+    ${uri_list} =    Get All Server Hardware Uris
+    Set To Dictionary     ${scope}    addedResourceUris    ${uri_list}
+    ${response} =    Fusion Api Create Scope    body=${scope}
+    Should Be Equal    '${response["status_code"]}'   '202'    msg= Failed to create scope!!!!!
+    ${task} =    Wait For Task    ${response}    20min    5s
+    ${taskState} =    Get From Dictionary    ${task}    taskState
+    Should Match    ${taskState}    Completed
+
+Create Scope With Network Set Resources In It
+    [Arguments]    ${scope}
+    [Documentation]    Create Scope with related resouces in it
+    ${uri_list} =     Get All Network Set Uris
+    Set To Dictionary     ${scope}    addedResourceUris    ${uri_list}
+    ${response} =    Fusion Api Create Scope    body=${scope}
+    Wait For Task2    ${response}
+
+Create Scopes With Resources
+    [Arguments]    ${scopeProfile}
+    [Documentation]    Create Scopes with related resouces in them
+    Fusion Api Login Appliance      ${APPLIANCE_IP}    ${admin_credentials}
+    Create Scope With LIG Resources In It              ${scopeProfile[0]}
+    Create Scope With LI Resources In It               ${scopeProfile[1]}
+    Create Scope With Interconnect Resources In It     ${scopeProfile[2]}
+    Create Scope With Ethernet Resources In It         ${scopeProfile[3]}
+    Create Scope With FC Resources In It               ${scopeProfile[4]}
+    Create Scope With FCoe Resources In It             ${scopeProfile[5]}
+    Create Scope With Network Set Resources In It      ${scopeProfile[6]}
+    Create Scope With Server Hardware Resources In It  ${scopeProfile[7]}
+
+Edit Existing Group Role
+    [Arguments]    ${bodyProfile}
+    [Documentation]    Edit Group Role Assignment
+    ${index} =    Set Variable    ${0}
+    :FOR    ${body}    IN    @{bodyProfile}
+    \       ${resps} =    Fusion_Api_Update_Group_Role_Assignment    body=${body}
+    \       ${status} =    Get From Dictionary   ${resps}    status_code
+    \       Should Be Equal    ${status}    ${200}
+
+Remove Groups
+    [Documentation]    Remove the group added before according to the profile
+    ${uri_list} =     Get All Added Groups
+    :FOR    ${uri}     IN     @{uri_list}
+    \       ${resp} =    Fusion Api Delete Group Role Assignment    uri=${uri}
+    \       ${status_code} =    Get From Dictionary    ${resp}    status_code
+    \       Should Be Equal    ${status_code}       ${204}   msg= Failed to remove groups
+    [Return]    ${true}
+
+Validate Group Permission Assignment
+    [Arguments]   ${group_list}
+    [Documentation]    Validate Group Permission Assignment
+    :FOR    ${group}    IN     @{group_list}
+    \       ${response} =    Fusion_Api_Validate_Group_And_Roles    body=${group}
+    \       Convert To String    ${response}
+    \       Should Be Equal    '${response["status_code"]}'    '200'    msg= Failed to Validate Group Permission Assignment!
+    [Return]    ${true}
+
+View All Directory Groups Permission Assignment
+    [Documentation]    View All Directory Groups Permission Assignment
+    ${response} =    Fusion Api Get Login Domains Global Settings
+    :FOR    ${directory}    IN    @{response['configuredLoginDomains']}
+    \       ${uri} =   Set Variable      ${directory['uri']}
+    \       ${uri} =   Replace String    ${uri}     logindomains      logindomains/grouptorolemapping
+    \       ${ret} =   Fusion Api Get Group Role Assignment    uri=${uri}
+    \       Should Be Equal    '${ret['status_code']}'     '200'    msg= Failed to view all directory groups permission assignment
+    [Return]  ${true}
+
+View Directory Groups Permission Assignment
+    [Documentation]    View Directory Groups Permission Assignment
+    ${uri_list} =     Get All Added Groups
+    :FOR    ${uri}    IN    @{uri_list}
+    \       ${ret} =  Fusion Api Get Group Role Assignment     uri=${uri}
+    \       Should Be Equal    '${ret['status_code']}'    '200'    msg= Failed to view permission assignments for directory groups
+    [Return]    ${true}

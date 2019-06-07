@@ -1,0 +1,709 @@
+*** Settings ***
+Documentation       Feature Test: These test cases intended to test Synergey 12000 frame Hafnium Interconnect Module - \
+...                  firmware update validation - OVF730 feature\
+...
+#Variables           ./data_variables.py
+Resource            ../../../../Resources/api/fusion_api_resource.txt
+Library             Collections
+Library             json
+Library             BuiltIn
+Library             OperatingSystem
+Library             RoboGalaxyLibrary
+Library             FusionLibrary
+
+*** Variables ***
+#${APPLIANCE_IP}                     192.168.145.50
+${SLEEP_TIME}                       30
+${LI_NAME}                          LE-LIG
+${SLEEP_TIME}                       30
+${SNMP_HOST}                        15.212.136.80
+${SSH_USER}                         root
+${SSH_PASS}                         12iso*help
+${PotashUname}                      netop
+${PotashPassword}                   netoppwd
+#${icmSnmpUser}                      sflowuser
+#${icmSnmpPassword}                  sflowpassword
+${icmSnmpUser}                      netop
+${icmSnmpPassword}                  netoppwd
+
+
+*** Keywords ***
+Create Server Profile
+    [Documentation]    Create SP
+    [Arguments]       ${SERVER_DATA}
+    ${server}=    Get From Dictionary  ${SERVER_DATA[0]}    serverHardwareUri
+    ${server}=    Split String    ${server}    :
+    log to console    ${server[1]}
+    Power off Server    ${server[1]}
+    ${resp}=    Add Server Profiles from variable   ${SERVER_DATA}
+    log to console    ${resp[0]}
+    ${task} =                       Wait For Task           ${resp[0]}     2800s    30s
+    log to console    ${task}
+    ${valDict} =    Create Dictionary    status_code=${200}
+    ...                                  taskState=Completed
+    Validate Response   ${task}     ${valDict}
+
+
+Create EG
+    [Documentation]    Create EG
+    [Arguments]   ${EG_DATA}
+    Log to console    Create Enclosure group
+    ${enc_groups} =    Get Variable Value    ${EG_DATA}
+    log to console and log file     ${enc_groups}
+    Run Keyword If    ${enc_groups} is not ${null}    Run Keyword for List    ${enc_groups}    Add Enclosure Group from variable
+    sleep   15
+
+Create LE
+    [Documentation]    Create LE
+    [Arguments]   ${LE_DATA}
+    ${enc_le} =   Get Variable Value      ${LE_DATA}
+    Run Keyword If    ${enc_le} is not ${null}    Run Keyword for List    ${enc_le}   Add Logical Enclosure from variable 
+    
+Add ethernet networks
+    [Documentation]    Add Ethernet
+    [Arguments]     ${network}
+    ${ethernet_networks} =    Get Variable Value     ${network} 
+    Run Keyword If  ${ethernet_networks} is not ${null}    Add Ethernet Networks from variable      ${ethernet_networks}
+
+Add Ethernet Networks with subnet
+    [Documentation]    Add Ethernet with subnet
+    [Arguments]     ${network}
+    ${network_data} =    Get Variable Value     ${network}
+    ${ethernet_networks}=    Copy Dictionary    ${network_data[0]}
+    ${subnetUri}=    Get From Dictionary    ${ethernet_networks}    subnetUri
+    ${subnetUri}=     Get ID Pools IPV4 Subnet URI By Network ID    ${subnetUri}
+    Set to dictionary   ${ethernet_networks}  subnetUri=${subnetUri}
+    ${network_data}=      Create List
+    Append To List      ${network_data}        ${ethernet_networks}
+    Run Keyword If  ${ethernet_networks} is not ${null}    Add Ethernet Networks from variable      ${network_data}
+
+Add Network Sets from variable1
+    [Documentation]    Add netset
+    [Arguments]     ${networks}
+    Log to console and logfile      Adding NETWORK SETS 
+    :FOR    ${net}  IN  @{networks}
+    \       ${networkUris} =    Get Ethernet URIs   ${net['networkUris']}
+    \       Set to dictionary   ${net}  networkUris    ${networkUris}
+    \       ${resp} =   Fusion Api Create Network Set       body=${net}
+    [Return]    ${resp}
+
+Install and start filebeat on target machine
+    [Arguments]     ${Location}
+    [Documentation]    Install filebeat on target machine
+    Open Connection And Log In      ${APPLIANCE_IP}
+    Log to console and log file    Installing filebeat
+    ${cmd}=    catenate    service filebeat status
+    ${status}=  Execute Command    ${cmd}
+    Log to console and log file    status - ${status}
+    ${result}=    Run Keyword And Return Status    Should Contain    ${status}     running
+    log to console and log file    ${result}
+    Pass Execution If     '${result}'=='True'    FileBeat is running
+    #
+    #continue filebeat installation only if file beat is not running
+    #
+    ${cmd}=    catenate    wget ${Location}filebeat-5.3.0-x86_64.rpm
+    ${status}=  Execute Command    ${cmd}
+    ${status}=  Execute Command  rpm -ivh filebeat-5.3.0-x86_64.rpm
+    Log to console and log file    rpm installation status ${status}
+    ${cmd1}=    catenate    wget ${Location}${APPLIANCE_IP}_filebeat.yml
+    Log to console and log file    ${cmd1}
+    ${status}=  Execute Command    ${cmd1}
+    Log to console and log file    status - ${status}
+    ${cmd2}=    catenate    \cp -f ${APPLIANCE_IP}_filebeat.yml   /etc/filebeat/filebeat.yml
+    Log to console and log file    ${cmd2}
+    ${status}=  Execute Command    ${cmd2}
+    Log to console and log file    starting filebeat services
+    ${status}=  Execute Command    service filebeat start
+    Log to console and log file    status - ${status}
+
+Execute command and return output
+    [Arguments]     ${SNMP_MIB}    ${SNMP_USER}    ${SNM_PWD}    ${IP}
+    [Documentation]    Execute command and return output
+    Log to console and logfile     opening connection
+    Open Connection     ${SNMP_HOST}     term_type=ansi    timeout=180s
+    Set Client Configuration     term_type=ansi
+    #Log to console and logfile     log in to icm
+    ${out}=    Login               ${SSH_USER}     ${SSH_PASS}
+    Log to console and log file    Connecting to Hafnium Module
+    #${cmd}=    catenate    snmpget -v3 -c public -a SHA -u ${SNMP_USER} -l authNoPriv  -A ${SNM_PWD} udp6:[${IP}]  ${SNMP_MIB}
+    ${cmd}=    catenate    snmpget -v3 -c -v3 -l authPriv -u ${SNMP_USER} -A ${SNM_PWD} -a SHA -x AES -X ${SNM_PWD} udp6:[${IP}]  ${SNMP_MIB}
+    ${d}=  Execute Command    ${cmd}
+    #Log to console and log file    ${d}
+    ${d}=    Split String    ${d}    =
+    ${d}=    Split String    ${d[1]}    :
+    Log to console and log file    ${d}
+    ${ret}=    Strip String    ${d[1]}
+    Log to console and log file    [${ret}]
+    [Return]    ${ret}
+
+Get Interface Details from Hafnium
+    [Arguments]     ${ifname}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}    ${type}
+    [Documentation]    Get Interface Details from Hafnium
+    Log to console and logfile     opening connection
+    Open Connection     ${SNMP_HOST}     term_type=ansi    timeout=180s
+    Set Client Configuration     term_type=ansi
+    Log to console and logfile     log in to icm
+    ${out}=    Login               ${SSH_USER}     ${SSH_PASS}
+    Log to console and log file    Connecting to Hafnium Module
+    #${cmd}=    catenate    snmpwalk -v3 -c public -a SHA -u ${icmSnmpUser} -l authNoPriv  -A ${icmSnmpPassword} udp6:[${icmipv6}]  ${hafniumInterfaceList}
+    ${cmd}=    catenate    snmpwalk -v3 -c -v3 -l authPriv -u ${icmSnmpUser} -A ${icmSnmpPassword} -a SHA -x AES -X ${icmSnmpPassword}  udp6:[${icmipv6}]  ${hafniumInterfaceList}
+    ${d}=  Execute Command    ${cmd}
+    #Log to console and log file    ${d}
+    ${s}=    Get Regexp Matches    ${d}    .*ifName.[0-9].* = .*: ${ifname}\\b
+    Log to console and log file    ${s}
+    ${d}=    Split String    ${s[0]}    =
+    ${interfaceNumber}=    Split String    ${d[0]}    .
+    ${interfaceNumber}=    Strip String    ${interfaceNumber[1]}
+    ${interfaceDeatils}=    Create Dictionary
+    Log to console and log file    ${interfaceNumber}
+    ${pollerData}=      Run Keyword if    '${type}'=='Polling'    Get Poller Interface Detail    ${interfaceDeatils}    ${ifname}    ${interfaceNumber}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+    ${SamplerData}=     Run Keyword if    '${type}'=='Sampling'    Get Salmpler Interface Detail    ${interfaceDeatils}    ${ifname}    ${interfaceNumber}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+    ${BothDetails}=     Run Keyword if    '${type}'=='BothEnabled'    Get Sampler and Poller Details    ${interfaceDeatils}    ${ifname}    ${interfaceNumber}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+    Log to console and log file    ${interfaceDeatils}
+    [Return]    ${interfaceDeatils}
+    # Example
+    # Get Interface Details from Hafnium    ${InterfaceName}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}    ${type}
+
+Get Poller Interface Detail
+    [Arguments]     ${interfaceDeatils}    ${ifname}    ${interfaceNumber}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+    [Documentation]    Get Poller Interface Detail
+    ${d1}=    Execute command and return output    ${InterfacePollingReceiver}.${interfaceNumber}.1    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+    ${d2}=    Execute command and return output    ${interfacePollerInterval}.${interfaceNumber}.1    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+    ${d6}=    Execute command and return output    ${sFlowInterfaceCounterPollerStatus}.${interfaceNumber}.1    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+    ${td6} =    Set Variable if 
+    ...         '${d6}' == '1'    Enabled
+    ...         '${d6}' == '2'    Disabled
+    Set to Dictionary       ${interfaceDeatils}    InterfacePollingReceiver=${d1}
+    ...                                      interfacePollerInterval=${d2}
+    ...                                      sFlowInterfaceCounterPollerStatus=${td6}
+    ...                                      InterfaceLongName=${ifname}
+    [Return]    ${interfaceDeatils}
+    
+Get Salmpler Interface Detail
+    [Arguments]     ${interfaceDeatils}    ${ifname}    ${interfaceNumber}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+    [Documentation]    Get Salmpler Interface Detail
+    ${d3}=    Execute command and return output    ${interfaceSamplingHeaderSize}.${interfaceNumber}.1    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+    ${d4}=    Execute command and return output    ${interfaceIngressSamplingRate}.${interfaceNumber}.1    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+    ${d5}=    Execute command and return output    ${interfaceSamplingDirection}.${interfaceNumber}.1    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+    ${td5} =    Set Variable if 
+    ...         '${d5}' == '1'    INGRESS
+    ...         '${d5}' == '2'    EGRESS
+    ...         '${d5}' == '3'    Both
+    ${d7}=    Execute command and return output    ${sFlowInterfaceSamplingStatus}.${interfaceNumber}.1    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+    ${td7} =    Set Variable if 
+    ...         '${d7}' == '1'    Enabled
+    ...         '${d7}' == '2'    Disabled
+    Set to Dictionary       ${interfaceDeatils}    interfaceSamplingHeaderSize=${d3}
+    ...                                      interfaceSamplingRate=${d4}
+    ...                                      interfaceSamplingDirection=${td5}
+    ...                                      sFlowInterfaceSamplingStatus=${td7}
+    ...                                      InterfaceLongName=${ifname}
+    [Return]    ${interfaceDeatils}
+
+Get Sampler and Poller Details
+    [Arguments]     ${interfaceDeatils}    ${ifname}    ${interfaceNumber}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+    [Documentation]    Get Sampler and Poller Details
+    ${pollerData}=      Get Poller Interface Detail    ${interfaceDeatils}    ${ifname}    ${interfaceNumber}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+    ${SamplerData}=     Get Salmpler Interface Detail    ${interfaceDeatils}    ${ifname}    ${interfaceNumber}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+    [Return]    ${interfaceDeatils}
+
+Get sFlow Collector Details
+    [Arguments]     ${path}    ${collectorId}    ${icmipv6}    ${icmSnmpUser}    ${icmSnmpPassword}
+    [Documentation]    Get sFlow Collector Details
+    ${MIB}=    catenate    ${path}.${collectorId}
+    ${d1}=    Execute command and return output    ${sFlowRcvrOwner}.${collectorId}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+    ${d2}=    Execute command and return output    ${sFlowRcvrAddress}.${collectorId}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+    ${d3}=    Execute command and return output    ${sFlowRcvrPort}.${collectorId}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+    ${d4}=    Execute command and return output    ${sFlowRcvrMaximumDatagramSize}.${collectorId}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+    ${d5}=    Execute command and return output    ${sFlowRcvrStatus}.${collectorId}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+    ${td5} =    Set Variable if 
+    ...         '${d5}' == '1'    True
+    ...         '${d5}' == '2'    False
+    ${d2}=    Convert from hex string to IP format    ${d2}
+    ${d1}=    Strip String    ${d1}
+    ${d1}=    Strip String    ${d1}    characters="
+    ${d3}=    Strip String    ${d3}
+    ${d4}=    Strip String    ${d4}
+    ${collector} =    Create Dictionary      name=${d1}
+    ...                                      ipAddress=${d2}
+    ...                                      port=${d3}
+    ...                                      maxDatagramSize=${d4}
+    ...                                      collectorId=${collectorId}
+    ...                                      collectorEnabled=${td5}
+    [Return]    ${collector}
+
+Get sFlow Agnet Details
+    [Arguments]     ${icmipv6}    ${icmSnmpUser}    ${icmSnmpPassword}
+    [Documentation]    Get sFlow Agnet Details
+    ${d1}=    Execute command and return output    ${sFlowAgentIpAddr}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+    ${d2}=    Execute command and return output    ${sFlowAgentStatus}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+    ${d3}=    Execute command and return output    ${sFlowSubnet}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+    #Log to console and logfile     ${d1} ${d2}
+    ${td2} =    Set Variable if 
+    ...         '${d2}' == '1'    Running    # Enabled   it was enabled, but later chnaged to runnning
+    ...         '${d2}' == '2'    Disabled
+    ${d1}=    Convert from hex string to IP format    ${d1}
+    ${agent} =    Create Dictionary      ipAddr=${d1}
+    ...                                  status=${td2}
+    ...                                  subnetMask=${d3}
+    [Return]    ${agent}
+
+Get LI sFlow Data
+    #[Arguments]     ${LI_NAME}
+    [Documentation]    Get LI sFlow Data
+    ${resp} =   Fusion Api Get LI
+    ${members}=    Get From Dictionary    ${resp}    members
+    ${sflowConfiguration}=    Get From Dictionary    ${members[0]}    sflowConfiguration
+    [Return]    ${sflowConfiguration}
+    
+Convert from hex string to IP format
+    [Arguments]    ${data}
+    [Documentation]    Convert from hex string to IP format
+    ${ip}=    Split String    ${data}
+    ${agentIP}=    Set Variable    
+    :FOR    ${item}    in    @{ip}
+    \           ${tt}=     Catenate    0x${item}
+    \           ${ip1}=    Convert to Integer    ${tt}
+    \           ${agentIP}=    Catenate    ${agentIP}.${ip1}
+    ${agentIP}=    Strip String    ${agentIP}    characters=.
+    [Return]    ${agentIP}
+
+Get ICM ip address
+    [Arguments]    ${name}
+    [Documentation]    Get ICM ip address
+    ${interconnect}=    Get Interconnect    ${name}
+    ${ipAddressList} =  Get From Dictionary  ${interconnect}    ipAddressList
+    ${icmAddress} =    Create Dictionary
+    :FOR    ${i}    in    @{ipAddressList}
+    \    ${ipAddressType}=    Get From Dictionary    ${i}    ipAddressType
+    \    ${ipAddress}=    Get From Dictionary    ${i}    ipAddress
+    \    Set to Dictionary   ${icmAddress}   ${ipAddressType}=${ipAddress}
+    [Return]    ${icmAddress}
+
+Get ICM ipv6 address
+    [Arguments]    ${icmName}
+    [Documentation]    Get ICM ipv6 address
+    ${icmAddress}=    Get ICM ip address    ${icmName}
+    ${ipv6}=    Get From Dictionary    ${icmAddress}    Ipv6LinkLocal
+    [Return]    ${ipv6}
+
+Validate sflow collector configuration
+    [Arguments]     ${icmipv6}    ${icmSnmpUser}    ${icmSnmpPassword}
+    [Documentation]    Validate sflow collector configuration
+    ${t}=    Get LI sFlow Data
+    ${t1}=    Get From Dictionary    ${t}    sflowCollectors
+    :For    ${i}    in    @{t1}
+    \     ${colid}=    Get From Dictionary    ${i}    collectorId
+    \     Log to console and logfile     ${colid}
+    \     ${collector}=    Get sFlow Collector Details    ${sFlowRcvrOwner}    ${colid}    ${icmipv6}    ${icmSnmpUser}    ${icmSnmpPassword}
+    \     ${ipAddress1}=    Get From Dictionary    ${i}    ipAddress
+    \     ${ipAddress2}=    Get From Dictionary    ${collector}    ipAddress
+    \     Should Be Equal As Strings    ${ipAddress1}    ${ipAddress2}
+    \     ${port1}=    Get From Dictionary    ${i}    port
+    \     ${port2}=    Get From Dictionary    ${collector}    port
+    \     Should Be Equal As Strings    ${port1}    ${port2}
+    \     ${name1}=    Get From Dictionary    ${i}    name
+    \     ${name2}=    Get From Dictionary    ${collector}    name
+    \     Should Be Equal As Strings    ${name1}    ${name2}
+    \     ${status1}=    Get From Dictionary    ${i}    collectorEnabled
+    \     ${status2}=    Get From Dictionary    ${collector}    collectorEnabled
+    \     Should Be Equal As Strings    ${status1}    ${status2}
+
+Validate sflow agent configuration
+    [Arguments]     ${icmipv6}    ${icmSnmpUser}    ${icmSnmpPassword}
+    [Documentation]    Validate sflow agent configuration
+    ${t}=    Get LI sFlow Data
+    ${t1}=    Get From Dictionary    ${t}    sflowAgents
+    ${agent}=    Get sFlow Agnet Details    ${icmipv6}    ${icmSnmpUser}    ${icmSnmpPassword}
+    ${ipAddr1}=    Get From Dictionary    ${t1[0]}    ipAddr
+    ${ipAddr2}=    Get From Dictionary    ${agent}    ipAddr
+    Should Be Equal As Strings    ${ipAddr1}    ${ipAddr2}
+    ${subnetMask1}=    Get From Dictionary    ${t1[0]}    subnetMask
+    ${subnetMask2}=    Get From Dictionary    ${agent}    subnetMask
+    Should Be Equal As Strings    ${subnetMask1}    ${subnetMask2}
+    ${status1}=    Get From Dictionary    ${t1[0]}    status
+    ${status2}=    Get From Dictionary    ${agent}    status
+    Should Be Equal As Strings    ${status1}    ${status2}
+
+
+Clean Appliance
+    [Documentation]    Clean Appliance
+    Log to console and log file    \nCleaning Appliance
+    Run Keyword and Ignore Error    Remove All Server Profiles
+    Run Keyword and Ignore Error    Remove All Server Profile Templates
+    Run Keyword and Ignore Error    Remove All LEs
+    Run Keyword and Ignore Error    Remove All Enclosure Groups
+    Run Keyword and Ignore Error    Remove All LIGs
+    Run Keyword and Ignore Error    Remove All Network Sets
+    Run Keyword and Ignore Error    Remove All Ethernet Networks
+    Run Keyword and Ignore Error    Remove All FC Networks
+    Run Keyword and Ignore Error    Remove All FCoE Networks
+
+
+Get Port Data
+    [Arguments]     ${portData}
+    [Documentation]    Get Port Data
+    ${d}=    Get From Dictionary    ${portData}    sflowConfigurationModes
+    ${modes}=   Get sflowConfigurationModes    ${d}
+    [Return]    ${modes}
+
+Get sflowConfigurationModes
+    [Arguments]     ${config}
+    [Documentation]    Get sflowConfigurationModes
+    ${d1}=      Get Dictionary Keys     ${config[0]}
+    #${d2}=      Get Dictionary Keys     ${config[1]}
+    ${configModes}=     Create Dictionary
+    :FOR    ${i}    in      @{config}
+    \   ${t}=    Get sflowConfigModesData    ${configModes}    ${i}
+    \   log to console and log file    ${t}
+    log to console and log file    ${configModes}
+    [Return]    ${configModes}
+
+Get sflowConfigModesData
+    [Arguments]     ${configModes}    ${tt}
+    [Documentation]    Get sflowConfigModesData
+    :FOR    ${k}   in    @{tt}
+    \   ${value}=    Get From Dictionary             ${tt}      ${k}
+    \   Set to Dictionary    ${configModes}    ${k}=${value}
+    ${mode}=    Get From Dictionary             ${configModes}      configurationMode
+    Set to Dictionary    ${configModes}    ${mode}=Enabled
+    Remove From Dictionary    ${configModes}    configurationMode
+    [Return]    ${configModes}
+
+Get sflowConfigurationModes_org
+    [Arguments]     ${config}
+    [Documentation]    Get sflowConfigurationModes_org
+    ${d1}=      Get Dictionary Keys     ${config[0]}
+    ${d2}=      Get Dictionary Keys     ${config[1]}
+    ${configModes}=     Create Dictionary
+    :FOR    ${key}    in      @{d1}
+    \   ${value}=     Get From Dictionary             ${config[0]}      ${key}
+    \   Set to Dictionary    ${configModes}    ${key}=${value}
+    :FOR    ${key}    in      @{d2}
+    \   ${value}=     Get From Dictionary             ${config[1]}      ${key}
+    \   Set to Dictionary    ${configModes}    ${key}=${value}
+    [Return]    ${configModes}
+
+
+Validate sflow port configuration
+    [Arguments]     ${icmipv6}    ${icmSnmpUser}    ${icmSnmpPassword}
+    [Documentation]    Validate sflow port configuration
+    ${t}=    Get LI sFlow Data
+    ${t1}=    Get From Dictionary    ${t}    sflowPorts
+    :For    ${i}    in    @{t1}
+    \   ${portName}=    Get From Dictionary    ${i}    portName
+    \   ${collectorId}=    Get From Dictionary    ${i}    collectorId
+    \   ${icmName}=    Get From Dictionary    ${i}    icmName
+    \   ${bayNumber}=    Get From Dictionary    ${i}    bayNumber
+    \   ${enclosureIndex}=    Get From Dictionary    ${i}    enclosureIndex
+    \   ${data}=   Get Port Data    ${i}
+    \   Set to Dictionary    ${data}    portName=${portName}
+    ...                                        collectorId=${collectorId}
+    ...                                        icmName=${icmName}
+    ...                                        bayNumber=${bayNumber}
+    ...                                        enclosureIndex=${enclosureIndex}
+    \   Log to console and logfile     ${data}
+    \   ${ifName}=      Get Interface Name    ${LI}     ${portName}    ${icmName}
+    \   Log to console and logfile     Checking for Interface:'${ifName}
+    \   ${PollingStatus}=    Evaluate    ${data}.get('Polling', 'Disabled')
+    \   ${SamplingStatus}=    Evaluate    ${data}.get('Sampling', 'Disabled')
+    \   Log to console and log file     Verifying Interface Details
+    \   Run Keyword If     '${PollingStatus}'=='Enabled' and '${SamplingStatus}'=='Disabled'
+    ...                    Verify Poling Data    ${data}    ${ifName}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+
+    \   Run Keyword If     '${SamplingStatus}'=='Enabled' and '${PollingStatus}'=='Disabled'
+    ...                    Verify Samplig Data    ${data}    ${ifName}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+
+    \   Run Keyword If     '${PollingStatus}'=='Enabled' and '${SamplingStatus}'=='Enabled'
+    ...                    Verify Polling and Sampling Data    ${data}    ${ifName}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+
+    \   ${ifDetails}=   Run Keyword If     '${PollingStatus}'=='Disabled' and '${SamplingStatus}'=='Disabled'    Log to console and log file   Nothing to verify
+
+Validate sflow port configuration_org
+    [Arguments]     ${icmipv6}    ${icmSnmpUser}    ${icmSnmpPassword}
+    [Documentation]    Validate sflow port configuration_org
+    ${t}=    Get LI sFlow Data
+    ${t1}=    Get From Dictionary    ${t}    sflowPorts
+    :For    ${i}    in    @{t1}
+    \   ${portName}=    Get From Dictionary    ${i}    portName
+    \   ${collectorId}=    Get From Dictionary    ${i}    collectorId
+    \   ${icmName}=    Get From Dictionary    ${i}    icmName
+    \   ${bayNumber}=    Get From Dictionary    ${i}    bayNumber
+    \   ${enclosureIndex}=    Get From Dictionary    ${i}    enclosureIndex
+    \   ${data}=   Get Port Data    ${i}
+    \   Set to Dictionary    ${data}    portName=${portName}
+    ...                                        collectorId=${collectorId}
+    ...                                        icmName=${icmName}
+    ...                                        bayNumber=${bayNumber}
+    ...                                        enclosureIndex=${enclosureIndex}
+    \   Log to console and logfile     ${data}
+    \   ${ifName}=      Get Interface Name    ${LI}     ${portName}    ${icmName}
+    \   Log to console and logfile     Checking for Interface:'${ifName}
+    \   ${pollingInterval}=    Get From Dictionary    ${data}    pollingInterval
+    \   ${samplingRate}=    Get From Dictionary    ${data}    samplingRate
+
+    \   ${PollingStatus}=    Set Variable if
+    ...             '${pollingInterval}'=='-1'    Disabled    Enabled
+    \   ${SamplingStatus}=    Set Variable if
+    ...             '${samplingRate}'=='-1'    Disabled    Enabled 
+    \   Log to console and log file     Verifying Interface Details
+    \   Run Keyword If     '${PollingStatus}'=='Enabled' and '${SamplingStatus}'=='Disabled'
+    ...                    Verify Poling Data    ${data}    ${ifName}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+
+    \   Run Keyword If     '${SamplingStatus}'=='Enabled' and '${PollingStatus}'=='Disabled'
+    ...                    Verify Samplig Data    ${data}    ${ifName}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+
+    \   Run Keyword If     '${PollingStatus}'=='Enabled' and '${SamplingStatus}'=='Enabled'
+    ...                    Verify Polling and Sampling Data    ${data}    ${ifName}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+
+    \   ${ifDetails}=   Run Keyword If     '${PollingStatus}'=='Disabled' and '${SamplingStatus}'=='Disabled'    Log to console and log file   Nothing to verify
+
+Verify Poling Data
+    [Arguments]     ${data}    ${ifName}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+    [Documentation]    Verify Poling Data
+    ${type}=    Set Variable    Polling
+    Log to console and log file     Verifying Polling data
+    ${ifDetails}=   Get Interface Details from Hafnium    ${ifName}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}    ${type}
+    ${collectorId1}=    Run Keyword If     '${type}'=='Polling'    Get From Dictionary    ${ifDetails}    InterfacePollingReceiver
+    ${collectorId2}=    Run Keyword If     '${type}'=='Polling'    Get From Dictionary    ${data}    collectorId
+    Run Keyword If     '${type}'=='Polling'    Should Be Equal As Strings    ${collectorId1}    ${collectorId2}
+    ${pollingInterval1}=    Run Keyword If     '${type}'=='Polling'    Get From Dictionary    ${ifDetails}    interfacePollerInterval
+    ${pollingInterval2}=    Run Keyword If     '${type}'=='Polling'    Get From Dictionary    ${data}    pollingInterval
+    Run Keyword If     '${type}'=='Polling'    Should Be Equal As Strings    ${pollingInterval1}    ${pollingInterval2}
+
+
+Verify Samplig Data
+    [Arguments]     ${data}    ${ifName}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+    [Documentation]    Verify Samplig Data
+    ${type}=    Set Variable    Sampling
+    Log to console and log file     Verifying Sampling data
+    ${ifDetails}=   Get Interface Details from Hafnium    ${ifName}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}    ${type}
+    ${samplingRate1}=    Run Keyword If     '${type}'=='Sampling'    Get From Dictionary    ${ifDetails}    interfaceSamplingRate
+    ${samplingRate2}=    Run Keyword If     '${type}'=='Sampling'    Get From Dictionary    ${data}    samplingRate
+    Run Keyword If     '${type}'=='Sampling'    Should Be Equal As Strings    ${samplingRate1}    ${samplingRate2}
+    ${direction1}=    Run Keyword If     '${type}'=='Sampling'    Get From Dictionary    ${ifDetails}    interfaceSamplingDirection
+    ${direction1}=    Convert To Lowercase    ${direction1}
+    ${direction2}=    Run Keyword If     '${type}'=='Sampling'    Get From Dictionary    ${data}    direction
+    ${direction2}=    Convert To Lowercase    ${direction2}
+    Run Keyword If     '${type}'=='Sampling'    Should Be Equal As Strings    ${direction1}    ${direction2}
+
+
+Verify Polling and Sampling Data
+    [Arguments]     ${data}    ${ifName}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}
+    [Documentation]    Verify Polling and Sampling Data
+    ${type}=    Set Variable    BothEnabled
+    Log to console and log file     Verifying Polling and Sampling data
+    ${ifDetails}=   Get Interface Details from Hafnium    ${ifName}    ${icmSnmpUser}    ${icmSnmpPassword}    ${icmipv6}    ${type}
+    ${collectorId1}=    Run Keyword If     '${type}'=='BothEnabled'    Get From Dictionary    ${ifDetails}    InterfacePollingReceiver
+    ${collectorId2}=    Run Keyword If     '${type}'=='BothEnabled'    Get From Dictionary    ${data}    collectorId
+    Run Keyword If     '${type}'=='BothEnabled'    Should Be Equal As Strings    ${collectorId1}    ${collectorId2}
+    ${pollingInterval1}=    Run Keyword If     '${type}'=='BothEnabled'    Get From Dictionary    ${ifDetails}    interfacePollerInterval
+    ${pollingInterval2}=    Run Keyword If     '${type}'=='BothEnabled'    Get From Dictionary    ${data}    pollingInterval
+    Run Keyword If     '${type}'=='BothEnabled'    Should Be Equal As Strings    ${pollingInterval1}    ${pollingInterval2}
+    ${samplingRate1}=    Run Keyword If     '${type}'=='BothEnabled'    Get From Dictionary    ${ifDetails}    interfaceSamplingRate
+    ${samplingRate2}=    Run Keyword If     '${type}'=='BothEnabled'    Get From Dictionary    ${data}    samplingRate
+    Run Keyword If     '${type}'=='BothEnabled'    Should Be Equal As Strings    ${samplingRate1}    ${samplingRate2}
+    ${direction1}=    Run Keyword If     '${type}'=='BothEnabled'    Get From Dictionary    ${ifDetails}    interfaceSamplingDirection
+    ${direction1}=    Convert To Lowercase    ${direction1}
+    ${direction2}=    Run Keyword If     '${type}'=='BothEnabled'    Get From Dictionary    ${data}    direction
+    ${direction2}=    Convert To Lowercase    ${direction2}
+    Run Keyword If     '${type}'=='BothEnabled'    Should Be Equal As Strings    ${direction1}    ${direction2}
+
+Get ICM Details in LI
+    [Arguments]     ${LI}
+    [Documentation]    Get ICM Details in LI
+    ${retdata}=     Create Dictionary
+    ${resp}=    Get LI member   ${LI}
+    ${uri}=    Get From Dictionary             ${resp}      interconnects
+    :FOR    ${i}    in    @{uri}
+    \   ${resp} =   fusion api get resource     ${i}
+    \   ${model}=    Get From Dictionary             ${resp}      model
+    \   ${name}=    Get From Dictionary             ${resp}      name
+    \   ${interconnectTypeUri}=    Get From Dictionary             ${resp}      interconnectTypeUri
+    \   ${interconnectLocation}=    Get From Dictionary             ${resp}      interconnectLocation
+    \   ${r}=    Get ICM location details    ${interconnectLocation}
+    \   Set to Dictionary   ${r}            interconnectTypeUri=${interconnectTypeUri}
+    ...                                     model=${model}
+    ...                                     name=${name}
+    \   Set to Dictionary   ${retdata}            ${name}=${r}
+    [Return]    ${retdata}
+
+Get ICM location details
+    [Arguments]     ${data}
+    [Documentation]    Get ICM location details
+    ${dt}=    Get From Dictionary    ${data}    locationEntries
+    ${retdata} =    Create Dictionary
+    :FOR    ${i}    in    @{dt}
+    \   ${type}=    Get From Dictionary             ${i}      type
+    \   ${value}=    Get From Dictionary             ${i}      value
+    \   Set to Dictionary   ${retdata}   ${type}=${value}
+    [Return]    ${retdata}
+
+Get Interface Name
+    [Arguments]     ${LI}    ${p}     ${icmName}
+    [Documentation]    Get Interface Name
+    ${d}=   Get ICM Details in LI    ${LI}
+    ${icmData}=    Get From Dictionary     ${d}    ${icmName}
+    ${StackingMemberId}=    Get From Dictionary     ${icmData}    StackingMemberId
+    ${d}=    Split String    ${p}    :
+    ${tt}=    Get Regexp Matches    ${p}    :
+    ${down}=    Get Regexp Matches    ${p}    d
+    ${ldown}=     Get Length     ${down}
+    ${l}=     Get Length     ${tt}
+    ${type}=    set variable if
+    ...             ${ldown} == 1   TwentyGigE
+    ...             ${l} == 0   FortyGigE
+    ...             ${l} > 0   Ten-GigabitEthernet
+    ${intermgmt}=    set variable if
+    ...             ${ldown} == 1   1
+    ...             ${l} == 0   0
+    ...             ${l} > 0   0
+    ${interfaceName}=   catenate   ${type}${StackingMemberId}/${intermgmt}/${p[1:]}
+    [Return]    ${interfaceName}
+
+Build LIG body
+    [Documentation]    builds LIG body
+    [Arguments]     ${xlig}
+    ${xlig}=   Copy Dictionary     ${xlig}
+    ${uplinkSets} =     Copy List   ${xlig['uplinkSets']}
+    ${l} =  Get Length  ${uplinkSets}
+
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${networkType} =    Get From Dictionary     ${uplinkSets[${x}]}     networkType
+    \   ${networks} =       Get From Dictionary     ${uplinkSets[${x}]}     networkUris
+    \   Run Keyword If  '${networkType}' == 'Ethernet'      Continue For Loop
+    \   ${networkUris} =    Get FC Uris ${networks}
+    \   Set to dictionary   ${uplinkSets[${x}]}     networkUris     ${networkUris}
+
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${networkType} =    Get From Dictionary     ${uplinkSets[${x}]}     networkType
+    \   ${networks} =       Get From Dictionary     ${uplinkSets[${x}]}     networkUris
+    \   Run Keyword If  '${networkType}' == 'FibreChannel'  Continue For Loop
+    \   ${networkUris} =    Get FCoE Uris   ${networks}
+    \   ${ethernetUris} =   Get Ethernet URIs   ${networks}
+    \   ${networkUris} =    combine lists    ${networkUris}    ${ethernetUris}
+    \   Set to dictionary   ${uplinkSets[${x}]}     networkUris    ${networkUris}
+
+    ${sflowConfiguration}=   Get From Dictionary     ${xlig}    sflowConfiguration
+    ${sflowNetwork}=   Get From Dictionary     ${sflowConfiguration}    sflowNetwork
+    ${sflowNetworkName}=   Get From Dictionary     ${sflowNetwork}    name
+    ${neturi}=    Get Ethernet URI    ${sflowNetworkName}
+    ${netDict} =    Create Dictionary    name=${sflowNetworkName}
+    ...                                  uri=${neturi}
+    log to console and log file    ${netDict}
+    Set to Dictionary    ${sflowConfiguration}     sflowNetwork=${netDict}
+    log to console and log file    ${sflowConfiguration}
+    
+    ${name} =                       Get Variable Value  ${xlig['name']}
+    ${enclosureIndexes} =           Get Variable Value  ${xlig['enclosureIndexes']}
+    ${enclosureType} =              Get Variable Value  ${xlig['enclosureType']}
+    ${ethernetSettings} =           Get Variable Value  ${xlig['ethernetSettings']}
+    ${fcoeSettings} =               Get Variable Value  ${xlig['fcoeSettings']}
+    ${interconnectBaySet} =         Get Variable Value  ${xlig['interconnectBaySet']}
+    ${interconnectMapTemplate} =    Get Variable Value  ${xlig['interconnectMapTemplate']}
+    ${redundancyType} =             Get Variable Value  ${xlig['redundancyType']}
+    ${stackingMode} =               Get Variable Value  ${xlig['stackingMode']}
+    ${telemetryConfiguration} =     Get Variable Value  ${xlig['telemetryConfiguration']}
+    ${snmpConfiguration} =          Get Variable Value  ${xlig['snmpConfiguration']}    
+    ${enclosureIndexes} =           Get Variable Value  ${xlig['enclosureIndexes']}
+    #${uplinkSets} =                 Get Variable Value  ${xlig['uplinkSets']}
+    ${internalNetworkUris} =           Get Variable Value  ${xlig['internalNetworkUris']}
+
+    ${body} =   Fusion Api Create LIG Payload   name=${name}
+    ...                                         enclosureIndexes=${enclosureIndexes}
+    ...                                         enclosureType=${enclosureType}
+    ...                                         ethernetSettings=${ethernetSettings}
+    ...                                         fcoeSettings=${fcoeSettings}
+    ...                                         interconnectBaySet=${interconnectBaySet}
+    ...                                         interconnectMapTemplate=${interconnectMapTemplate}
+    ...                                         redundancyType=${redundancyType}
+    ...                                         stackingMode=${stackingMode}
+    ...                                         telemetryConfiguration=${telemetryConfiguration}
+    ...                                         snmpConfiguration=${snmpConfiguration}
+    ...                                         uplinkSets=${uplinkSets}
+    ...                                         sflowConfiguration=${sflowConfiguration}
+    ...                                         internalNetworkUris=${internalNetworkUris}
+    [Return]    ${body}
+
+Create LIG
+    [Documentation]    Suite Setup Tasks
+    [Arguments]        ${body1}
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${login_details}
+    ${body}    sflow_resources.Build LIG body    ${body1}
+    Log to console and logfile    \n-Creating LIG ${body}
+    ${resp}    Fusion Api Create LIG    ${body}
+    ${task} =   Wait For Task   ${resp}    60s  2s
+    [Return]    ${resp}
+
+Verify sFlow alert
+    [Arguments]     ${msg}
+    [Documentation]    Verify sFlow alert
+    ${r}=    Get Alert By Param   param=?filter=description like '${msg}'
+    [Return]     ${r}
+    # Verify sFlow alert   'The sFlow configuration is disabled because a static IP address has not been specified for the sFlow agent*'
+
+Delete sFlow Alert
+    [Arguments]     ${msg}
+    [Documentation]    Delete sFlow Alert
+    ${r}=    Delete All Alerts by Param   param=?filter=description like '${msg}'
+    [Return]     ${r}
+    # Delete sFlow Alert   'The sFlow configuration is disabled because a static IP address has not been specified for the sFlow agent*'
+
+Update LI Firmware
+    [Arguments]       ${LI_FIRMWARE_DATA}    ${LI_NAME}
+    [Documentation]    Update LI Firmware
+    ${uri} =    Get LI URI    ${LI_NAME}
+    ${body} =    Build LI FwUpdate API body    ${LI_FIRMWARE_DATA}
+    ${resp} =   fusion_api_li_upgrade_firmware   body=${body}    uri=${uri}
+    log to console  ${resp}
+    #Verify resp for result    ${resp}
+    ${task}=  Wait For Task     ${resp}     3600s    30s
+    #Log to console and logfile    Response is    ${task}
+    #${status_code}=                 Get From Dictionary     ${task}         status_code
+    #Should Be Equal as Strings      ${status_code}          200             msg=Failed to Update/Downgrade Module Firmware
+    
+    ${valDict} =    Create Dictionary    status_code=${200}
+      ...                                  taskState=Completed
+    Validate Response   ${task}     ${valDict}
+
+Build LI FwUpdate API body
+      [Documentation]    Build LI body
+      [Arguments]       ${li-fw-update}
+      ${command} =                  Get From Dictionary     ${li-fw-update}  command
+      ${path} =                     Get From Dictionary     ${li-fw-update}  path
+      ${ethernetActivationDelay} =  Get From Dictionary     ${li-fw-update}  ethernetActivationDelay
+      ${ethernetActivationType} =   Get From Dictionary     ${li-fw-update}  ethernetActivationType
+      ${fcActivationDelay} =        Get From Dictionary     ${li-fw-update}  fcActivationDelay
+      ${fcActivationType} =         Get From Dictionary     ${li-fw-update}  fcActivationType
+      ${force} =                    Get From Dictionary     ${li-fw-update}  force
+      ${sppUri} =                   Get From Dictionary     ${li-fw-update}  sppUri
+      ${validateOnly}               Get From Dictionary     ${li-fw-update}  validationType
+      ${body} =    Create Dictionary                command=${command}
+      ...                                            ethernetActivationDelay=${ethernetActivationDelay}
+      ...                                            ethernetActivationType=${ethernetActivationType}
+      ...                                            fcActivationDelay=${fcActivationDelay}
+      ...                                            fcActivationType=${fcActivationType}
+      ...                                            validationType=${validateOnly}
+      ...                                            force=${force}
+      ...                                            sppUri=${sppUri}
+      Log to console    ${body}
+      [Return]    ${body}
+
+Create netop account on Hafnium
+    [Arguments]     ${icm}
+    [Documentation]    Create netop account on Hafnium
+    Open Connection And Log In      ${APPLIANCE_IP}
+    Log to console and log file    Getting Auth token to write Canmic block
+    ${enclosure}    ${dump}   ${Bay}=    split string    ${icm}
+    ${enclosure}=    strip string    ${enclosure}    characters=,
+    Log to console and log file    ${\n}Enclosure ${enclosure} and ${\n}Bay ${Bay}
+    ${EM1}=  Execute Command   /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${enclosure}
+    Log to console and log file    ${EM1}
+    ${EM1}=  catenate   SEPARATOR=   ${EM1}  %bond0
+    ${XAUTH}=  Execute Command  /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${enclosure} -o t
+    Log to console and log file    ${XAUTH}
+    #
+    ${cmd}=    catenate    curl -g -x "" -k -i -H "x-auth-token:${XAUTH}" -X POST https://[${EM1}]/rest/v1/InterconnectManager/${Bay} -d '{"Action":"WriteCanmicBlocks", "List":[ {"Block": 168, "Format": "Base64", "Data": "AW5ldG9wcHdkAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABuZXRvcAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="} ]}'
+    Log to console and log file    ${cmd}
+    #
+    ${canmic1}=   Execute Command   ${cmd}

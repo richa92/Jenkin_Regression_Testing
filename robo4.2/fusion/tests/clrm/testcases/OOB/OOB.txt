@@ -1,0 +1,276 @@
+*** Settings ***
+Documentation    Tests and verify OOB clrm operation on Synergy enclosure
+
+Library                         FusionLibrary
+Library                         RoboGalaxyLibrary
+Library                         ../../support_files/clrm_support_functions.py
+
+Resource                        ../../../../Resources/api/fusion_api_resource.txt
+Resource                        ../../support_files/clrm_common.txt
+Resource                        ../SPT/resource.txt
+Resource                        ../ovf379_380/resource.txt
+Resource                        ../OVF1024/resource.robot
+Variables                       OOB.py
+Suite Setup                     Fusion Api Login Appliance  ${Appliance}     ${admin_credentials}
+Suite Teardown                  Fusion Api Logout Appliance
+
+*** Variables ***
+@{oob_ips}    10.1.1.236
+#${X-API-VERSION}    1000
+
+*** Test cases ***
+
+OVTC28485
+    [Documentation]   Vcenter events for Add Cluster
+    ...    Add cluster Out of Band and check the DB for clusters. Add cluster on the back end from VC
+    [Tags]    F319    p0
+    Connect To VI Server   ${vCenterIp}  ${vCenterCredentials['user']}   ${vCenterCredentials['password']}
+    RoboGalaxyLibrary.create_cluster    ${Test_name}    ${data_center}
+    Wait Until Keyword Succeeds    8 minutes    1 minutes      Cluster should be present in CLRM    ${Test_name}
+    RoboGalaxyLibrary.remove_cluster    ${Test_name}
+    Disconnect from VI Server
+
+OVTC28486
+    [Documentation]    Vcenter events for DELETE Cluster
+    ...  Delete cluster Out of Band and check the DB for clusters
+    [Tags]    F319    p0
+    Connect To VI Server   ${vCenterIp}  ${vCenterCredentials['user']}   ${vCenterCredentials['password']}
+    RoboGalaxyLibrary.create_cluster    ${Test_name}    ${data_center}
+    Wait Until Keyword Succeeds    8 minutes    1 minutes      Cluster should be present in CLRM    ${Test_name}
+
+    RoboGalaxyLibrary.remove_cluster    ${Test_name}
+    Wait Until Keyword Succeeds    8 minutes    1 minutes      Cluster should not be present in DB    ${Test_name}
+    Disconnect from VI Server
+
+OVTC28488
+    [Documentation]    Update Host IP from backend and check the DB for hosts. Make GET call for  hosts
+    [Tags]    F319    p0
+    [setup]    Create SPT    ${SPT_OOB}   isPositive=True
+    set log level    TRACE
+    Create cluster    ${oob_host_ip_change}    ${True}
+    Connect To VI Server   ${vCenterIp}  ${vCenterCredentials["user"]}   ${vCenterCredentials["password"]}
+    ${ips}    get_hosts_in_cluster    ${oob_host_ip_change[0]['name']}
+    :FOR   ${ip}    ${new_ip}    IN ZIP    ${ips}    ${oob_ips}
+    \     ${vnic}    Find mgmt vnic    ${ip}
+    \     Log    found management nic : ${vnic}    console=True
+    \    Login to esxi    ${ip}     ${oob_host_ip_change[0]["server_password"]}
+    \    Log    ${ip}:${new_ip}    console=True
+    \    ${stdout}    Execute Command    esxcli network ip interface ipv4 set -i ${vnic} -I ${new_ip} -N 255.255.255.0 -t static
+    \    Log    ${stdout}    console=True
+    \    Close Connection
+    ${HCP_uri}=    Get Cluster Profile Uri by Name    ${oob_host_ip_change[0]['name']}
+    ${get_param}    set variable    ?filter="resourceUri='${HCP_uri}' and alertState='Active'"
+    ${get_Alert}=    Get Alert by Param     param=${get_param}
+    ${isDisconnected}    run keyword and return status     Should Match Regexp     ${get_Alert['description']}    ${oob_host_ip_change_alert}
+    run keyword if    ${isDisconnected}==False    FAIL    cluster is not in disconnected state
+    Delete cluster    ${oob_host_ip_change}    ${False}
+    [teardown]    run keywords    run keyword and return status    Delete cluster    ${oob_host_ip_change}    True    and
+    run keyword and ignore error    remove sp spt    ${SPT_OOB}
+
+OVTC28487
+    [Documentation]   Create Host and cluster to outside OOB - Host state should be Unmanaged in DB
+    [Tags]  F319    P0
+    [setup]    Add Non Existing Server Profile Templates    ${SPT_OVTC28489}
+    ${configured_mgmt_ips}=    run keyword if    '${enclosure_type}' == 'C7K'      Create Prerequisites for C7K Import    ${profiles_OVTC28489}    ${OVTC28489_SH_list}   ${autodeploy_configs}  ${mgmt_net}   ${mgmt_nic}
+    ...    ELSE IF   '${enclosure_type}' == 'Synergy'      Create Prerequisites for I3S Import    ${profiles_OVTC28489}    ${OVTC28489_SH_list}
+    ...    ELSE       Fatal Error     msg=Enclosure Type Not defined
+    Connect To VI Server   ${vCenterIp}  ${vCenterCredentials['user']}   ${vCenterCredentials['password']}
+    RoboGalaxyLibrary.create_cluster    ${Test_name}_cluster    DC1_Reg
+    Set To Dictionary    ${target_vcenter}    cluster    ${Test_name}_cluster
+    run keyword if    '${enclosure_type}' == 'Synergy'      resource.Add Hosts to Target VCenter    ${configured_mgmt_ips}   ${target_vcenter}  ${esxi_configs}
+    ...    ELSE    resource.Add Hosts to Target VCenter    ${configured_mgmt_ips}   ${target_vcenter}  ${autodeploy_configs['esxi_config']}
+    Wait Until Keyword Succeeds    8 minutes    1 minutes      Cluster should be present in CLRM    ${Test_name}_cluster
+    :FOR    ${ip}    IN    @{configured_mgmt_ips}
+    \    Wait Until Keyword Succeeds    8 minutes    1 minutes      Host should be present in DB    ${ip}
+    \    Host should be in unmanaged state    ${ip}
+    Connect To VI Server   ${vCenterIp}  ${vCenterCredentials['user']}   ${vCenterCredentials['password']}
+    Remove Cluster    ${Test_name}_cluster
+    [Teardown]   Power off and delete SP    ${profiles_OVTC28489[0]['name']}    ${profiles_OVTC28489[0]['serverHardwareUri']}
+
+OVTC28489
+    [Documentation]   Update Host by moving it from cluster to outside of cluster - Out of Band and check the DB for hosts.
+    ...  Make GET call for hosts
+    [Tags]  F319    P0
+    ${configured_mgmt_ips}=    run keyword if    '${enclosure_type}' == 'C7K'      Create Prerequisites for C7K Import    ${profiles_OVTC28489}    ${OVTC28489_SH_list}   ${autodeploy_configs}  ${mgmt_net}   ${mgmt_nic}
+    ...    ELSE IF   '${enclosure_type}' == 'Synergy'      Create Prerequisites for I3S Import    ${profiles_OVTC28489}    ${OVTC28489_SH_list}
+    ...    ELSE       Fatal Error     msg=Enclosure Type Not defined
+    Connect To VI Server   ${vCenterIp}  ${vCenterCredentials['user']}   ${vCenterCredentials['password']}
+    RoboGalaxyLibrary.create_cluster    ${Test_name}_cluster    DC1_Reg
+    Set To Dictionary    ${target_vcenter}    cluster    ${Test_name}_cluster
+    run keyword if    '${enclosure_type}' == 'Synergy'      resource.Add Hosts to Target VCenter    ${configured_mgmt_ips}   ${target_vcenter}  ${esxi_configs}
+    ...    ELSE    resource.Add Hosts to Target VCenter    ${configured_mgmt_ips}   ${target_vcenter}  ${autodeploy_configs['esxi_config']}
+    Wait Until Keyword Succeeds    8 minutes    1 minutes      Cluster should be present in CLRM    ${Test_name}_cluster
+    :FOR    ${ip}    IN    @{configured_mgmt_ips}
+    \    Wait Until Keyword Succeeds    8 minutes    1 minutes      Host should be present in DB    ${ip}
+    \    Host should be in unmanaged state    ${ip}
+    \    Wait Until Keyword Succeeds    8 minutes    1 minutes      Host should be present in DC    ${ip}    DC1_Reg/${Test_name}_cluster
+    Connect To VI Server   ${vCenterIp}  ${vCenterCredentials['user']}   ${vCenterCredentials['password']}
+    RoboGalaxyLibrary.create_cluster    ${Test_name}_cluster_new    DC1_Reg
+
+    :FOR    ${ip}    IN    @{configured_mgmt_ips}
+    \     RoboGalaxyLibrary.enter_host_into_maintenance_mode    ${ip}
+    \     ${task}=    remove_host_in_cluster    ${Test_name}_cluster    ${ip}
+    \     RoboGalaxyLibrary.wait_for_task    ${task}
+    \     Set To Dictionary    ${target_vcenter}    cluster    ${Test_name}_cluster_new
+    run keyword if    '${enclosure_type}' == 'Synergy'      resource.Add Hosts to Target VCenter    ${configured_mgmt_ips}   ${target_vcenter}  ${esxi_configs}
+    ...    ELSE    resource.Add Hosts to Target VCenter    ${ip}   ${target_vcenter}  ${autodeploy_configs['esxi_config']}
+
+    :FOR    ${ip}    IN    @{configured_mgmt_ips}
+    \    Wait Until Keyword Succeeds    8 minutes    1 minutes      Host should be present in DB    ${ip}
+    \    Host should be in unmanaged state    ${ip}
+    \    Wait Until Keyword Succeeds    8 minutes    1 minutes      Host should be present in DC    ${ip}    DC1_Reg/${Test_name}_cluster_new
+    Connect To VI Server   ${vCenterIp}  ${vCenterCredentials['user']}   ${vCenterCredentials['password']}
+    Remove Cluster    ${Test_name}_cluster_new
+    Remove Cluster    ${Test_name}_cluster
+    [Teardown]   Power off and delete SP    ${profiles_OVTC28489[0]['name']}    ${profiles_OVTC28489[0]['serverHardwareUri']}
+
+OVTC28490
+    [Documentation]    OOB_Vcenter events for Disconnect Host
+    ...   Update Host by disconnecting from cluster and moving it to outside of cluster  - Out of Band and check the DB for hosts.
+    [Tags]  F319    Positive
+    [Setup]    Add Non Existing Server Profile Templates       ${SPT_OVTC28490}
+    ${configured_mgmt_ips}=    run keyword if    '${enclosure_type}' == 'C7K'      Create Prerequisites for C7K Import    ${profiles_OVTC28490}    ${OVTC28490_SH_list}   ${autodeploy_configs}  ${mgmt_net}   ${mgmt_nic}
+    ...    ELSE IF   '${enclosure_type}' == 'Synergy'      Create Prerequisites for I3S Import    ${profiles_OVTC28490}    ${OVTC28490_SH_list}
+    ...    ELSE       Fatal Error     msg=Enclosure Type Not defined
+    Connect To VI Server   ${vCenterIp}  ${vCenterCredentials['user']}   ${vCenterCredentials['password']}
+    RoboGalaxyLibrary.create_cluster    ${Test_name}_cluster    DC1_Reg
+    Set To Dictionary    ${target_vcenter}    cluster    ${Test_name}_cluster
+    run keyword if    '${enclosure_type}' == 'Synergy'      resource.Add Hosts to Target VCenter    ${configured_mgmt_ips}   ${target_vcenter}  ${esxi_configs}
+    ...    ELSE    resource.Add Hosts to Target VCenter    ${configured_mgmt_ips}   ${target_vcenter}  ${autodeploy_configs['esxi_config']}
+
+    Wait Until Keyword Succeeds    8 minutes    1 minutes      Cluster should be present in CLRM    ${Test_name}_cluster
+    :FOR    ${ip}    IN    @{configured_mgmt_ips}
+    \    Wait Until Keyword Succeeds    8 minutes    1 minutes      Host should be present in DB    ${ip}
+    \    Host should be in unmanaged state    ${ip}
+    \    Wait Until Keyword Succeeds    8 minutes    1 minutes      Host should be present in DC    ${ip}    DC1_Reg/${Test_name}_cluster
+    Connect To VI Server   ${vCenterIp}  ${vCenterCredentials['user']}   ${vCenterCredentials['password']}
+    RoboGalaxyLibrary.create_cluster    ${Test_name}_cluster_new    DC1_Reg
+
+    :FOR    ${ip}    IN    @{configured_mgmt_ips}
+    \     disconnect_host    ${ip}
+    \     ${task}=    remove_host_in_cluster    ${Test_name}_cluster    ${ip}
+    \     RoboGalaxyLibrary.wait_for_task    ${task}
+    \     Set To Dictionary    ${target_vcenter}    cluster    ${Test_name}_cluster_new
+    run keyword if    '${enclosure_type}' == 'Synergy'      resource.Add Hosts to Target VCenter    ${configured_mgmt_ips}   ${target_vcenter}  ${esxi_configs}
+    ...    ELSE    resource.Add Hosts to Target VCenter    ${ip}   ${target_vcenter}  ${autodeploy_configs['esxi_config']}
+
+    :FOR    ${ip}    IN    @{configured_mgmt_ips}
+    \    Wait Until Keyword Succeeds    8 minutes    1 minutes      Host should be present in DB    ${ip}
+    \    Host should be in unmanaged state    ${ip}
+    \    Wait Until Keyword Succeeds    8 minutes    1 minutes      Host should be present in DC    ${ip}    DC1_Reg/${Test_name}_cluster_new
+    Connect To VI Server   ${vCenterIp}  ${vCenterCredentials['user']}   ${vCenterCredentials['password']}
+    Remove Cluster    ${Test_name}_cluster_new
+    Remove Cluster    ${Test_name}_cluster
+    [Teardown]    run keyword and ignore error    remove sp spt    ${SPT_OVTC28490}
+
+OVTC45267
+    [Documentation]    Cluster operations with servers powered off
+    [Tags]    F319    p0
+    [setup]    Create SPT    ${SPT_OOB}   isPositive=True
+    Create cluster    ${OVTC45267_cluster}
+    ${host_profile_uri}=    Get Host Profile Uri By Name    ${TEST_NAME}1
+    ${host_profile_detail}=    Get Host Profile by Uri    ${host_profile_uri}
+    ${host_ip}=    Get From Dictionary    ${host_profile_detail['ipSettings']}    ip
+    Connect To VI Server   ${vCenterIp}  ${vCenterCredentials["user"]}   ${vCenterCredentials["password"]}
+    set to dictionary       ${vm_settings}      clusterName=${TEST_NAME}
+    set to dictionary       ${vm_settings}      guestname=VM_OVTC45267
+    Create Vm Guest    ${vm_settings}
+    Power On VM     VM_OVTC45267
+    shutdown_host    ${host_ip}    ${True}
+    Delete cluster    ${OVTC45267_cluster}    ${False}    ${True}
+    Delete cluster    ${OVTC45267_cluster}    ${True}
+    [Teardown]    run keyword and ignore error    remove sp spt    ${SPT_OOB}
+
+OVTC45340
+    [Documentation]    Import - Validate Cluster name changes and datacenter path for imported cluster
+    [Tags]    F323     P0
+    [Setup]    Create SPT    ${SPT_OVTC28489}   isPositive=True
+    Create Prerequisties for Import    ${profiles_OVTC45340}    ${OVTC28489_SH_list}    ${target_vcenter}   ${TEST_NAME}    ${enclosure_type}    ${autodeploy_configs}    ${mgmt_net}    ${mgmt_nic}
+    ${payload}=    Create Import Cluster Payload     ${TEST_NAME}    SPT_OVTC28489    ${hypervisorClusterSettings}    ${virtualSwitchConfigPolicy}    ${OVTC28489_SH_list}
+    ${import_response}=    Fusion Api Create Hypervisor Cluster Profile    body=${payload}
+    should be equal as integers     ${import_response['status_code']}      202
+    Wait For Task2    ${import_response}    timeout=5m    interval=1m
+    ${cluster_uri}=    Get Cluster Profile Uri by Name     ${TEST_NAME}
+    ${hcp_response}=    Fusion Api Get Hypervisor Cluster Profile       ${cluster_uri}
+    ${remediate_response}=    Run Keyword If    '${hcp_response['complianceState']}' != 'Consistent'    Remediate cluster profile Inconsistent    ${cluster_uri}
+    should be equal as integers     ${remediate_response['status_code']}      202
+    Wait For Task2    ${remediate_response}    timeout=20m    interval=1m    errorMessage=Remediate Failed
+    Wait Until Keyword Succeeds    5 minutes    1 minutes      Cluster should be Consistent    ${cluster_uri}
+    HCP_create_validation    ${payload}
+    Connect To VI Server   ${target_vcenter['vc']}  ${target_vcenter['user']}   ${target_vcenter['password']}
+    rename_cluster    ${TEST_NAME}    ${TEST_NAME}_renamed
+    Wait Until Keyword Succeeds    5 minutes    1 minutes      Cluster Should Not Be Consistent    ${cluster_uri}
+    ${remediate_response}=    Run Keyword If    '${hcp_response['complianceState']}' != 'Consistent'    Remediate cluster profile Inconsistent    ${cluster_uri}
+    should be equal as integers     ${remediate_response['status_code']}      202
+    Wait For Task2    ${remediate_response}    timeout=20m    interval=1m    errorMessage=Remediate Failed
+    Wait Until Keyword Succeeds    5 minutes    1 minutes      Cluster should be Consistent    ${cluster_uri}
+    create_host_folder    ${TEST_NAME}_folder    ${target_vcenter['datacenter']}
+    move_cluster_into_folder    ${TEST_NAME}    ${TEST_NAME}_folder
+    Sleep  2min
+    Cluster should be Consistent    ${cluster_uri}
+    Delete Cluster By Name    ${TEST_NAME}    ${OVTC28489_SH_list}
+    remove_host_folder    ${TEST_NAME}_folder    ${target_vcenter['datacenter']}
+    [Teardown]    run keyword and ignore error    remove sp spt    ${SPT_OVTC28489}
+
+OVTC47900
+    [Documentation]    OOB Remove and Add back host to CLP and check for alert messages on OV
+    [Tags]    F379&F380    p0
+    Set Log Level    Trace
+    [setup]    Create SPT    ${SPT_OOB}   isPositive=True
+    Connect To VI Server    ${target_vcenter['vc']}    ${target_vcenter['user']}    ${target_vcenter['password']}
+    Create cluster    ${OVTC47900}    ${True}
+    Get Cluster Profile    ${OVTC47900[0]['name']}
+    ${host_profile_uri}=    Get Host Profile Uri By Name     ${OVTC47900[0]['name']}1
+    ${host_profile_detail}=    Get Host Profile by Uri    ${host_profile_uri}
+    ${host_ip}=    Get From Dictionary    ${host_profile_detail['ipSettings']}    ip
+    ${configured_mgmt_ips}=   create list    ${host_ip}
+    RoboGalaxyLibrary.enter_host_into_maintenance_mode    ${host_ip}
+    ${task}=    remove_host_in_cluster    ${OVTC47900[0]['name']}    ${host_ip}
+    RoboGalaxyLibrary.wait_for_task    ${task}
+    Set To Dictionary    ${target_vcenter}    cluster    ${OVTC47900[0]['name']}
+    ${HCP_uri}=    Get Cluster Profile Uri by Name     ${OVTC47900[0]['name']}
+    ${get_Alert}=     Wait Until Keyword Succeeds    2 minutes    1 minutes      Get Alert by Param     param=?filter="resourceUri='${HCP_uri}' and alertState='Locked'"
+    ${isDisconnected}    run keyword and return status     Should Match Regexp     ${get_Alert['description']}    ${oob_host_disconnected_alert}
+    run keyword if    ${isDisconnected}==False    FAIL    Host is not in disconnected state
+    Wait Until Keyword Succeeds    5 minutes    1 minutes    Add Hosts to Target VCenter    ${configured_mgmt_ips}   ${target_vcenter}  ${esxi_configs}
+    Connect To VI Server   ${target_vcenter['vc']}    ${target_vcenter['user']}    ${target_vcenter['password']}
+    ${HCP_uri}=    Get Cluster Profile Uri by Name     ${OVTC47900[0]['name']}
+    Wait Until Keyword Succeeds    5 minutes    1 minutes      Alert should be in cleared state     ${get_Alert["uri"]}
+    Delete cluster    ${OVTC47900}    ${False}
+    [teardown]    run keywords    run keyword and return status    Delete cluster    ${OVTC47900}
+
+*** keywords ***
+
+Find mgmt vnic
+    [Documentation]    Find the management nic
+    [Arguments]     ${host_ip}
+     ${data}    capture host vnics    ${host_ip}
+     :FOR   ${vnic_data}    in    @{data}
+     \    return from keyword if    "${vnic_data["ipAddress"]}"=="${hostip}"   ${vnic_data["device"]}
+     FAIL   Could not  find  management nic
+
+Login to esxi
+    [Documentation]    Connect to Appliance CIM Bash via SSH
+    ...    Example:\n| Login to esxi host | 10.0.12.106 | root | hpvse123 |
+    [Arguments]    ${IP}    ${PASSWORD}
+    ...    ${TIMEOUT}=100    ${ALIAS}=APP_SSH
+    ${USERNAME}    set variable    root
+    ${Id} =    Open Connection    ${IP}    alias=${ALIAS}
+    ${Output} =    Login    ${USERNAME}    ${PASSWORD}
+    [Return]    ${Id}
+
+Host should be present in DC
+    [Arguments]    ${host_ip}    ${DC_path}
+    ${host_resp}=    Fusion Api Get Hypervisor Host    param=?filter="'name'=='${host_ip}'"
+    Should Be Equal As Strings    ${host_resp["members"][0]["path"]}    ${DC_path}
+
+Power off and delete SP
+    [Arguments]    ${SP_name}    ${hw}
+    Power off Server    ${hw}
+    ${resp}=    Fusion Api Delete Server Profile    ${SP_name}
+    Wait For Task2  ${resp}  timeout=600  interval=5
+
+Alert should be in cleared state
+    [Arguments]    ${alert_uri}
+    ${host_resp}=    Fusion Api Get Alerts    uri=${alert_uri}
+    Should Be Equal As Strings    ${host_resp["alertState"]}    Cleared

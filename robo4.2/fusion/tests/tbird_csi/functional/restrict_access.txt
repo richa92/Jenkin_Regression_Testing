@@ -1,0 +1,192 @@
+*** Settings ***
+Documentation    CLI restricted interconnect access and kill session test (US35825 & US36588)  
+...    = USAGE =
+...    | pybot | -v ENCLOSURE:<host> | -v FUSION_IP:<addr> | restrict_access.txt |
+...    = Variables =
+...    | ENCLOSURE | Required; Enclosure name to use for test. Default value is dcs. |
+...    | FUSION_IP | Required if ENCLOSURE is dcs. |
+...    Pre-requisite:  Accessible ICM (with CLI) bay; Potash or better.
+
+Library    json
+#Library    robot.api.logger
+#Library    Collections   
+Variables  ../resources/variables.py    ${ENCLOSURE}
+Resource   ../resources/constants.txt
+Resource   ../resources/fusion_api.txt
+Resource   ../resources/fusion_cli.txt
+Resource   ../resources/system_info.txt
+Force Tags    HW    DCS
+
+*** Variables ***
+
+*** Test Cases ***
+Add Users
+    [Documentation]    Create user accounts for each role.
+    [Template]         Add User
+    [Setup]            Login to Fusion via Rest
+    [Teardown]         Logout of Fusion Via Rest
+    Read only
+    Backup administrator
+    Network administrator
+    Server administrator
+    Storage administrator
+    Infrastructure administrator
+
+Connect Interconnects
+    [Documentation]    Connect to interconnect from each role.
+    [Template]         Connect Interconnect
+    Read only                restrict
+    Backup administrator     restrict
+    Network administrator    unrestrict
+    Server administrator     restrict
+    Storage administrator    restrict
+    Infrastructure administrator    unrestrict
+
+Kill Interconnect connections
+    [Documentation]    Kill existing session from each role.
+    [Template]         Kill Connection
+    Read only                restrict
+    Backup administrator     restrict
+    Network administrator    unrestrict
+    Server administrator     restrict
+    Storage administrator    restrict
+    Infrastructure administrator    unrestrict
+
+Kill Invalid Connections
+    [Documentation]    Kill invalid session from restricted and unrestricted account
+    [Template]         Kill Invalid Connection
+    Read only                restrict
+    Infrastructure administrator    unrestrict
+
+Delete Users
+    [Documentation]    Clean up user accounts.
+    [Template]         Delete User
+    [Setup]            Login to Fusion via Rest
+    [Teardown]         Logout of Fusion Via Rest
+    [Tags]             Cleanup
+    Read only
+    Backup administrator
+    Network administrator
+    Server administrator
+    Storage administrator
+    Infrastructure administrator
+
+*** Keywords ***
+Add User
+    [Arguments]    ${Role}
+    ${User}       Set Variable    ${Role.replace(" ", "")}
+    ${Account}    Set Variable    {"userName":"${User}","roles":["${Role}"],"enabled":"true","password":"myPass1234","type":"UserAndRoles"}
+    # Convert Account string into a json dictionary
+    ${Body}    json.loads    ${Account}    
+    ${Response}    Fusion Api Add User    ${Body}
+    Should Be Equal    '${Response['status_code']}'    '200'    msg=Unable to create account ${User}
+
+Delete User
+    [Arguments]    ${Role}
+    ${User}        Set Variable    ${Role.replace(" ", "")}
+    ${Response}    Fusion Api Remove User    ${None}    /rest/users/${User}
+    Should Be Equal    '${Response.status_code}'    '204'    msg=Unable to remove account ${User}
+
+Connect Interconnect
+    [Arguments]    ${Role}    ${restrict}
+    # Interconnect bay to utilize
+    ${Interconnect_Bay}    Select Random Populated Interconnect Bay
+    Set Suite Variable    ${Interconnect_Bay}
+
+    # Login and attempt to connect to the interconnect
+    ${User}    Set Variable    ${Role.replace(" ", "")}
+    Login to Fusion CLI    ${Fusion_IP}    ${User}    myPass1234
+    Enter CLI View    console-view
+    SSHLibrary.Write    connect interconnect ${Enc_Serial Number} ${Interconnect_Bay} 1 force
+
+    # For the unauthorized accounts
+    ${output}    Run Keyword If    '${restrict}'=='restrict'    Read Until    console-view
+    Run Keyword If    '${restrict}'=='restrict'    Should Contain    ${output}    Not authorized to connect
+    Run Keyword If    '${restrict}'=='restrict'    Return From Keyword
+
+    # We're authorized! Hit return a couple times for prompt to appear
+    Sleep    10
+    ${output}    SSHLibrary.Read
+    Should Contain    ${output}    Connecting to interconnect
+    SSHLibrary.Write Bare    \n\n
+    ${output}    SSHLibrary.Read Until    \<HP\>
+    ${output}    SSHLibrary.Read
+
+    # Check a simple command works
+    ${output}    Execute CLI Command    display device    \<HP\>
+    Should Match Regexp    ${output}    Slot Type\\s*State\\s*Subslot\\s*Soft Ver\\s*Patch Ver
+
+    # We're done, exit this connection
+    ${CONTROL_UNDERSCORE}    Convert To String    \x1f
+    ${output}    Execute CLI Command    ${CONTROL_UNDERSCORE}.    ${CLI_CONSOLE_PROMPT}
+    Logout of Fusion CLI
+
+Make Administrator Connection
+    # Login and connect to the interconnect
+    ${Id}=    Login to Fusion CLI
+    Enter CLI View    console-view
+    SSHLibrary.Write    connect interconnect ${Enc_Serial Number} ${Interconnect_Bay} 1 force
+    Sleep    10
+    ${output}    SSHLibrary.Read
+    Should Contain    ${output}    Connecting to interconnect
+    # Hit return a couple of times for prompt to appear
+    SSHLibrary.Write Bare    \n\n
+    ${output}    SSHLibrary.Read Until    \<HP\>
+    ${output}    SSHLibrary.Read
+    [Return]    ${Id}
+
+Kill Connection
+    [Arguments]    ${Role}    ${restrict}
+    # Make the initial/good  Interconnect Session 
+    ${AdminId}    Make Administrator Connection
+    # Login to the user account at the specified role
+    ${User}    Set Variable    ${Role.replace(" ", "")}
+    ${Id}=    Login to Fusion CLI    ${Fusion_IP}    ${User}    myPass1234
+
+    # Attempt to kill the connected session    
+    Enter CLI View    console-view
+    # Usage: kill (blade | interconnect) <enclosure-name | enclosure-uuid> <bay-number> [<console-index>]
+    ${output}    Execute CLI Command    kill interconnect ${Enc_Serial Number} ${Interconnect_Bay} 1
+    ...    ${CLI_CONSOLE_PROMPT}
+
+    # Restricted accounts should not be allowed to kill sessions
+    Run Keyword If    '${restrict}'=='restrict'    Should Contain    ${output}    Not authorized to terminate session 
+    Run Keyword If    '${restrict}'=='restrict'    Return From Keyword
+
+    # Otherwise the kill session command should succeed.
+    Should Contain    ${output}    Terminated console session for interconnect
+
+    # Check that the Administrator connection was actually disconnected
+    Switch Connection    ${AdminId}
+    ${output}    Execute CLI Command    show interconnect sessions    ${CLI_CONSOLE_PROMPT}
+    Should Contain    ${output}    Connection to the interconnect was terminated by another user.
+    Close All Connections
+
+Kill Invalid Connection
+    [Arguments]    ${Role}    ${restrict}
+
+    # Login to the user account at the specified role
+    ${User}    Set Variable    ${Role.replace(" ", "")}
+    ${Id}=    Login to Fusion CLI    ${Fusion_IP}    ${User}    myPass1234
+    Enter CLI View    console-view
+
+    # Kill interconnect session with  non-existing enclosure-name (e.g., foobar).
+    ${output}    Execute CLI Command    kill interconnect foobar 1 1
+    Should Contain    ${output}	   No enclosure found with specified name or UUID.
+    # Kill interconnect session with  bad bay number (99)
+    ${output}    Execute CLI Command    kill interconnect ${Enc_Serial Number} 99 1
+    Should Contain    ${output}    Bay number specified is not valid
+    # Kill interconnect session with  bad console-index
+    ${output}    Execute CLI Command    kill interconnect ${Enc_Serial Number} 1 42
+    # Restricted accounts should not be allowed to kill sessions
+    Run Keyword If    '${restrict}'=='restrict'    Should Contain    ${output}    Not authorized to terminate session
+    Run Keyword If    '${restrict}'!='restrict'    Should Contain    ${output}    Specified console index is invalid for specified resource
+    # Kill interconnect session with  illegal enclosure-name (e.g., â€œ!@#$%^&*()â€�)
+    ${output}    Execute CLI Command    kill interconnect $%^&*!@ 1 1
+    Should Contain    ${output}	   Invalid input
+    # Kill interconnect session with  illegal bay number
+    ${output}    Execute CLI Command    kill interconnect ${Enc_Serial Number} SDFGH 1
+    Should Contain    ${output}	   Invalid input
+    # Kill interconnect session with  illegal console-index
+    ${output}    Execute CLI Command    kill interconnect ${Enc_Serial Number} 1 SDFGH
+    Should Contain    ${output}	   Invalid input

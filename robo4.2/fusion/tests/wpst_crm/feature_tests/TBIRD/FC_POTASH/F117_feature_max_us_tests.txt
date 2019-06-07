@@ -1,0 +1,186 @@
+*** Settings ***
+Documentation    OVF243 FC DirectAttach on Potash User Story
+...              - Max uplinksets on LI and LIG (Postive and Negative cases)
+...              - Various FC (both FA and DA) uplinkport portStatus and portStatusReason
+
+Variables        ./data_common.py
+Variables        ./data_max_us.py
+
+Resource         ../../../../resource/fusion_api_all_resource_files.txt
+Resource         ../FVT/fvt-keywords.txt
+Resource         ../FVT/Resources/fvt_resource.txt
+Resource         ./F117_keywords.txt
+
+Library          FusionLibrary
+Library          ../FVT/fvt_api.py
+
+*** Variables ***
+${LI_URI}      None
+${LE_URI}      None
+${POTASH3_URI}    None
+${POTASH6_URI}    None
+
+*** Test Cases ***
+OVF243 Login User
+    [Tags]  Login    setup
+    Set Log Level   TRACE
+    Fusion Api Login Appliance  ${appliance_ip}    ${admin_credentials}
+
+    # get the OV version
+    ${resp} =    Fusion Api Get Appliance Version
+    Set Suite Metadata     OneView Version      ${resp['softwareVersion']}    top=True
+
+
+OVF243 Create FabricAttach and DirectAttach Networks
+    [Tags]  FC
+    Create FC Networks    ${danetworks}
+    Create FC Networks    ${fanetworks}
+
+
+OVF243 LIG Exceeding Max FC Uplinksets per ICM Error Check
+    [Tags]  ExceedMaxLigUS
+
+    # Create LIG with 16 FC uplinksets on Aside,
+    #      Expect taskState 'Error' /taskErrors/item/errorCode  CRM_EXCEEDS_MAX_ALLOWED_FC_NETWORKS_PER_BAY
+    Log to console and logfile    ${\n}Create LIG with FC uplinksets exceeding max allowed per ICM
+    ${task} =    Add LIG from variable    ${ligs['LIG-MAX-US-ERR1']}    120s    5s
+    :FOR    ${taskerror}    IN    @{task['taskErrors']}
+    \    ${errorCode} =    Get From Dictionary    ${taskError}    errorCode
+    \    ${message} =    Get From Dictionary    ${taskError}    message
+    \    Exit For Loop If    '${errorCode}' == 'CRM_EXCEEDS_MAX_ALLOWED_FC_NETWORKS_PER_BAY'
+    Should Be Equal As Strings    ${errorCode}    CRM_EXCEEDS_MAX_ALLOWED_FC_NETWORKS_PER_BAY
+    Should Match Regexp    ${message}    ${MSG_EXCEED_MAX_ALLED_FC_NETWORK_PER_BAY}
+
+
+OVF243 LIG Exceeding Max FC Uplinksets per LI Error Check
+    [Tags]  ExceedMaxLigUS
+
+    # Create LIG with 15 FC uplinksets on Aside and 16 FC uplinksets on Bside
+    #      httpcode 400, errorcode CRM_MAX_FC_NETWORKS_EXCEEDED
+    # Note that Add LIG from variable expect task status_code 200. But this error returns 400 through
+    #     synchronous check
+    ${body} =    Build LIG body    ${ligs['LIG-MAX-US-ERR2']}
+    Log to console and logfile    ${\n}Create LIG with FC uplinksets exceeding max allowed
+    ${resp} =    Fusion Api Create LIG    ${body}
+
+    Should Be Equal As Integers    ${resp['status_code']}    ${400}
+    Should Be Equal As Strings    ${resp['errorCode']}    CRM_MAX_FC_NETWORKS_EXCEEDED
+    Should Be Equal As Strings    ${resp['message']}    ${MSG_MAX_FC_NETWORKS_EXCEEDED}
+
+
+OVF243 LIG with Max allowable FC uplinksets
+    [Tags]  MaxLigUS
+
+    # Import 2 frame HA enclosure with 15 FC (7DA and 8FA) uplinksets on each side
+    Run Keyword and Ignore Error    Write To ciDebug Log
+    Log to console and logfile    ${\n}Create 2 frame LIG with max allowed FC uplinksets per ICM
+
+    # It take longer time to create LIG with a lot uplinksets
+    ${task} =    Add LIG from variable    ${ligs['${LIG}']}    3min    10s
+    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+
+OVF243 Add LE with Max allowable FC uplinksets, incuding FabricAttach and DirectAttach
+    [Tags]  MaxLiUS
+    # Create Enclosure Group
+    # [Tags]  EG     setup
+    Log to console and logfile    ${\n}Create 2 frame LE with max allowed FC uplinksets per ICM
+
+    ${resp} =    Add Enclosure Group from variable    ${enc_group['${EG}']}
+    ${resp}    Fvt Api Get Enclosure Group By Name    ${EG}
+    Should Be Equal As Strings    ${resp['status']}    OK
+    Should Be Equal As Strings    ${resp['name']}    ${EG}
+
+    # Create Logical Enclosure
+    # This keyword return task
+    ${task} =    Add Logical Enclosure from variable    ${les['${LE}']}
+    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+    ${resp} =    Fvt Api Get Logical Enclosure By Name    ${LE}
+    Run Keyword If    ${resp} != None    Set Suite Variable    ${LE_URI}    ${resp['uri']}
+    Should Be Equal As Strings    ${resp['name']}    ${LE}
+    Should Be Equal As Strings    ${resp['status']}    OK
+    Should Be Equal As Strings    ${resp['state']}    Consistent
+    ${resp} =    Fvt Api Get Logical Interconnect By Name    ${LI}
+    Run Keyword If    ${resp} != None    Set Suite Variable    ${LI_URI}    ${resp['uri']}
+    Should Be Equal As Strings    ${resp['consistencyStatus']}    CONSISTENT
+
+    Log to console and logfile    ${\n}Verify both Potashes are in Configured State
+    ${resp} =    Fvt Api Get Interconnect By Name    ${POTASH3}
+    Run Keyword If    ${resp} != None    Set Suite Variable    ${POTASH3_URI}    ${resp['uri']}
+    Should Be Equal As Strings    ${resp['state']}    Configured
+
+    ${resp} =    Fvt Api Get Interconnect By Name    ${POTASH6}
+    Run Keyword If    ${resp} != None    Set Suite Variable    ${POTASH6_URI}    ${resp['uri']}
+    Should Be Equal As Strings    ${resp['state']}    Configured
+
+
+OVF243 Exceeding Max LI FC Uplinksets on Aside ICM Error checking
+    [Tags]  ExceedMaxLiUSA    ExceedMaxLiUS
+
+    # Create 2frame LI uplinkset exceeding max uplinkset per interconnect
+    # Create 16th LI uplinksets on IC3; expect error
+    #       httpcode 400 errorCode CRM_EXCEEDS_MAX_ALLOWED_FC_NETWORKS_PER_BAY
+
+    ${resp} =    Run Keyword If    '${LI_URI}' == 'None'     Fvt Api Get Logical Interconnect By Name    ${LI}
+    Run Keyword If    ${resp} != None    Set Suite Variable    ${LI_URI}    ${resp['uri']}
+
+
+    Log to console and logfile    ${\n}Exceed max allowed FC uplinksets on Aside in LE HA
+
+    ${us} =     Copy Dictionary    ${li_add_uplinkset1}
+    ${body} =    Build US body    ${us}    ${LI_URI}
+    ${resp} =    Fusion Api Create Uplink Set    body=${body}
+    Should Be Equal As Integers    ${resp['status_code']}    ${400}
+    Should Be Equal As Strings    ${resp['errorCode']}    CRM_EXCEEDS_MAX_ALLOWED_FC_NETWORKS_PER_BAY
+    Should Match Regexp    ${resp['message']}    ${MSG_EXCEED_MAX_ALLED_FC_NETWORK_PER_BAY}
+
+
+OVF243 Exceeding Total Max LI FC Uplinksets on Bside ICM Error checking
+    [Tags]  ExceedMaxLiUSB     ExceedMaxLiUS
+
+    #Create 2frame LI total 31 uplinkset exceeding max uplinkset allowed
+    #Create 16th LI uplinksets on IC6; expect error
+    #       httpcode 400 errorCode CRM_EXCEEDS_MAX_ALLOWED_FC_NETWORKS_PER_BAY
+
+    ${resp} =    Run Keyword If    '${LI_URI}' == 'None'     Fvt Api Get Logical Interconnect By Name    ${LI}
+    Run Keyword If    ${resp} != None    Set Suite Variable    ${LI_URI}    ${resp['uri']}
+
+
+    Log to console and logfile    ${\n}Exceed max allowed FC uplinksets on Bside in LE HA
+
+    ${us} =     Copy Dictionary    ${li_add_uplinkset2}
+    ${body} =    Build US body    ${us}    ${LI_URI}
+    ${resp} =    Fusion Api Create Uplink Set    body=${body}
+    Should Be Equal As Integers    ${resp['status_code']}    ${400}
+    Should Be Equal As Strings    ${resp['errorCode']}    CRM_EXCEEDS_MAX_ALLOWED_FC_NETWORKS_PER_BAY
+    Should Match Regexp    ${resp['message']}    ${MSG_EXCEED_MAX_ALLED_FC_NETWORK_PER_BAY}
+
+
+OVF243 Various LI FA and DA Uplinkports portStatue and portStatusReason verifications
+    [Tags]    portStatusReason
+    [Documentation]   This is very wiring dependent
+
+    PASS EXECUTION IF    '${RACK}' != 'AZ51'    Skip Test If it is not AZ51 Test Enclosure
+
+    Log to console and logfile     ${\n}Verify Uplinks expected portStatus and portStatusReason
+    ${resp} =    Run Keyword If    '${POTASH3_URI}' == 'None'     Fvt Api Get Interconnect By Name    ${POTASH3}
+    Run Keyword If    ${resp} != None    Set Suite Variable    ${POTASH3_URI}    ${resp['uri']}
+    ${resp} =    Run Keyword If    '${POTASH6_URI}' == 'None'     Fvt Api Get Interconnect By Name    ${POTASH6}
+    Run Keyword If    ${resp} != None    Set Suite Variable    ${POTASH6_URI}    ${resp['uri']}
+
+
+    Log to console and logfile     ${\n}Wait for ports to reach stabilized status
+    sleep    ${UPLINK_SHORT_WAIT}
+
+    # used by DA uplinkset with port connected to 3Par
+    Run Keyword And Continue On Failure    Verify Port    ${POTASH6_URI}    Q4:4   portStatus=${LINKED}    portStatusReason=${LOGGEDIN}
+    # used by FA uplinkset with port connected to Enet connector
+    Run Keyword And Continue On Failure    Verify Port    ${POTASH3_URI}    Q1:1   portStatus=${UNLINKED}    portStatusReason=${MODULEINCOMPATIBE}
+    # used by DA uplinkset with port connected to 3Par
+    Run Keyword And Continue On Failure    Verify Port    ${POTASH3_URI}    Q4:3   portStatus=${LINKED}    portStatusReason=${LOGGEDIN}
+
+    # FA uplinkport with port connected to SAN
+    Run Keyword And Continue On Failure    Verify Port    ${POTASH3_URI}    Q2:2   portStatus=${LINKED}    portStatusReason=${LOGGEDIN}
+    # use by DA uplinkset with port connected to SAN
+    Run Keyword And Continue On Failure    Verify Port    ${POTASH3_URI}    Q3:1   portStatus=${UNLINKED}    portStatusReason=${FABRICMISMATCH}

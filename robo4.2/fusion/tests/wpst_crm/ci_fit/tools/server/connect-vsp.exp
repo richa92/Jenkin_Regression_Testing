@@ -1,0 +1,105 @@
+#!/usr/bin/expect -f
+set ilouser "dvt-auto"
+set ilopw "dvt-auto"
+set osuser "root"
+set ospw "rootpwd"
+set iloip [lrange $argv 0 0]
+set mac [lrange $argv 1 1]
+set vlan [lrange $argv 2 2]
+set osip [lrange $argv 3 3]
+set timeout 20 
+
+if {[llength $argv] != 4} {
+	puts "usage: connect-vsp <iLO ipaddr> <MAC> <VLAN> <OS ipaddr>"
+	exit 1
+}
+
+spawn ssh $ilouser@$iloip
+expect {
+	timeout {puts "Timed-out while trying to ssh to $iloip"; exit} 
+	"password:"
+}
+send "$ilopw\r"
+expect {
+	timeout {puts "Timed-out while sending iLo password $ilopw"; exit} 
+	"</>hpiLO->"
+}
+#TODO: iLo2 on some servers does not close the iLo session so the reset map1 command is 
+#used as a workaround to reset iLO on first attempt. Need to add logic to check 
+#for the this conditon and then reset if found, otherwise continue if not found.
+send "reset map1\r"
+expect "CLI session stopped"
+sleep 65 
+send "\r"
+expect "Connection reset by peer"
+spawn ssh $ilouser@$iloip
+expect {
+	timeout {puts "Timed-out while trying to ssh to $iloip after reset"; exit} 
+	"password:"
+}
+send "$ilopw\r"
+expect {
+        timeout {puts "Timed-out while sending iLo password $ilopw after reset"; exit}
+        "</>hpiLO->"
+}
+send "vsp\r"
+#TODO: Add logic to detect if the port is active.  If it's not active then exit
+# the script so that the configuration can continue for the other servers
+expect "Virtual Serial Port active"
+send "\r"
+expect {
+        timeout {puts "Timed-out waiting for login prompt"; exit 1}
+        "login:"
+}
+send "$osuser\r"
+expect {
+	timeout {puts "Timed-out while attempting to log into OS with user $osuser"; return 1}
+        "Password:";
+}
+send "$ospw\r"
+ expect {
+	timeout {puts "Timed-out while attempting to log into OS with password $ospw"; return 1}
+        "#"
+}
+send "rm /etc/sysconfig/network-scripts/ifcfg-e* -f\r"
+expect "#"
+send "rm /etc/sysconfig/network-scripts/ifcfg-b* -f\r"
+expect "#"
+send "rm /etc/sysconfig/networking/profiles/default/ifcfg* -f\r"
+expect "#"
+send "rm /etc/sysconfig/networking/devices/ifcfg* -f\r"
+expect "#"
+send "rm /root/ifcfg -f \r"
+expect "#"
+#TODO: If the driver is not loaded then you won't find a MAC address
+#Add the logic to detect this error out appropriately.
+send "ifconfig -a | grep -m 1 $mac | awk 'BEGIN{FS=\" \"} {print \$NR}'\r"
+expect "#"
+if {[regexp {eth[0-9][0-9]*} "$expect_out(buffer)" eth]} { 
+	send "touch /etc/sysconfig/network-scripts/ifcfg-$eth\r"
+	expect "#"
+	send "echo \"DEVICE=$eth\" >> /etc/sysconfig/network-scripts/ifcfg-$eth\r"
+	expect "#"
+	send "touch /etc/sysconfig/network-scripts/ifcfg-$eth.$vlan\r"
+	expect "#"
+	send "echo \"DEVICE=$eth.$vlan\" >> /etc/sysconfig/network-scripts/ifcfg-$eth.$vlan\r"
+	expect "#"
+	send "echo \"HWADDR=$mac\" >> /etc/sysconfig/network-scripts/ifcfg-$eth.$vlan\r"
+	expect "#"
+	send "echo \"IPADDR=$osip\" >> /etc/sysconfig/network-scripts/ifcfg-$eth.$vlan\r"
+	expect "#"
+	send "echo \"VLAN=yes\" >> /etc/sysconfig/network-scripts/ifcfg-$eth.$vlan\r"
+	expect "#"
+	send "echo \"ONBOOT=yes\" >> /etc/sysconfig/network-scripts/ifcfg-$eth.$vlan\r"
+	expect "#"
+	send "service network restart\r"
+	expect "#"
+	send "exit\r"
+	expect " login:"
+	send "\033Q"
+} else {
+	puts"Interface not enumerated in the kernel.  Check if the driver is loaded."
+}
+expect oef
+
+

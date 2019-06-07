@@ -1,0 +1,83 @@
+*** Settings ***
+Documentation     Reset ICM Manager from the Webapp - US35642
+...    = USAGE =
+...    | pybot | -v FUSION_IP:my_fusion_ip | icm_mgr_reset.txt |
+...    | pybot | -v FUSION_IP:my_fusion_ip | -v EM_IP:16.114.179.116 | icm_mgr_reset.txt |
+...    = Variables =
+...    | FUSION_IP | Required. IP address or hostname of the Fusion 2.0 appliance. |
+...    | EM_IP | Optional. IP address or hostname of the Enclosure Manager to which the enclosure belongs.  Default value is for DCS. |
+
+Library           RoboGalaxyLibrary                    # DVTs Robot Framework extensions
+Library           FusionLibrary                        # DVTs Robot Framework extensions
+Library           OperatingSystem                      # For opening files
+Library           json
+Variables         ../resources/variables.py    #${ENCLOSURE}    # Variables file
+Resource          ../resources/compare_json.txt        # Comet-DVT JSON comparison extensions
+Resource          ../resources/defaults.txt            # Comet-DVT default variables
+Resource          ../resources/fusion_api.txt          # Comet-DVT Fusion API extensions
+Resource          ../resources/hal_webapp.txt          # Comet-DVT HAL Webapp extensions
+Resource          ../resources/system_info.txt   # Comet-DVT fusion API extensions
+Resource          ../resources/fusion_ssh.txt           # AM-DVT fusion ssh extensions
+Suite Setup       Login to Fusion via SSH
+Suite Teardown    Logout of Fusion Via SSH
+Force Tags        DCS  HW
+
+*** Testcases ***
+
+
+Happy Path: Reset Filled ICM Bays
+    #@{bays-actions}=	  Create List	InterconnectBays	 IcmManagerReset
+    #Set Suite Variable    @{bays-actions}	@{bays-actions}
+    ${icmuri}=    Set Variable if    ${DCS}     /rest/v1/Chassis/1/InterconnectBays    /rest/v1/InterconnectBays
+    ${notempty}=    Set Variable if    ${DCS}     "Empty":false    "Empty": false
+    Set Suite Variable    ${icmuri}    ${icmuri}
+    ${filled}    ${unfilled}=    Find Filled Bays    ${icmuri}
+    Set Suite Variable    ${unfilled}     ${unfilled}
+    ${protocol}=    Set Variable If    ${DCS}    https   http
+    ${EM_IP1}=    Set Variable If    ${DCS}    ${EM_IP}    ${EM_IP}%${FUSION_NIC}
+    :For    ${bay}    in    @{filled}
+    \    ${bay}=    Convert to Integer    ${bay}
+    \    #Run keyword unless    ${DCS}    Record EM Events
+    \    HAL Action    IcmManagerReset    ${bay}
+    \    #Verify AM52 is fixed
+    \    ${response}=    Execute Command    curl -ik ${protocol}://${EM_IP1}/${icmuri}/${bay}
+    \    Log    ${response}
+    \    Should Contain    ${response}    ${notempty}
+    \    Continue For Loop If    ${DCS}
+    \    Verify ICM Reset Events    ${bay}
+
+Unhappy Path: Reset Unfilled Device Bays
+    :For    ${bay}    in    @{unfilled}
+    \    ${bay}=    Convert to Integer    ${bay}
+    \    HAL Action    IcmManagerReset    ${bay}    invalid
+
+Unhappy Path: Reset Bad Device Bays
+    @{bad}=    Create List    -5    0    7    105
+    :For    ${bay}    in    @{bad}
+    \    ${bay}=    Convert to Integer    ${bay}
+    \     HAL Action    IcmManagerReset    ${bay}    invalid
+
+*** Keywords ***
+
+
+Verify ICM Reset Events
+    [Arguments]    ${bay}
+    Set Client Configuration    timeout=120 seconds
+    Write    ssh Administrator@${fusion_ip}
+    ${response}=    Read Until Regexp    (yes|password)
+    ${line}=    Get Line    ${response.strip()}    -1
+    ${tmp}=    Get Substring    ${line.strip()}    -3
+    Run Keyword If    '${tmp}'=='yes'    Write    yes
+    Run Keyword If    '${tmp}'=='yes'    Read Until     password:
+    Write    ${CLI_PASSWORD}
+    Sleep   3    For login to complete
+    Write    console-view
+    Read Until    console-view>
+    Write    connect interconnect ${enc_serial_number} ${bay} 1 force
+    Read Until    password
+    Set Client Configuration    timeout=240 seconds
+    #Write          canserial
+    ${data}=    Read Until    System is starting
+    Log    ${data}
+    Should Contain X Times    ${data}    Loading file flash    3
+

@@ -1,0 +1,1263 @@
+*** Settings ***
+Documentation      Supershaw_module_fa_da_scenarios
+Library    json
+Library    FusionLibrary
+Library    RoboGalaxyLibrary
+Library    Collections
+Variables    data_variables.py
+Library     Telnet
+Library     SSHLibrary
+Resource    ../../../../resource/fusion_api_all_resource_files.txt
+Resource    ../../TBIRD/FVT/fvt-keywords.txt
+Resource    ../../TBIRD/FVT/Resources/fvt_resource.txt
+Library     ../../TBIRD/FVT/fvt_api.py
+Library    validate.py
+Library    String
+
+***Test cases***
+1_Login and Create User
+    [Documentation]  Login to OneView and create users
+    [Tags]  setup
+    Set Log Level    TRACE
+    ${resp}    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    Run Keyword If  '${resp[0]['status_code']}' != '200'  Fail  ELSE  Log to console  \nSuccessfully logged into the appliance
+    Suite Cleanup
+
+2_Create Ethernet network
+    [Documentation]  Creating the Ethernet networks
+    [Tags]  Network    setup
+    Set Log Level    TRACE
+
+    ${resp}    Fusion Api Create Ethernet Network       body=${ethernet_networks}
+    Run Keyword If  '${resp['status_code']}' != '202'    Fail    ELSE    Log to console  \nSuccessfully created a ethernet network
+
+3_Create Fc netowrks
+    [Documentation]  Creating the FC networks
+    [Tags]  Network    setup
+    Set Log Level    TRACE
+
+    :FOR    ${net}    IN    @{fc_networks}
+    \    ${resp} =    Fusion Api Create FC Network    body=${net}
+    \    Run Keyword If  '${resp['status_code']}' != '202'    Fail    ELSE    Log to console  \nSuccessfully created a FC network
+
+4_Create LIG
+    [Documentation]  Creates LIG with ethernet and FC uplinks
+    [Tags]  LIG    setup
+    Set Log Level    TRACE
+
+    ${task} =    Add LIG from variable    ${lig}    3min    10s
+    Run Keyword If  '${task['taskState']}' !='Completed'    fail    msg=\nUnable to create LIG ${task['taskErrors'][0]['errorCode']}
+    ...         ELSE    Log to Console    \nsuccessfully created LIG - ${lig['name']}
+
+5_Create EG and Import Enclosure
+    [Documentation]  Create EG and import enclosure
+    [Tags]  EG    setup
+    Set Log Level    TRACE
+
+    ${Enc_Grp_Resp} =    Add Enclosure Group from variable      ${enc_group}
+    Run keyword unless  ${Enc_Grp_Resp['status_code']}== 201    Fail    "Unable to Create Enclosure Group"
+    Log to console and logfile    \n\nEG created succesfully
+
+    Add Enclosures from variable     ${encs}
+    Sleep    200
+
+6_Verify Port Status
+    [Documentation]  Verfies if the ports are linked
+    [Tags]  Verify_Port
+    Set Log Level    TRACE
+
+    ${len}    Get Length    ${INTERCONNECTS}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    Verify Interconnect Port Status    ${Uplink_Ports[${x}]}    ${INTERCONNECTS[${x}]}
+
+7_Create Server Profiles
+    [Documentation]  creates server profile
+    [Tags]  Verify_Port
+    Set Log Level    TRACE
+
+    Add Server Profiles from variable   ${server_profile1}
+    Verify Server Profiles status    ${server_profile1[0]['name']}    OK
+
+    Add Server Profiles from variable    ${server_profile_bfs}
+    Verify Server Profiles status    ${server_profile_bfs[0]['name']}    OK
+
+    ###Poweron servers####
+    :For    ${sp}    IN     @{server_profile1}
+    \    Power on Server    ${sp['serverHardwareUri']}
+    :For    ${sp}    IN     @{server_profile_bfs}
+    \    Power on Server    ${sp['serverHardwareUri']}
+    Sleep    800
+
+8_Verfify by ssh into bfs server whether gateway ip is pinging
+    [Documentation]  Verfify by ssh into bfs server gateway ip is pinging
+    # In case BFS server is not up, linux server may take longer to come up
+    Wait For Appliance To Become Pingable    ${BFS_PING_LIST}
+
+    # ssh Linux BFS server and ping gateway ip
+    SSH to host and ping others    ${BFS_PING_LIST}    ${BFS_gateway_ip}
+    ...    ${LINUX_BFS_USER}    ${LINUX_BFS_PWD}
+
+9_Get linux count for bfs server 10
+    [Documentation]  Verfify by ssh into bfs server gateway ip is pinging
+    ${count}=    Get Linux LUN Count    ${BFS_PING_LIST}    ${LINUX_BFS_USER}    ${LINUX_BFS_PWD}
+    Run Keyword If    ${count}==1    Log to console and logfile    LUN count is ${count} for bfs server    ELSE    Fail
+    Log to console and logfile    ${count}
+
+10_Get windows LUN Count for server 1
+    [Documentation]    Get windows LUN Count for server 1
+    ${output1}=    Get Windows LUN Count    ${Server_IP}    ${win_server_details}    ${diskspd_cmd}
+    Run keyword unless    ${output1}== ${lun_count_total}    Fail    Log to console and logfile    The count of available LUN is ${output1}
+    Log to console and logfile    ${output1}
+
+11_Get Port loginsCount for FA1 connection
+    [Documentation]    Get Port loginsCount for FA1 connection
+    ${IC_uri}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri}
+    ${logins}    Get Port loginsCount for FA1 connection    ${IC_uri}    ${Uplink_Ports[1][0]}
+    Log to console    ${logins}
+    Run keyword unless    ${logins}== ${login1}    Fail    Log to console and logfile    The count of logins is ${logins}
+
+12_verify server storage access for DA connection through connection map
+    [Documentation]    verify server storage access for DA connection through connection map
+    #IC1
+    ${IC_uri}    Get IC URI    ${INTERCONNECTS[0]}
+    Log to console    ${IC_uri}
+    ${nameservers_ic1} =    Get IC NameServers    ${IC_uri}
+    Log to console    ${nameservers_ic1}
+    Verify Uplink DA Port    ${nameservers_ic1}    ${Uplink_Ports[0][1]}    ${expected_conn_map_ic1}
+    Verify Server DA Connection    ${nameservers_ic1}    ${downlink_1}    ${expected_conn_map_d1}
+    #IC2
+    ${IC_uri}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri}
+    ${nameservers_ic2} =    Get IC NameServers    ${IC_uri}
+    Log to console    ${nameservers_ic2}
+    Verify Uplink DA Port    ${nameservers_ic2}    ${Uplink_Ports[1][1]}    ${expected_conn_map_ic2}
+    Verify Server DA Connection    ${nameservers_ic2}    ${downlink_10}    ${expected_conn_map_d10}
+
+13_Disable Uplinks Case 1,Affect Servers Connection Servers DA connection verification through map and also verify the LUN count
+    [Tags]  DisableAUplink
+    [Documentation]    Disable  US_DA1 uplinkport X5
+    ...                Disabling it would cause profile connection error.
+
+
+    ${IC_uri1}    Get IC URI    ${INTERCONNECTS[0]}
+    Log to console    ${IC_uri1}
+    ${IC_uri2}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri2}
+    #For server 1
+    #Disable uplink X5
+    Change Uplink Port Status   ${Uplink_Ports[0][1]}   ${INTERCONNECTS[0]}     false
+    Sleep    240s
+    Log to Console    ${\n}Verify uplink status, portStatus and disabled
+    Verify Port    ${IC_uri1}    ${Uplink_Ports[0][1]}    status=Warning    portStatus=Unlinked    enabled=False
+
+    Log to Console    ${\n}Verify affected uplinkset status
+    Verify Uplinkset Status    ${LI}    us_da1    Critical
+
+    Log to Console    ${\n}Verify server profiles status going through US_DA1 become Critical
+    Verify Server Profiles status    ${server_profile1[0]['name']}    Critical
+    Verify Server Profiles status    ${server_profile_bfs[0]['name']}    OK
+
+    #Verification IC1 connection map
+    ${nameservers_ic1} =    Get IC NameServers    ${IC_uri1}
+    Should Not Be Empty    ${nameservers_ic1}
+
+    Log to Console      ${\n}Verify disabled uplink not in nameServers
+
+    Verify Port Not In nameServers    ${nameservers_ic1}    ${Uplink_Ports[0][1]}
+
+
+    ${s1_conn_map} =    Create List     ${EMPTY}
+    Verify Server DA Connection    ${nameservers_ic1}    ${downlink_1}     ${s1_conn_map}
+
+    ${output1}=    Get Windows LUN Count    ${Server_IP}    ${win_server_details}    ${diskspd_cmd}
+    Run keyword unless    ${output1}== ${lun_count_ic1}    Fail    Log to console and logfile    The count of available LUN is ${output1}
+    Log to console and logfile    ${output1}
+    #For Server10
+    #Verify LOGINS for FA1 connection####
+    ${IC_uri}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri}
+    ${logins}    Get Port loginsCount for FA1 connection    ${IC_uri}    ${Uplink_Ports[1][0]}
+    Log to console    ${logins}
+    Run keyword unless    ${logins}== ${login1}    Fail    Log to console and logfile    The count of logins is ${logins}
+
+    #Verification IC2 connection map
+    ${nameservers_ic2} =    Get IC NameServers    ${IC_uri2}
+    Should Not Be Empty    ${nameservers_ic2}
+
+    Verify Uplink DA Port    ${nameservers_ic2}    ${Uplink_Ports[1][1]}    ${expected_conn_map_ic2}
+    Verify Server DA Connection    ${nameservers_ic2}    ${downlink_10}    ${expected_conn_map_d10}
+    #LUN count for server 10
+    ${count}=    Get Linux LUN Count    ${BFS_PING_LIST}    ${LINUX_BFS_USER}    ${LINUX_BFS_PWD}
+    Run Keyword If    ${count}==1    Log to console and logfile    LUN count is ${count} for bfs server    ELSE    Fail
+    Log to console and logfile    ${count}
+
+
+14_Enable Uplinks Case 1,Servers Connection Servers DA connection verification through map and also verify the LUN count
+    [Tags]  Enableuplink
+    [Documentation]    Enable  US_DA1 uplinkport X5
+    ...                Enabling it would not cause profile connection error.
+
+
+    ${IC_uri1}    Get IC URI    ${INTERCONNECTS[0]}
+    Log to console    ${IC_uri1}
+    ${IC_uri2}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri2}
+    Change Uplink Port Status   ${Uplink_Ports[0][1]}   ${INTERCONNECTS[0]}     true
+    Sleep    240s
+    Log to Console    ${\n}Verify uplink status, portStatus and enabled
+
+    Verify Port    ${IC_uri1}    ${Uplink_Ports[0][1]}    status=OK    portStatus=Linked    enabled=True
+
+    Log to Console    ${\n}Verify affected uplinkset status
+    Verify Uplinkset Status    ${LI}    us_da1    OK
+
+
+    Log to Console    ${\n}Verify server profiles status going through US_DA1 become OK
+    Verify Server Profiles status    ${server_profile1[0]['name']}    OK
+    Verify Server Profiles status    ${server_profile_bfs[0]['name']}    OK
+
+    #Verification IC1 connection map
+    ${nameservers_ic1} =    Get IC NameServers    ${IC_uri1}
+    Should Not Be Empty    ${nameservers_ic1}
+
+    Verify Uplink DA Port    ${nameservers_ic1}    ${Uplink_Ports[0][1]}    ${expected_conn_map_ic1}
+    Verify Server DA Connection    ${nameservers_ic1}    ${downlink_1}    ${expected_conn_map_d1}
+
+    ${output1}=    Get Windows LUN Count    ${Server_IP}    ${win_server_details}    ${diskspd_cmd}
+    Run keyword unless    ${output1}== ${lun_count_total}    Fail    Log to console and logfile    The count of available LUN is ${output1}
+    Log to console and logfile    ${output1}
+
+    #Verify LOGINS for FA1 connection####
+    ${IC_uri}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri}
+    ${logins}    Get Port loginsCount for FA1 connection    ${IC_uri}    ${Uplink_Ports[1][0]}
+    Log to console    ${logins}
+    Run keyword unless    ${logins}== ${login1}    Fail    Log to console and logfile    The count of logins is ${logins}
+
+    #Verification IC2 connection map
+    ${nameservers_ic2} =    Get IC NameServers    ${IC_uri2}
+    Should Not Be Empty    ${nameservers_ic2}
+
+    Verify Uplink DA Port    ${nameservers_ic2}    ${Uplink_Ports[1][1]}    ${expected_conn_map_ic2}
+    Verify Server DA Connection    ${nameservers_ic2}    ${downlink_10}    ${expected_conn_map_d10}
+    #LUN count for server 10
+    ${count}=    Get Linux LUN Count    ${BFS_PING_LIST}    ${LINUX_BFS_USER}    ${LINUX_BFS_PWD}
+    Run Keyword If    ${count}==1    Log to console and logfile    LUN count is ${count} for bfs server    ELSE    Fail
+    Log to console and logfile    ${count}
+
+
+15_Disable Uplinks for FA connection and DA connection for ic2 and verify the LUN count
+    [Tags]  DisableAUplink
+    [Documentation]    Disable  US_FA1 uplinkport X2 and US_DA2 uplinkport X5
+    ...                Disabling it would cause profile connection error.
+    ${IC_uri2}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri2}
+    Change Uplink Port Status   ${Uplink_Ports[1][0]}   ${INTERCONNECTS[1]}     false
+    Change Uplink Port Status   ${Uplink_Ports[1][1]}   ${INTERCONNECTS[1]}     false
+    Sleep    240s
+    Log to Console    ${\n}Verify uplink status, portStatus and disabled
+
+    Verify Port    ${IC_uri2}    ${Uplink_Ports[1][0]}    status=Warning    portStatus=Unlinked    enabled=False
+    Log to Console    ${\n}Verify affected uplinkset status
+    Verify Uplinkset Status    ${LI}    us_fa1    Critical
+
+    Verify Port    ${IC_uri2}    ${Uplink_Ports[1][1]}    status=Warning    portStatus=Unlinked    enabled=False
+    Log to Console    ${\n}Verify affected uplinkset status
+    Verify Uplinkset Status    ${LI}    us_da2    Critical
+
+    Log to Console    ${\n}Verify server profiles status going through US_FA1 and US_DA2 become Critical
+    Verify Server Profiles status    ${server_profile1[0]['name']}    Critical
+    Verify Server Profiles status    ${server_profile_bfs[0]['name']}    Critical
+
+    ${output1}=    Get Windows LUN Count    ${Server_IP}    ${win_server_details}    ${diskspd_cmd}
+    Run keyword unless    ${output1}== ${lun_count_ic2}    Fail    Log to console and logfile    The count of available LUN is ${output1}
+    Log to console and logfile    ${output1}
+    #Verify LOGINS for FA1 connection####
+    ${IC_uri}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri}
+    ${logins}    Get Port loginsCount for FA1 connection    ${IC_uri}    ${Uplink_Ports[1][0]}
+    Log to console    ${logins}
+    Run keyword unless    ${logins}== ${login0}    Fail    Log to console and logfile    The count of logins is ${logins}
+
+    #Verification IC2 connection map
+    ${nameservers_ic2} =    Get IC NameServers    ${IC_uri2}
+    Should Not Be Empty    ${nameservers_ic2}
+    Log to Console      ${\n}Verify disabled uplink not in nameServers
+    Verify Port Not In nameServers    ${nameservers_ic2}    ${Uplink_Ports[1][1]}
+    ${s1_conn_map} =    Create List     ${EMPTY}
+    Verify Server DA Connection    ${nameservers_ic2}    ${downlink_10}     ${s1_conn_map}
+    #LUN count for server 10
+    ${count}=    Get Linux LUN Count    ${BFS_PING_LIST}    ${LINUX_BFS_USER}    ${LINUX_BFS_PWD}
+    Run Keyword If    ${count}==0    Log to console and logfile    LUN count is ${count} for bfs server    ELSE    Fail
+    Log to console and logfile    ${count}
+
+16_Enable Uplinks for FA and DA connection and verify the LUN count
+    [Tags]  Enableuplink
+    [Documentation]    Enable  US_FA1 uplinkport X2 and US_DA2 uplinkport X5
+    ...                Enabling it won't cause profile connection error.
+
+    ${IC_uri2}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri2}
+    Change Uplink Port Status   ${Uplink_Ports[1][0]}   ${INTERCONNECTS[1]}     true
+    Change Uplink Port Status   ${Uplink_Ports[1][1]}   ${INTERCONNECTS[1]}     true
+    Sleep    240s
+    Log to Console    ${\n}Verify uplink status, portStatus and Enabled
+
+    Verify Port    ${IC_uri2}    ${Uplink_Ports[1][0]}    status=OK    portStatus=Linked    enabled=True
+    Verify Port    ${IC_uri2}    ${Uplink_Ports[1][1]}    status=OK    portStatus=Linked    enabled=True
+    Log to Console    ${\n}Verify affected uplinkset status
+    Verify Uplinkset Status    ${LI}    us_fa1    OK
+    Verify Uplinkset Status    ${LI}    us_da2    OK
+
+    Log to Console    ${\n}Verify server profiles status going through US_FA1 and US_DA2 become OK
+    Verify Server Profiles status    ${server_profile1[0]['name']}    OK
+    Verify Server Profiles status    ${server_profile_bfs[0]['name']}    OK
+
+    ${output1}=    Get Windows LUN Count    ${Server_IP}    ${win_server_details}    ${diskspd_cmd}
+    Run keyword unless    ${output1}== ${lun_count_total}    Fail    Log to console and logfile    The count of available LUN is ${output1}
+    Log to console and logfile    ${output1}
+    #Verify LOGINS for FA1 connection####
+    ${IC_uri}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri}
+    ${logins}    Get Port loginsCount for FA1 connection    ${IC_uri}    ${Uplink_Ports[1][0]}
+    Log to console    ${logins}
+    Run keyword unless    ${logins}== ${login1}    Fail    Log to console and logfile    The count of logins is ${logins}
+    #Verification IC2 connection map
+    ${nameservers_ic2} =    Get IC NameServers    ${IC_uri2}
+    Should Not Be Empty    ${nameservers_ic2}
+
+    Verify Uplink DA Port    ${nameservers_ic2}    ${Uplink_Ports[1][1]}    ${expected_conn_map_ic2}
+    Verify Server DA Connection    ${nameservers_ic2}    ${downlink_10}    ${expected_conn_map_d10}
+    #LUN count for server 10
+    ${count}=    Get Linux LUN Count    ${BFS_PING_LIST}    ${LINUX_BFS_USER}    ${LINUX_BFS_PWD}
+    Run Keyword If    ${count}==1    Log to console and logfile    LUN count is ${count} for bfs server    ELSE    Fail
+    Log to console and logfile    ${count}
+
+
+17_Disable downlink Case 1,Affect Servers Connection Servers DA connection verification through map and also verify the LUN count
+    [Tags]  Disabledownlink
+    [Documentation]    Disable  downlink port d1 of interconnect 1
+    ...                Disabling it would cause profile connection error.
+
+
+    ${IC_uri1}    Get IC URI    ${INTERCONNECTS[0]}
+    Log to console    ${IC_uri1}
+    ${IC_uri2}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri2}
+
+    Change Downlink Port Status   ${downlink_1}    ${INTERCONNECTS[0]}     false
+    Sleep    240s
+    Log to Console    ${\n}Verify uplink status, portStatus and disabled
+    Verify Port    ${IC_uri1}    ${downlink_1}    status=Critical    portStatus=Unlinked    enabled=False
+    Verify Port    ${IC_uri2}    ${downlink_1}    status=OK    portStatus=Linked    enabled=True
+
+    Log to Console    ${\n}Verify server profiles status going through d1 become Critical
+    Verify Server Profiles status    ${server_profile1[0]['name']}    Critical
+    Verify Server Profiles status    ${server_profile_bfs[0]['name']}    OK
+
+    #Verification IC1 connection map
+    ${nameservers_ic1} =    Get IC NameServers    ${IC_uri1}
+    Should Not Be Empty    ${nameservers_ic1}
+
+    Log to Console      ${\n}Verify disabled downlink not in nameServers
+
+    Verify Port Not In nameServers    ${nameservers_ic1}    ${downlink_1}
+
+    #${output1}=    Get Windows LUN Count    ${Server_IP}    ${win_server_details}
+    #Run keyword unless    ${output1}== ${lun_count_ic1}    Fail    Log to console and logfile    The count of available LUN is ${output1}
+    #Log to console and logfile    ${output1}
+
+    #Verify LOGINS for FA1 connection####
+    ${IC_uri}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri}
+    ${logins}    Get Port loginsCount for FA1 connection    ${IC_uri}    ${Uplink_Ports[1][0]}
+    Log to console    ${logins}
+    Run keyword unless    ${logins}== ${login1}    Fail    Log to console and logfile    The count of logins is ${logins}
+
+    #Verification IC2 connection map
+    ${nameservers_ic2} =    Get IC NameServers    ${IC_uri2}
+    Should Not Be Empty    ${nameservers_ic2}
+
+    Verify Uplink DA Port    ${nameservers_ic2}    ${Uplink_Ports[1][1]}    ${expected_conn_map_ic2}
+    Log to Console      ${\n}Verify disabled downlink not in nameServers
+
+    Verify Port Not In nameServers    ${nameservers_ic2}    ${downlink_1}
+    Verify Server DA Connection    ${nameservers_ic2}    ${downlink_10}    ${expected_conn_map_d10}
+    #LUN count for server 10
+    ${count}=    Get Linux LUN Count    ${BFS_PING_LIST}    ${LINUX_BFS_USER}    ${LINUX_BFS_PWD}
+    Run Keyword If    ${count}==1    Log to console and logfile    LUN count is ${count} for bfs server    ELSE    Fail
+    Log to console and logfile    ${count}
+
+
+18_Enable downlink Case 1,Affect Servers Connection Servers DA connection verification through map and also verify the LUN count
+    [Tags]  Disabledownlink
+    [Documentation]    Enable  downlink port d1 of interconnect 1
+    ...                Enabling it would not cause profile connection error.
+
+
+    ${IC_uri1}    Get IC URI    ${INTERCONNECTS[0]}
+    Log to console    ${IC_uri1}
+    ${IC_uri2}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri2}
+
+    Change Downlink Port Status   ${downlink_1}    ${INTERCONNECTS[0]}     true
+    Sleep    240s
+    Log to Console    ${\n}Verify uplink status, portStatus and disabled
+    Verify Port    ${IC_uri1}    ${downlink_1}    status=OK    portStatus=Linked    enabled=True
+    Verify Port    ${IC_uri2}    ${downlink_1}    status=OK    portStatus=Linked    enabled=True
+
+    Log to Console    ${\n}Verify server profiles status going through d1 become OK
+    Verify Server Profiles status    ${server_profile1[0]['name']}    OK
+    Verify Server Profiles status    ${server_profile_bfs[0]['name']}    OK
+
+    #Verification IC1 connection map
+    ${nameservers_ic1} =    Get IC NameServers    ${IC_uri1}
+    Should Not Be Empty    ${nameservers_ic1}
+    Verify Uplink DA Port    ${nameservers_ic1}    ${Uplink_Ports[0][1]}    ${expected_conn_map_ic1}
+    Verify Server DA Connection    ${nameservers_ic1}    ${downlink_1}    ${expected_conn_map_d1}
+
+    ${output1}=    Get Windows LUN Count    ${Server_IP}    ${win_server_details}    ${diskspd_cmd}
+    Run keyword unless    ${output1}== ${lun_count_total}    Fail    Log to console and logfile    The count of available LUN is ${output1}
+    Log to console and logfile    ${output1}
+
+    #Verify LOGINS for FA1 connection####
+    ${IC_uri}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri}
+    ${logins}    Get Port loginsCount for FA1 connection    ${IC_uri}    ${Uplink_Ports[1][0]}
+    Log to console    ${logins}
+    Run keyword unless    ${logins}== ${login1}    Fail    Log to console and logfile    The count of logins is ${logins}
+
+    #Verification IC2 connection map
+    ${nameservers_ic2} =    Get IC NameServers    ${IC_uri2}
+    Should Not Be Empty    ${nameservers_ic2}
+
+    Verify Uplink DA Port    ${nameservers_ic2}    ${Uplink_Ports[1][1]}    ${expected_conn_map_ic2}
+    Verify Server DA Connection    ${nameservers_ic2}    ${downlink_10}    ${expected_conn_map_d10}
+
+    #LUN count for server 10
+    ${count}=    Get Linux LUN Count    ${BFS_PING_LIST}    ${LINUX_BFS_USER}    ${LINUX_BFS_PWD}
+    Run Keyword If    ${count}==1    Log to console and logfile    LUN count is ${count} for bfs server    ELSE    Fail
+    Log to console and logfile    ${count}
+
+
+19_Disable downlink port fa and da connection of interconnect 2 and verify the lun count and logins
+    [Tags]  Disabledownlink
+    [Documentation]    Disable  downlink port d1,d10 of interconnect 2
+    ...                Disabling it would cause profile connection error.
+
+
+    ${IC_uri1}    Get IC URI    ${INTERCONNECTS[0]}
+    Log to console    ${IC_uri1}
+    ${IC_uri2}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri2}
+
+    Change Downlink Port Status   ${downlink_1}    ${INTERCONNECTS[1]}     false
+    Change Downlink Port Status   ${downlink_10}    ${INTERCONNECTS[1]}     false
+    Sleep    240s
+    Log to Console    ${\n}Verify uplink status, portStatus and disabled
+    Verify Port    ${IC_uri2}    ${downlink_1}    status=Critical    portStatus=Unlinked    enabled=False
+    Verify Port    ${IC_uri2}    ${downlink_10}    status=Critical    portStatus=Unlinked    enabled=False
+
+    Log to Console    ${\n}Verify server profiles status going through d1 become Critical
+    Verify Server Profiles status    ${server_profile1[0]['name']}    Critical
+    Verify Server Profiles status    ${server_profile_bfs[0]['name']}    Critical
+    #####Verify LOGINS for FA1 connection####
+    ${IC_uri}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri}
+    ${logins}    Get Port loginsCount for FA1 connection    ${IC_uri}    ${Uplink_Ports[1][0]}
+    Log to console    ${logins}
+    Run keyword unless    ${logins}== ${login0}    Fail    Log to console and logfile    The count of logins is ${logins}
+
+
+    ${output1}=    Get Windows LUN Count    ${Server_IP}    ${win_server_details}    ${diskspd_cmd}
+    Run keyword unless    ${output1}== ${lun_count_ic2}    Fail    Log to console and logfile    The count of available LUN is ${output1}
+    Log to console and logfile    ${output1}
+    #Verification IC2 connection map
+    ${nameservers_ic1} =    Get IC NameServers    ${IC_uri1}
+    Should Not Be Empty    ${nameservers_ic1}
+    ${nameservers_ic2} =    Get IC NameServers    ${IC_uri2}
+    Should Not Be Empty    ${nameservers_ic2}
+
+    Verify Uplink DA Port    ${nameservers_ic2}    ${Uplink_Ports[1][1]}    ${expected_conn_map_ic2}
+    Log to Console      ${\n}Verify disabled downlink not in nameServers
+    Verify Port Not In nameServers    ${nameservers_ic2}    ${downlink_10}
+    Verify Server DA Connection    ${nameservers_ic1}    ${downlink_1}    ${expected_conn_map_d1}
+    #LUN count for server 10
+    ${count}=    Get Linux LUN Count    ${BFS_PING_LIST}    ${LINUX_BFS_USER}    ${LINUX_BFS_PWD}
+    Run Keyword If    ${count}==0    Log to console and logfile    LUN count is ${count} for bfs server    ELSE    Fail
+    Log to console and logfile    ${count}
+
+20_Enable downlink port fa connection of interconnect 2 and verify the lun count and logins
+    [Tags]  Enabledownlink
+    [Documentation]    Enable  downlink port d1,d10 of interconnect 2
+    ...                Enabling it would not cause profile connection error.
+
+
+    ${IC_uri2}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri2}
+
+
+    Change Downlink Port Status   ${downlink_1}    ${INTERCONNECTS[1]}     true
+    Change Downlink Port Status   ${downlink_10}    ${INTERCONNECTS[1]}     true
+    Sleep    240s
+    Log to Console    ${\n}Verify uplink status, portStatus and disabled
+    Verify Port    ${IC_uri2}    ${downlink_1}    status=OK    portStatus=Linked    enabled=True
+    Verify Port    ${IC_uri2}    ${downlink_10}    status=OK    portStatus=Linked    enabled=True
+
+    Log to Console    ${\n}Verify server profiles status going through d1 become OK
+    Verify Server Profiles status    ${server_profile1[0]['name']}    OK
+    Verify Server Profiles status    ${server_profile_bfs[0]['name']}    OK
+
+    ${output1}=    Get Windows LUN Count    ${Server_IP}    ${win_server_details}    ${diskspd_cmd}
+    Run keyword unless    ${output1}== ${lun_count_total}    Fail    Log to console and logfile    The count of available LUN is ${output1}
+    Log to console and logfile    ${output1}
+
+    #Verify LOGINS for FA1 connection####
+    ${IC_uri}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri}
+    ${logins}    Get Port loginsCount for FA1 connection    ${IC_uri}    ${Uplink_Ports[1][0]}
+    Log to console    ${logins}
+    Run keyword unless    ${logins}== ${login1}    Fail    Log to console and logfile    The count of logins is ${logins}
+
+    #Verification IC2 connection map
+    ${nameservers_ic2} =    Get IC NameServers    ${IC_uri2}
+    Should Not Be Empty    ${nameservers_ic2}
+
+    Verify Uplink DA Port    ${nameservers_ic2}    ${Uplink_Ports[1][1]}    ${expected_conn_map_ic2}
+    Verify Server DA Connection    ${nameservers_ic2}    ${downlink_10}    ${expected_conn_map_d10}
+    #LUN count for server 10
+    ${count}=    Get Linux LUN Count    ${BFS_PING_LIST}    ${LINUX_BFS_USER}    ${LINUX_BFS_PWD}
+    Run Keyword If    ${count}==1    Log to console and logfile    LUN count is ${count} for bfs server    ELSE    Fail
+    Log to console and logfile    ${count}
+
+
+21_Poweroff interconnect 1 and verify the connection map for da connection
+    [Tags]  Poweroffinterconnect1
+    [Documentation]    Poweroff interconnect 1
+
+    Poweroff Interconnect   ${ENCLOSURE_IP}    ${OA_USER}    ${interconnect_bay1}
+    #Poweroff Interconnect   ${ENCLOSURE_IP}    ${OA_USER}    ${interconnect_bay1}
+    #Poweroff Interconnect   ${ENCLOSURE_IP}    ${OA_USER}    ${interconnect_bay1}
+    Sleep    360s
+    ${resp} =    Fusion Api Get Interconnect    param=?filter="'name'=='${INTERCONNECTS[0]}'"
+    Wait Until Keyword Succeeds    5 min    10 sec    GET IC STATE    ${INTERCONNECTS[0]}    Maintenance
+
+    #Verify Interconnect    ${INTERCONNECTS[0]}    state=Maintenance
+    Log to Console    ${\n}Verify uplink status, portStatus and Enabled
+
+    ${IC_uri1}    Get IC URI    ${INTERCONNECTS[0]}
+    Log to console    ${IC_uri1}
+    ${IC_uri2}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri2}
+
+    Verify Port    ${IC_uri1}    ${Uplink_Ports[0][1]}    status=Critical    portStatus=Unlinked
+    Log to Console    ${\n}Verify affected uplinkset status
+    Verify Uplinkset Status    ${LI}    us_da1    Critical
+
+    Log to Console    ${\n}Verify server profiles status going through US_DA1 become Critical
+    Verify Server Profiles status    ${server_profile1[0]['name']}    Critical
+    Verify Server Profiles status    ${server_profile_bfs[0]['name']}    Critical
+
+
+    #Verification IC1 connection map
+    ${nameservers_ic1} =    Get IC NameServers    ${IC_uri1}
+    Should Not Be Empty    ${nameservers_ic1}
+    ###Expected after power off the interconnect,connection map still remains####
+    Verify Uplink DA Port    ${nameservers_ic1}    ${Uplink_Ports[0][1]}    ${expected_conn_map_ic1}
+    Verify Server DA Connection    ${nameservers_ic1}    ${downlink_1}    ${expected_conn_map_d1}
+
+    #Verification IC2 connection map
+    ${nameservers_ic2} =    Get IC NameServers    ${IC_uri2}
+    Should Not Be Empty    ${nameservers_ic2}
+    ###Expected after power off the interconnect,connection map still remains####
+    Verify Uplink DA Port    ${nameservers_ic2}    ${Uplink_Ports[1][1]}    ${expected_conn_map_ic2}
+    Verify Server DA Connection    ${nameservers_ic2}    ${downlink_10}    ${expected_conn_map_d10}
+
+    #LUN count for server 10
+    #${count}=    Get Linux LUN Count    ${BFS_PING_LIST}    ${LINUX_BFS_USER}    ${LINUX_BFS_PWD}
+    #Run Keyword If    ${count}==1    Log to console and logfile    LUN count is ${count} for bfs server    ELSE    Fail
+    #Log to console and logfile    ${count}
+
+22_Poweron interconnect 1 and verify the connection map and LUN count for da connection
+    [Tags]  Poweroninterconnect1
+    [Documentation]    Poweron interconnect 1 and verify the connection map and LUN count for da connection
+
+    Poweron Interconnect   ${ENCLOSURE_IP}    ${OA_USER}    ${interconnect_bay1}
+    #Poweron Interconnect   ${ENCLOSURE_IP}    ${OA_USER}    ${interconnect_bay1}
+    #Poweron Interconnect   ${ENCLOSURE_IP}    ${OA_USER}    ${interconnect_bay1}
+    Sleep    360s
+    ${resp} =    Fusion Api Get Interconnect    param=?filter="'name'=='${INTERCONNECTS[0]}'"
+    Wait Until Keyword Succeeds    15 min    10 sec    GET IC STATE    ${INTERCONNECTS[0]}    Configured
+    #Verify Interconnect    ${INTERCONNECTS[0]}    state=Configured
+    Log to Console    ${\n}Verify uplink status, portStatus and Enabled
+
+    ${IC_uri1}    Get IC URI    ${INTERCONNECTS[0]}
+    Log to console    ${IC_uri1}
+
+    ${IC_uri2}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri2}
+
+    Verify Port    ${IC_uri1}    ${Uplink_Ports[0][1]}    status=OK    portStatus=Linked
+    Log to Console    ${\n}Verify affected uplinkset status
+    Verify Uplinkset Status    ${LI}    us_da1    OK
+
+    Log to Console    ${\n}Verify server profiles status going through US_DA1 become OK
+    Verify Server Profiles status    ${server_profile1[0]['name']}    OK
+    Verify Server Profiles status    ${server_profile_bfs[0]['name']}    OK
+    #Verification IC1 connection map
+    ${nameservers_ic1} =    Get IC NameServers    ${IC_uri1}
+    Should Not Be Empty    ${nameservers_ic1}
+
+    Verify Uplink DA Port    ${nameservers_ic1}    ${Uplink_Ports[0][1]}    ${expected_conn_map_ic1}
+    Verify Server DA Connection    ${nameservers_ic1}    ${downlink_1}    ${expected_conn_map_d1}
+
+    ${output1}=    Get Windows LUN Count    ${Server_IP}    ${win_server_details}    ${diskspd_cmd}
+    Run keyword unless    ${output1}== ${lun_count_total}    Fail    Log to console and logfile    The count of available LUN is ${output1}
+    Log to console and logfile    ${output1}
+
+    #Verification IC2 connection map
+    ${nameservers_ic2} =    Get IC NameServers    ${IC_uri2}
+    Should Not Be Empty    ${nameservers_ic2}
+    ###Expected after power off the interconnect,connection map still remains####
+    Verify Uplink DA Port    ${nameservers_ic2}    ${Uplink_Ports[1][1]}    ${expected_conn_map_ic2}
+    Verify Server DA Connection    ${nameservers_ic2}    ${downlink_10}    ${expected_conn_map_d10}
+
+    #LUN count for server 10
+    ${count}=    Get Linux LUN Count    ${BFS_PING_LIST}    ${LINUX_BFS_USER}    ${LINUX_BFS_PWD}
+    Run Keyword If    ${count}==1    Log to console and logfile    LUN count is ${count} for bfs server    ELSE    Fail
+    Log to console and logfile    ${count}
+
+
+23_Poweroff interconnect 2 and verify the logins count for fa connection
+    [Tags]  Poweroffinterconnect2
+    [Documentation]    Poweroff interconnect 2 and verify the logins count for fa connection
+
+    #Poweroff Interconnect   ${ENCLOSURE_IP}    ${OA_USER}    ${interconnect_bay2}
+    Poweroff Interconnect   ${ENCLOSURE_IP}    ${OA_USER}    ${interconnect_bay2}
+    Poweroff Interconnect   ${ENCLOSURE_IP}    ${OA_USER}    ${interconnect_bay2}
+    Sleep    360s
+    #Verify Interconnect    ${INTERCONNECTS[1]}    state=Maintenance
+    ${resp} =    Fusion Api Get Interconnect    param=?filter="'name'=='${INTERCONNECTS[1]}'"
+    Wait Until Keyword Succeeds    5 min    10 sec    GET IC STATE    ${INTERCONNECTS[1]}    Maintenance
+    Log to Console    ${\n}Verify uplink status, portStatus and Enabled
+
+    ${IC_uri2}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri2}
+
+    Verify Port    ${IC_uri2}    ${Uplink_Ports[1][0]}    status=Critical    portStatus=Unlinked
+    Verify Port    ${IC_uri2}    ${Uplink_Ports[1][1]}    status=Critical    portStatus=Unlinked
+    Log to Console    ${\n}Verify affected uplinkset status
+    Verify Uplinkset Status    ${LI}    us_fa1    Critical
+    Verify Uplinkset Status    ${LI}    us_da2    Critical
+
+    Log to Console    ${\n}Verify server profiles status going through us_fa1 become Critical
+    Verify Server Profiles status    ${server_profile1[0]['name']}    Critical
+    Verify Server Profiles status    ${server_profile_bfs[0]['name']}    Critical
+
+    ${output1}=    Get Windows LUN Count    ${Server_IP}    ${win_server_details}    ${diskspd_cmd}
+    Run keyword unless    ${output1}== ${lun_count_ic2}    Fail    Log to console and logfile    The count of available LUN is ${output1}
+    Log to console and logfile    ${output1}
+    ###Expected after poweroff the interconnect logins won't impact for fa connection#####
+    #Verify LOGINS for FA1 connection####
+    ${IC_uri}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri}
+    ${logins}    Get Port loginsCount for FA1 connection    ${IC_uri}    ${Uplink_Ports[1][0]}
+    Log to console    ${logins}
+    #Expected when powering off the interconnect having fa connection ,logins should remain same
+    Run keyword unless    ${logins}== ${login1}    Fail    Log to console and logfile    The count of logins is ${logins}
+    ${IC_uri1}    Get IC URI    ${INTERCONNECTS[0]}
+    Log to console    ${IC_uri1}
+    #Verification IC1 connection map
+    ${nameservers_ic1} =    Get IC NameServers    ${IC_uri1}
+    Should Not Be Empty    ${nameservers_ic1}
+
+    Verify Uplink DA Port    ${nameservers_ic1}    ${Uplink_Ports[0][1]}    ${expected_conn_map_ic1}
+    Verify Server DA Connection    ${nameservers_ic1}    ${downlink_1}    ${expected_conn_map_d1}
+
+    #Verification IC2 connection map
+    ${nameservers_ic2} =    Get IC NameServers    ${IC_uri2}
+    Should Not Be Empty    ${nameservers_ic2}
+    ###Expected after power off the interconnect,connection map still remains####
+    Verify Uplink DA Port    ${nameservers_ic2}    ${Uplink_Ports[1][1]}    ${expected_conn_map_ic2}
+    Verify Server DA Connection    ${nameservers_ic2}    ${downlink_10}    ${expected_conn_map_d10}
+
+    #LUN count for server 10
+    ${count}=    Get Linux LUN Count    ${BFS_PING_LIST}    ${LINUX_BFS_USER}    ${LINUX_BFS_PWD}
+    Run Keyword If    ${count}==0    Log to console and logfile    LUN count is ${count} for bfs server    ELSE    Fail
+    Log to console and logfile    ${count}
+
+24_Poweron interconnect 2 and verify the logins count for fa connection
+    [Tags]  Poweroninterconnect2
+    [Documentation]    Poweron interconnect 2 and verify the logins count for fa connection
+
+    Poweron Interconnect   ${ENCLOSURE_IP}    ${OA_USER}    ${interconnect_bay2}
+    #Poweron Interconnect   ${ENCLOSURE_IP}    ${OA_USER}    ${interconnect_bay2}
+    #Poweron Interconnect   ${ENCLOSURE_IP}    ${OA_USER}    ${interconnect_bay2}
+    Sleep    360s
+    #Verify Interconnect    ${INTERCONNECTS[1]}    state=Configured
+    ${resp} =    Fusion Api Get Interconnect    param=?filter="'name'=='${INTERCONNECTS[1]}'"
+    Wait Until Keyword Succeeds    15 min    10 sec    GET IC STATE    ${INTERCONNECTS[1]}    Configured
+    Log to Console    ${\n}Verify uplink status, portStatus and Enabled
+
+    ${IC_uri1}    Get IC URI    ${INTERCONNECTS[0]}
+    Log to console    ${IC_uri1}
+    ${IC_uri2}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri2}
+    Verify Port    ${IC_uri2}    ${Uplink_Ports[1][0]}    status=OK    portStatus=Linked
+    Verify Port    ${IC_uri2}    ${Uplink_Ports[1][1]}    status=OK    portStatus=Linked
+    Log to Console    ${\n}Verify affected uplinkset status
+    Verify Uplinkset Status    ${LI}    us_fa1    OK
+    Verify Uplinkset Status    ${LI}    us_da2    OK
+
+    Log to Console    ${\n}Verify server profiles status going through us_fa1 become OK
+    Verify Server Profiles status    ${server_profile1[0]['name']}    OK
+    Verify Server Profiles status    ${server_profile_bfs[0]['name']}    OK
+
+    ${output1}=    Get Windows LUN Count    ${Server_IP}    ${win_server_details}    ${diskspd_cmd}
+    Run keyword unless    ${output1}== ${lun_count_total}    Fail    Log to console and logfile    The count of available LUN is ${output1}
+    Log to console and logfile    ${output1}
+    ###Expected after poweroff the interconnect logins won't impact for fa connection#####
+    #Verify LOGINS for FA1 connection####
+    ${IC_uri}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri}
+    ${logins}    Get Port loginsCount for FA1 connection    ${IC_uri}    ${Uplink_Ports[1][0]}
+    Log to console    ${logins}
+    Run keyword unless    ${logins}== ${login1}    Fail    Log to console and logfile    The count of logins is ${logins}
+
+   #Verification IC1 connection map
+    ${nameservers_ic1} =    Get IC NameServers    ${IC_uri1}
+    Should Not Be Empty    ${nameservers_ic1}
+
+    Verify Uplink DA Port    ${nameservers_ic1}    ${Uplink_Ports[0][1]}    ${expected_conn_map_ic1}
+    Verify Server DA Connection    ${nameservers_ic1}    ${downlink_1}    ${expected_conn_map_d1}
+
+    #Verification IC2 connection map
+    ${nameservers_ic2} =    Get IC NameServers    ${IC_uri2}
+    Should Not Be Empty    ${nameservers_ic2}
+    ###Expected after power off the interconnect,connection map still remains####
+    Verify Uplink DA Port    ${nameservers_ic2}    ${Uplink_Ports[1][1]}    ${expected_conn_map_ic2}
+    Verify Server DA Connection    ${nameservers_ic2}    ${downlink_10}    ${expected_conn_map_d10}
+
+    #LUN count for server 10
+    ${count}=    Get Linux LUN Count    ${BFS_PING_LIST}    ${LINUX_BFS_USER}    ${LINUX_BFS_PWD}
+    Run Keyword If    ${count}==1    Log to console and logfile    LUN count is ${count} for bfs server    ELSE    Fail
+    Log to console and logfile    ${count}
+
+
+
+25_Efuseoff icm1 and validate the connection map for da connection
+    [Documentation]     Efuseoff icm1 and validate the connection map for da connection
+    OA CLI EFUSE    ${ENCLOSURE_IP}    ${OA_USER}    ${OA_PASS}    ${DEVICE}    ${interconnect_bay1}    ${ACTION[1]}
+    Sleep    240s
+
+    ${resp} =    Fusion Api Get Interconnect    param=?filter="'name'=='${INTERCONNECTS[0]}'"
+    Wait Until Keyword Succeeds    5 min    10 sec    GET IC STATE    ${INTERCONNECTS[0]}    Absent
+    ${IC_uri1}    Get IC URI    ${INTERCONNECTS[0]}
+    Log to console    ${IC_uri1}
+    ${IC_uri2}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri2}
+
+    Verify Port    ${IC_uri1}    ${Uplink_Ports[0][1]}    status=None
+    Log to Console    ${\n}Verify affected uplinkset status
+    Verify Uplinkset Status    ${LI}    us_da1    Critical
+
+    Log to Console    ${\n}Verify server profiles status going through US_DA1 become Critical
+    Verify Server Profiles status    ${server_profile1[0]['name']}    Critical
+    Verify Server Profiles status    ${server_profile_bfs[0]['name']}    Critical
+
+
+    #Verification IC1 connection map
+    ${nameservers_ic1} =    Get IC NameServers    ${IC_uri1}
+    Should Be Empty    ${nameservers_ic1}
+
+
+    #Verification IC2 connection map
+    ${nameservers_ic2} =    Get IC NameServers    ${IC_uri2}
+    Should Not Be Empty    ${nameservers_ic2}
+
+    Verify Uplink DA Port    ${nameservers_ic2}    ${Uplink_Ports[1][1]}    ${expected_conn_map_ic2}
+    Verify Server DA Connection    ${nameservers_ic2}    ${downlink_10}    ${expected_conn_map_d10}
+
+
+
+26_Efuseon icm1 and validate the connection map for da connection
+    [Documentation]     Efuseoff icm1 and validate the connection map for da connection
+    OA CLI EFUSE    ${ENCLOSURE_IP}    ${OA_USER}    ${OA_PASS}    ${DEVICE}    ${interconnect_bay1}    ${ACTION[0]}
+    Sleep    500s
+
+    ${resp} =    Fusion Api Get Interconnect    param=?filter="'name'=='${INTERCONNECTS[0]}'"
+    Wait Until Keyword Succeeds    15 min    10 sec    GET IC STATE    ${INTERCONNECTS[0]}    Configured
+
+    ${IC_uri1}    Get IC URI    ${INTERCONNECTS[0]}
+    Log to console    ${IC_uri1}
+    ${IC_uri2}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri2}
+
+    Verify Port    ${IC_uri1}    ${Uplink_Ports[0][1]}    status=OK    portStatus=Linked
+    Log to Console    ${\n}Verify affected uplinkset status
+    Verify Uplinkset Status    ${LI}    us_da1    OK
+
+    Log to Console    ${\n}Verify server profiles status going through US_DA1 become OK
+    Verify Server Profiles status    ${server_profile1[0]['name']}    OK
+    Verify Server Profiles status    ${server_profile_bfs[0]['name']}    OK
+
+    #Verification IC1 connection map
+    ${nameservers_ic1} =    Get IC NameServers    ${IC_uri1}
+    Should Not Be Empty    ${nameservers_ic1}
+
+    Verify Uplink DA Port    ${nameservers_ic1}    ${Uplink_Ports[0][1]}    ${expected_conn_map_ic1}
+    Verify Server DA Connection    ${nameservers_ic1}    ${downlink_1}    ${expected_conn_map_d1}
+
+    ${output1}=    Get Windows LUN Count    ${Server_IP}    ${win_server_details}    ${diskspd_cmd}
+    Run keyword unless    ${output1}== ${lun_count_total}    Fail    Log to console and logfile    The count of available LUN is ${output1}
+    Log to console and logfile    ${output1}
+
+    #Verification IC2 connection map
+    ${nameservers_ic2} =    Get IC NameServers    ${IC_uri2}
+    Should Not Be Empty    ${nameservers_ic2}
+
+    Verify Uplink DA Port    ${nameservers_ic2}    ${Uplink_Ports[1][1]}    ${expected_conn_map_ic2}
+    Verify Server DA Connection    ${nameservers_ic2}    ${downlink_10}    ${expected_conn_map_d10}
+
+    #LUN count for server 10
+    ${count}=    Get Linux LUN Count    ${BFS_PING_LIST}    ${LINUX_BFS_USER}    ${LINUX_BFS_PWD}
+    Run Keyword If    ${count}==1    Log to console and logfile    LUN count is ${count} for bfs server    ELSE    Fail
+    Log to console and logfile    ${count}
+
+
+27_Efuseoff icm2 and validate the LUN count for fa connection
+    [Documentation]     Efuseoff icm2 and validate the LUN count for fa connection
+    GET LOGINS COUNT CLI
+
+    OA CLI EFUSE    ${ENCLOSURE_IP}    ${OA_USER}    ${OA_PASS}    ${DEVICE}    ${interconnect_bay2}    ${ACTION[1]}
+    Sleep    240s
+
+    ${resp} =    Fusion Api Get Interconnect    param=?filter="'name'=='${INTERCONNECTS[1]}'"
+    Wait Until Keyword Succeeds    5 min    10 sec    GET IC STATE    ${INTERCONNECTS[1]}    Absent
+    ${IC_uri1}    Get IC URI    ${INTERCONNECTS[0]}
+    Log to console    ${IC_uri1}
+    ${IC_uri2}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri2}
+
+    Verify Port    ${IC_uri2}    ${Uplink_Ports[1][0]}    status=None
+    Log to Console    ${\n}Verify affected uplinkset status
+    Verify Uplinkset Status    ${LI}    us_fa1    Critical
+
+    Log to Console    ${\n}Verify server profiles status going through us_fa1 become Critical
+    Verify Server Profiles status    ${server_profile1[0]['name']}    Critical
+    Verify Server Profiles status    ${server_profile_bfs[0]['name']}    Critical
+
+    ${output1}=    Get Windows LUN Count    ${Server_IP}    ${win_server_details}    ${diskspd_cmd}
+    Run keyword unless    ${output1}== ${lun_count_ic2}    Fail    Log to console and logfile    The count of available LUN is ${output1}
+    Log to console and logfile    ${output1}
+    #Validate npiv logins by log into switch
+    GET LOGINS COUNT ABSENT CLI
+
+    #Verification IC1 connection map
+    ${nameservers_ic1} =    Get IC NameServers    ${IC_uri1}
+    Should Not Be Empty    ${nameservers_ic1}
+
+    Verify Uplink DA Port    ${nameservers_ic1}    ${Uplink_Ports[0][1]}    ${expected_conn_map_ic1}
+    Verify Server DA Connection    ${nameservers_ic1}    ${downlink_1}    ${expected_conn_map_d1}
+
+    #Verification IC2 connection map
+    ${nameservers_ic2} =    Get IC NameServers    ${IC_uri2}
+    Should Be Empty    ${nameservers_ic2}
+
+    #LUN count for server 10
+    ${count}=    Get Linux LUN Count    ${BFS_PING_LIST}    ${LINUX_BFS_USER}    ${LINUX_BFS_PWD}
+    Run Keyword If    ${count}==0    Log to console and logfile    LUN count is ${count} for bfs server    ELSE    Fail
+    Log to console and logfile    ${count}
+
+28_Efuseon icm2 and validate the LUN count for fa connection
+    [Documentation]     Efuseoff icm2 and validate the LUN count for fa connection
+    OA CLI EFUSE    ${ENCLOSURE_IP}    ${OA_USER}    ${OA_PASS}    ${DEVICE}    ${interconnect_bay2}    ${ACTION[0]}
+    Sleep    240s
+
+    ${resp} =    Fusion Api Get Interconnect    param=?filter="'name'=='${INTERCONNECTS[1]}'"
+    Wait Until Keyword Succeeds    15 min    10 sec    GET IC STATE    ${INTERCONNECTS[1]}    Configured
+
+    ${IC_uri1}    Get IC URI    ${INTERCONNECTS[0]}
+    Log to console    ${IC_uri1}
+    ${IC_uri2}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri2}
+
+    Verify Port    ${IC_uri2}    ${Uplink_Ports[1][0]}    status=OK    portStatus=Linked
+    Log to Console    ${\n}Verify affected uplinkset status
+    Verify Uplinkset Status    ${LI}    us_fa1    OK
+
+    Log to Console    ${\n}Verify server profiles status going through us_fa1 become OK
+    Verify Server Profiles status    ${server_profile1[0]['name']}    OK
+    Verify Server Profiles status    ${server_profile_bfs[0]['name']}    OK
+
+    ${output1}=    Get Windows LUN Count    ${Server_IP}    ${win_server_details}    ${diskspd_cmd}
+    Run keyword unless    ${output1}== ${lun_count_total}    Fail    Log to console and logfile    The count of available LUN is ${output1}
+    Log to console and logfile    ${output1}
+
+    #Verify LOGINS for FA1 connection####
+    ${IC_uri}    Get IC URI    ${INTERCONNECTS[1]}
+    Log to console    ${IC_uri}
+    ${logins}    Get Port loginsCount for FA1 connection    ${IC_uri}    ${Uplink_Ports[1][0]}
+    Log to console    ${logins}
+    Run keyword unless    ${logins}== ${login1}    Fail    Log to console and logfile    The count of logins is ${logins}
+
+    GET LOGINS COUNT CLI
+
+    #Verification IC1 connection map
+    ${nameservers_ic1} =    Get IC NameServers    ${IC_uri1}
+    Should Not Be Empty    ${nameservers_ic1}
+
+    Verify Uplink DA Port    ${nameservers_ic1}    ${Uplink_Ports[0][1]}    ${expected_conn_map_ic1}
+    Verify Server DA Connection    ${nameservers_ic1}    ${downlink_1}    ${expected_conn_map_d1}
+
+    #Verification IC2 connection map
+    ${nameservers_ic2} =    Get IC NameServers    ${IC_uri2}
+    Should Not Be Empty    ${nameservers_ic2}
+
+    Verify Uplink DA Port    ${nameservers_ic2}    ${Uplink_Ports[1][1]}    ${expected_conn_map_ic2}
+    Verify Server DA Connection    ${nameservers_ic2}    ${downlink_10}    ${expected_conn_map_d10}
+
+    #LUN count for server 10
+    ${count}=    Get Linux LUN Count    ${BFS_PING_LIST}    ${LINUX_BFS_USER}    ${LINUX_BFS_PWD}
+    Run Keyword If    ${count}==1    Log to console and logfile    LUN count is ${count} for bfs server    ELSE    Fail
+    Log to console and logfile    ${count}
+
+29_Final Cleanup
+   [Documentation]    Remove all resources from oneview
+    Suite Cleanup   
+
+***Keywords***
+Verify Uplink DA Port
+    [Documentation]    Verify DA uplinkport connected 3par portwwn through the nameServer entries
+    ...                argument ul_da is a dictionary of uplink name and its expected DA 3par portWwn
+    [Arguments]     ${nameservers}    ${ul_da}    ${expected_conn_map_u1}
+
+    # Go through nameServers list and check against the input uplink and its expected da portwwn
+    :FOR    ${ns}    IN    @{nameservers}
+    \    ${ns_da_portwwn} =    Set Variable IF    '${ns['portName']}' == '${ul_da}'
+    \    ...                ${ns['portWwn']}    ${EMPTY}
+    \    Exit For Loop If    '${ns['portName']}' == '${ul_da}'
+
+    # ul_da contains uplink to be checked in nameservers, this check ensures nameservers not missing uplinks
+    Should Be Equal As Strings    ${ns_da_portwwn}    ${expected_conn_map_u1}
+Verify Server DA Connection
+    [Documentation]    Verify server connections through input server downlink and expected connected ports
+    [Arguments]    ${nameservers}    ${dl}    ${expected_conn_map}
+
+    ${conn_map_from_ns} =     Create List
+    :FOR    ${ns}    IN     @{nameservers}
+    \    ${conn_map_from_ns} =    Set Variable IF    '${ns['portName']}' == '${dl}'    ${ns['connectionMap']}
+    \    Exit for loop if    '${ns['portName']}' == '${dl}'
+
+    # The order is not guaranteed
+    #Sort List     ${conn_map_from_ns}
+    #Sort List     ${expected_conn_map}
+    Lists Should Be Equal    ${conn_map_from_ns}    ${expected_conn_map}
+Get IC NameServers
+    [Documentation]    Returns DirectAttach nameServers info of specified interconnect
+    [Arguments]    ${ic_uri}
+
+    ${resp} =     fusion api get interconnect nameservers    ${ic_uri}
+    Should Be Equal As Integers    ${resp['status_code']}    ${200}
+
+    # workaround FusionLibrary request problem that it does not return proper format when response is not a dict
+    # Get the response from key _content
+    ${json_string} =    Set Variable    ${resp['_content']}
+    #log to console     ${\n}The returned name server string: ${json_string}
+
+    ${nameservers} =    evaluate    json.loads('''${json_string}''')    json
+
+    [Return]  ${nameservers}
+Get IC Port
+    [Documentation]    Returns the port info of the named port of specified interconnect uri
+    [Arguments]     ${uri}    ${portName}
+
+    ${return} =    Create List
+    ${resp} =    fusion api get interconnect ports    uri=${uri}
+    ${ports} =    Get From Dictionary    ${resp}    members
+    :FOR    ${port}    IN    @{ports}
+    \    ${return} =    Run Keyword If    '${port['portName']}' == '${portName}'    set variable    ${port}
+    \    Exit for loop if    '${port['portName']}' == '${portName}'
+
+    [Return]    ${return}
+Get Port loginsCount for FA1 connection
+    [Documentation]    return the loginsCount of specified FC uplinkport
+    [Arguments]    ${ic_uri}    ${portName}
+
+    ${resp} =    Get IC Port    ${ic_uri}    ${portName}
+    #Should Not Be Empty    ${resp}
+    Log to console    ${resp['fcPortProperties']}
+    Log to console    ${resp['fcPortProperties']['loginsCount']}
+    #${fcPortProperties} =    ${resp['fcPortProperties']}
+    #Should Not Be Empty    ${fcPortProperties}
+
+    [Return]    ${resp['fcPortProperties']['loginsCount']}
+Suite Cleanup
+    [Documentation]  Clean up
+    Set Log Level    TRACE
+
+    Power off ALL Servers
+    Remove All Server Profiles
+    Remove All Enclosures
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove ALL Ethernet Networks
+    Remove ALL FC Networks
+    Remove ALL Network Sets
+    Remove All Users
+
+Verify Interconnect Port Status
+    [Documentation]  Get IC Ports details.
+    [Arguments]    ${port_no}   ${IC}
+
+    ${uri} =    Get IC URI    ${IC}
+    ${len}    Get Length    ${port_no}
+    :FOR    ${y}    IN RANGE    0    ${len}
+    \    ${ic_uri} =        catenate    ${uri}/ports
+    \    Log to console and logfile   ic catenate ${ic_uri}
+    \    ${resp}        Fusion Api Get Interconnect     ${uri}
+    \    Verify Port Status    ${resp['ports']}    ${port_no[${y}]}
+
+Verify Port Status
+    [Documentation]  Verifies the port status
+    [Arguments]     ${resp}    ${port_no}
+
+    ${len} =    Get Length    ${resp}
+    :FOR    ${y}    IN RANGE    0  ${len}-1
+    \    ${count} =    Set Variable    0
+    \    Run Keyword If    '${resp[${y}]['portName']}' != '${port_no}'    Continue For Loop
+    \    Should Match Regexp     ${resp[${y}]['portStatus']}    Linked
+    \    ${count} =    Evaluate    ${count} + 1
+    \    Run Keyword If    ${count}==${len}    Exit For Loop
+
+Get Windows LUN Count
+    [Documentation]    Gets the available lun counts from the server.
+    [Arguments]     ${Server_IP}    ${win_server_details}    ${diskspd_cmd}
+    Sleep    10
+    ${count}    validate_windows_lun_count    ${Server_IP}    ${win_server_details['username']}    ${win_server_details['password']}    ${diskspd_cmd}
+    Log to console and logfile    \n\n${count}
+
+    [Return]    ${count}
+
+Get Linux LUN Count
+    [Documentation]    Gets the available lun counts from the server.
+    [Arguments]     ${BFS_PING_LIST}    ${LINUX_BFS_USER}    ${LINUX_BFS_PWD}
+    SSHLibrary.Open Connection    ${BFS_PING_LIST}    timeout=120s
+    SSHLibrary.Login               ${LINUX_BFS_USER}    ${LINUX_BFS_PWD}
+    SSHLibrary.Write    lsscsi | grep VV
+    Sleep    5
+    ${list_disk}=    SSHLibrary.Read
+    ${lines}=    Get Lines Containing String    ${list_disk}    dev/sd
+    ${count}=    Get Line Count    ${lines}
+    SSHLibrary.Write    exit
+    SSHLibrary.Close Connection
+    SSHLibrary.Close All Connections
+    [Return]    ${count}
+Change Uplink Port Status
+    [Documentation]   Keyword to Disable/Enable an uplink port in an interconnect
+    [Arguments]     ${uplink_port}      ${interconnect}     ${status}
+
+    ${ic_uri} =     Get IC URI      ${interconnect}
+    ${resp}=    Fusion Api Get Interconnect Ports   ${ic_uri}
+    ${len} =    Get Length    ${resp['members']}
+    ${port_info}=     Create List
+    :FOR    ${y}    IN RANGE    0  ${len}
+    \    Run Keyword If    '${resp['members'][${y}]['portName']}' != '${uplink_port}' or '${resp['members'][${y}]['portType']}' != 'Uplink'    Continue For Loop
+    \    ...         ELSE    Append To List    ${port_info}    ${resp['members'][${y}]}
+    ${ic_uri} =     Get IC URI      ${interconnect}
+    @{id} =     Split String    ${ic_uri}   /
+    ${port_id} =    Get From List   ${id}   3
+    ${portid}       catenate    ${port_id}:${uplink_port}
+    #Log to console \nport id ${portid}
+    Set to Dictionary   ${Edit_Uplink_Port}  portId     ${portid}
+    Set to Dictionary   ${Edit_Uplink_Port}  enabled     ${status}
+    Set to Dictionary   ${Edit_Uplink_Port}  portName     ${uplink_port}
+    Set to Dictionary   ${Edit_Uplink_Port}  portStatus     ${port_info[0]['portStatus']}
+    set to dictionary    ${Edit_Uplink_Port}   associatedUplinkSetUri=${port_info[0]['associatedUplinkSetUri']}
+    set to dictionary    ${Edit_Uplink_Port}   portHealthStatus=${port_info[0]['portHealthStatus']}
+
+    ${edit_body} =  Create List     ${Edit_Uplink_Port}
+
+    ${resp}     Fusion Api Edit Interconnect Ports      ${edit_body}        ${ic_uri}
+    Log to console  \n resp after update is ${Resp}
+    Run Keyword If  ${resp['status_code']} !=202    fail    msg=\nEditing of Uplink ${uplink_port} in ${interconnect} Failed. \n ErrorCode:${resp['errorCode']}\nMessage:${resp['message']}
+    ${task} =   Wait For Task   ${resp}     15m    5s
+    Run Keyword If  '${task['taskState']}' !='Completed'  or  ${task['status_code']} !=200   fail    msg=\nEditing of Uplink ${uplink_port} in ${interconnect} Failed. \n ErrorCode:${task[‘taskErrors’][0][errorCode]}\n :Message ${task[‘taskErrors’][0][errorCode]}
+    ...         ELSE    Log to console and logfile  \n\nEdited Uplink ${uplink_port} in ${interconnect} Successfully !!
+
+Change Downlink Port Status
+    [Documentation]   Keyword to Disable/Enable an uplink port in an interconnect
+    [Arguments]     ${uplink_port}      ${interconnect}     ${status}
+
+    ${ic_uri} =     Get IC URI      ${interconnect}
+    ${resp}=    Fusion Api Get Interconnect Ports   ${ic_uri}
+    ${len} =    Get Length    ${resp['members']}
+    ${port_info}=     Create List
+    :FOR    ${y}    IN RANGE    0  ${len}
+    \    Run Keyword If    '${resp['members'][${y}]['portName']}' != '${uplink_port}' or '${resp['members'][${y}]['portType']}' != 'Downlink'    Continue For Loop
+    \    ...         ELSE    Append To List    ${port_info}    ${resp['members'][${y}]}
+    ${ic_uri} =     Get IC URI      ${interconnect}
+    @{id} =     Split String    ${ic_uri}   /
+    ${port_id} =    Get From List   ${id}   3
+    ${portid}       catenate    ${port_id}:${uplink_port}
+    #Log to console \nport id ${portid}
+    Set to Dictionary   ${Edit_Uplink_Port}  portId     ${portid}
+    Set to Dictionary   ${Edit_Uplink_Port}  enabled     ${status}
+    Set to Dictionary   ${Edit_Uplink_Port}  portName     ${uplink_port}
+    Set to Dictionary   ${Edit_Uplink_Port}  portStatus     ${port_info[0]['portStatus']}
+    set to dictionary    ${Edit_Uplink_Port}   associatedUplinkSetUri=${port_info[0]['associatedUplinkSetUri']}
+    set to dictionary    ${Edit_Uplink_Port}   portHealthStatus=${port_info[0]['portHealthStatus']}
+
+    ${edit_body} =  Create List     ${Edit_Uplink_Port}
+
+    ${resp}     Fusion Api Edit Interconnect Ports      ${edit_body}        ${ic_uri}
+    Log to console  \n resp after update is ${Resp}
+    Run Keyword If  ${resp['status_code']} !=202    fail    msg=\nEditing of Uplink ${uplink_port} in ${interconnect} Failed. \n ErrorCode:${resp['errorCode']}\nMessage:${resp['message']}
+    ${task} =   Wait For Task   ${resp}     15m    5s
+    Run Keyword If  '${task['taskState']}' !='Completed'  or  ${task['status_code']} !=200   fail    msg=\nEditing of Uplink ${uplink_port} in ${interconnect} Failed. \n ErrorCode:${task[‘taskErrors’][0][errorCode]}\n :Message ${task[‘taskErrors’][0][errorCode]}
+    ...         ELSE    Log to console and logfile  \n\nEdited downlink ${uplink_port} in ${interconnect} Successfully !!
+
+Verify Port
+    [Documentation]    Verify the named port of specified interconnect uri has the optional expected attribute values
+    [Arguments]    ${uri}    ${portName}    ${status}=${None}    ${portStatus}=${None}
+    ...            ${portStatusReason}=${None}    ${opSpeed}=${None}    ${enabled}=${None}
+    ...            ${loginsCount}=${None}    ${connectedTo}=${None}
+
+    ${resp} =    Get IC Port    ${uri}    ${portName}
+    Should Not Be Empty    ${resp}
+
+    # for optional kw arguments. If not specified, do not check
+    Run Keyword IF    '${status}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['status']}    ${status}
+    Run Keyword IF    '${portStatus}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['portStatus']}    ${portStatus}
+    Run Keyword IF    '${portStatusReason}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['portStatusReason']}    ${portStatusReason}
+    Run Keyword IF    '${opSpeed}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['operationalSpeed']}    ${opSpeed}
+    Run Keyword IF    '${enabled}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['enabled']}    ${enabled}
+    Run Keyword IF    '${loginsCount}' != '${None}'
+    ...               should be equal as Integers    ${resp['fcPortProperties']['loginsCount']}    ${loginsCount}
+    Run Keyword IF    '${connectedTo}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['fcPortProperties']['principleInterconnectName']}
+    ...                                             ${connectedTo}
+
+Verify Uplinkset Status
+    [Documentation]    Verify the named uplinkset has the expected status
+    [Arguments]     ${li_name}    ${us_name}    ${status}
+
+    ${resp} =    fvt-keywords.Get Uplink Set By Name    ${li_name}    ${us_name}
+    Should be Equal As Strings    ${resp['status']}    ${status}
+
+Verify Server Profiles Status
+    [Documentation]    Verify the named profiles have the expected status
+    [Arguments]     ${sp_names}    ${expected_status}
+    ${sp_resp} =    Fvt Api Get Server Profile By Name    ${sp_names}
+    Should Be Equal As Strings    ${sp_resp['status']}    ${expected_status}
+    #:FOR    ${sp}    IN    @{sp_names}
+    #\    ${sp_resp} =    Fvt Api Get Server Profile By Name    ${sp}
+    #\    Should Be Equal As Strings    ${sp_resp['status']}    ${expected_status}
+
+Verify Port Not In nameServers
+    [Documentation]    Verify there is no nameServer entry for the named port
+    ...                When a port is disabled, there is no entry in the nameServers
+    [Arguments]     ${nameservers}    ${portName}
+
+    :FOR    ${ns}    IN    @{nameservers}
+    \    Should Not Be Equal As Strings    ${ns['portName']}    ${portName}
+
+Poweroff Interconnect
+    [Documentation]     Poweroff Interconnect
+    [Arguments]         ${SSH_HOST}   ${SSH_USER}    ${interconnect}
+    Telnet.Open Connection     ${SSH_HOST}     timeout=180s
+    Set Suite variable  ${SSH_PASS}     ${OA_PASS}
+    Telnet.Login    ${SSH_USER}    ${SSH_PASS}
+    Telnet.Write     poweroff interconnect ${interconnect}
+    Telnet.Write     poweroff interconnect ${interconnect}
+    Telnet.Close All Connections
+
+Poweron Interconnect
+    [Documentation]     Poweron Interconnect
+    [Arguments]         ${SSH_HOST}   ${SSH_USER}    ${interconnect}
+    Telnet.Open Connection     ${SSH_HOST}     timeout=180s
+    Set Suite variable  ${SSH_PASS}     ${OA_PASS}
+    Telnet.Login    ${SSH_USER}    ${SSH_PASS}
+    Telnet.Write     poweron interconnect ${interconnect}
+    Telnet.Write     poweron interconnect ${interconnect}
+    Telnet.Close All Connections
+
+Verify Interconnect
+    [Documentation]    Verify the named interconnect has the optional expected attribute values
+    [Arguments]     ${ic_name}    ${status}=${None}    ${state}=${None}
+
+    # for optional kw arguments. If not specified, do not check
+    ${resp} =    Fvt Api Get Interconnect By Name    ${ic_name}
+    Run Keyword IF    '${status}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['status']}    ${status}
+
+    Run Keyword IF    '${state}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['state']}    ${state}
+
+OA CLI EFUSE
+    [Documentation]    issues an EFUSE Action to the given Device\Bay.
+    ...   {DEVICE} = <BLADE|IOM|NETTRAY|SWM|FAN|OA|EM>
+    ...   {BAY} = desired bay for given device
+    ...   {ACTION} = <ON|OFF>
+    [Arguments]        ${OA_HOST}    ${OA_USER}     ${OA_PASS}    ${DEVICE}    ${BAY}    ${ACTION}
+    Telnet.Open Connection     ${OA_HOST}     prompt=>    timeout=20s
+    Telnet.Login               ${OA_USER}     ${OA_PASS}
+    Telnet.Write    ++diag--
+    Telnet.Read Until    diag>
+    Telnet.Write    efuse ${DEVICE} ${BAY} ${ACTION}
+    Telnet.Write    q
+    Telnet.Close All Connections
+
+GET LOGINS COUNT ABSENT CLI
+    [Documentation]    Get logins count by login into switch
+    Telnet.Open Connection     ${SWITCH_IP}     prompt=>    timeout=20s
+    Telnet.Login               ${SWITCH_USER}     ${SWITCH_PASSWRD}
+    ${show}=    Telnet.Execute Command    switchshow
+    Log to Console      ${show}
+    ${flow}=        Get Lines Containing String     ${show}   NPIV pub
+    Log to console and logfile  ${flow}
+    #${match}   ${logins}    Should Not Match Regexp    ${flow}    14\\s+14\\s+760e00\\s+id\\s+N8\\s+No_Light\\s+FC\\s+F-Port\\s+(\\d)\\s+N\\s+Port\\s+
+    ${match}   ${logins}    Should Not Match Regexp    ${flow}    \\s+(\\d)\\s+N\\s+Port\\s+
+
+GET LOGINS COUNT CLI
+    [Documentation]    Get logins count by login into switch
+    Telnet.Open Connection     ${SWITCH_IP}     prompt=>    timeout=20s
+    Telnet.Login               ${SWITCH_USER}     ${SWITCH_PASSWRD}
+    ${show}=    Telnet.Execute Command    switchshow
+    Log to Console      ${show}
+    ${flow}=        Get Lines Containing String     ${show}   NPIV pub
+    Log to console and logfile  ${flow}
+    #${match}   ${logins}    Should Not Match Regexp    ${flow}    14\\s+14\\s+760e00\\s+id\\s+N8\\s+No_Light\\s+FC\\s+F-Port\\s+(\\d)\\s+N\\s+Port\\s+
+    ${match}   ${logins}    Should Match Regexp    ${flow}    \\s+(\\d)\\s+N\\s+Port\\s+
+    Run keyword If    ${logins}!= 1    Fail    Log to console and logfile    The count of available login is ${logins}
+
+GET IC STATE
+    [Documentation]     GET IC STATE
+    [Arguments]     ${IC}    ${IC_state}
+    ${resp} =    Fusion Api Get Interconnect    param=?filter="'name'=='${IC}'"
+    Run Keyword If  "${resp['members'][0]['state']}" != "${IC_state}"    Fail    The Interconnect module ${IC} is in ${resp['members'][0]['state']} state!!
+
+My Open Connection And Log In
+    [Documentation]    Opens an SSH session to an appliance and logs in
+    [Arguments]        ${host}=localhost   ${user}=root   ${pass}=hpvse1
+
+    # The ssh prompt may be set by other Fusion keywords through Set Default Configuration
+    # set the expected ssh prompt for this connection
+    SSHLibrary.Open Connection    ${host}    timeout=120s
+    SSHLibrary.Login               ${user}    ${pass}
+
+SSH to host and ping others
+    [Documentation]    SSH's to a given Linux host, then pings from the host to other target servers IPs
+    [Arguments]        ${source}    ${targets}    ${source_user}    ${source_pwd}
+
+    My Open Connection And Log In    ${source}    ${source_user}    ${source_pwd}
+    ${Output}=    SSHLibrary.Execute Command    ping -c 4 ${targets}    return_stdout=True    return_rc=False
+    Log to console and logfile    ${Output}
+    Should Contain    ${Output}    ttl=
+    SSHLibrary.Close All Connections

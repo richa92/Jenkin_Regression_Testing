@@ -1,0 +1,216 @@
+*** Settings ***
+Library               FusionLibrary
+Library               RoboGalaxyLibrary
+Library               ./sort_helper.py
+
+Resource              ./resource.txt
+
+*** Keywords ***
+###############
+# Plexxi
+###############
+Plexxi Login
+    [Documentation]    Login to Plexxi Connect to get authentication token
+    ${resp} =    Plexxi Api Login   ${PLEXXI_CFM}   ${CFM_CREDENTIALS['username']}   ${CFM_CREDENTIALS['password']}
+    Log    Plexxi Login: ${resp}    console=${CONSOLE}
+    Run Keyword If    '${resp['status_code']}'!='${OK}'    Fatal Error   Failed Plexxi Api Login: ${resp}
+
+Discover Plexxi Fabrics From Variable
+    [Documentation]   Discovery Plexxi fabrics in Composable Fabric Manager
+    [Arguments]   ${plexxi_fabrics}
+    :FOR   ${body}   IN   @{plexxi_fabrics}
+    \   ${resp} =   Plexxi Api Discover Fabric   ${body}
+    \   Run Keyword If    '${resp['status_code']}'!='${200}'    Fatal Error    msg=Failed to Discover Fabrics in Plexxi: ${resp['result']}
+
+Add OneView Configuration To Plexxi Connect From Variable
+    [Documentation]   Add OneView Configuration to Plexxi Connect Packs
+    [Arguments]   ${oneview_config}
+    Run Keyword If   '${APPLIANCE_IP}' != '${Null}'   Set To Dictionary   ${oneview_config}   host   ${APPLIANCE_IP}
+    ${resp} =   Plexxi Api Add OneView Configuration   ${oneview_config}
+    [Return]  ${resp}
+
+Remove OneView Configuration From Composable Fabric Manager
+    [Documentation]   Remove OneView configuration defined in data file from Plexxi Connect
+    ${resp} =   Plexxi Api Get OneView Configuration
+    ${unable_to_find} =   Create List
+
+    # If there was some other OneView this loop captures it
+    :FOR   ${ov}   IN   @{resp['result']}
+    \   Run Keyword If   '${ov['host']}' == '${APPLIANCE_IP}'   Plexxi Api Delete OneView Configuration   ${ov['uuid']}
+    \   ...       ELSE   Append To List   ${unable_to_find}   ${ov['host']}
+
+    # If there were other OneView configured, at least Log them
+    :FOR   ${host}   IN   @{unable_to_find}
+    \   Log    Found extra OneView config host: ${host} Did not try to remove from ${PLEXXI_CFM}.    level=WARN    console=${CONSOLE}
+
+Confirm Plexxi Access Ports
+    [Documentation]    Confirms Plexxi Access Ports configured by OneView
+    [Arguments]     ${expected}
+    ${plexxi_ports} =    Plexxi Api Get Ports
+
+    ${this_expected} =     Copy Dictionary    ${expected}  # need a deep copy so we don't mess up the original Dict
+
+    ${result_dir} =    Create List
+    ${plexxi_access_ports} =    Create Dictionary    result=${result_dir}
+    # Need to get rid of all the non-access ports.  port_label > ${PLEXXI_LAST_ACCESS_PORT} as they aren't confirmed here
+    :FOR    ${port}    IN    @{plexxi_ports["result"]}
+#    \    Log   pl: ${port["port_label"]}    console=${CONSOLE}
+    \    ${count} =    Get Count    ${port["port_label"]}    .    #  If port_labe. contains '.' (51.2) then can skip
+    \    Continue For Loop If    ${count}>${0}
+    \    ${port_label_int} =    Convert To Integer  ${port["port_label"]}
+    \    Continue For Loop If    ${port_label_int} > ${PLEXXI_LAST_ACCESS_PORT}
+#    \    Log    Append ${port_label_int}    console=${CONSOLE}
+    \    Append To List    ${plexxi_access_ports["result"]}    ${port}
+
+#    ${l_pp} =    Get Length    ${plexxi_ports["result"]}
+#    ${ov_p} =    Get Length    ${CONFIRM_PLEXXI_PORTS_ONE["result"]}
+
+    # need to sort the dict with list of dict so Fusion Api Validate Response Follow will work. Also we don't have
+    # to update Fusion API Validate Response Follow with yet another sort section.
+    ${sort_keys} =    Create List    port_label    switch_name
+    ${plexxi_access_ports} =    Sort Helper    ${plexxi_access_ports}    result    ${sort_keys}
+    ${this_expected} =    Sort Helper    ${this_expected}    result    ${sort_keys}
+    ${status} =    Fusion Api Validate Response Follow    ${this_expected}    ${plexxi_access_ports}    disable_dict_sorting=True    wordy=True
+    Should Be True    ${status}
+
+CFM Perform Fit to COMPLETED
+    [Documentation]    Execute a "Perform FiT" expecting a successful and completed fit
+    [Arguments]    ${body}
+    ${resp} =    plexxi api perform fit   body=${body}
+    Run Keyword If  ${resp['status_code']} is not 200    Fail      status_code:${resp['status_code']}
+
+    ${uuid} =    get from dictionary   ${resp}   result
+    ${resp} =    plexxi api get fits   uuid=${uuid}
+    should be equal     ${resp['result']['fit_status']}    COMPLETED
+
+###############
+# Fabrics
+###############
+Get Fabric Uri By Name
+    [Documentation]   Get fabric uri by name
+    [Arguments]   ${fabric_name}
+    ${resp} =   Fusion Api Get Fabric
+    ${total} =   Convert To Integer   ${resp['total']}
+    Should Be Equal as Integers    ${total}    1    Only expected 1 fabric, obtained: ${total}
+    :FOR   ${fabric}   IN   @{resp['members']}
+    \   Return From Keyword If   '${fabric['name']}' == '${FABRIC_NAME}'   ${fabric['uri']}
+    Fail    ${FABRIC_NAME} not in OneView Fabrics
+
+Wait Until Fabric Reached State
+   [Documentation]   Wait until fabric reached state
+   [Arguments]   ${fabric_name}   ${fabric_state}   ${wait_timeout}=10m   ${wait_interval}=20s
+   Wait Until Keyword Succeeds   ${wait_timeout}   ${wait_interval}   Fabric Reached State    ${fabric_name}   ${fabric_state}
+
+Fabric Reached State
+    [Documentation]   Fabric reached a certain state.
+    [Arguments]   ${fabric_name}   ${fabric_state}
+    ${resp} =   Fusion Api Get Fabric
+    ${total} =   Convert To Integer   ${resp['total']}
+    Should Be Equal as Integers    ${total}    1    Only expected 1 fabric, obtained: ${total}
+    :FOR   ${fabric}   IN   @{resp['members']}
+    \    Should Be Equal   ${fabric['name']}   ${fabric_name}
+    \    Should Be Equal   ${fabric['state']}   ${fabric_state}
+
+###############
+# Switches
+###############
+Wait Until Switches Reached State
+   [Documentation]   Wait until switches reached state
+   [Arguments]   ${switch_chassisId}   ${switch_names}    ${switch_state}=Configured   ${switch_status}=OK    ${wait_timeout}=2 min   ${wait_interval}=10 sec
+   Wait Until Keyword Succeeds   ${wait_timeout}   ${wait_interval}
+   ...    Switches Reached State    ${switch_chassisId}   ${switch_names}   ${switch_state}    ${switch_status}
+
+Switches Reached State
+    [Documentation]   Switches reached a certain state.  Only checks switches "learned" by OneView.  Another Test Case should verify switch count
+    [Arguments]   ${switch_chassisId}   ${switch_names}   ${switch_state}    ${switch_status}
+    ${resp} =   Fusion Api Get Switch
+    ${total} =   Convert To Integer   ${resp['total']}
+    ${exptected_switch_count} =    Get Length    ${switch_chassisId}
+    Should Be Equal as Integers    ${total}    ${exptected_switch_count}    Expected ${exptected_switch_count} switches, obtained: ${total}
+    :FOR   ${switch}   IN   @{resp['members']}
+    \    Log    ${switch['name']} ${switch['chassisId']} is ${switch['state']} and ${switch['status']}    console=${CONSOLE}
+    \    Run Keyword If    '${switch['name']}' not in @{switch_names}    Fail    ${switch['name']} was not an expected switch name
+    \    Should Be Equal    ${switch['chassisId']}    ${switch_chassisId['${switch['name']}']}    Fail   ${switch['chassisId']} was not an expected chassis id
+    \    Should Be Equal    ${switch['state']}   ${switch_state}
+    \    Should Be Equal    ${switch['status']}   ${switch_status}
+
+Switches Are Synced And Healthy
+    [Documentation]    Confirms the Plexxi Switches are Synced
+    ${switches} =    Plexxi Api Get Switches
+    :FOR    ${switch}    in    @{switches['result']}
+    \    Log    Switch ${switch['ip_address']} is ${switch['status']} and ${switch['health']}    console=${CONSOLE}
+    \    Run Keyword If    '${switch['status']}'!='SYNCED'    Fail   Switch ${switch['ip_address']} status is not SYNCED
+    \    Run Keyword If    '${switch['health']}'!='HEALTHY'    Fail   Switch ${switch['ip_address']} health is not HEALTHY
+
+Clear Fabric
+    [Documentation]     Clear Fabric on Switches
+    [Arguments]     ${swCred}
+    Log    \nResetting ${swCred['hostname']}...    console=${CONSOLE}
+    Write   sudo su -
+    ${o} =   Read   delay=1.5s
+#    Should Contain   ${o}   sudo su -
+#    Should Contain   ${o}   [sudo] password for admin:
+    Write   ${swCred['password']}
+    Sleep   1.5s
+    ${o} =   Read Until Regexp   root@${PLEXXI_SWITCH_PROMPT_REGEX}:~\#
+    Write   px-shell
+    ${o} =   Read Until Regexp   ${PLEXXI_SWITCH_PROMPT_REGEX}\>
+    Write   enable
+    ${o} =   Read Until Regexp   ${PLEXXI_SWITCH_PROMPT_REGEX}\#
+    Write   fabric clear-fabric-id
+    ${o} =   Read   delay=2s
+    Should Contain   ${o}   Are you sure you want to clear the fabric UUID\? \(y\/n\):
+    Write   y
+    ${o} =   Read Until Regexp   ${PLEXXI_SWITCH_PROMPT_REGEX}\#
+    Write   exit
+    ${o} =   Read Until Regexp   root@${PLEXXI_SWITCH_PROMPT_REGEX}:~\#
+    # Generating token
+    Write   generateToken -r
+    ${o} =   Read Until Regexp   root@${PLEXXI_SWITCH_PROMPT_REGEX}:~\#
+    Log    [DONE]    console=${CONSOLE}
+
+    ${plexxi_switches} =   Get Dictionary Values   ${PLEXXI_SWITCHES_CREDENTIALS}
+    :FOR   ${swCred}   IN   @{plexxi_switches}
+    \    Open Connection   ${swCred['hostname']}
+    \    Login   ${swCred['username']}   ${swCred['password']}   delay=1.5s
+    # Getting fabricInfo after reset
+    \    Log    \nGetting fabricInfo AFTER reset of ${swCred['hostname']}...    console=${CONSOLE}
+    \    ${stdout}   ${stderr}   ${rc} =   Execute Command   /opt/plexxi/bin/fabricInfo   return_stderr=True   return_rc=True
+    \    Log    ${stdout}    console=${CONSOLE}
+    \    Should Match Regexp    ${stdout}    Ring UUID:\\s\\[\\]
+
+###############
+# Shared Misc
+###############
+Get Plexxi VLAN Ports For LAG Test
+    [Documentation]    Gets the Plexxi Ports with VLANS assigned.
+    ...    we need this mapping
+    ${vlan_ports} =    Create List
+    ${plexxi_ports} =    Plexxi Api Get Ports
+
+    :FOR    ${pp}    IN    @{plexxi_ports['result']}
+    \    Run Keyword If    "${pp['vlans']}" != ""    Append To List    ${vlan_ports}    ${pp}
+    \    Run Keyword If    "${pp['vlans']}" != ""    Log    Found Port with VLAN: ${pp["port_label"]}    console=${CONSOLE}
+
+    [Return]    ${vlan_ports}
+
+Get Plexxi LAG Ports For LAG Test
+    [Documentation]    Gets the Plexxi LAG with VLANS assigned
+    ...    we need this mapping
+    ${lag_ports} =    Create List
+    ${plexxi_lags} =    Plexxi Api Get Lags
+
+    :FOR    ${pp}    IN    @{plexxi_lags['result']}
+    \    Run Keyword If    "${pp['vlans']}" != ""    Append To List    ${lag_ports}    ${pp}
+    \    Run Keyword If    "${pp['vlans']}" != ""    Log    Found Lag with VLAN: ${pp["name"]}    console=${CONSOLE}
+
+    [Return]    ${lag_ports}
+
+Confirm Vlans To Ports
+    [Documentation]    Confirms the vlans are configured on the expected port
+    [Arguments]    ${vlan_ports}   ${port_to_vlans}
+    :FOR    ${port}    IN    @{vlan_ports}
+    \    Log    Check ${port['vlans']} equal ${port_to_vlans[${port['port_label']}]}    console=${CONSOLE}
+    \    Should Be Equal As Strings    ${port['vlans']}    ${port_to_vlans[${port['port_label']}]}
+    \    Log    Check ${port['uuid']} in ${port_to_vlans['${port['vlans']}']}    console=${CONSOLE}
+    \    Should Contain    ${port_to_vlans['${port['vlans']}']}    ${port['uuid']}

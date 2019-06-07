@@ -1,0 +1,639 @@
+Library				RoboGalaxyLibrary
+Library				Collections
+Library				String
+Library				FusionLibrary
+
+
+*** Variables ***
+${DataFile}			C:\solution3.0\fusion\tests\cho\data-acceptance.xml
+${FUSION_IP}		10.10.11.12
+${FUSION_USERNAME}	Administrator
+${FUSION_PASSWORD}	Cosmos1234
+
+
+*** Keywords ***
+Login to Fusion Via REST
+	[Documentation]    Connects to the Appliance and creates a session using the Username and Password.
+    [Documentation]    Example:\n| Login to Fusion Via REST | 10.9.11.3 | Administrator | Cosmos1234 |
+    [Arguments]    ${IP}=${FUSION_IP}    ${USERNAME}=${FUSION_USERNAME}    ${PASSWORD}=${FUSION_PASSWORD}
+    Should Not Be Equal    ${IP}    'unknown'    msg=Please specify a valid Fusion IP address or hostname
+    ${Creds}    Create Dictionary    userName    ${USERNAME}    password    ${PASSWORD}
+    ${SessionId}    Fusion Api Login Appliance    ${IP}    ${Creds}
+
+Logout of Fusion Via REST
+    [Documentation]    Terminates a session with the REST API.
+    [Documentation]    Example:\n| Logout Of Fusion Via REST |
+    Fusion Api Logout Appliance
+
+
+
+Test Values
+	[Arguments]		${Name}
+	Log To Console		Successfully added server to Altair 			no_newline=true
+	Log To Console		- ${Name}
+
+#---------------------------------------------------------------------------------
+#        SERVER PROFILES
+#---------------------------------------------------------------------------------
+
+Build Server Profile Payload
+    [Documentation]    Create Payload dictionary with basic Server Profile required and optional attributes
+    [Arguments]     ${Name}    ${Description}=${null}
+    ...             ${ServerHwName}=${null}    ${ServerHwTypeName}=${null}
+    ...             ${EncGroupName}=${null}    ${EncName}=${null}	${eTag}=${null}
+
+    ${EncUri}=         Run Keyword If    '${EncName}'!='${null}'         Get Enclosure Uri          ${EncName}
+    ${EncGroupUri}=    Run Keyword If    '${EncGroupName}'!='${null}'    Get Enclosure Group Uri    ${EncGroupName}
+    ${ServerHwUri}=    Run Keyword If    '${ServerHwName}'!='${null}'    Get Server Hardware Uri    ${ServerHwName}
+    ${ServerHwTypeUri}=    Run Keyword If    '${ServerHwTypeName}'!='${null}'   Get Server Hardware Type Uri    ${ServerHwTypeName}
+
+    # Build Payload
+    ${Payload}=    Create Dictionary    type=ServerProfileV6
+    ...                                 name=${Name}
+    ...                                 affinity=Bay
+    ...                                 description=${Description}
+    ...                                 macType=Virtual
+    ...                                 wwnType=Virtual
+    ...                                 serialNumberType=Virtual
+    ...                                 serverHardwareUri=${ServerHwUri}
+    ...                                 serverHardwareTypeUri=${ServerHwTypeUri}
+    ...                                 enclosureGroupUri=${EncGroupUri}
+    ...                                 enclosureUri=${EncUri}
+    ...									eTag=${eTag}
+
+	Log Dictionary    ${Payload}
+    [Return]  ${Payload}
+
+
+Add Connection to Server Profile Payload
+    [Documentation]		Add Ethernet and/or FC Connection to Profile
+    [Arguments]    ${Payload}    ${type}    ${name}		${networkName}
+    ...            ${port}=${null}        ${bw}=${null}
+    ...            ${arraywwpn}=${null}		${priority}=${null}
+
+    # Check for existing connections and determine id
+    ${rc}=    Run Keyword and Return Status    Dictionary Should Contain Key    ${Payload}    connections
+    ${connections}=    Run Keyword If    '${rc}'=='${True}'    Get From Dictionary    ${Payload}    connections
+    ...                ELSE              Create List
+    ${size}=    Get Length    ${connections}
+    ${id}=      Evaluate      ${size} + 1
+
+    # Get Network Uri
+    ${networkUri}=    Run Keyword If    '${type}'=='Ethernet'        Get Ethernet Network Uri         ${networkName}
+    ...				  ELSE IF			'${type}'=='NetworkSet'      Get Network Set Uri			  ${networkName}
+    ...               ELSE IF           '${type}'=='FibreChannel'    Get FC Network Uri		          ${networkName}
+    ...				  ELSE IF			'${type}'=='FCoE'			 Get FCOE Uri					  ${networkname}
+    ...               ELSE               Fail                        msg=Unknown Netowrk Type '${type}'. Should be 'Ethernet' 'NetworkSet' 'FibreChannel' or 'FCOE'.
+
+	${type}=	Set Variable If		'${type}' in ['NetworkSet','Ethernet']		Ethernet	FibreChannel
+
+	#Create Boot parameter of connection as per network type
+	${targets}=		Run Keyword If    '${type}'=='FibreChannel'		Create List
+	${target}=		Run Keyword If    '${type}'=='FibreChannel'		Create Dictionary	arrayWwpn=${arraywwpn}
+	...																					lun=1
+	Run Keyword If    '${type}'=='FibreChannel'		Append To List		${targets}		${target}
+
+	${boot}=	Run Keyword If    '${type}'=='Ethernet'        Create Dictionary	priority=${priority}
+	...			ELSE IF           '${type}'=='FibreChannel'    Create Dictionary	priority=${priority}		targets=${targets}
+
+    # Build connection payload
+    # Add Required Parameters
+    ${Connection}=    Create Dictionary     id=${id}
+    ...										name=${name}
+    ...                                     functionType=${type}
+    ...                                     networkUri=${networkUri}
+    ...                                     portId=${port}
+    ...                                     requestedMbps=${bw}
+    ...                                     boot=${boot}
+
+    # Add to Connections
+    Append To List    ${connections}    ${Connection}
+
+    # Add to Payload
+    Set To Dictionary    ${Payload}    connections    ${connections}
+
+    Log Dictionary    ${Payload}
+    [Return]    ${Payload}
+
+
+Add Multiple Connections to Server Profile Payload
+	[Documentation]		Add multiple connections to Server profile payload
+	[Arguments]		${Payload}	${profile}
+	: FOR	${connection}		in		@{profile.Connections}
+	\	${Payload}=		Add Connection to Server Profile Payload	${Payload}		${connection.functype}		${connection.name}
+	\					...											${connection.networkname}	${connection.portid}	${connection.bandwidth}
+	\					...											${connection.arraywwpn}		${connection.priority}
+
+	Log Dictionary    ${Payload}
+	[Return]	${Payload}
+
+
+
+Add Boot Order to Server Profile
+    [Documentation]    Adds Boot Order Settings to Server Profile Payload
+    [Arguments]    ${Payload}    ${BootOrder}
+
+	${Boot}=	Create List
+	: FOR	${order}		in		@{BootOrder}
+	\	Append To List		${Boot}		${order.device}
+
+    ${Boot Settings}=    Create Dictionary    manageBoot=true
+    ...                                       order=${Boot}
+    Set To Dictionary    ${Payload}    boot    ${Boot Settings}
+
+    Log Dictionary    ${Payload}
+    [Return]    ${Payload}
+
+
+Add Volume to Volume Attachments
+    [Documentation]    Adds SAN Storage volume to Volume Attachments in Server Profile Payload
+    [Arguments]    ${Payload}	${Volumes}	${VolumeName}=${null}    ${VolumeSize}=${null}
+    ...            ${PoolName}=${null}    ${StorageSystemName}=${null}
+
+    # Get Volume Attachments if exists
+    ${size}=    Get Length    ${Volumes}
+    ${id}=      Evaluate      ${size} + 1
+
+    # Get Volume info
+    ${PoolUri}=    Run Keyword If    '${PoolName}'!='${null}'      Get Storage Pool Uri      ${PoolName}
+    ${SystemUri}=    Run Keyword If    '${StorageSystemName}'!='${null}'    Get Storage System Uri    ${StorageSystemName}
+
+	${StoragePaths}=	Create List
+	${connections}=    Get From Dictionary    ${Payload}    connections
+	${storageTarget}=	Create List
+	: FOR	${connection}	in	@{connections}
+	\	${type}=	Get From Dictionary    ${connection}	functionType
+	\	${connid}=	Get From Dictionary    ${connection}	id
+	\	${storagepath}=		Run Keyword If    '${type}'=='FibreChannel'		Create Dictionary	isEnabled=true
+	\																		...					connectionId=${connid}
+	\																		...					storageTargetType=Auto
+	\																		...					storageTargets=${storageTarget}
+	\	Run Keyword If    '${type}'=='FibreChannel'		Append To List    ${StoragePaths}    ${storagepath}
+
+    # Build Volume
+    ${Volume}=    Create Dictionary    id=${id}
+    ...								   volumeName=${VolumeName}
+    ...                                volumeStoragePoolUri=${PoolUri}
+    ...                                volumeStorageSystemUri=${SystemUri}
+    ...								   volumeProvisionType=Thin
+    ...								   volumeProvisionedCapacityBytes=${VolumeSize}
+    ...								   volumeShareable=false
+    ...                                lunType=Manual
+    ...								   lun=1
+    ...                                storagePaths=${StoragePaths}
+    ...								   permanent=false
+
+    # Add to Volume list
+    Append To List    ${Volumes}    ${Volume}
+
+	[Return]	${Volumes}
+
+Add Shared Volume to Volume Attachments
+    [Documentation]    Adds SAN Storage volume to Volume Attachments in Server Profile Payload
+    [Arguments]    ${Payload}	${Volumes}		${VolumeName}
+
+    # Get Volume Attachments if exists
+    ${size}=    Get Length    ${Volumes}
+    ${id}=      Evaluate      ${size} + 1
+
+    # Get Volume info
+    ${SharedVolumeUri}=    Run Keyword If    '${VolumeName}'!='${null}'      Get Storage Volume Uri      ${VolumeName}
+
+	${StoragePaths}=	Create List
+	${connections}=    Get From Dictionary    ${Payload}    connections
+	${storageTarget}=	Create List
+	: FOR	${connection}	in	@{connections}
+	\	${type}=	Get From Dictionary    ${connection}	functionType
+	\	${connid}=	Get From Dictionary    ${connection}	id
+	\	${storagepath}=		Run Keyword If    '${type}'=='FibreChannel'		Create Dictionary	isEnabled=true
+	\																		...					connectionId=${connid}
+	\																		...					storageTargetType=Auto
+	\																		...					storageTargets=${storageTarget}
+	\	Run Keyword If    '${type}'=='FibreChannel'		Append To List    ${StoragePaths}    ${storagepath}
+
+    # Build Volume
+    ${Volume}=    Create Dictionary    id=${id}
+    ...								   volumeUri=${SharedVolumeUri}
+    ...                                lunType=Manual
+    ...								   lun=2
+    ...                                storagePaths=${StoragePaths}
+
+    # Add to Volume list
+    Append To List    ${Volumes}    ${Volume}
+
+	[Return]	${Volumes}
+
+
+Add Volume to Volume Attachments Edit Profile Payload
+	[Documentation]    Adds SAN Storage volume to Volume Attachments in Server Profile Payload
+    [Arguments]    ${Payload}	${Volumes}		${VolumeName}
+
+    # Get Volume Attachments if exists
+    ${size}=    Get Length    ${Volumes}
+    ${id}=      Evaluate      ${size} + 1
+
+    # Get Volume info
+    ${SharedVolumeUri}=    Run Keyword If    '${VolumeName}'!='${null}'      Get Storage Volume Uri      ${VolumeName}
+
+	${StoragePaths}=	Create List
+	${connections}=    Get From Dictionary    ${Payload}    connections
+	${storageTarget}=	Create List
+	: FOR	${connection}	in	@{connections}
+	\	${type}=	Get From Dictionary    ${connection}	functionType
+	\	${connid}=	Get From Dictionary    ${connection}	id
+	\	${storagepath}=		Run Keyword If    '${type}'=='FibreChannel'		Create Dictionary	isEnabled=true
+	\																		...					connectionId=${connid}
+	\																		...					storageTargetType=Auto
+	\																		...					storageTargets=${storageTarget}
+	\	Run Keyword If    '${type}'=='FibreChannel'		Append To List    ${StoragePaths}    ${storagepath}
+
+    # Build Volume
+    ${Volume}=    Create Dictionary    id=${id}
+    ...								   volumeUri=${SharedVolumeUri}
+    ...                                lunType=Manual
+    ...								   lun=${id}
+    ...                                storagePaths=${StoragePaths}
+
+    # Add to Volume list
+    Append To List    ${Volumes}    ${Volume}
+
+	[Return]	${Volumes}
+
+
+Add San Storage to Server Profile Payload
+	[Documentation]		Add san storage to server profile payload
+	[Arguments]		${Payload}	${profile}	${HostOSType}
+	${Volumes}=		Create List
+	: FOR	${volume}		in		@{profile.VolumeAttachments}
+	\	${Volumes}=		Add Volume to Volume Attachments			${Payload}		${Volumes}		${volume.VolumeName}		${volume.VolumeSize}
+	\					...											${volume.PoolName}		${volume.StorageSystemName}
+	: FOR	${volume}		in		@{profile.SharedVolumeAttachments}
+	\	${Volumes}=		Add Shared Volume to Volume Attachments			${Payload}		${Volumes}		${volume.VolumeName}
+
+	${SanStorage}=		Create Dictionary    hostOSType=${HostOSType}
+	...										 manageSanStorage=true
+	...										 volumeAttachments=${Volumes}
+
+	Set To Dictionary    ${Payload}    sanStorage    ${SanStorage}
+	Log Dictionary    ${Payload}
+	Log To Console		${Payload}
+	[Return]	${Payload}
+
+
+Add San Storage to Edit Server Profile Payload
+	[Documentation]		Add san storage to server profile payload
+	[Arguments]		${Payload}	${profile}	${HostOSType}
+	${Volumes}=		Create List
+	: FOR	${volume}		in		@{profile.VolumeAttachments}
+	\	${Volumes}=		Add Volume to Volume Attachments Edit Profile Payload			${Payload}		${Volumes}		${volume.VolumeName}
+
+	${SanStorage}=		Create Dictionary    hostOSType=${HostOSType}
+	...										 manageSanStorage=true
+	...										 volumeAttachments=${Volumes}
+
+	Set To Dictionary    ${Payload}    sanStorage    ${SanStorage}
+	Log Dictionary    ${Payload}
+	Log To Console		${Payload}
+	[Return]	${Payload}
+
+Create Profile
+	[Documentation]		Create Server Profile
+	[Arguments]		${Payload}		${URIList}		${profilename}
+	${Response}=	Fusion Api Create Server Profile   	${Payload}
+	${status}=		Get From Dictionary		${Response}		status_code
+    Should Contain    ['200','201','202','203']   	'${status}'		msg=Failed to Trigger Create Profile. Verify it manually.
+	${uri}=		Get From Dictionary		${Response}		uri
+	Log To Console		Creating Server Profile with name		no_newline=true
+	Log To Console		- ${profilename}
+	Append To List		${URIList}		${uri}
+	[Return]	${URIList}
+
+
+Get Profile URI
+	[Documentation]		Get Server Profile
+	[Arguments]		${profilename}
+	${Response}=	Fusion Api Get Server Profiles		param=?filter="'name'=='${profilename}'"
+	${status}=		Get From Dictionary		${Response}		status_code
+	Should Contain    ['200','201','202','203']		'${status}'		msg=Failed to Trigger Create Profile. Verify it manually.
+	${count}=	Get From Dictionary		${Response}	count
+    Should not be Equal as Integers		${count}	0	msg=No Server Profiles Found
+    ${members}=		Get From Dictionary		${Response}	members
+	${Element}=		Get From List		${members}	0
+    ${Uri}		Get From Dictionary		${Element}		uri
+    [Return]	${Uri}
+
+
+Edit Profile
+	[Documentation]		Edit Server Profile
+	[Arguments]		${Payload}		${URIList}		${profilename}		${ProfURI}
+	${Response}=	Fusion Api Edit Server Profile   	${Payload}		${ProfURI}
+	${status}=		Get From Dictionary		${Response}		status_code
+	Should Contain    ['200','201','202','203']   	'${status}'		msg=Failed to Trigger Create Profile. Verify it manually.
+	${uri}=		Get From Dictionary		${Response}		uri
+	Log To Console		Editing Server Profile		no_newline=true
+	Log To Console		- ${profilename}
+	Append To List		${URIList}		${uri}
+	[Return]	${URIList}
+
+
+Wait for Task
+	[Documentation]		Waiting for Profile Task to Complete
+	[Arguments]		${JobList}
+	${retries}=		Convert To Integer		40
+	${sleep_time}=		Convert To Integer		30
+	: FOR	${uri}	in	@{JobList}
+	\	${Resp}=	Fusion Api Wait For Task To Complete	${uri}		retries=${retries}		sleep_time=${sleep_time}
+	\	${stateReason}		Get From Dictionary		${Resp}		stateReason
+	\	${taskState}		Get From Dictionary		${Resp}		taskState
+	\	${taskStatus}		Get From Dictionary		${Resp}		taskStatus
+	\	${status}=		Run Keyword If 		'${stateReason}'=='Completed' and '${taskState}'=='Completed'		Log To Console		${taskStatus}
+	\	...				ELSE		Fail	msg=Failed to Perform Server Profile Task Successfully
+
+Delete Profile
+	[Documentation]		Delete Server Profile
+	[Arguments]			${profilename}		${URIList}
+	${Response}		Fusion Api Delete Server Profile		${profilename}
+	${taskuri}=		Get From Dictionary		${Response}		uri
+	Log To Console		Deleting Server Profile with name		no_newline=true
+	Log To Console		- ${profilename}
+	Append To List		${URIList}		${taskuri}
+	[Return]	${URIList}
+
+Get Server Profile eTag
+    [Documentation]    Get Server Profile ETAG
+    [Arguments]    ${ServerProfileName}
+    ${ServerProfileCollection}=    Fusion Api Get Server Profiles		param=?filter="'name'=='${ServerProfileName}'"
+    ${count}=    Get From Dictionary      ${ServerProfileCollection}    count
+    Should not be Equal as Integers       ${count}           0           msg=No Server Profiles Found
+    ${members}=    Get From Dictionary    ${ServerProfileCollection}    members
+	${Element}=     Get From List          ${members}                     0
+    ${eTag}    Get From Dictionary    ${Element}      eTag
+    [Return]	${eTag}
+
+#---------------------------------------------------------------------------------
+#        ENCLOSURES
+#---------------------------------------------------------------------------------
+
+Get Enclosure
+    [Documentation]    Get Enclosure by Name
+    [Arguments]    ${EncName}=${ENC_NAME}
+    ${EnclosureCollection}=    Fusion Api Get Enclosures             param=?filter="'name'=='${EncName}'"
+    ${count}=    Get From Dictionary      ${EnclosureCollection}    count
+    Should not be Equal as Integers       ${count}      0           msg=Failed to find Enclosure ${EncName}
+    ${members}=    Get From Dictionary    ${EnclosureCollection}    members
+    ${member}=     Get From List          ${members}                0
+    [Return]    ${member}
+
+Get Enclosure Uri
+    [Documentation]    Get Enclosure Uri by Name
+    [Arguments]    ${EncName}=${ENC_NAME}
+    ${member}=     Get Enclosure          ${EncName}
+    ${name}=       Get From Dictionary    ${member}     name
+    Should Be Equal as Strings            ${EncName}    ${name}     msg=Enclosure Name did not match.
+    ${uri}=        Get From Dictionary    ${member}     uri
+    [Return]    ${uri}
+
+#---------------------------------------------------------------------------------
+#        ENCLOSURE GROUPS
+#---------------------------------------------------------------------------------
+Get Enclosure Group
+    [Documentation]    Get Enclosure Group by Name
+    [Arguments]    ${EncGroupName}
+    ${EnclosureGroupCollection}=    Fusion Api Get Enclosure Groups      param=?filter="'name'=='${EncGroupName}'"
+    ${count}=    Get From Dictionary      ${EnclosureGroupCollection}    count
+    Should not be Equal as Integers       ${count}      0                msg=Failed to find Enclosure ${EncGroupName}
+    ${members}=    Get From Dictionary    ${EnclosureGroupCollection}    members
+    ${member}=     Get From List          ${members}                     0
+    [Return]    ${member}
+
+Get Enclosure Group Uri
+    [Documentation]    Get Enclosure Group Uri by Name
+    [Arguments]    ${EncGroupName}
+    ${member}=     Get Enclosure Group    ${EncGroupName}
+    ${name}=       Get From Dictionary    ${member}                      name
+    Should Be Equal as Strings            ${EncGroupName}    ${name}     msg=Enclosure Group Name did not match.
+    ${uri}=        Get From Dictionary    ${member}          uri
+    [Return]    ${uri}
+
+# -----------------------------------------------------------------------------
+#       SERVER HARDWARE
+# -----------------------------------------------------------------------------
+
+Get Server Hardware
+    [Documentation]    Get unused Server Hardware by Name
+    [Arguments]    ${ServerHwName}
+    ${ServerHwCollection}=    Fusion Api Get Server Hardware        param=?filter="'name'=='${ServerHwName}'"
+    ${count}=    Get From Dictionary      ${ServerHwCollection}    count
+    Should not be Equal as Integers       ${count}           0           msg=No Server Hardware Found
+    ${members}=    Get From Dictionary    ${ServerHwCollection}    members
+	${member}=     Get From List          ${members}                     0
+    [Return]    ${member}
+
+Get Server Hardware Uri
+    [Documentation]    Get Uri of unused Server Hardware by Name
+    [Arguments]    ${ServerHwName}
+    ${ServerHw}=     Get Server Hardware    ${ServerHwName}
+    ${name}=     Get From Dictionary    ${ServerHw}          name
+    Should Be Equal as Strings            ${ServerHwName}    ${name}     msg=Server Hardware Name did not match.
+    ${uri}=       Get From Dictionary   ${ServerHw}          uri
+    [Return]    ${uri}
+
+Power Off Server
+	[Documentation]		Power Off Server Hardware
+	[Arguments]		${ServerHwName}
+	${ServerHwUri}=		Get Server Hardware Uri		${ServerHwName}
+	${Payload}=		Create Dictionary		powerState=Off
+	...										powerControl=PressAndHold
+	${Response}=		Fusion Api Edit Server Hardware Power State		${Payload}		${ServerHwUri}
+	${taskuri}=		Get From Dictionary		${Response}		uri
+	${retries}=		Convert To Integer		6
+	${sleep_time}=		Convert To Integer		10
+	${Resp}=	Fusion Api Wait For Task To Complete	${taskuri}		retries=${retries}		sleep_time=${sleep_time}
+	${taskState}		Get From Dictionary		${Resp}		taskState
+	${taskStatus}		Get From Dictionary		${Resp}		taskStatus
+	${status}=		Run Keyword If 		'${taskState}'=='Completed'		Log To Console		${taskStatus}
+	...				ELSE		Fail	msg=Failed to Power Off Server Successfully
+
+Power On Server
+	[Documentation]		Power On Server Hardware
+	[Arguments]		${ServerHwName}
+	${ServerHwUri}=		Get Server Hardware Uri		${ServerHwName}
+	${Payload}=		Create Dictionary		powerState=On
+	...										powerControl=MomentaryPress
+	${Response}=		Fusion Api Edit Server Hardware Power State		${Payload}		${ServerHwUri}
+	${taskuri}=		Get From Dictionary		${Response}		uri
+	${retries}=		Convert To Integer		3
+	${sleep_time}=		Convert To Integer		5
+	${Resp}=		Fusion Api Wait For Task To Complete	${taskuri}		retries=${retries}		sleep_time=${sleep_time}
+	${taskState}		Get From Dictionary		${Resp}		taskState
+	${taskStatus}		Get From Dictionary		${Resp}		taskStatus
+	${status}=		Run Keyword If 		'${taskState}'=='Completed'		Log To Console		${taskStatus}
+	...				ELSE		Fail	msg=Failed to Power On Server Successfully
+
+# -----------------------------------------------------------------------------
+#       SERVER HARDWARE TYPES
+# -----------------------------------------------------------------------------
+
+Get Server Hardware Type Uri
+    [Documentation]    Get Uri of unused Server Hardware by Name
+    [Arguments]    ${ServerHwTypeName}
+    ${ServerHwTypeCollection}=    Fusion Api Get Server Hardware Types
+    ${count}=    Get From Dictionary      ${ServerHwTypeCollection}    count
+    Should not be Equal as Integers       ${count}           0           msg=No Server Hardware Types Found
+    @{members}=    Get From Dictionary    ${ServerHwTypeCollection}    members
+
+    :FOR    ${member}    IN    @{members}
+    \    ${name}=     Get From Dictionary    ${member}          name
+    \    Continue For Loop If    '${ServerHwTypeName}'!='${name}'
+    \    ${uri}=       Get From Dictionary   ${member}          uri
+    \    Return From Keyword    ${uri}
+
+    Fail    msg=Failed to find Server Hardware Type ${ServerHwTypeName}.
+
+# -----------------------------------------------------------------------------
+#		ETHERNET NETWORKS
+# -----------------------------------------------------------------------------
+
+Get Ethernet Network Uri
+    [Documentation]    Returns a Network URI given a network Name
+    [Arguments]    ${Name}
+    ${Network}    Fusion Api Get Ethernet Networks  param=?filter="'name'=='${Name}'"
+    ${Count}    Get from Dictionary    ${Network}    count
+    Should Be Equal As Numbers    ${Count}    1    msg=Cant find ethernet-network named ${Name}
+    ${Members}    Get From Dictionary    ${Network}    members
+    ${Element}    Get From List          ${Members}    0
+    ${Uri}    Get From Dictionary    ${Element}      uri
+    [Return]    ${Uri}
+
+# -----------------------------------------------------------------------------
+#       FIBRE CHANNEL NETWORKS
+# -----------------------------------------------------------------------------
+
+Get FC Network Uri
+	[Arguments]    ${Name}
+    ${Response}     Fusion Api Get FC Networks    param=?filter="'name'=='${Name}'"
+    ${Count}    Get from Dictionary    ${Response}    count
+    Should Be Equal As Numbers    ${Count}    1    msg=Cant find FC-network named ${Name}
+    ${Members}    Get From Dictionary    ${Response}    members
+    ${Element}    Get From List          ${Members}    0
+    ${Uri}    Get From Dictionary    ${Element}      uri
+    [Return]	${Uri}
+
+# -----------------------------------------------------------------------------
+#       NETWORK SETS
+# -----------------------------------------------------------------------------
+
+Get Network Set Uri
+	[Documentation]    Returns a Network Set URI for a given network set
+    [Arguments]    ${Name}
+    ${Response}    Fusion Api Get Network Set  param=?filter="'name'=='${Name}'"
+    ${Count}    Get from Dictionary    ${Response}    count
+    Should Be Equal As Numbers    ${Count}    1    msg=Cant find Network Set named ${Name}
+    ${Members}    Get From Dictionary    ${Response}    members
+    ${Element}    Get From List          ${Members}    0
+    ${Uri}    Get From Dictionary    ${Element}      uri
+    [Return]    ${Uri}
+
+# -----------------------------------------------------------------------------
+#       FCOE NETWORKS
+# -----------------------------------------------------------------------------
+
+Get FCOE Uri
+	[Documentation]    Returns a FCOE URI for the given network name
+    [Arguments]    ${Name}
+    ${Response}    Fusion Api Get FCOE Networks  param=?filter="'name'=='${Name}'"
+    ${Count}    Get from Dictionary    ${Response}    count
+    Should Be Equal As Numbers    ${Count}    1    msg=Cant find FCOE network ${Name}
+    ${Members}    Get From Dictionary    ${Response}    members
+    ${Element}    Get From List          ${Members}    0
+    ${Uri}    Get From Dictionary    ${Element}      uri
+    [Return]    ${Uri}
+
+# -----------------------------------------------------------------------------
+#       STORAGE POOLS
+# -----------------------------------------------------------------------------
+Get Storage Pool Uri
+	[Documentation]		Returns Storage Pool URI for a given storage pool
+	[Arguments]		${PoolName}
+	${Response}    Fusion Api Get Storage Pools  param=?filter="'name'=='${PoolName}'"
+    ${Count}    Get from Dictionary    ${Response}    count
+    Should Be Equal As Numbers    ${Count}    1    msg=Cant find Storage Pool named ${PoolName}
+    ${Members}    Get From Dictionary    ${Response}    members
+    ${Element}    Get From List          ${Members}    0
+    ${Uri}    Get From Dictionary    ${Element}      uri
+    [Return]    ${Uri}
+
+# -----------------------------------------------------------------------------
+#       STORAGE SYSTEMS
+# -----------------------------------------------------------------------------
+Get Storage System Uri
+	[Documentation]		Returns Storage System URI for a given storage System
+	[Arguments]		${Storagename}
+	${GetStorage}	Fusion Api Get Storage System		param=?filter="'name'=='${Storagename}'"
+	${Count}    Get from Dictionary    ${GetStorage}    count
+    Should Be Equal As Numbers    ${Count}    1    msg=Cant find storage with name ${Storagename}
+    ${Members}    Get From Dictionary    ${GetStorage}    members
+    ${Element}    Get From List          ${Members}    0
+    ${Uri}    Get From Dictionary    ${Element}      uri
+    [Return]    ${Uri}
+
+# -----------------------------------------------------------------------------
+#       VOLUMES
+# -----------------------------------------------------------------------------
+Create Storage Volume
+	[Documentation]		Creates a storage Volume and verify
+	[Arguments]		${name}		${size}		${shareable}	${provisiontype}		${storagepool}
+
+	#Get Storage Pool URI
+	${PoolUri}=    Run Keyword If    '${storagepool}'!='${null}'      Get Storage Pool Uri      ${storagepool}
+
+	#Create Payload
+	${ProvParam}=	Create Dictionary		storagePoolUri=${PoolUri}
+	...										requestedCapacity=${size}
+	...										provisionType=${provisiontype}
+	...										shareable=${shareable}
+
+	${Payload}=		Create Dictionary		name=${name}
+	...										provisioningParameters=${ProvParam}
+
+	${Response}=	Fusion Api Create Storage Volume   	${Payload}
+	${status}=		Get From Dictionary		${Response}		status_code
+	Should Contain    ['200','201','202','203']   	'${status}'		msg=Failed to Trigger Create Volume. Verify it manually.
+	${uri}=		Get From Dictionary		${Response}		uri
+	${retries}=		Convert To Integer		6
+	${sleep_time}=		Convert To Integer		10
+	${Resp}=	Fusion Api Wait For Task To Complete	${uri}		retries=${retries}		sleep_time=${sleep_time}
+	${taskState}		Get From Dictionary		${Resp}		taskState
+	${taskStatus}		Get From Dictionary		${Resp}		taskStatus
+	${status}=		Run Keyword If 		'${taskState}'=='Completed'		Log To Console		${taskStatus}
+	...				ELSE		Fail	msg=Failed to Create Storage Volume Successfully
+
+Get Storage Volume Uri
+	[Documentation]		Returns Storage Volume URI for a given storage Volume
+	[Arguments]		${name}
+	${Response}	Fusion Api Get Storage Volumes		param=?filter="'name'=='${name}'"
+	${Count}    Get from Dictionary    ${Response}    count
+    Should Be Equal As Numbers    ${Count}    1    msg=Cant find Storage Volume with name ${name}
+    ${Members}    Get From Dictionary    ${Response}    members
+    ${Element}    Get From List          ${Members}    0
+    ${Uri}    Get From Dictionary    ${Element}      uri
+    [Return]    ${Uri}
+
+Delete Storage Volume
+	[Documentation]		Delete Storage Volume
+	[Arguments]			${volumename}
+	${Response}		Fusion Api Delete Storage Volume		${volumename}
+	${taskuri}=		Get From Dictionary		${Response}		uri
+	${retries}=		Convert To Integer		6
+	${sleep_time}=		Convert To Integer		10
+	${Resp}=	Fusion Api Wait For Task To Complete	${taskuri}		retries=${retries}		sleep_time=${sleep_time}
+	${taskState}		Get From Dictionary		${Resp}		taskState
+	${taskStatus}		Get From Dictionary		${Resp}		taskStatus
+	${status}=		Run Keyword If 		'${taskState}'=='Completed'		Log To Console		${taskStatus}
+	...				ELSE		Fail	msg=Failed to Delete Storage Volume Successfully
+
+Delete All Detached Volumes
+	[Documentation]		Delete All Storage Volumes Present
+	[Arguments]			${profile}
+	: FOR	${volumeattachment}		in		@{profile.VolumeAttachments}
+	\	Delete Storage Volume	${volumeattachment.VolumeName}

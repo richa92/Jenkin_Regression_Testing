@@ -1,0 +1,111 @@
+*** Settings ***
+Documentation   Verify CLI TAB key      - US35014
+...             = USAGE =
+...             | pybot | _v ENCLOSURE:<enc_name> | cli_TAB_key.txt |
+...             = Variables =
+...             | ENCLOSURE | Fusion Enclosure Name |
+
+Library             RoboGalaxyLibrary           # DVTs Robot Framework extensions
+Library             FusionLibrary               # DVTs Fusion extensions
+Library             String
+Variables           ../resources/variables.py   ${ENCLOSURE}
+Resource            ../resources/fusion_ssh.txt
+Resource            ../resources/fusion_cli.txt
+Resource            ../resources/defaults.txt
+Suite Setup         Run Keywords
+...                 Login to Fusion CLI
+Suite Teardown      Logout of Fusion CLI
+Force Tags          CLI                         DCS     HW
+
+
+*** Variables ***
+${TAB}          \u0009
+${BS}           \u0008
+${QUESTION}     ?
+${READ DELAY}   0.5
+
+
+*** Test Cases ***
+Verify Tab Completion in Main View
+    Verify SubCommand Tab Completion    ${EMPTY}
+
+Verify Tab Completion in Console View
+    Enter CLI Console View
+    Verify SubCommand Tab Completion    ${EMPTY}
+
+
+*** Keywords ***
+Verify SubCommand Tab Completion
+    [Documentation]     This function executes the '?' function on the given command and
+    ...                 recursively verifies subcommand arguments until no subcommands exist.
+    [Arguments]         ${command}
+
+    # Run Command with Question Mark
+    ${output}=      Execute Bare CLI Command    ${command}${QUESTION}
+    Log             ${output}
+
+    # Check for error
+    Should Not Contain      ${output}   Unrecognized command    msg=Unknown command '${command}${QUESTION}'.
+
+    # Parse output command list
+    ${args}=    Parse Question Mark output      ${output}
+    ${args}=    Get Dictionary Keys             ${args}
+
+    # Verify Top level contains commands.
+    ${size}=            Get Length          ${args}
+    Run Keyword If      '${command}'=='${EMPTY}'
+    ...                 Should Be True      ${size} > 0     msg=Top Level command list is empty!
+
+    # Get sub arguments and process
+    :FOR    ${arg}          IN                  @{args}
+    \       # Verify Tab Completion
+    \       Execute and Verify Tab Completion   ${command}                  ${arg}
+    \       ${next cmd}=    Set Variable If     '${command}'=='${EMPTY}'    ${arg}
+    \       ...             ${command.strip()} ${arg}
+    \       Verify SubCommand Tab Completion    ${next cmd}${SPACE}
+
+Execute and Verify Tab Completion
+    [Arguments]     ${cmd}      ${arg}
+
+    # Ignore placeholder arguments (ex: <enclosure-uuid>)
+    ${status}=                  Run Keyword and Return Status   Should Contain      ${arg}      <
+    Return From Keyword if      '${status}'=='${TRUE}'
+
+    # Get random substring
+    ${size}         Get Length      ${arg}
+    ${random}=      Evaluate        random.randint(1, ${size})      random
+    ${substring}=   Get Substring   ${arg}                          0   ${random}
+
+    # Write preceding command, substring and tab key
+    SSHLibrary.Write Bare   ${cmd} ${substring}
+    SSHLibrary.Write Bare   ${TAB}
+    sleep                   ${READ DELAY}
+    ${out}=                 Read
+
+    # Delete command from buffer
+    ${len_out}          Get Length          ${out}
+    repeat keyword      ${len_out} times    SSHLibrary.Write Bare   ${BS}
+
+    # Get command output
+    ${out}      Get Lines containing String     ${out}      ${arg}
+    ${out}      Fetch from right                ${out}      [K
+
+    # Verify expected argument is displayed.
+    @{lines}=           Split To Lines              ${out}
+    ${size}=            Get Length                  ${lines}
+    Run Keyword If      ${size} > 1
+    ...                 Verify Multiple Arguments   ${arg}      ${lines}
+    ...                 ELSE
+    ...                 Verify Single Arugment      ${arg}      ${lines}
+
+Verify Multiple Arguments
+    [Arguments]                 ${arg}          ${lines}
+    ${line}=                    Get From List   ${lines}    1
+    ${options}=                 Split String    ${line}     ${SPACE}
+    List Should Contain Value   ${options}      ${arg}      msg=Failed to see '${arg}' in tab completion output.
+
+Verify Single Arugment
+    [Arguments]                     ${arg}              ${lines}
+    ${line}=                        Get From List       ${lines}    0
+    Should Be Equal As Strings      ${line.strip()}     ${arg}      msg=Failed to verify Tab completion for command ${arg}.
+

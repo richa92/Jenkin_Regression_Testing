@@ -1,0 +1,160 @@
+*** Settings ***
+Documentation		Feature Test: Biggs
+...                 Updated test to include all network types: Ethernet, FC and FCoE networks
+...		
+Variables 		    data_variables.py		
+
+Suite Setup   		Run FTS and test-specific setup
+Suite Teardown		Suite Teardown
+
+Resource            ../../../../resource/fusion_api_all_resource_files.txt
+
+Library				Collections
+Library             json
+Library				OperatingSystem
+
+*** Variables ***
+${SSH_PASS}                     hpvse1
+${VM}
+
+*** Test Cases ***
+NEGATIVE - Try to create an LIG with 1 Biggs, assign Uplink Set that calls for FC
+    [Tags]  1    NEGATIVE
+	Set Log Level	TRACE
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	Fusion Api Login Appliance 		${APPLIANCE_IP}		${admin_credentials}
+    ${body} =   Build LIG body      ${negligs['1']}
+	${resp} = 	Fusion Api Create LIG	${body}
+	${task} =	Wait For Task 	${resp} 	120s	2s
+	${valDict} = 	Create Dictionary	status_code=${200}
+	...                                 taskState=Error
+	...									taskStatus=Invalid uplink set: Port: \\d+ for interconnect-type: .* is not capable for FIBRE_CHANNEL.
+	Validate Response Regex		${task}	${valDict}
+
+NEGATIVE - Try to create an LIG with 1 Biggs, assign Uplink Set that calls for X11-X14
+    [Tags]  2    NEGATIVE
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	Fusion Api Login Appliance 		${APPLIANCE_IP}		${admin_credentials}
+    ${body} =   Build LIG body      ${negligs['2']}
+	${resp} = 	Fusion Api Create LIG	${body}
+	${task} =	Wait For Task 	${resp} 	120s	2s
+	${valDict} = 	Create Dictionary	status_code=${200}
+	...                                 taskState=Error
+	...									taskStatus=Invalid uplink set: Port: \\d+ for interconnect-type: .* is not an uplink port.
+	Validate Response Regex		${task}	${valDict}
+
+POSITIVE - Verify that the LIG recognizes and supports Biggs and that all 10 uplink ports can be used
+    [Tags]  3    POSITIVE
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	Fusion Api Login Appliance 		${APPLIANCE_IP}		${admin_credentials}
+	${ligs} =	Get Variable Value	${ligs}
+	Run Keyword If	${ligs} is not ${null}	Run Keyword for List	${ligs}    Add LIG from variable
+
+POSITIVE - Add Enclosure, create profiles, then ping blades: full stack test
+    [Tags]  4    POSITIVE
+    Run Keyword and Ignore Error    Write To ciDebug Log
+	Fusion Api Login Appliance 		${APPLIANCE_IP}		${admin_credentials}
+    ${enc_groups} =	Get Variable Value	${enc_groups}
+	Run Keyword If	${enc_groups} is not ${null}	Run Keyword for List	${enc_groups}	Add Enclosure Group from variable
+
+	# Verify full-stack functionality on the Biggs modules by pinging blade to blade, and testhead to blade
+	# 1. import the enclosure
+	# 2. make sure servers are powered off
+	# 3. create profiles
+	# 4. power on servers
+	# 5. sleep for 10 minutes allowing time for servers to boot
+	# 6. ping from blade bay5 to gateway, from bay5 to bay6
+	# 7. ping from testhead to bay5,bay6
+    ${encs} =	Get Variable Value	${encs}
+	Run Keyword If	${encs} is not ${null}					Add Enclosures from variable	${encs}
+	Power Off All Servers
+	${server_profiles} =	Get Variable Value	${server_profiles}
+	Run Keyword If	${server_profiles} is not ${null}		Add Server Profiles from variable	${server_profiles}
+    Run Keyword for List    ${servers}    Power on server
+    #Power on ALL servers
+    Sleep    10min
+    Wait For Appliance To Become Pingable   ${BAY5_IP}
+    Wait For Appliance To Become Pingable   ${BAY6_IP}
+    SSH to host and ping x    ${BAY5_IP}    ${BAY6_IP}
+    SSH to host and ping x    ${BAY5_IP}    ${GW_IP}
+
+NEGATIVE - Try to create an US that calls for FC
+    [Tags]  5    NEGATIVE
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	Fusion Api Login Appliance 		${APPLIANCE_IP}		${admin_credentials}
+	${li_uri} = 	    Get LI URI   ${ENC1}-${LIG1}
+	${us} = 		    Copy Dictionary	${li_uplink_sets['us1']}
+	${body} = 		    Build US body 	${us}	${li_uri}
+	${resp} = 			Fusion Api Create Uplink Set	body=${body}
+	${valDict} = 		Create Dictionary	status_code=${400}
+	...                                     errorCode=CRM_PORT_CONFIG_INFO_LOCATION_IS_NOT_FC_UPLINK_CAPABLE
+	Validate Response	${resp}	${valDict}
+
+POSITIVE - Create an US that uses X1-X10.
+    [Tags]  6    POSITIVE
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	Fusion Api Login Appliance 		${APPLIANCE_IP}		${admin_credentials}
+	${li_uri} = 	    Get LI URI   ${ENC1}-${LIG1}
+	${us} = 		    Copy Dictionary	${li_uplink_sets['us2']}
+	${body} = 		    Build US body 	${us}	${li_uri}
+	${resp} = 			Fusion Api Create Uplink Set	body=${body}
+	${task} =	        Wait For Task 	${resp} 	120s	2s
+	${valDict} = 	    Create Dictionary	status_code=${200}
+	...                                     taskState=Completed
+	Validate Response	${task}	${valDict}
+
+NEGATIVE - Try to create an US that uses X11-X14
+    [Tags]  7    NEGATIVE
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	Fusion Api Login Appliance 		${APPLIANCE_IP}		${admin_credentials}
+	${li_uri} = 	    Get LI URI   ${ENC1}-${LIG1}
+	${us} = 		    Copy Dictionary	${li_uplink_sets['us3']}
+	${body} = 		    Build US body 	${us}	${li_uri}
+	${resp} = 			Fusion Api Create Uplink Set	body=${body}
+	${valDict} = 		Create Dictionary	status_code=${400}
+	...                                     errorCode=CRM_PORT_CONFIG_INFO_LOCATION_IS_NOT_ETHERNET_UPLINK_CAPABLE
+	Validate Response	${resp}	${valDict}
+
+*** Keywords ***
+SSH to host and ping x
+    [Documentation]    SSH's to a given host, then pings an IP from that host
+    [Arguments]	       ${HOST}    ${HOST2}
+    Open Connection And Log In      ${HOST}
+    ${Output}=    Execute Command    ping -c 4 ${HOST2}    return_stdout=True    return_rc=False
+    Log to console and logfile    ${Output}
+    Should Contain    ${Output}    ttl=
+    Close All Connections
+
+FTS
+    [Documentation]  ...
+	Set Log Level	DEBUG
+    Get VM IP   ${VM}
+	First Time Setup					password=hpvse123
+
+Test Specific Setup
+    [Documentation]  ...
+	Set Log Level	TRACE
+	${TEST_NAME} =      Set Variable    TEST-SPECIFIC SETUP
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	Log to console and logfile	[TEST-SPECIFIC SETUP]
+	Fusion Api Login Appliance 		${APPLIANCE_IP}		${admin_credentials}
+	${users} =	Get Variable Value	${users}
+	Run Keyword If	${users} is not ${null}    Add Users from variable				${users}
+	${ethernet_networks} =	Get Variable Value    ${ethernet_networks}
+	Run Keyword If	${ethernet_networks} is not ${null}    Add Ethernet Networks from variable	${ethernet_networks}
+	${ethernet_ranges} =	Get Variable Value	${ethernet_ranges}
+	Run Keyword If	${ethernet_ranges} is not ${null}		Run Keyword for List	${ethernet_ranges}	Create Ethernet Range
+	${fc_networks} =	Get Variable Value	${fc_networks}
+	Run Keyword If	${fc_networks} is not ${null}    Add FC Networks from variable		${fc_networks}
+	${fcoe_networks} =	Get Variable Value	${fcoe_networks}
+	Run Keyword If	${fcoe_networks} is not ${null}    Add FCoE Networks from variable		${fcoe_networks}
+	${licenses} =	Get Variable Value	${licenses}
+	Run Keyword If	${licenses} is not ${null}		Add Licenses from variable		${licenses}
+
+    Login all users     ${users}
+
+Run FTS and test-specific setup
+    [Documentation]  ...
+	Set Log Level	TRACE
+    FTS
+    Test Specific Setup

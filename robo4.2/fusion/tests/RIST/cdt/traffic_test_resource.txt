@@ -1,0 +1,202 @@
+*** Settings ***
+Library     TrafficLib
+Library     FusionLibrary
+Library     Collections
+Library     DateTime
+
+
+*** Keywords ***
+Generate Ping Traffic
+    [Documentation]     Generate command what needs to be execute and runs as a hidden process
+    ...                 and logs will be redirected to a file
+    TrafficLib.Generate Ping Commands
+    TrafficLib.Start Ping Traffic
+
+Generate Fping Traffic
+    [Documentation]     Generate command what needs to be execute and runs as a hidden process
+    ...                 and logs will be redirected to a file
+    TrafficLib.Generate Fping Commands
+    TrafficLib.Start Fping Traffic
+
+Stop Server Side Process
+    [Documentation]     Stop Server Side Process
+    TrafficLib.Stop Ping Traffic
+    TrafficLib.Stop Fping Traffic
+    # Stop iPerf Traffic <- Will be added in future implementation
+    # Stop IOMeter Traffic <- Will be added in future implementation
+
+Get All Server And Its Connection Connection Information From Oneview
+    [Documentation]         Get all server and its connection connection information from OneView
+    [Arguments]             ${fusion}
+    fusion api login appliance      ${fusion['ip']}     ${fusion['cred']}
+    &{ov}                   create dictionary
+    ${ilts}                 fusion api get interconnect link topology
+    Set To Dictionary       ${ov}   ilts                ${ilts}
+    ${les}                  fusion api get logical enclosure
+    Set To Dictionary       ${ov}   les                 ${les}
+    ${enclosures}           fusion api get enclosures
+    Set To Dictionary       ${ov}   enclosures          ${enclosures}
+    ${serverhardwares}      fusion api get server hardware
+    Set To Dictionary       ${ov}   serverhardwares     ${serverhardwares}
+    ${serverprofiles}       fusion api get server profiles
+    Set To Dictionary       ${ov}   serverprofiles      ${serverprofiles}
+    ${ethernet_networks}    fusion api get ethernet networks
+    Set To Dictionary       ${ov}   ethernet_networks   ${ethernet_networks}
+    ${fc_networks}          fusion api get fc networks
+    Set To Dictionary       ${ov}   fc_networks         ${fc_networks}
+    ${fcoe_networks}        fusion api get fcoe networks
+    Set To Dictionary       ${ov}   fcoe_networks       ${fcoe_networks}
+    ${network_sets}         fusion api get network set
+    Set To Dictionary       ${ov}   network_sets        ${network_sets}
+    fusion api logout appliance
+    [Return]                &{ov}
+
+Is Traffic Required For Entity
+    [Documentation]     Returns True if given traffigen matched in entity input
+    [Arguments]         ${input_entity}     ${type}
+    :FOR                ${item}             IN      @{input_entity}
+    \                   ${status}=          Evaluate
+    \                   ...                 str('${item['profile']['trafficgen']}').strip().lower() == str('${type}').strip().lower()
+    \                   exit for loop if    ${status} == True
+    [Return]            ${status}
+
+Generate Traffic
+    [Documentation]     Keyword is used for Generate Traffic between servers, between Guest OS, Between TestHead to
+    ...                 servers and also other mixed comminations like between TeshHead to servers within LE, etc.
+    ...                 Keyword does below steps
+    ...                 1. Fecthes all connection information from OneView
+    ...                 2. Validates input against OneView connection informaton
+    ...                 3. Generate commands to execute on remote machine
+    ...                 4. Based on input data, login to server or guest OS
+    ...                 5. Installs binaries and executes all traffic commands. E.g Fping*.rpm/exe and other related binaries
+    ...                 6. All generated sessions are independent; In the end closes all session(Like ssh session)
+    ...                 to run commands independently
+    [Arguments]         ${traffic_test_data}
+
+    Set Suite Variable      ${GENERATE_TRAFFIC_KEYWORD_STATUS}      False
+
+    Log     \nFrom '${TEST_NAME}': Generate Traffic Entered     console=True
+
+    Log             \nFrom '${TEST_NAME}': Getting all connection information from OneView      console=True
+    Set Log Level   level=NONE
+    ${ov}           Get All Server And Its Connection Connection Information From Oneview       ${traffic_test_data['fusion']}
+    Set Log Level   level=TRACE
+
+    Log     \nFrom '${TEST_NAME}': Setting Traffic Input    console=True
+    TrafficLib.Set Traffic Input    ${traffic_test_data}
+
+    Log     \nFrom '${TEST_NAME}': Validating given data input with OneView configuration   console=True
+    TrafficLib.Map OV Data And Given Data   ${ov}
+
+    Log     \nFrom '${TEST_NAME}': Check and download support binaries      console=True
+    TrafficLib.Download Support Binaries
+
+    Log     \nFrom '${TEST_NAME}': Fetching all interface configuration from Host OS    console=True
+    TrafficLib.Get All Host OS Interface Configurations
+
+    TrafficLib.Log Server Interface Data    server=all
+
+    ${status}=          Is Traffic Required For Entity      ${traffic_test_data['entities']}    ping
+    Run Keyword If      ${status} == True                   Log     \nFrom '${TEST_NAME}': Started generating ping session
+    ...                 console=True
+    Run Keyword If      ${status} == True                   Generate Ping Traffic
+
+    ${status}=          Is Traffic Required For Entity      ${traffic_test_data['entities']}    fping
+    Run Keyword If      ${status} == True                   Log     \nFrom '${TEST_NAME}': Started generating fping session
+    ...                 console=True
+    Run Keyword If      ${status} == True                   Generate Fping Traffic
+
+    # Generate iPerf Traffic <- Will be added in future implementation
+    # Generate IOMeter Traffic <- Will be added in future implementation
+
+    Set Suite Variable      ${GENERATE_TRAFFIC_KEYWORD_STATUS}              True
+    Log                     From '${TEST_NAME}': Generate Traffic Exited    console=True
+
+Report Traffic
+    [Documentation]     Reports the analysed report in Table & JSON format in log.html
+    TrafficLib.Report Ping Traffic Statistics
+    TrafficLib.Report Fping Traffic Statistics
+    # Report iPerf Traffic <- Will be added in future implementation
+    # Report IOMeter Traffic <- Will be added in future implementation
+
+Analyse Traffic
+    [Documentation]     When this keyword called below activities will be taken place.
+    ...                 1. Stop all traffic sessions on server OR Guest OS OR TestHead
+    ...                 2. Collect all STDOUT logs to the local machine
+    ...                 3. Line by line analysis will happen and report will gets generated
+    ...                 4. Report will be provided in the form of JSON & also in table format
+    ...                 5. Based on the Threshold ${threshold} value does test PASS/FAIL
+    [Arguments]         ${traffic_test_data}    ${threshold}
+
+    Run Keyword And Return If   ${GENERATE_TRAFFIC_KEYWORD_STATUS}==False   Log
+    ...                         Generate Traffic keyword failed/not triggered; Analyse traffic not required
+    ...                         level=WARN
+
+    Log     From '${TEST_NAME}': Analyse Traffic Entered    console=True
+
+    Stop Server Side Process
+
+    ${status}=          Is Traffic Required For Entity      ${traffic_test_data}    ping
+    Run Keyword If      ${status} == True                   Log
+    ...                 \nFrom '${TEST_NAME}': Started analysing ping session
+    ...                 console=True
+    Run Keyword If      ${status} == True                   Run Keyword And Continue On Failure
+    ...                 TrafficLib.Analyse Ping Traffic
+    ...                 ${threshold}
+
+    ${status}=          Is Traffic Required For Entity      ${traffic_test_data}    fping
+    Run Keyword If      ${status} == True                   Log
+    ...                 \nFrom '${TEST_NAME}': Started analysing fping session
+    ...                 console=True
+    Run Keyword If      ${status} == True                   Run Keyword And Continue On Failure
+    ...                 TrafficLib.Analyse Fping Traffic
+    ...                 ${threshold}
+
+    # Analyse iPerf Traffic     ${threshold} <- Will be added in future implementation
+    # Analyse IOMeter Traffic   ${threshold} <- Will be added in future implementation
+
+    Report Traffic
+    Log     From '${TEST_NAME}': Analyse Traffic Exited     console=True
+
+Generate Traffic For General OS Entities
+    [Documentation]     Used for Generate Traffic between servers, between Guest OS, Between TestHead to
+    ...                 servers and also other mixed comminations like between TeshHead to servers within LE, etc.
+    ...                 Keyword does below steps
+    ...                 1. Validates input
+    ...                 2. Generate commands to execute on remote machine
+    ...                 3. Based on input data, login to guest OS (i.e. Any OS with given reachable IPv4)
+    ...                 4. Installs binaries and executes all traffic commands. E.g Fping*.rpm/exe and other related binaries
+    ...                 5. All generated sessions are independent; In the end closes all session(Like ssh session)
+    ...                 to run commands independently
+    [Arguments]         ${traffic_test_data}
+
+    Set Suite Variable      ${GENERATE_TRAFFIC_KEYWORD_STATUS}      False
+
+    Set Log Level   level=TRACE
+
+    Log     \nFrom '${TEST_NAME}': Generate Traffic Entered     console=True
+
+    Log     \nFrom '${TEST_NAME}': Setting Traffic Input    console=True
+    TrafficLib.Set Traffic Input    ${traffic_test_data}
+
+    Log     \nFrom '${TEST_NAME}': Check and download support binaries      console=True
+    TrafficLib.Download Support Binaries
+
+    Log     \nFrom '${TEST_NAME}': Fetching all interface configuration from Host OS    console=True
+    TrafficLib.Get All Host OS Interface Configurations
+
+    TrafficLib.Log Server Interface Data    server=all
+
+    ${status}=          Is Traffic Required For Entity      ${traffic_test_data['entities']}    ping
+    Run Keyword If      ${status} == True                   Log     \nFrom '${TEST_NAME}': Started generating ping session
+    ...                 console=True
+    Run Keyword If      ${status} == True                   Generate Ping Traffic
+
+    ${status}=          Is Traffic Required For Entity      ${traffic_test_data['entities']}    fping
+    Run Keyword If      ${status} == True                   Log     \nFrom '${TEST_NAME}': Started generating fping session
+    ...                 console=True
+    Run Keyword If      ${status} == True                   Generate Fping Traffic
+
+    Set Suite Variable      ${GENERATE_TRAFFIC_KEYWORD_STATUS}              True
+    Log                     From '${TEST_NAME}': Generate Traffic Exited    console=True
+

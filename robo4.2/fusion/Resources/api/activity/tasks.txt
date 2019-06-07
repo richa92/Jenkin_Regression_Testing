@@ -1,0 +1,241 @@
+*** Settings ***
+Documentation    Collection of Keywords related to tasks
+Library             FusionLibrary
+Library             RoboGalaxyLibrary
+Library           Collections
+Library           String
+Library           ./ActivityHelpers.py
+
+Variables         ${CURDIR}/../activity/errorMessages.py
+
+*** Keywords ***
+Run and validate
+    [Documentation]     Takes the keyword, runs it against the data in the variable_list
+    ...    and checks for failed tasks. Returns the list of tasks
+    [Arguments]     ${keyword}  ${variable_list}    ${timeout}=600 s
+    ${resplist} =       run keyword     ${keyword}        ${variable_list}
+    ${tasklist} =       Wait for task list      ${resplist}     ${timeout}
+    ${failedtasks} =    Validate Task List      ${tasklist}
+    Should be empty     ${failedtasks}
+    [Return]    ${tasklist}
+
+Validate Task List
+    [Documentation]    Gets a list of endstate tasks and checks for any with a state of
+    ...                other than complete. Output is a list of any tasks that fail
+    [Arguments]    ${tasklist}
+    Log    'Checking for failed tasks'
+    ${failedtasks} =    Create List
+    : FOR    ${task}    IN    @{tasklist}
+    \    ${task_state} =    Get From Dictionary    ${task}    taskState
+    \    ${passed} =  Run keyword and return status  Should not be equal as strings
+    ...  ${task_state}  Completed
+    \    run keyword if     ${passed}   append to list    ${failedtasks}    ${task}
+    [Return]    ${failedtasks}
+
+Wait for Task list
+    [Documentation]    Waits for a list of tasks to reach their end state
+    [Arguments]    ${resplist}    ${timeout}=600 s
+    Log    Waiting for list of tasks to complete
+    ${tasklist} =    Create List
+    : FOR    ${resp}    IN    @{resplist}
+    \    ${task} =    Wait For Task    ${resp}
+    \    append to list    ${tasklist}    ${task}
+    [Return]    ${tasklist}
+
+Wait For Task
+    [Documentation]    Waits for a task to reach an end-state
+    [Arguments]    ${resp}    ${timeout}=60 s    ${interval}=2 s
+    ${status}  ${taskState} =  Run Keyword and Ignore Error  Get From Dictionary
+    ...  ${resp}  taskState
+    ${task} =     Run Keyword If  '${status}'=='PASS'    Wait Until Keyword Succeeds
+    ...  ${timeout}    ${interval}    Task Reached Endstate    ${resp}
+    Return From Keyword If    '${status}'=='PASS'    ${task}
+
+    Log    resp: ${resp}
+    ${status}  ${location} =  Run Keyword and Ignore Error  Get From Dictionary
+    ...  ${resp['headers']}    location
+    Run Keyword If  '${status}'=='FAIL'    Fail
+    ...  resp was not a taskResource nor location as task.  Can't Wait For Task.
+
+    ${task} =    Fusion Api Get Task    uri=${location}
+    ${task} =    Wait Until Keyword Succeeds  ${timeout}  ${interval}
+    ...  Task Reached Endstate  ${resp}
+    [Return]    ${task}
+
+Task Reached Endstate
+    [Documentation]    Waits for a task to reach an end-state
+    [Arguments]    ${resp}
+    Set Log Level    TRACE
+    #Should Contain    ${resp}    uri
+    #${location} =    Get Variable Value    ${resp['headers']['location']}
+    #Log to Console     ${resp}
+    ${location} =    Get Variable Value    ${resp['headers']['location']}    ${resp['location']}
+    ${task_uri} =    Run Keyword If    '${location}' is 'None'    Get From Dictionary    ${resp}
+    ...    uri    ELSE    Get Variable Value    ${location}
+    ${task} =    Fusion Api Get Task    uri=${task_uri}
+    # Hack for backup task uri that contains https://IP in error
+    #${task_uri} =    Remove String    ${task_uri}    https://    ${APPLIANCE_IP}
+    ${task_state} =    Get From Dictionary    ${task}    taskState
+    ${task_category} =    Get From Dictionary    ${task}    category
+    ${task_name} =    Get From Dictionary    ${task}    name
+    ${resource} =    Get From Dictionary    ${task['associatedResource']}    resourceName
+    ${resource_uri} =    Get From Dictionary    ${task['associatedResource']}    resourceUri
+    Log  \t Task: [${task_category}:${task_name}] is: ${task_state} for resource: ${resource} ${resource_uri}
+    Should Match Regexp    ${task_state}    ((?i)Warning|Unknown|Terminated|Killed|Error|Completed)
+    ${failedsubtasks} =    Run Keyword If     '${task_state}' != 'Completed'    fusion api get task
+    ...  param=?filter="parentTaskUri='${task_uri}'"&filter="taskState ne 'Completed'"
+    [Return]    ${task}
+
+Wait For Task2
+    [Documentation]  Waits for a task to reach an end-state.
+    ...    Argument ${tasks} can be a TaskResource or a dict that contains
+    ...    a ['headers']['location'] value to a task uri, or a list of such.
+    ...    If a list and any task fails, the keyword will fail and remaining tasks are not verified
+    ...    Supports BREAK_LOOP_IF and Error Message override of failure for negative testing.
+    ...    BREAK_LOOP_IF is used to. terminate the wait loop prior to timeout.  ...
+    ...    This keyword also evaluates ${tasks} to see if an error occurred and thus ${tasks}
+    ...    wasn't a task resource.
+    ...    Defaults: ${timeout}=60  ${interval}=2  ${errorMessage}=None Expected
+    ...    ${PASS}=((?i)Completed|Warning)  ${BREAK_LOOP_IF}=((?i)Error|Terminated)
+    ...    ${VERBOSE}=False
+    ...    Timeout and interval are in seconds, though Timeout can be entered in minutes as in 10m.
+    ...
+    ...    If ${errorMessage} is not passed in, error messages will not be be
+    ...    validated for Negative testing.
+    ...    If ${errorMessage} is passed in and the actual errorMessage value contains ${variables},
+    ...    then you must supply those variables values.
+    ...    See errorMessages.py for additional information regarding errorMessages.
+    ...
+    ...    Usage examples:
+    ...    Wait For Task2  ${tasks}  timeout=60  interval=5  pass=Error  errorMessage=ethernet_exists
+    ...    name=Net777
+    ...    Wait For Task2  ${tasks}  ${PASS}=((?i)Running|Starting)
+    ...    ${BREAK_LOOP_IF}=((?i)Error|Terminated)  ${VERBOSE}=True
+
+    [Arguments]     ${tasks}    ${timeout}=60    ${interval}=2    ${errorMessage}=None Expected
+    ...  ${PASS}=((?i)Completed|Warning)  ${BREAK_LOOP_IF}=((?i)Error|Terminated)
+    ...  ${VERBOSE}=False  &{kwargs}
+    ${len} =  get length  ${tasks}
+    Return from keyword if  ${len}==0  NO OP
+    WFT2 Python Helper    ${tasks}    ${timeout}    ${interval}    ${errorMessage}   ${PASS}
+    ...  ${BREAK_LOOP_IF}    ${VERBOSE}    &{kwargs}
+
+Get Expected Error
+    [Documentation]    Get Expected Error
+    [Arguments]  ${errorMessage}    ${named_args}
+    # Need to to create scoped variables from ${named_args} so Replace Variables and be used.
+    @{keys} =  get dictionary keys  ${named_args}
+    :FOR  ${key}  in  @{keys}
+    \    Set Test Variable    ${${key}}    ${named_args['${key}']}
+
+    Log Variables    level=TRACE
+    #
+    ${status}  ${message} =  Run Keyword and Ignore Error  Get From Dictionary
+    ...  ${errorMessages}  ${errorMessage}
+    Return From Keyword If    '${status}'=='FAIL'    None Expected
+    #
+    # replace variables within the expected_error_message:
+    #  'A network with the name $name already exists.'
+    ${expected_error_message} =    Replace Variables    ${message}
+
+    # removed from 3.10 as a message I need to verify contains a ' within the error.
+    # Need to see if it breaks other tests.  Ron Soto 1/3/17
+    #   ${expected_error_message} =    Replace String    ${expected_error_message}    '    ${EMPTY}
+    #
+    Return From Keyword    ${expected_error_message}
+
+Get Task By Param
+    [Documentation]    Get task by param
+    ...    Examples:
+    ...    Get Task By Param param=?filter='name'=='Discover
+    ...    hardware'&sort=created:descending&count=1
+    ...    Get Task By Param param=?filter="'name'='Add' AND
+    ...    associatedResource.resourceName='${name}'"&sort=created:descending&count=1
+    [Arguments]    ${param}
+    ${resp}=    Fusion Api Get Task    param=${param}
+    Log    ${resp}    TRACE
+    ${status} =  Run keyword and return status  Dictionary should contain key  ${resp}  'errorCode'
+    Run Keyword If  ${status}==${True}  Fail
+    ...  Fail: Get Task By Param ${param} failed, response is  ${resp}
+    ${count} =    Get From Dictionary    ${resp}    count
+    Run Keyword If  $count==0  Fail  Fail: Get Task By Param ${param} failed, response is ${resp}
+    [Return]    ${resp['members'][0]}
+
+Run Negative Task
+    [Documentation]    Run Negative task
+    ...    Data File Examples:
+    ...    task = {
+    ...             'keyword':'Add Server Profile',
+    ...             'argument': negative_profile1.copy(),
+    ...             'taskState':'Error',
+    ...             'timeout': '120',
+    ...             'interval': '15',
+    ...             'status_code': 202,
+    ...             'errorMessage':'Invalid_secondary_boot'}
+    ...    The errorMessage needs to be defined in errorMessages.py
+    ...             'Invalid_secondary_boot':'Secondary boot connection is not valid.'
+    [Arguments]    ${task}  ${timeout}=300  ${interval}=5
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${task}  timeout
+    ${timeout} =  set variable if  '${status}'=='PASS'  ${return}  ${timeout}
+
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${task}  interval
+    ${interval} =  set variable if  '${status}'=='PASS'  ${return}  ${interval}
+
+    ${status}  ${return}=    Run Keyword and Ignore Error    Get From Dictionary    ${task}    status_code
+    ${status_code}=    Set Variable If    '${status}'=='PASS'    ${return}    ${None}
+
+    ${resp}=    Run Keyword If    '${status_code}'=='${None}'    Run Keyword    ${task['keyword']}    ${task['argument']}
+    ...         ELSE              Run Keyword    ${task['keyword']}    ${task['argument']}    status_code=${status_code}
+
+    Wait For Task2  ${resp}  PASS=${task['taskState']}  errorMessage=${task['errorMessage']}
+    ...  timeout=${timeout}  interval=${interval}  VERBOSE=True
+
+Run Negative Tasks for List
+    [Documentation]    Run Negative Tasks for List
+    [Arguments]     ${list}  &{kwargs}
+    Run Keyword for List with kwargs  ${list}  Run Negative Task  &{kwargs}
+
+Validate Sub Task
+    [Documentation]    Validate a task has subtasks complete with correct name and resouce
+    [Arguments]     ${uri}  ${subtasks}
+    ${tasklist} =    Fusion Api Get Task    uri=${task_uri}?view=flat-tree&start=0&count=100
+    : FOR    ${subtask}    IN    @{subtasks}
+    \    ${subtask} =    Validate Sub Task Exist    ${tasklist}  ${subtask}
+    \    Should Be Equal    ${subtask['taskState']} Completed
+
+Validate Sub Task Exist
+    [Documentation]    Validate Sub Task Exist
+    [Arguments]     ${tasklist}  ${subtask}
+    : FOR    ${task}    IN    @{tasklist['members']}
+    \    ${resourcename} =    Set Variable    ${task['associatedResource']['resourceName']}
+    \    ${taskname} =    Set Variable    ${task['name']}
+    \    run keyword if  '${taskname}'==${subtask['name']} and
+    ... '${resourcename}'==${subtask['resource']}  Return From Keyword    ${task}
+    [Return]    Cannot find Task with name ${subtask['name']} and reource ${subtask['resource']}
+
+Get Task Tree From Post Response
+    [Documentation]    Get Task Tree From Response
+    [Arguments]    ${responses}
+    :FOR  ${response}  in  @{responses}
+    \  ${uri} =  Get From Dictionary  ${response['headers']}  Location
+    \  Get Task Tree  ${uri}
+
+Wait For All Tasks IN One View
+    [Documentation]  Wait for all tasks in OV and timeout
+    [arguments]   ${timeout}=10m
+    ${tasks} =  Fusion Api Get Task  param=?filter="taskState eq 'Running'"
+    :FOR  ${task}  IN  @{tasks['members']}
+    \    ${resp} =  Get Resource by URI    ${task['uri']}
+    \    Wait For Task2  ${resp}  timeout=${timeout}  interval=5  VERBOSE=False
+
+Should not have task state other than Completed and Cleared with Status other than OK
+    [Documentation]  One View should not have Active tasks
+    ...    Fail the test if tasks are active not cleared and completed
+    [arguments]   ${timeout}=10m
+    ${tasks} =  Fusion Api Get Task    param=?filter="taskState NE 'completed' and taskState ne 'cleared' and taskStatus ne 'OK'"
+    Return from keyword if    '${tasks['count']}' == '0'
+    ${res} =  Set Variable  ${empty}
+    :FOR  ${task}  IN  @{tasks['members']}
+    \    ${res} =  Catenate  ${res}
+    ...  \nStatus - ${task['taskStatus']} Name - ${task['name']} Status - ${task['taskState']}
+    Fail  ${tasks['count']} Tasks are not completed and cleared with Status other than OK ${res}

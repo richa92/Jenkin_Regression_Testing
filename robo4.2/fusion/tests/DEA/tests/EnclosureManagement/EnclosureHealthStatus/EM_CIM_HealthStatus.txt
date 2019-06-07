@@ -1,0 +1,132 @@
+*** Settings ***
+Documentation    Test suite to validate Enclosure Health Status when CIMs are removed and re-inserted into the enclosure or are reset
+
+...    = GENERIC USAGE =
+...    | pybot | -v ENC_SERIAL_NO:[enclosure serial #] | -v APPLIANCE_IP:<ipv4> |-v GIT_REPO_ROOT: | EM_CIM_HealthStatus.txt |
+...    = Variables =
+...    | GIT_REPO_ROOT | Required: Repo root path if NOT defined in environment variable this is mgmtfw root location
+...    | ENC_SERIAL_NO | Optional: If omitted, will use the 1st enclosure detected in OV
+...    | APPLIANCE_IP | Required: OneView IPv4 address
+
+Library            RoboGalaxyLibrary
+Library            MgmtFWLibrary
+Library            FusionLibrary
+Library            Collections
+Library            Selenium2Library
+
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Resource          ${GIT_REPO_ROOT}/fusion/Resources/api/activity/tasks.txt
+
+Suite Setup       Run Keywords    Login to Fusion Via REST    AND     Login to Fusion via SSH    AND    Login to EM And Create Session
+Suite Teardown    Run Keyword    Logout of Fusion Via REST
+
+*** Test Cases ***
+
+TC01:: EM Health Status: Validate The Enclosure Health OK Status When A Standby CIM Is Removed And Re-inserted Into An Enclosure
+    [Documentation]    This test verifies if an enclosure remains in OK state when a standby cim is removed
+    ...    and re-inserted back to enclosure
+    [Tags]    PE    API    Automated    CIM    EM
+    Login to Fusion via SSH
+    #Get the standby CIM bay
+    ${standby_cim}=    Get CIM Active Or StandBy Bay    ${Standby_Node}
+    Should Not Be Equal as Strings    ${standby_cim}    None    msg= Standby CIM is required for this test script
+    #Retrieve the Enclosure health status before efuse-on
+    ${resp_before_efuseon}=    Fusion Api Get Enclosures
+    ${health_before_efuseon}=    Get From Dictionary    ${resp_before_efuseon['members'][0]}    status
+    Should Be Equal    ${health_before_efuseon}    OK
+    #Efuse-On the standby CIM and wait for the CIM absence state
+    Efuse Appliance Device    EFuseOn    ${standby_cim}
+    Wait For Device Present Or Absent Status    ${CIMDevice_EM}    ${standby_cim}    Absent
+    #Retrieve the Enclosure health status after efuse-on
+    ${resp_after_efuseon}=    Fusion Api Get Enclosures
+    ${health_after_efuseon}=    Get From Dictionary    ${resp_after_efuseon['members'][0]}    status
+    Should Be Equal    ${health_after_efuseon}    OK
+    #Efuse-Off the standby CIM and wait for the CIM to return to OK status
+    Efuse Appliance Device    EFuseOff    ${standby_cim}
+    Wait For Device Status    ${CIMDevice_EM}    ${standby_cim}    OK
+    #Check the Enclosure health status after efuse-off
+    ${resp_after_efuseoff}=    Fusion Api Get Enclosures
+    ${health_after_efuseoff}=    Get From Dictionary    ${resp_after_efuseoff['members'][0]}    status
+    Should Be Equal    ${health_after_efuseoff}    OK
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Efuse Appliance Device    EFuseOff    ${standby_cim}    AND     Wait For Device Status    ${CIMDevice_EM}    ${standby_cim}    OK
+
+TC02:: EM Health Status: Validate The Enclosure Health OK Status When A Standby CIM Is Reset
+    [Documentation]    This test verifies if an enclosure remains in OK state when a standby cim is reset
+    [Tags]    PE    API    Automated    CIM    EM
+    Login to Fusion via SSH
+    #Get the standby CIM bay
+    ${standby_cim}=    Get CIM Active Or StandBy Bay    ${Standby_Node}
+    Should Not Be Equal as Strings    ${standby_cim}    None    msg= Standby CIM is required for this test script
+    #Retrieve the Enclosure health status before standby CIM reset
+    ${resp_before_reset}=    Fusion Api Get Enclosures
+    ${health_before_reset}=    Get From Dictionary    ${resp_before_reset['members'][0]}    status
+    Should Be Equal    ${health_before_reset}    OK
+    #EfuseReset the standby CIM and check the Enclosure health status
+    Efuse Appliance Device    EFuseReset    ${standby_cim}
+    Sleep    240
+    Wait For Device Status    ${CIMDevice_EM}    ${standby_cim}    OK
+    #Retrieve the Enclosure health status after standby flm reset
+    ${resp_after_reset}=    Fusion Api Get Enclosures
+    ${health_after_reset}=    Get From Dictionary    ${resp_after_reset['members'][0]}    status
+    Should Be Equal    ${health_after_reset}    OK
+    [Teardown]    Run Keyword If Test Failed    Run Keyword    Wait For Device Status    ${CIMDevice_EM}    ${standby_cim}    OK
+
+TC03:: EM Health Status: Validate The Enclosure Health Status When Active CIM Is Reset
+    [Documentation]    This test verifies the enclosure health status when active cim is reset and standby becomes active
+    [Tags]    PE    API    Automated    CIM    EM
+    Login to Fusion via SSH
+    #Check If standby CIM exists and get the active and standby CIM bay
+    ${CIM_count}=    Get Existing CIManager Presence Count
+    Should Be Equal as Strings    ${CIM_count}    2    msg= Standby CIM is required for this test script
+    ${active_cim}=    Get CIM Active Or StandBy Bay    ${Active_Node}
+    ${standby_cim}=    Get CIM Active Or StandBy Bay    ${Standby_Node}
+    #Retrieve the Enclosure health status before active CIM reset
+    ${resp_before_reset}=    Fusion Api Get Enclosures
+    ${health_before_reset}=    Get From Dictionary    ${resp_before_reset['members'][0]}    status
+    Should Be Equal    ${health_before_reset}    OK
+    #EfuseReset the active CIM and check the Enclosure health status
+    Efuse Appliance Device    EFuseReset    ${active_cim}
+    Sleep    600
+    Wait For Active CIM Node To Be Ready    ${CIM_Device_Wait_Time}    ${CIM_Device_interval}
+    ${resp_after_reset}=    Fusion Api Get Enclosures
+    ${health_after_reset}=    Get From Dictionary    ${resp_after_reset['members'][0]}    status
+    Should Be Equal    ${health_after_reset}    OK
+    ${active_cim_health}=    Get Fusion Device Health Status    ${CIMDevice_EM}    ${active_cim}
+    ${standby_cim_health}=    Get Fusion Device Health Status    ${CIMDevice_EM}    ${standby_cim}
+    Should Be Equal As Strings    ${active_cim_health}    OK
+    Should Be Equal As Strings    ${standby_cim_health}    OK
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Wait For Device Status    ${CIMDevice_EM}    ${standby_cim}    OK    AND    Wait For Device Status    ${CIMDevice_EM}    ${active_cim}    OK
+
+TC04:: EM Health Status: Validate The Enclosure Health Status When Active CIM Is Removed And Re-inserted Into An Enclosure
+    [Documentation]    This test verifies the enclsoure health state when active cim is removed
+    ...    and re-inserted back to enclosure
+    [Tags]    PE    API    Automated    CIM    EM
+    Setup EM RIS Session
+    #Check If standby CIM exists and get the active CIM bay
+    ${CIM_count}=    Get Existing CIManager Presence Count
+    Should Be Equal as Strings    ${CIM_count}    2    msg= Standby CIM is required for this test script
+    ${active_cim}=    Get CIM Active Or StandBy Bay    ${Active_Node}
+    ${standby_cim}=    Get CIM Active Or StandBy Bay    ${Standby_Node}
+    #Check the Enclosure and the cim health OK status before efuse-on
+    ${resp_before_efuseon}=    Fusion Api Get Enclosures
+    ${health_before_efuseon}=    Get From Dictionary    ${resp_before_efuseon['members'][0]}    status
+    Should Be Equal    ${health_before_efuseon}    OK
+    ${active_cim_health}=    Get Fusion Device Health Status    ${CIMDevice_EM}    ${active_cim}
+    ${standby_cim_health}=    Get Fusion Device Health Status    ${CIMDevice_EM}    ${standby_cim}
+    Should Be Equal As Strings    ${active_cim_health}    OK
+    Should Be Equal As Strings    ${standby_cim_health}    OK
+    #Efuse-On the active CIM
+    RIS EM Efuse On CIM    ${active_cim}
+    Sleep    10
+    #Efuse-Off the active CIM and wait for the CIM to return to OK status
+    RIS EM Efuse Off CIM Without HealthCheck   ${active_cim}
+    Wait For Active CIM Node To Be Ready    ${CIM_Device_Wait_Time}    ${CIM_Device_interval}
+    Wait For Device Status    ${CIMDevice_EM}    ${active_cim}    OK
+    #Check the Enclosure health status after efuse-off
+    ${resp_after_efuseoff}=    Fusion Api Get Enclosures
+    ${health_after_efuseoff}=    Get From Dictionary    ${resp_after_efuseoff['members'][0]}    status
+    Should Be Equal    ${health_after_efuseoff}    OK
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    RIS EM Efuse Off CIM Without HealthCheck   ${active_cim}    AND     Wait For Device Status    ${CIMDevice_EM}    ${active_cim}    OK

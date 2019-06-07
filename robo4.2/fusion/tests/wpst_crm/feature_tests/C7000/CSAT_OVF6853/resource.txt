@@ -1,0 +1,182 @@
+*** Settings ***
+Documentation    OVF6852 and OVF6853 Keywords
+Library              FusionLibrary
+Library              RoboGalaxyLibrary
+Library              Collections
+Library              BuiltIn
+
+
+*** Variables ***
+${APPLIANCE_IP}     ${None}
+
+*** Keywords ***
+
+Cleanup
+    [Documentation]     Cleanup
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+    Power off ALL Servers
+    Remove All Server Profiles
+    Remove All Enclosures
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove ALL Ethernet Networks
+    Remove ALL FC Networks
+    Remove ALL FCoE Networks
+    Remove ALL Network Sets
+
+
+Create Bulk networks
+    [Documentation]     Creates Ethernet networks in bulk with the given VLAN ID range. The VLAN ID range is specified as a combination of values or ranges.
+    [Arguments]     ${networks}     ${timeout}=500  ${interval}=5
+    ${response} =   Create List
+    Log    ${networks}    console=True
+    :FOR    ${net}  IN  @{networks}
+    \       Log    ${net}    console=True
+    \       ${initialScopeUris}=  Pop From Dictionary  ${net}  initialScopeUris  default=${None}
+    \       ${scopeUris}=       Run Keyword If    ${initialScopeUris} != ${None}
+    \       ...                 Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    \       Run Keyword If      ${initialScopeUris} != ${None}
+    \       ...                 Set To Dictionary    ${net}  initialScopeUris  ${scopeUris}
+    \    ${NSuris}=   Get From Dictionary  ${net}  networkSetUris
+    \    ${Netseturis}    Get netset URI    ${NSuris}
+    \    Set To Dictionary    ${net}  networkSetUris    ${Netseturis}
+    \    ${resp} =   Fusion Api Create Ethernet Bulk Networks    ${net}
+    \    Append to List  ${response}     ${resp}
+    [Return]    ${response}
+
+Get netset URI
+    [Documentation]     Fetches the uri of the network set
+    [Arguments]   ${netSet}
+    ${Netset_uris} =   Create List
+    :FOR    ${net}  IN  @{netSet}
+    \    ${resp} =    Fusion Api Get Network Set    param=?filter="'name'=='${net}'"
+    #\    Return From Keyword If  ${resp['count']}==0  /rest/network_set_uri_${net}_not_found
+    \    Return From Keyword If  ${resp['count']}==0  ${net}
+    \    ${uri} =   Get From Dictionary    ${resp['members'][0]}    uri
+    \    Append to List  ${Netset_uris}  ${uri}
+    [Return]    ${Netset_uris}
+
+
+
+Adding Uplinksets from variable
+    [Documentation]  Adds a uplinkset to an logical interconnect from a variable which contains a list of dicts with the entire payload.
+    ...              Example:
+    ...              uplinkset = {
+    ...                  "type": "uplink-setV300",
+    ...                  "name": uplinkset_name,    #user should defined uplinkset name
+    ...                  "portConfigInfos": [
+    ...                      {"desiredSpeed": "Auto",
+    ...                       "location": {"locationEntries": [
+    ...                                        {"value": "Q2:1", "type": "Port"},
+    ...                                        {"value": 3, "type": "Bay"},
+    ...                                        {"value": "CN754406XL", "type": "Enclosure"}]
+    ...                                    }
+    ...                       }
+    ...                  ],
+    ...                  "networkType": "FibreChannel",
+    ...                  "primaryPortLocation": None,
+    ...                  "reachability": None,
+    ...                  "manualLoginRedistributionState": "Supported",
+    ...                  "logicalInterconnectUri": "EG:%s" % LI_name,   #user should defined logical interconnect name
+    ...                  "connectionMode": "Auto",
+    ...                  "lacpTimer": "Short",
+    ...                  "nativeNetworkUri": None,
+    ...                  "networkSetUris": [],
+    ...                  "networkUris": [],
+    ...                  "fcNetworkUris": ["FC:%s" % FC_Name],    #user should defined fabric channel name
+    ...                  "fcoeNetworkUris": []
+    ...              }
+    [Arguments]   ${uplinkset}    ${flag}=None
+    Log    Adding Uplinkset To LOGICAL Interconnect   console=True
+    ${uplinkset} =   Copy Dictionary  ${uplinkset}
+    ${li}=    Get From Dictionary  ${uplinkset}  logicalInterconnectUri
+    ${liuri}=    Get LI URI    ${li}
+    Log   ${liuri}
+    Set To Dictionary  ${uplinkset}  logicalInterconnectUri  ${liuri}
+
+    ${status}  ${Entries}=    Run Keyword And Ignore Error
+    ...      Get From Dictionary  ${uplinkset["portConfigInfos"][0]["location"]}  locationEntries
+    ${locationEntries}=    Run Keyword If  '${status}'=='PASS'  Lookup PortConfigInfors Uris  ${Entries}
+    Run Keyword If  ${locationEntries} is not ${None}    Set To Dictionary  ${uplinkset["portConfigInfos"][0]["location"]}  locationEntries  ${locationEntries}
+
+    ${ethuris}=   Get From Dictionary  ${uplinkset}  networkUris
+    ${ethuri_list} =    Create List
+    :FOR    ${e}   IN    @{ethuris}
+    \       ${ethuri} =  FVT Api Get Ethernet Network By Name   ${e}
+    \       Append to List  ${ethuri_list}  ${ethuri['uri']}
+    Set To Dictionary   ${uplinkset}  networkUris   ${ethuri_list}
+
+    ${Netseturis}=   Get From Dictionary  ${uplinkset}  networkSetUris
+    ${Netset1_uris} =    Create List
+    Log   ${Netseturis}    console=True
+    :FOR    ${net}   IN    @{Netseturis}
+    \       ${NSuri}=    Run Keyword If  ${flag}!=True   Get Network Set URI   ${net}    ELSE   Append to List  ${Netset1_uris}    "Non-Existent-Netset"
+    \       Log    ${Netset1_uris}
+    \       Run Keyword If  ${flag}!=True    Append to List  ${Netset1_uris}  ${NSuri}
+    Set To Dictionary   ${uplinkset}  networkSetUris   ${Netset1_uris}
+    Log    ${uplinkset}
+
+    ${fcuris}=    Get From Dictionary  ${uplinkset}  fcNetworkUris
+    ${fcuri_list} =    Create List
+    :FOR    ${fcuri}   IN    @{fcuris}
+    \       @{words} =  Split String     ${fcuri}    :
+    \       ${type} =   Get From List    ${words}    0
+    \       ${e} =      Get From List    ${words}    1
+    \       ${fcuri} =  Get FC URI       ${e}
+    \       Append to List  ${fcuri_list}  ${fcuri}
+    Set To Dictionary   ${uplinkset}  fcNetworkUris   ${fcuri_list}
+
+    ${fcoeuris}=  Get From Dictionary  ${uplinkset}  fcoeNetworkUris
+    ${fcoeuri_list} =    Create List
+    :FOR    ${fcoeuri}   IN    @{fcoeuris}
+    \       @{words} =  Split String     ${fcoeuri}    :
+    \       ${type} =   Get From List    ${words}    0
+    \       ${e} =      Get From List    ${words}    1
+    \       ${fcuri} =  Get FCoE URI   ${e}
+    \       Append to List  ${fcoeuris}  ${fcoeuri}
+    Set To Dictionary   ${uplinkset}  fcoeNetworkUris   ${fcoeuri_list}
+
+    ${resp}=    Fusion Api Create Uplink Set  ${uplinkset}
+    [Return]   ${resp}
+
+Lookup PortConfigInfors Uris
+    [Documentation]    Lookup portConfigInfors Uris
+    [Arguments]    ${locationEntries}
+    :FOR    ${locationEntrie}    IN    @{locationEntries}
+    \       Continue For Loop If   '${locationEntrie["type"]}' != 'Enclosure'
+    \       ${e}=   Get From Dictionary  ${locationEntrie}  value
+
+    \       ${encuri}=   Get Enclosure URI    ${e}
+    \       Set To Dictionary  ${locationEntrie}  value  ${encuri}
+    [Return]  ${locationEntries}
+
+
+Get LI member
+    [Documentation]     Getting LI members
+    [Arguments]     ${li}
+    ${resp} =       Fusion Api Get LI
+    ${l} =  Get Length  ${resp['members']}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   Run Keyword If  '${resp['members'][${x}]['name']}' != '${li}'       Continue For Loop
+    \   ${member} =     Get From List       ${resp['members']}  ${x}
+    [Return]    ${member}
+
+
+
+Remove Uplinkset By Uri
+    [Documentation]  Remove Uplinkset Via Uri
+    ...                Remove Uplinkset By Uri  ${uri}
+    [Arguments]     ${uri}
+    Log    \nRemoving Uplinkset ${uri}   console=True
+    ${resp}=    Fusion Api Delete Uplink Set  uri=${uri}
+    [Return]  ${resp}
+
+Remove All Uplinksets
+    [Documentation]  Remove All Uplinksets
+    [Arguments]     ${timeout}=6m    ${internal}=10
+    Log    Remove All Uplinksets   console=True
+    ${resp} =   Fusion Api Get Uplink Set
+    :FOR    ${uplinkset}   IN    @{resp['members']}
+    \       ${uri} =     Get From Dictionary    ${uplinkset}    uri
+    \       ${resp} =    Remove Uplinkset By Uri  uri=${uri}
+    \       ${task} =    Wait For Task  ${resp}    120min    30s

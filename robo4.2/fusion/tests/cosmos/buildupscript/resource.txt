@@ -1,0 +1,173 @@
+*** Settings ***
+Documentation        Configures an appliance with resources found in supplied data file. Pass in specific tags with pybot -i <tag(s)> to limit processing
+Library                         FusionLibrary
+Library                         RoboGalaxyLibrary
+Library                         OperatingSystem
+Library                         BuiltIn
+Library                         Collections
+Library                         XML
+Library                         String
+Library                         json
+Library                         SSHLibrary
+
+Resource                        ../../../Resources/api/fusion_api_resource.txt
+
+*** Variables ***
+${X-API-VERSION}                1000
+${VERIFY}                       ${TRUE}
+${SUITE_LOG_LEVEL}              TRACE
+${TIMEOUT}                      10s
+${POLLING_INTERVAL}             2s
+${REMOTE_SUPPORT_TIMEOUT}       600
+${PauseWhenFailed}              False
+# Mail notification related
+${Email_when_paused}            False
+${Sender}                       ashok.boralingaiah@hpe.com
+${Receiver}                     ashok.boralingaiah@hpe.com
+${Subject}                      Buildup script Execution Status
+${Content}                      Buildup script Execution Status. Please go to the test head and continue
+
+# VSPHERE CLIENT DETAILS
+${vSphere_IP}                   wpstwork.vse.rdlabs.hpecorp.net
+${vSphere_Username}             wpst-ova
+${vSphere_Password}             wpstova1
+${vSphere_Datastore}            "OneView"
+${Fusion_Name}                  BuildUp-HPOneView
+${vSphere_Network}              "hpcorpnet-16.114"
+${OVFtool}                      "c:\\Program Files\\VMware\\VMware OVF Tool\\ovftool.exe"    #for 64-bit ovftool
+${OVFtool1}                     ovftool.exe     #use this if path is too long for windows command prompt
+${Target_Locator}               "vi://onsite@vsphere.local:Cosmos@123@172.25.9.203/Datacenter/host/Cosmos_Cluster-6.5"
+${Fusion_Depot}                 ftp://128.88.150.19/OneView/4.20.00/ova/HPEOneView-4.20.00-0363682_PASS128.ova
+
+# Download SPP Variables
+${WEB_USERNAME}                 None   # YOU_MUST_SPECIFY_ON_COMMAND_LINE_IF_WEB_URL_REQUIRES_AUTHENTICATION
+${WEB_PASSWORD}                 None   # YOU_MUST_SPECIFY_ON_COMMAND_LINE_IF_WEB_URL_REQUIRES_AUTHENTICATION
+${SPP_LOCALPATH}                c:\\firmware
+${WEB_URL}                      None   # YOU_MUST_SPECIFY_ON_COMMAND_LINE
+${THREADNUM}                    2
+${SPP_LOCAL_FILE}               None
+
+*** Keywords ***
+BuildUp Suite Setup
+    [Documentation]     Suite Setup Login to appliance
+    [Arguments]     ${credentials}
+    Set Log Level   ${SUITE_LOG_LEVEL}
+    ${response}=   Create List
+    ${resp}=   Fusion Api Login Appliance  ${appliance_ip}     ${credentials}
+    ${response}=  Convert to List  ${resp}
+    Run Keyword If   ${response[0]['status_code']} is not 400  Log  Appliance is logged in
+    Run Keyword If   ${response[0]['status_code']} is 400   Fatal Error   Appliance Credentials are not correct
+    ${LOGGED} =   Set Variable   True
+    Set OneView Version Metadata    ${appliance_ip}   ${LOGGED}
+    Set RoboGalaxyLibrary Version Metadata
+    Set FusionLibrary Version Metadata
+    Set Suite Metadata    Test API Version    ${X-API-VERSION}
+    Log  \nTest API Version: ${X-API-VERSION}  console=True
+
+BuildUp Suite Teardown
+    [Documentation]     Suite Teardown to Logout from OV
+    Fusion Api Logout Appliance
+
+Verify TBird Resource
+    [Documentation]  Verify Resource
+    ...              **kwargs are used to add key value pair to the expected DTO
+    ...              Example:
+    ...                Verify Resource  ${expected_dto}
+    ...                Verify Resource  ${expected_dto}  Status=OK
+    ...              Data Required:
+    ...                Expected Resource DTO
+    [Arguments]  ${expected_dto}  &{kwargs}
+
+    ${status}  ${name} =  Run Keyword and Ignore Error  Get From Dictionary  ${expected_dto}  name
+    Return from keyword if    '${status}'=='FAIL'    ${expected_dto} doesn't contain the key $name
+    ${status}  ${type} =  Run Keyword and Ignore Error  Get From Dictionary  ${expected_dto}  type
+    Return from keyword if    '${status}'=='FAIL'    ${expected_dto} doesn't contain the key $type
+    Log  ${\n}Verifying ${type} ${name}    console=True
+    ${new_expected_dto} =  Add Key Value to DTO  ${expected_dto}  &{kwargs}
+    ${dto} =  Get Resource  ${type}:${name}
+    log  the dto is ${dto}
+    log   the expected is ${expected_dto}    console=True
+    ${validate_status} =  Fusion api validate response follow  ${new_expected_dto}  ${dto}  wordy=${False}
+    ${dict} =  create dictionary
+    set to dictionary   ${dict}  status=${validate_status}
+    set to dictionary   ${dict}  name=${name}
+    Return From Keyword    ${dict}
+
+Verify C7000 Logical Enclosure
+    [Documentation]  Verify Resource
+    ...              **kwargs are used to add key value pair to the expected DTO
+    ...              Example:
+    ...                Verify Resource  ${expected_dto}
+    ...                Verify Resource  ${expected_dto}  Status=OK
+    ...              Data Required:
+    ...                Expected Resource DTO
+    [Arguments]  ${expected_dto}  &{kwargs}
+
+    ${status}  ${name} =  Run Keyword and Ignore Error  Get From Dictionary  ${expected_dto}  name
+    Return from keyword if    '${status}'=='FAIL'    ${expected_dto} doesn't contain the key $name
+    ${status}  ${type} =  Run Keyword and Ignore Error  Get From Dictionary  ${expected_dto}  type
+    Return from keyword if    '${status}'=='FAIL'    ${expected_dto} doesn't contain the key $type
+    Log  ${\n}Verifying ${type} ${name}    console=True
+    ${new_expected_dto} =  Add Key Value to DTO  ${expected_dto}  &{kwargs}
+    ${dto} =  Get Resource  ${type}:${name}
+    log  the dto is ${dto}
+    log   the expected is ${expected_dto}    console=True
+    ${validate_status} =  Fusion api validate response follow  ${new_expected_dto}  ${dto}  wordy=${False}
+    Return From Keyword    ${validate_status}
+
+#########################
+# ADDRESS RANGE KEYWORDS
+#########################
+
+Add IP Subnets to Oneview
+   [Documentation]  Add IP subnets to oneview if not exists
+   [Arguments]  ${ipv4_subnet}
+   ${subnet_data}=      Create List
+   :FOR     ${subnet}   IN  @{ipv4_subnet}
+   \    ${subnetUri} =   Get ID Pools IPV4 Subnet URI By Network ID       ${subnet['networkId']}
+   \    Run Keyword If  '${subnetUri}' == 'None'    Append To List      ${subnet_data}        ${subnet}
+   \    ...             ELSE    Log     Subnet already exists in oneview    console=True
+   ${count}=   Get Length    ${subnet_data}
+   Run Keyword If     '${count}' != '0'     Create ID Pools IPV4 Subnet        ${subnet_data}
+
+Register IP pools ranges
+    [Documentation]  Add IP ranges to oneview if not exists
+    [Arguments]  ${ipv4_ranges}
+    ${pool_range}=      Create List
+    ${resp} =   Fusion API Get Resource       /rest/id-pools/IPv4
+    ${status}  ${uri_list} =  Run Keyword If   ${resp['status_code']}==200   Run Keyword and Ignore Error  Get From Dictionary  ${resp}  rangeUris
+    ${count}=   Run keyword if    '${status}'=='PASS'   Get Length    ${uri_list}
+    ${name_list}=   Run Keyword If     '${count}' != '0'   Get IPv4 Range Name by Uri   ${uri_list}
+    :FOR     ${ranges}   IN  @{ipv4_ranges}
+    \    ${ip_status}=   Run Keyword and Return Status     List Should Contain Value   ${name_list}   ${ranges['name']}
+    \    Run Keyword If   '${ip_status}'=='False'       Append To List      ${pool_range}        ${ranges}
+    \    ...             ELSE    Log     Ranges already exists in oneview    console=True
+    ${count}=   Get Length    ${pool_range}
+    Run Keyword If     '${count}' != '0'     Create ID Pools IPV4 Ranges        ${pool_range}
+
+Get IPv4 Range Name by Uri
+   [Documentation]  Add IP ranges to oneview if not exists
+   [Arguments]  ${rangeUris}
+   ${range_list}=   Create List
+   :FOR     ${uri}   IN  @{rangeUris}
+   \    ${rangeresp} =   Fusion Api Get Ipv4 Range       ${uri}
+   \    ${rangeName} =  Run Keyword If   ${rangeresp['status_code']}==200   Get From Dictionary  ${rangeresp}   name
+   \    Append To List      ${range_list}        ${rangeName}
+   [Return]   ${range_list}
+
+Add Deployment Server
+    [Documentation]  Add deployment server to oneview if not exists
+    [Arguments]  ${osds_list}
+    :FOR     ${osds}   IN  @{osds_list}
+    \    ${osds_body} =   Create Deployment Server Payload       ${osds}    ${osds['name']}
+    \    ${resp}=   Fusion API Create OS Deploymentserver    ${osds_body}
+    \    Run Keyword If     ${resp['status_code']}==202     Wait For Task2   ${resp}   timeout=600    interval=5
+    \    ...    ELSE IF  ${resp['status_code']}==400   Log   Deployment server already exists   console=True
+
+Remove OS Deployment Server
+    [Documentation]  Add deployment server to oneview if not exists
+    [Arguments]  ${osds_list}
+    :FOR     ${osds}   IN  @{osds_list}
+    \    ${resp}=   Fusion API Delete OS Deploymentserver    ${osds['name']}
+    \    Run Keyword If     ${resp['status_code']}==202     Wait For Task2   ${resp}   timeout=1200    interval=60
+    \    ...    ELSE IF  ${resp['status_code']}==400   Log   Deployment server already Deleted   console=True

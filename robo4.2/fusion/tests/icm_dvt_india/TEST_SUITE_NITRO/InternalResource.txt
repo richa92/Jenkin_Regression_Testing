@@ -1,0 +1,1496 @@
+*** Settings ***
+Documentation       This module for FC FCoE Feature testing in Nitro
+Resource           ../../../Resources/api/fusion_api_resource.txt
+Resource           ./InternalKeywords.txt
+Library            RoboGalaxyLibrary
+Library            FusionLibrary
+Library            SSHLibrary
+Library             BuiltIn
+Library             Collections
+Library             XML
+Library             String
+Library             Dialogs
+Library             InternalFunctions.py
+
+*** keywords ***
+
+
+############################################################################
+#   Set Suite Variables Before running Automation Suite
+#############################################################################
+Set Suite Variables before running Automation Suite
+    [Documentation]    To Set Suite Variables before running Automation Suite
+    [Arguments]        ${INTERCONNECT1}   ${INTERCONNECT2}
+
+    ${resp} =    Fusion Api Get Interconnect    param=?filter="'name'=='${INTERCONNECT1}'"
+    Log    ${resp}
+    ${NitroIP1_IPV4} =   Set Variable   ${resp['members'][0]['ipAddressList'][0]['ipAddress']}
+    Set Suite Variable    ${NitroIP1_IPV4}
+
+    ${NitroIP1_IPV6} =   Set Variable   ${resp['members'][0]['ipAddressList'][1]['ipAddress']}
+    Set Suite Variable    ${NitroIP1_IPV6}
+
+    ${resp} =    Fusion Api Get Interconnect    param=?filter="'name'=='${INTERCONNECT2}'"
+    Log    ${resp}
+    ${NitroIP2_IPV4} =   Set Variable   ${resp['members'][0]['ipAddressList'][0]['ipAddress']}
+    Set Suite Variable    ${NitroIP2_IPV4}
+
+    ${NitroIP2_IPV6} =   Set Variable   ${resp['members'][0]['ipAddressList'][1]['ipAddress']}
+    Set Suite Variable    ${NitroIP2_IPV6}
+
+    ${Enclosure1}=    Split String  ${INTERCONNECT1}   ,
+    ${Enclosure1}=    Get From List    ${Enclosure1}    0
+
+    ${Enc1_Nitro_Module_Bay_No}=    Split String  ${INTERCONNECT1}
+    ${Enc1_Nitro_Module_Bay_No}=    Get From List    ${Enc1_Nitro_Module_Bay_No}    2
+
+    ${Enclosure2}=    Split String  ${INTERCONNECT2}   ,
+    ${Enclosure2}=    Get From List    ${Enclosure2}    0
+
+    ${Enc2_Nitro_Module_Bay_No}=    Split String  ${INTERCONNECT2}
+    ${Enc2_Nitro_Module_Bay_No}=    Get From List    ${Enc2_Nitro_Module_Bay_No}    2
+
+
+    Set Suite Variable    ${Enclosure1}
+    Set Suite Variable    ${Enc1_Nitro_Module_Bay_No}
+    Set Suite Variable    ${Enclosure2}
+    Set Suite Variable    ${Enc2_Nitro_Module_Bay_No}
+    Set Suite Variable    ${NitroUserName}
+
+    Set Suite Variable    ${OneViewPrompt}
+
+
+#############################################################################
+#   Reset Nitro module with SNMP Command
+#   There is SNMP command to reset Nitro ICM.
+#   Use this keyword to reset Nitro ICM using SNMP command
+#############################################################################
+Reset ICM with SNMP Command
+    [Documentation]    Keyword to Reset Nitro ICM with SNMP command
+    [Arguments]    ${Username}    ${Random_Password}    ${NitroIP}
+    ${snmp_set_cmd}=    Get SNMPSET Command    ${Username}    ${Random_Password}    ${NitroIP}
+    ${snmp_set_cmd}=    catenate    ${snmp_set_cmd}    1.3.6.1.4.1.11.5.7.5.9.1.81.1.9.0 i 1
+    ${output}=     Execute Command    ${snmp_set_cmd}
+    Should Contain     ${output}   = INTEGER: 1
+    [return]   ${output}
+
+#############################################################################
+#   Get Random Password for Nitro
+#############################################################################
+Get Random Password for Nitro
+    [Documentation]    Keyword to get the Random password for Nitro
+    [Arguments]          ${OneViewIP}  ${OneViewUser}  ${OneViewPassword}  ${Enclosure}  ${Nitro_Module_Bay_No}
+
+    Open Connection And Log In      ${OneViewIP}    ${OneViewUser}    ${OneViewPassword}
+
+    ${EM_SN}=  Execute Command   /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${Enclosure} -o i
+    ${XAUTH}=  Execute Command  /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${Enclosure} -o t
+
+    ${read_canmic}=    catenate    curl --tlsv1 --fail -g -x "" -k -i -H "x-auth-token:${XAUTH}" -X POST https://[${EM_SN}%bond0]/rest/v1/InterconnectManager/${Nitro_Module_Bay_No}    -d '{"Action":"ReadCanmicBlocks", "List":['10']}' | grep } | python -m json.tool | grep Data | cut -d "\\"" -f 4 | base64 -d | hexdump -C
+
+    ${canmic_output}=   Execute Command   ${read_canmic}
+
+    ${random_password_line1}=    Get Line    ${canmic_output}    0
+    ${random_password_line2}=    Get Line    ${canmic_output}    1
+
+    ${random_password_line1}=    Split String    ${random_password_line1}    |
+    ${random_password_line2}=    Split String    ${random_password_line2}    |
+
+    ${random_password_part1}=    Get From List    ${random_password_line1}    1
+    ${random_password_part2}=    Get From List    ${random_password_line2}    1
+
+    ${random_password}=    catenate    ${random_password_part1}    ${random_password_part2}
+
+    ${random_password}=    Remove String    ${random_password}    .
+    ${random_password}=    Remove String    ${random_password}    ${space}
+
+    Close All Connections
+    [return]    ${Random_Password}
+
+#############################################################################
+#    Check ICM Firmware version
+#############################################################################
+Check ICM Firmware version
+    [Documentation]    Keyword to Verify ICM's Firmware Version
+    [Arguments]       ${OneViewIP}  ${Random_Password}  ${NitroIP1}
+
+    Open Connection And Log In      ${OneViewIP}
+    ${cmd}=    Get SNMPWALK Command   OneView    ${Random_Password}     ${NitroIP1}
+    ${cmd}=    catenate    ${cmd}    1.3.6.1.4.1.11.5.7.5.9.1.81.1.3
+    Log to Console    ${cmd}
+    ${output}=     Execute Command    ${cmd}
+    Log to Console    ${output}
+    [return]    ${output}
+
+###############################################################################
+#    Enable FaceplateSerial, Netop User and Canserial
+###############################################################################
+Enable FaceplateSerial, Netop User and Canserial for interconnect
+    [Documentation]    Enable FaceplateSerial, Netop User and Canserial for the given ICM
+    [Arguments]         ${OneViewIP}    ${interconnect}    ${req_body}
+    ${resp} =    Fusion Api Get Interconnect    param=?filter="'name'=='${interconnect}'"
+
+
+    ${uri} =    Set Variable    ${resp['members'][0]['uri']}
+    ${resp} =   fusion api patch interconnect   body=${req_body}    uri=${uri}
+    Log to console and logfile   ${resp}
+    Run Keyword If  '${resp['status_code']}' != '202'  Fail    ELSE  log to console   \n-Successfully Created netop user
+
+#############################################################################
+#   Extract Counters
+#############################################################################
+Extract Counters
+    [Documentation]    Keyword to extract counters
+    [Arguments]   ${InCounter}    ${OutCounter}
+    ${InCounter_Value}=    Split String    ${InCounter}    :
+    ${InCounter_Value}=    Get From List    ${InCounter_Value}    3
+    ${InCounter_Value}=    Convert To Integer    ${InCounter_Value}
+    ${OutCounter_Value}=    Split String    ${OutCounter}    :
+    ${OutCounter_Value}=    Get From List    ${OutCounter_Value}    3
+    ${OutCounter_Value}=    Convert To Integer    ${OutCounter_Value}
+    ${Counters}=    Evaluate    ${InCounter_Value}+${OutCounter_Value}
+    [return]    ${Counters}
+
+#############################################################################
+#   Get All OIDS
+#   Execute the SNMP command to retrieve the data with All OIDS in ICM
+#############################################################################
+Get All OIDS
+    [Documentation]    Keyword to get data with all OIDs in ICM
+    [Arguments]   ${OneViewIP}  ${Random_Password}  ${NitroIP}
+
+    Open Connection And Log In      ${OneViewIP}
+    ${snmp_cmd}=    Get SNMPWALK Command    OneView    ${Random_Password}     ${NitroIP}
+    ${snmp_cmd}=    catenate    ${snmp_cmd}    ifName
+    ${snmp_cmd_output}=     Execute Command    ${snmp_cmd}
+    [return]  ${snmp_cmd_output}
+
+
+#############################################################################
+#   Get OID for Interface
+#############################################################################
+Get OID for Interface
+    [Documentation]    Keyword to Get OID for a specific interface
+    [Arguments]    ${OneViewIP}  ${Random_Password}  ${Interface}  ${NitroIP}
+
+    ${all_oids}=    Get All OIDS    ${OneViewIP}  ${Random_Password}  ${NitroIP}
+    Log      ${all_oids}
+
+    ${oid_for_interface}=    oid_of_interface   ${all_oids}  ${Interface}
+    Log    ${oid_for_interface}
+
+    [return]    ${oid_for_interface}
+
+#############################################################################
+#   Check FCoE Connectivity whether the Flogi is happened in Nitro module
+#############################################################################
+Check FCoE Connectivity whether the Flogi is happened in Nitro module
+    [Documentation]    To check Flogi
+    [Arguments]       ${OneViewIP}  ${Random_Password}  ${NitroIP}   ${Port1}   ${Port2}
+
+    ${OID1}=    Get OID for Interface     ${OneViewIP}  ${Random_Password}  ${Port1}  ${NitroIP}
+    ${OID2}=    Get OID for Interface     ${OneViewIP}  ${Random_Password}  ${Port2}  ${NitroIP}
+
+    Open Connection And Log In      ${OneViewIP}
+    ${snmp_cmd}=    Get SNMPWALK Command    OneView    ${Random_Password}     ${NitroIP}
+
+    #Check the FIP-Snooping session
+    ${cmd}=    catenate    ${snmp_cmd}    1.3.6.1.4.1.11.5.7.5.8.2.2.102.2.2.1.8
+    ${cmd_output}=     Execute Command    ${cmd}
+
+    #Check the FIP-Snooping fcf
+    ${cmd}=    catenate    ${snmp_cmd}    1.3.6.1.4.1.11.5.7.5.8.2.2.102.2.3.1.4
+    ${output}=     Execute Command    ${cmd}
+    run keyword and continue on failure  Should Match Regexp    ${output}    \\s*[\\w\\W]*?Hex-STRING: 0E FC 00\\s*[\\w\\W]*?
+
+    #Check the FIP-Snooping On both the interfaces
+    ${cmd}=    catenate    ${snmp_cmd}    1.3.6.1.4.1.11.5.7.5.8.2.2.102.2.1
+    ${output}=     Execute Command    ${cmd}
+    #run keyword and continue on failure  Should Contain    ${output}    ${OID1}
+    run keyword and continue on failure  Should Contain    ${output}    ${OID2}
+
+    # Check the Fabric Name for FCoE
+    ${cmd}=    catenate    ${snmp_cmd}    1.3.6.1.4.1.11.5.7.5.8.2.2.102.2.3.1.7
+    ${output}=     Execute Command    ${cmd}
+    run keyword and continue on failure  Should Match Regexp    ${output}    \\s*[\\w\\W]*?Hex-STRING:\\s*[\\w\\W]*?   Fabric Names for FCoE is not Available
+
+
+
+#############################################################################
+#   FC/FCOE - Reboot the Nitro module and
+#   Verify Traffic should flow through other Nitro module
+#############################################################################
+FC/FCOE - Reboot Nitro module and Check Traffic flow
+    [Documentation]    FC/FCOE - Reboot Nitro module and Check Traffic flow
+    [Arguments]       ${OneViewIP}  ${Random_Password}  ${NitroIP}    ${NitroIP2}   ${Enc1_Nitro_Module_Bay_No}  ${Downlink_Port2}  ${Downlink_Port1}
+
+    Log    ${Random_Password}
+
+    ${OID1}=    Get OID for Interface     ${OneViewIP}  ${Random_Password}  ${Downlink_Port1}  ${NitroIP}
+    ${OID2}=    Get OID for Interface     ${OneViewIP}  ${Random_Password}  ${Downlink_Port2}  ${NitroIP}
+
+    Open Connection And Log In      ${OneViewIP}
+
+    ##############################################################################
+    # Note initial traffic reading in port1 which is going to be rebooted shortly.
+    ##############################################################################
+    ${snmp_walk_cmd}=    Get SNMPWALK Command    OneView    ${Random_Password}     ${NitroIP}
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.10.${OID1}
+    ${outputIn}=     Execute Command    ${cmd}
+
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.16.${OID1}
+    ${outputOut}=     Execute Command    ${cmd}
+
+    ${Traffic_Rebooted_Port_Initial}=    Extract Counters    ${outputIn}    ${outputOut}
+    log    ${Traffic_Rebooted_Port_Initial}
+
+    #############################################################################
+    # Note initial traffic reading in port2.
+    #############################################################################
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.10.${OID2}
+    ${outputIn}=     Execute Command    ${cmd}
+
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.16.${OID2}
+    ${outputOut}=     Execute Command    ${cmd}
+
+    ${Traffic_2nd_Port_Initial}=    Extract Counters    ${outputIn}    ${outputOut}
+    log    ${Traffic_2nd_Port_Initial}
+
+
+    #############################################################################
+    # Reboot Nitro Module.
+    #############################################################################
+    ${output}=    ISS Reset with SNMP Command    OneView    ${Random_Password}    ${Nitro_IP}
+
+    #############################################################################
+    # Note final traffic reading in port for module thats rebooted
+    #############################################################################
+    ${snmp_walk_cmd}=    Get SNMPWALK Command    OneView    ${Random_Password}     ${NitroIP2}
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.10.${OID1}
+    ${outputIn}=     Execute Command    ${cmd}
+
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.16.${OID1}
+    ${outputOut}=     Execute Command    ${cmd}
+
+    ${Traffic_Rebooted_Port_Final}=    Extract Counters    ${outputIn}    ${outputOut}
+    log    ${Traffic_Rebooted_Port_Final}
+
+    #############################################################################
+    # Note final traffic reading in port2.
+    #############################################################################
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.10.${OID2}
+    ${outputIn}=     Execute Command    ${cmd}
+
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.16.${OID2}
+    ${outputOut}=     Execute Command    ${cmd}
+
+    ${Traffic_2nd_Port_Final}=    Extract Counters    ${outputIn}    ${outputOut}
+
+    log     ${Traffic_2nd_Port_final}
+    Log     ${Traffic_2nd_Port_Initial}
+    Log     ${Traffic_Rebooted_Port_final}
+    Log     ${Traffic_Rebooted_Port_Initial}
+
+    ${diff}=    Evaluate    ${Traffic_2nd_Port_final}-${Traffic_2nd_Port_Initial}
+    Run Keyword If    ${diff} > 20000    Log       TEST PASSED - Counters are Increasing Drastically..     ELSE    Log     Counters are not increasing drastically...
+
+    Run Keyword If    ${Traffic_2nd_Port_final} < ${Traffic_2nd_Port_Initial}   Log   Traffic not increased in connected port.
+
+    Verify_Master_Nitro    OneView    ${Random_Password}    ${NitroIP2}
+
+
+
+#############################################################################
+#   FC/FCOE - Set Defaults
+#############################################################################
+Set Required Suite Variables before Hot Plug ICM
+    [Documentation]    Keyword to set Required Suite Variables before Hot Plug ICM
+    [Arguments]          ${OneViewIP}  ${OneViewUser}  ${OneViewPassword}
+
+    ${FUSION_IP}=    set variable    ${OneViewIP}
+    Set Suite Variable    ${FUSION_IP}
+
+    ${FUSION_SSH_USERNAME}=  set variable   ${OneViewUser}
+    Set Suite Variable    ${FUSION_SSH_USERNAME}
+
+    ${FUSION_SSH_PASSWORD}=  set variable    ${OneViewPassword}
+    Set Suite Variable   ${FUSION_SSH_PASSWORD}
+
+    ${FUSION_PROMPT}=   set variable      ${OneViewPrompt}
+    Set Suite Variable   ${FUSION_PROMPT}
+
+    ${FUSION_TIMEOUT}=  set variable     20secs
+    Set Suite Variable   ${FUSION_TIMEOUT}
+
+    ${FUSION_NIC}=  set variable   bond0
+    Set Suite Variable    ${FUSION_NIC}
+
+
+#############################################################################
+#   FC/FCOE - Hot Plug the Nitro module and
+#   Verify Traffic should flow through other Nitro module
+#############################################################################
+FCoE/FC - Hot Plug the Nitro module and Check Traffic flow
+    [Documentation]    FCoE :: Hot Plug the Nitro module and Check Traffic flow
+    [Arguments]          ${OneViewIP}  ${Random_Password}  ${Enclosure}  ${Enc1_Nitro_Module_Bay_No}  ${NitroIP}  ${NitroIP2}  ${Downlink_Port2}  ${Downlink_Port1}
+
+    Get EM IP    ${Enclosure}
+    Get EM Token    ${Enclosure}
+
+    Efuse ICM    EFuseReset     ${Enc1_Nitro_Module_Bay_No}
+    Fail   test
+
+    ${OID1}=    Get OID for Interface     ${OneViewIP}  ${Random_Password}  ${Downlink_Port1}  ${NitroIP}
+    ${OID2}=    Get OID for Interface     ${OneViewIP}  ${Random_Password}  ${Downlink_Port2}  ${NitroIP}
+
+    Open Connection And Log In      ${OneViewIP}
+
+    #######################################################################################
+    # Note initial traffic reading in port1 which is going to be hotpluged shortly.
+    #######################################################################################
+    #${snmp_walk_cmd}=    Get SNMPWALK Command    OneView    ${Random_Password}     ${NitroIP}
+    #${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.10.${OID1}
+    ${outputIn}=     Execute Command    ${cmd}
+
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.16.${OID1}
+    ${outputOut}=     Execute Command    ${cmd}
+
+    #${Traffic_Hotplugged_Port_Initial}=    Extract Counters    ${outputIn}    ${outputOut}
+    #log    ${Traffic_Hotplugged_Port_Initial}
+
+    #############################################################################
+    # Note initial traffic reading in port2.
+    #############################################################################
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.10.${OID2}
+    ${outputIn}=     Execute Command    ${cmd}
+
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.16.${OID2}
+    ${outputOut}=     Execute Command    ${cmd}
+
+    ${Traffic_2nd_Port_Initial}=    Extract Counters    ${outputIn}    ${outputOut}
+    log    ${Traffic_2nd_Port_Initial}
+
+
+    #############################################################################
+    # Efuse Reset the Nitro module
+    #############################################################################
+
+    Get EM IP    ${Enclosure}
+    Get EM Token    ${Enclosure}
+
+    Efuse ICM    EFuseReset     ${Enc1_Nitro_Module_Bay_No}
+    Sleep  15 minutes
+
+    Open Connection And Log In      ${OneViewIP}
+
+    #############################################################################
+    # Note final traffic reading in hotplugged port
+    #############################################################################
+    ${snmp_walk_cmd}=    Get SNMPWALK Command    OneView    ${Random_Password}     ${NitroIP2}
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.10.${OID1}
+    ${outputIn}=     Execute Command    ${cmd}
+
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.16.${OID1}
+    ${outputOut}=     Execute Command    ${cmd}
+
+    ${Traffic_Hotplugged_Port_Final}=    Extract Counters    ${outputIn}    ${outputOut}
+    log    ${Traffic_Hotplugged_Port_Final}
+
+    #############################################################################
+    # Note final traffic reading in port2.
+    #############################################################################
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.10.${OID2}
+    ${outputIn}=     Execute Command    ${cmd}
+
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.16.${OID2}
+    ${outputOut}=     Execute Command    ${cmd}
+
+    ${Traffic_2nd_Port_Final}=    Extract Counters    ${outputIn}    ${outputOut}
+
+    log     ${Traffic_2nd_Port_final}
+    Log     ${Traffic_2nd_Port_Initial}
+    Log     ${Traffic_Hotplugged_Port_final}
+    Log     ${Traffic_Hotplugged_Port_Initial}
+
+    ${diff}=    Evaluate    ${Traffic_2nd_Port_final}-${Traffic_2nd_Port_Initial}
+    Run Keyword If    ${diff} > 20000    Log       TEST PASSED - Counters are Increasing Drastically..     ELSE    Log     Counters are not increasing drastically...
+
+    Run Keyword If    ${Traffic_2nd_Port_final} < ${Traffic_2nd_Port_Initial}   Log   Traffic not increased in connected port.
+
+    Verify_Master_Nitro    OneView    ${Random_Password}    ${NitroIP2}
+
+
+#############################################################################
+#   FC/FCOE - Check the multipath by enabling and disabling the ports In Mezz
+#   Disable one of the FC/FCOE Downlink Ports, Verify Traffic should flow
+#   through the other FC/FCOE Downlinkport.
+#############################################################################
+FC/FCOE - Check the multipath by enabling and disabling the ports In Mezz
+    [Documentation]    FC/FCOE - Check the multipath by enabling and disabling the ports In Mezz
+    [Arguments]         ${OneViewIP}  ${Random_Password}  ${NitroIP}  ${Downlink_Port1}  ${Downlink_Port2}
+
+    Log   ${Random_Password}
+    Log     ${Downlink_Port1}
+    Log     ${Downlink_Port2}
+
+    ${OID1}=    Get OID for Interface     ${OneViewIP}  ${Random_Password}  ${Downlink_port1}  ${NitroIP}
+    ${OID2}=    Get OID for Interface     ${OneViewIP}  ${Random_Password}  ${Downlink_port2}  ${NitroIP}
+
+    Open Connection And Log In      ${OneViewIP}
+
+    #############################################################################
+    # Enable both downlink ports
+    #############################################################################
+    ${snmp_set_cmd}=    Get SNMPSET Command    OneView    ${Random_Password}     ${NitroIP}
+
+    ${cmd}=    catenate    ${snmp_set_cmd}    IF-MIB::ifAdminStatus.${OID1} i 1
+    ${output}=     Execute Command    ${cmd}
+    Should Contain      ${output}  INTEGER: up(1)
+
+    ${cmd}=    catenate    ${snmp_set_cmd}    IF-MIB::ifAdminStatus.${OID2} i 1
+    ${output}=     Execute Command    ${cmd}
+    Should Contain     ${output}  INTEGER: up(1)
+
+    #############################################################################
+    # Note initial traffic reading in port1 which is up.
+    #############################################################################
+    ${snmp_walk_cmd}=    Get SNMPWALK Command    OneView    ${Random_Password}     ${NitroIP}
+
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.10.${OID1}
+    ${outputIn}=     Execute Command    ${cmd}
+
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.16.${OID1}
+    ${outputOut}=     Execute Command    ${cmd}
+
+    ${Traffic_Connected_Port_Initial}=    Extract Counters    ${outputIn}    ${outputOut}
+    log    ${Traffic_Connected_Port_Initial}
+
+    #############################################################################
+    # Note initial traffic reading in port2 which is also up.
+    #############################################################################
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.10.${OID2}
+    ${outputIn}=     Execute Command    ${cmd}
+
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.16.${OID2}
+    ${outputOut}=     Execute Command    ${cmd}
+
+    ${Traffic_2nd_Port_Initial}=    Extract Counters    ${outputIn}    ${outputOut}
+    log    ${Traffic_2nd_Port_Initial}
+
+    #############################################################################
+    # Disable one of the downlink port - 2.
+    #############################################################################
+    ${cmd}=    catenate    ${snmp_set_cmd}    IF-MIB::ifAdminStatus.${OID2} i 2
+    ${output}=     Execute Command    ${cmd}
+    Should Contain   ${output}  INTEGER: down(2)
+
+    #############################################################################
+    # Verify traffic in other port - 1 which is up.
+    #############################################################################
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.10.${OID1}
+    ${outputIn}=     Execute Command    ${cmd}
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.16.${OID1}
+    ${outputOut}=     Execute Command    ${cmd}
+    ${Traffic_Connected_Port_final}=    Extract Counters    ${outputIn}    ${outputOut}
+    log to console    ${Traffic_Connected_Port_Final}
+
+    #############################################################################
+    # Also check the traffic in port which is down
+    #############################################################################
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.10.${OID2}
+    ${outputIn}=     Execute Command    ${cmd}
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.16.${OID2}
+    ${outputOut}=     Execute Command    ${cmd}
+    ${Traffic_2nd_Port_Final}=    Extract Counters    ${outputIn}    ${outputOut}
+
+    log     ${Traffic_2nd_Port_Final}
+    Log     ${Traffic_2nd_Port_Initial}
+    Log     ${Traffic_Connected_Port_Final}
+    Log     ${Traffic_Connected_Port_Initial}
+
+    ${diff}=    Evaluate    ${Traffic_Connected_Port_Final}-${Traffic_Connected_Port_Initial}
+    Run Keyword If    ${diff} > 20000    Log       Counters are Increasing Drastically..     ELSE    Log     Counters are not increasing drastically...
+
+    Run Keyword If    ${Traffic_Connected_Port_Final} < ${Traffic_Connected_Port_Initial}   Fail   Test Case Failed as Traffic not increased in connected port.
+    Run Keyword If    ${Traffic_2nd_Port_Final} > ${Traffic_2nd_Port_Initial}  Log   After disabing port2, There should be a drop in traffic in port2 thats disabled, but this has not happened.
+
+    # Enable the downlink port2, so that other test cases can be executed without issues.
+    ${cmd}=    catenate    ${snmp_set_cmd}    IF-MIB::ifAdminStatus.${OID2} i 1
+    ${output}=     Execute Command    ${cmd}
+    Should Contain   ${output}  INTEGER: up(1)
+
+
+
+
+#############################################################################
+#   Verify Ports
+#############################################################################
+Verify Ports
+    [Documentation]    Keyword to Verify Ports are Up
+    [Arguments]        ${OneViewIP}  ${Random_Password}  ${NitroIP}  ${Port1}  ${Port2}
+
+    Log   ${Random_Password}
+    Log     ${Port1}
+    Log     ${Port2}
+
+    ${OID1}=    Get OID for Interface     ${OneViewIP}  ${Random_Password}  ${Port1}  ${NitroIP}
+    ${OID2}=    Get OID for Interface     ${OneViewIP}  ${Random_Password}  ${Port2}  ${NitroIP}
+
+    Open Connection And Log In      ${OneViewIP}
+
+    #############################################################################
+    # Verify both Ports
+    #############################################################################
+    ${snmp_get_cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP}
+    ${cmd}=    catenate    ${snmp_get_cmd}    IF-MIB::ifAdminStatus.${OID1}
+    ${output}=     Execute Command    ${cmd}
+    Should Contain      ${output}  INTEGER: up(1)
+
+    ${cmd}=    catenate    ${snmp_get_cmd}    IF-MIB::ifAdminStatus.${OID2}
+    ${output}=     Execute Command    ${cmd}
+    Should Contain     ${output}  INTEGER: up(1)
+
+#############################################################################
+#   Verify Master Nitro
+#############################################################################
+Verify_Master_Nitro
+    [Documentation]    Keyword to verify if ICM is Master
+    [Arguments]    ${username}    ${Password}    ${NitroIP1}
+    ${cmd}=    Get SNMPGET Command    ${username}    ${Password}     ${NitroIP1}
+    ${cmd}=    catenate    ${cmd}    1.3.6.1.4.1.11.5.7.5.8.1.99.1.4.0
+    ${cmd_output}=     Execute Command    ${cmd}
+    Should Match Regexp    ${cmd_output}   \\s*[\\w\\W]*?INTEGER: 1\\s*[\\w\\W]*?
+
+
+#############################################################################
+#   Verify Setup
+#   Verify status of FC/FCOE Uplink and Downlink ports
+#   Verify Master/Subordinate toplogy remains intact without any changes
+#############################################################################
+Verify Setup
+    [Documentation]    Verify the Setup - Master/Subordinate topology of ICMS shoud be intact, also verify ports are up.
+    [Arguments]         ${OneViewIP}  ${Random_Password}  ${NitroIP}  ${FC_Downlink_Port1}  ${FC_Downlink_Port2}  ${FC_Uplink_Port1}  ${FC_Uplink_Port2}  ${FCOE_Downlink_Port1}  ${FCOE_Downlink_Port2}  ${FCOE_Uplink_Port1}  ${FCOE_Uplink_Port2}
+
+    Log   ${Random_Password}
+
+    Verify Ports     ${OneViewIP}  ${Random_Password}  ${NitroIP}  ${FC_Downlink_Port1}  ${FC_Downlink_Port2}
+    Verify Ports     ${OneViewIP}  ${Random_Password}  ${NitroIP}  ${FC_Uplink_Port1}  ${FC_Uplink_Port2}
+    Verify Ports     ${OneViewIP}  ${Random_Password}  ${NitroIP}  ${FCOE_Downlink_Port1}  ${FCOE_Downlink_Port2}
+    Verify Ports     ${OneViewIP}  ${Random_Password}  ${NitroIP}  ${FCOE_Uplink_Port1}  ${FCOE_Uplink_Port2}
+
+    Verify_Master_Nitro    OneView    ${Random_Password}    ${NitroIP}
+
+
+
+#############################################################################
+# FC/FCOE - Remove and insert both the stacking cables,
+# when the ICMs in a stable state.
+# After this verify the traffic flow.
+#############################################################################
+FC/FCOE - Remove and insert both the stacking cables, when the ICMs in a stable state
+    [Documentation]    FC/FCOE - Remove and insert both the stacking cables, when the ICMs in a stable state
+    [Arguments]         ${OneViewIP}  ${Random_Password}  ${NitroIP}  ${STACKING_PORT1}  ${STACKING_PORT2}   ${STACKING_PORT3}   ${STACKING_PORT4}
+
+    Log   ${Random_Password}
+    Log     ${STACKING_PORT1} Traffic_1st_Port_Initial
+    Log     ${STACKING_PORT2}
+
+    ${OID1}=    Get OID for Interface     ${OneViewIP}  ${Random_Password}    ${STACKING_PORT1}  ${NitroIP}
+    ${OID2}=    Get OID for Interface     ${OneViewIP}  ${Random_Password}    ${STACKING_PORT2}  ${NitroIP}
+    ${OID3}=    Get OID for Interface     ${OneViewIP}  ${Random_Password}    ${STACKING_PORT3}  ${NitroIP}
+    ${OID4}=    Get OID for Interface     ${OneViewIP}  ${Random_Password}    ${STACKING_PORT4}  ${NitroIP}
+
+    Open Connection And Log In      ${OneViewIP}
+
+    #############################################################################
+    # Note initial traffic reading in port1 which is up.
+    #############################################################################
+    ${snmp_walk_cmd}=    Get SNMPWALK Command    OneView    ${Random_Password}     ${NitroIP}
+
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.10.${OID1}
+    ${outputIn}=     Execute Command    ${cmd}
+
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.16.${OID1}
+    ${outputOut}=     Execute Command    ${cmd}
+
+    ${Traffic_1st_Port_Initial}=    Extract Counters    ${outputIn}    ${outputOut}
+    log    ${Traffic_1st_Port_Initial}
+
+    #############################################################################
+    # Note initial traffic reading in port2 which is also up.
+    #############################################################################
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.10.${OID2}
+    ${outputIn}=     Execute Command    ${cmd}
+
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.16.${OID2}
+    ${outputOut}=     Execute Command    ${cmd}
+
+    ${Traffic_2nd_Port_Initial}=    Extract Counters    ${outputIn}    ${outputOut}
+    log    ${Traffic_2nd_Port_Initial}
+
+    #############################################################################
+    # Try to Disable both stacking ports.
+    # Verify Status - It should be enabled. Stacking links cannot be disabled
+    # Refer Quix for details -
+    #############################################################################
+    ${snmp_set_cmd}=    Get SNMPSET Command    OneView    ${Random_Password}     ${NitroIP}
+
+    ${snmp_get_cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP}
+
+
+    ${cmd}=    catenate    ${snmp_set_cmd}    IF-MIB::ifAdminStatus.${OID1} i 2
+    ${output}=     Execute Command    ${cmd}
+    Should Contain      ${output}  INTEGER:
+    ${cmd}=    catenate    ${snmp_get_cmd}    IF-MIB::ifAdminStatus.${OID1}
+    ${output}=     Execute Command    ${cmd}
+    Should Contain      ${output}  INTEGER: up(1)
+
+    ${cmd}=    catenate    ${snmp_set_cmd}    IF-MIB::ifAdminStatus.${OID2} i 2
+    ${output}=     Execute Command    ${cmd}
+    Should Contain     ${output}  INTEGER:
+    ${cmd}=    catenate    ${snmp_get_cmd}    IF-MIB::ifAdminStatus.${OID2}
+    ${output}=     Execute Command    ${cmd}
+    Should Contain     ${output}  INTEGER: up(1)
+
+    ${cmd}=    catenate    ${snmp_set_cmd}    IF-MIB::ifAdminStatus.${OID3} i 2
+    ${output}=     Execute Command    ${cmd}
+    Should Contain      ${output}  INTEGER:
+    ${cmd}=    catenate    ${snmp_get_cmd}    IF-MIB::ifAdminStatus.${OID3}
+    ${output}=     Execute Command    ${cmd}
+    Should Contain      ${output}  INTEGER: up(1)
+
+    ${cmd}=    catenate    ${snmp_set_cmd}    IF-MIB::ifAdminStatus.${OID4} i 2
+    ${output}=     Execute Command    ${cmd}
+    Should Contain     ${output}  INTEGER:
+    ${cmd}=    catenate    ${snmp_get_cmd}    IF-MIB::ifAdminStatus.${OID4}
+    ${output}=     Execute Command    ${cmd}
+    Should Contain     ${output}  INTEGER: up(1)
+
+
+    #############################################################################
+    # Enable both stacking ports
+    #############################################################################
+    ${cmd}=    catenate    ${snmp_set_cmd}    IF-MIB::ifAdminStatus.${OID1} i 1
+    ${output}=     Execute Command    ${cmd}
+    Should Contain      ${output}  INTEGER: up(1)
+    ${cmd}=    catenate    ${snmp_get_cmd}    IF-MIB::ifAdminStatus.${OID1}
+    ${output}=     Execute Command    ${cmd}
+    Should Contain      ${output}  INTEGER: up(1)
+
+    ${cmd}=    catenate    ${snmp_set_cmd}    IF-MIB::ifAdminStatus.${OID2} i 1
+    ${output}=     Execute Command    ${cmd}
+    Should Contain     ${output}  INTEGER: up(1)
+    ${cmd}=    catenate    ${snmp_get_cmd}    IF-MIB::ifAdminStatus.${OID2}
+    ${output}=     Execute Command    ${cmd}
+    Should Contain     ${output}  INTEGER: up(1)
+
+    ${cmd}=    catenate    ${snmp_set_cmd}    IF-MIB::ifAdminStatus.${OID3} i 1
+    ${output}=     Execute Command    ${cmd}
+    Should Contain      ${output}  INTEGER: up(1)
+    ${cmd}=    catenate    ${snmp_get_cmd}    IF-MIB::ifAdminStatus.${OID3}
+    ${output}=     Execute Command    ${cmd}
+    Should Contain      ${output}  INTEGER: up(1)
+
+
+    ${cmd}=    catenate    ${snmp_set_cmd}    IF-MIB::ifAdminStatus.${OID4} i 1
+    ${output}=     Execute Command    ${cmd}
+    Should Contain     ${output}  INTEGER: up(1)
+    ${cmd}=    catenate    ${snmp_get_cmd}    IF-MIB::ifAdminStatus.${OID4}
+    ${output}=     Execute Command    ${cmd}
+    Should Contain     ${output}  INTEGER: up(1)
+
+
+    #############################################################################
+    # Verify traffic in other port - 1 which is up.
+    #############################################################################
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.10.${OID1}
+    ${outputIn}=     Execute Command    ${cmd}
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.16.${OID1}
+    ${outputOut}=     Execute Command    ${cmd}
+    ${Traffic_1st_Port_Final}=    Extract Counters    ${outputIn}    ${outputOut}
+
+
+    #############################################################################
+    # Also check the traffic in port 2 which is also up.
+    #############################################################################
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.10.${OID2}
+    ${outputIn}=     Execute Command    ${cmd}
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.16.${OID2}
+    ${outputOut}=     Execute Command    ${cmd}
+    ${Traffic_2nd_Port_Final}=    Extract Counters    ${outputIn}    ${outputOut}
+
+    Log     ${Traffic_1st_Port_Initial}
+    Log     ${Traffic_1st_Port_Final}
+    Log     ${Traffic_2nd_Port_Initial}
+    log     ${Traffic_2nd_Port_Final}
+
+
+
+#############################################################################
+# FC/FCOE - Kill and Restart ISS executable from the standby ICM
+# And verify traffic
+#############################################################################
+FC/FCOE - Kill and restart the ISS exe from the Standby ICM and verify traffic
+    [Documentation]    FC/FCOE - Kill and restart the ISS.exe from the Standby ICM and verify traffic
+    [Arguments]         ${OneViewIP}  ${Random_Password}  ${NitroIP}  ${NitroIP2}  ${Downlink_port1}  ${Downlink_port2}  ${Nitro_root_password}
+
+    Log   ${Random_Password}
+    Log     ${Downlink_port1}
+    Log     ${Downlink_port2}
+
+    ${OID1}=    Get OID for Interface     ${OneViewIP}  ${Random_Password}    ${Downlink_port1}  ${NitroIP}
+    ${OID2}=    Get OID for Interface     ${OneViewIP}  ${Random_Password}    ${Downlink_port2}  ${NitroIP}
+
+    Open Connection And Log In      ${OneViewIP}
+
+    #############################################################################
+    # Note initial traffic reading in port1 which is up.
+    #############################################################################
+    ${snmp_walk_cmd}=    Get SNMPWALK Command    OneView    ${Random_Password}     ${NitroIP}
+
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.10.${OID1}
+    ${outputIn}=     Execute Command    ${cmd}
+
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.16.${OID1}
+    ${outputOut}=     Execute Command    ${cmd}
+
+    ${Traffic_Connected_Port_Initial}=    Extract Counters    ${outputIn}    ${outputOut}
+    log    ${Traffic_Connected_Port_Initial}
+
+    #############################################################################
+    # Note initial traffic reading in port2 which is also up.
+    #############################################################################
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.10.${OID2}
+    ${outputIn}=     Execute Command    ${cmd}
+
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.16.${OID2}
+    ${outputOut}=     Execute Command    ${cmd}
+
+    ${Traffic_2nd_Port_Initial}=    Extract Counters    ${outputIn}    ${outputOut}
+    log    ${Traffic_2nd_Port_Initial}
+
+    #############################################################################
+    # Kill and restart the ISS.exe from the Standby ICM
+    #############################################################################
+    Open Connection     ${NitroIP2}     timeout=20s
+    Login              root     ${Nitro_root_password}
+    Write    pkill ISS.exe
+    Read Until    \#
+    Write    exit
+
+    Sleep  3 minutes
+
+    Open Connection And Log In      ${OneViewIP}
+
+    #############################################################################
+    # Verify traffic in other port - 1 which is up.
+    #############################################################################
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.10.${OID1}
+    ${outputIn}=     Execute Command    ${cmd}
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.16.${OID1}
+    ${outputOut}=     Execute Command    ${cmd}
+    ${Traffic_Connected_Port_final}=    Extract Counters    ${outputIn}    ${outputOut}
+    log to console    ${Traffic_Connected_Port_final}
+
+    #############################################################################
+    # Also check the traffic in port which is also up.
+    #############################################################################
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.10.${OID2}
+    ${outputIn}=     Execute Command    ${cmd}
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.16.${OID2}
+    ${outputOut}=     Execute Command    ${cmd}
+    ${Traffic_2nd_Port_final}=    Extract Counters    ${outputIn}    ${outputOut}
+
+    log     ${Traffic_2nd_Port_final}
+    Log     ${Traffic_2nd_Port_Initial}
+    Log     ${Traffic_Connected_Port_final}
+    Log     ${Traffic_Connected_Port_Initial}
+    Sleep  3 minutes
+
+#############################################################################
+#   FC/FCOE - Check and update the Nitro module on latest firmware
+#############################################################################
+ Check and update the Nitro module on latest firmware
+    [Documentation]    firmware update
+    [Arguments]       ${OneViewIP}  ${Random_Password}  ${NitroIP}    ${NitroIP2}
+
+    ########################################################################################
+    # scp hpe_icm_fv1-1.1.0-12-2017-01-03.pkg and package.json to
+    # Both Nitro Modules (Master and Subordinate)
+    ########################################################################################
+    Open Connection And Log In      ${OneViewIP}
+    Read Until    ${OneViewPrompt}
+    write   scp ${FirmwareUpdate_Package} OneView@${NitroIP}:/upload
+    Read Until    ${Password_Prompt}
+    write     ${Random_Password}
+    sleep     2secs
+    write    scp package.json OneView@${NitroIP}:/upload
+    Read Until    ${Password_Prompt}
+    write     ${Random_Password}
+
+
+    Read Until    ${OneViewPrompt}
+    write   scp ${FirmwareUpdate_Package} OneView@${NitroIP2}:/upload
+    Read Until    ${Password_Prompt}
+    write     ${Random_Password}
+    sleep     2secs
+    write    scp package.json OneView@${NitroIP2}:/upload
+    Read Until    ${Password_Prompt}
+    write     ${Random_Password}
+
+
+    #################################################################################
+    #  ISSU Mode Compatible check
+    #################################################################################
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP}
+    ${cmd}=    catenate    ${cmd}    1.3.6.1.4.1.11.5.7.5.8.2.2.103.1.9.0
+    ${output}=     Execute Command    ${cmd}
+    ${compatible_check}=    set variable    SNMPv2-SMI::enterprises.11.5.7.5.8.2.2.103.1.9.0 = INTEGER: 1
+    run keyword and continue on failure  Should Contain    ${output}    ${compatible_check}
+
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP2}
+    ${cmd}=    catenate    ${cmd}    1.3.6.1.4.1.11.5.7.5.8.2.2.103.1.9.0
+    ${output}=     Execute Command    ${cmd}
+    ${compatible_check}=    set variable    SNMPv2-SMI::enterprises.11.5.7.5.8.2.2.103.1.9.0 = INTEGER: 1
+    run keyword and continue on failure  Should Contain    ${output}    ${compatible_check}
+
+    #################################################################################
+    #  Set ISSU Mode of Master Nitro to Full Compatable.
+    #  Subordinate should change automatically
+    #################################################################################
+    ${cmd}=    Get SNMPSET Command   OneView    ${Random_Password}     ${NitroIP}
+    ${cmd}=    catenate    ${cmd}    1.3.6.1.4.1.11.5.7.5.8.2.2.103.1.9.0 i 1
+    ${output}=     Execute Command    ${cmd}
+    run keyword and continue on failure  Should Contain    ${output}    ${compatible_check}
+
+    #################################################################################
+    #  ISSU Mode Compatible check
+    #################################################################################
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP}
+    ${cmd}=    catenate    ${cmd}    1.3.6.1.4.1.11.5.7.5.8.2.2.103.1.9.0
+    ${output}=     Execute Command    ${cmd}
+    run keyword and continue on failure  Should Contain    ${output}    ${compatible_check}
+
+    #Getting ISSU mode of the switches to Fully-compatible mode/Sub-ordinate
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP2}
+    ${cmd}=    catenate    ${cmd}    1.3.6.1.4.1.11.5.7.5.8.2.2.103.1.9.0
+    ${output}=     Execute Command    ${cmd}
+    run keyword and continue on failure  Should Contain    ${output}    ${compatible_check}
+
+
+    ################################################################################
+    # Keeping the switches in Maintenance mode. The expectation is that when
+    # we change on MASTER switch then STAND_BY should change automatically
+    ################################################################################
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP}
+    ${cmd}=    catenate    ${cmd}    1.3.6.1.4.1.11.5.7.5.8.2.2.103.1.1.0
+    ${output}=     Execute Command    ${cmd}
+    ${compatible_check1.1_integer2}=    set variable    SNMPv2-SMI::enterprises.11.5.7.5.8.2.2.103.1.1.0 = INTEGER: 2
+    ${compatible_check1.2_integer2}=    set variable    SNMPv2-SMI::enterprises.11.5.7.5.8.2.2.103.1.2.0 = INTEGER: 2
+    run keyword and continue on failure  Should Contain    ${output}    ${compatible_check1.1_integer2}
+
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP2}
+    ${cmd}=    catenate    ${cmd}    1.3.6.1.4.1.11.5.7.5.8.2.2.103.1.1.0
+    ${output}=     Execute Command    ${cmd}
+    run keyword and continue on failure  Should Contain    ${output}    ${compatible_check1.1_integer2}
+
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP}
+    ${cmd}=    catenate    ${cmd}    1.3.6.1.4.1.11.5.7.5.8.2.2.103.1.2.0
+    ${output}=     Execute Command    ${cmd}
+    run keyword and continue on failure  Should Contain    ${output}    ${compatible_check1.2_integer2}
+
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP2}
+    ${cmd}=    catenate    ${cmd}    1.3.6.1.4.1.11.5.7.5.8.2.2.103.1.2.0
+    ${output}=     Execute Command    ${cmd}
+    run keyword and continue on failure  Should Contain    ${output}    ${compatible_check1.2_integer2}
+
+    #################################################################################
+    # Set Master Nitro module to Maintenance mode. Subordinate Nitro Module
+    # should change automatically
+    #################################################################################
+    ${cmd}=    Get SNMPSET Command   OneView    ${Random_Password}     ${NitroIP}
+    ${cmd}=    catenate    ${cmd}    1.3.6.1.4.1.11.5.7.5.8.2.2.103.1.1.0 i 1
+    #${cmd}=  set variable   snmpset -v3 -l authPriv -u OneView -A f9qFh7Ece5VHUOzN -a SHA -x AES -X f9qFh7Ece5VHUOzN 90.1.0.179 1.3.6.1.4.1.11.5.7.5.8.2.2.103.1.1.0 i 1
+    ${output}=     Execute Command    ${cmd}
+    ${set_compatible_check_1.1_integer1}=    set variable    SNMPv2-SMI::enterprises.11.5.7.5.8.2.2.103.1.1.0 = INTEGER: 1
+    run keyword and continue on failure  Should Contain    ${output}    ${set_compatible_check_1.1_integer1}
+
+    ###############################################################################
+    # Check switch moved to Maintenance mode
+    ###############################################################################
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP}
+    ${cmd}=    catenate    ${cmd}    1.3.6.1.4.1.11.5.7.5.8.2.2.103.1.2.0
+    ${output}=     Execute Command    ${cmd}
+    ${compatible_check_1.2_integer1}=    set variable    SNMPv2-SMI::enterprises.11.5.7.5.8.2.2.103.1.2.0 = INTEGER: 1
+    run keyword and continue on failure  Should Contain    ${output}    ${compatible_check_1.2_integer1}
+
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP2}
+    ${cmd}=    catenate    ${cmd}    1.3.6.1.4.1.11.5.7.5.8.2.2.103.1.2.0
+    ${output}=     Execute Command    ${cmd}
+    run keyword and continue on failure  Should Contain    ${output}    ${compatible_check_1.2_integer1}
+
+
+
+    #################################################################################
+    # Setting the image path for master switch
+    ################################################################################
+    ${cmd}=    Get SNMPSET Command   OneView    ${Random_Password}     ${NitroIP}
+    ${cmd}=    catenate    ${cmd}    .1.3.6.1.4.1.11.5.7.5.8.2.2.103.1.3.0 s "/upload/${FirmwareUpdate_Package}"
+    ${output}=     Execute Command    ${cmd}
+    ${package_path}    set variable    SNMPv2-SMI::enterprises.11.5.7.5.8.2.2.103.1.3.0 = STRING: "/upload/${FirmwareUpdate_Package}"
+    run keyword and continue on failure  Should Contain    ${output}    ${package_path}
+
+    Sleep  2 minutes
+
+    ${cmd}=    Get SNMPSET Command   OneView    ${Random_Password}     ${NitroIP2}
+    ${cmd}=    catenate    ${cmd}    .1.3.6.1.4.1.11.5.7.5.8.2.2.103.1.3.0 s "/upload/${FirmwareUpdate_Package}"
+    ${output}=     Execute Command    ${cmd}
+    run keyword and continue on failure  Should Contain    ${output}    ${package_path}
+
+    Sleep  2 minutes
+
+    ##############################################################################
+    # Verifying  the image path for master/subordinate switch
+    #############################################################################
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP}
+    ${cmd}=    catenate    ${cmd}    .1.3.6.1.4.1.11.5.7.5.8.2.2.103.1.3.0
+    ${output}=     Execute Command    ${cmd}
+    #${compatible_check_1.3_null}=    set variable    SNMPv2-SMI::enterprises.11.5.7.5.8.2.2.103.1.3.0 = ""
+    #run keyword and continue on failure  Should Contain    ${output}    ${compatible_check_1.3_null}
+
+
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP2}
+    ${cmd}=    catenate    ${cmd}    .1.3.6.1.4.1.11.5.7.5.8.2.2.103.1.3.0
+    ${output}=     Execute Command    ${cmd}
+    # run keyword and continue on failure  Should Contain    ${output}    ${compatible_check_1.3_null}
+
+    #############################################################################
+    # Findout master/switch using FS_RM mib.Master
+    # switch should return 1 and whereas stand-by should return 2
+    #############################################################################
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP}
+    ${cmd}=    catenate    ${cmd}    1.3.6.1.4.1.11.5.7.5.8.1.99.1.4.0
+    ${output}=     Execute Command    ${cmd}
+    ${mib_check}=    set variable    SNMPv2-SMI::enterprises.11.5.7.5.8.1.99.1.4.0 = INTEGER: 1
+    run keyword and continue on failure  Should Contain    ${output}    ${mib_check}
+
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP2}
+    ${cmd}=    catenate    ${cmd}    1.3.6.1.4.1.11.5.7.5.8.1.99.1.4.0
+    ${output}=     Execute Command    ${cmd}
+    ${mib_check_standby}=    set variable    SNMPv2-SMI::enterprises.11.5.7.5.8.1.99.1.4.0 = INTEGER: 2
+    run keyword and continue on failure  Should Contain    ${output}    ${mib_check_standby}
+
+
+    ##############################################################################
+    # Loading image on stand-by
+    ##############################################################################
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP}
+    ${cmd}=    catenate    ${cmd}    1.3.6.1.4.1.11.5.7.5.8.2.2.103.1.10.0
+    ${output}=     Execute Command    ${cmd}
+    #${image_standby}=    set variable    SNMPv2-SMI::enterprises.11.5.7.5.8.2.2.103.1.10.0 = INTEGER: 0
+    #run keyword and continue on failure  Should Contain    ${output}    ${image_standby}
+
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP2}
+    ${cmd}=    catenate    ${cmd}    1.3.6.1.4.1.11.5.7.5.8.2.2.103.1.10.0
+    ${output}=     Execute Command    ${cmd}
+    #${mib_check_standby}=    set variable    SNMPv2-SMI::enterprises.11.5.7.5.8.2.2.103.1.10.0 = INTEGER: 0
+    #run keyword and continue on failure  Should Contain    ${output}    ${mib_check_standby}
+    Sleep  2 minutes
+
+    ##############################################################################
+    #set SNMP .set image for stand-by module
+    ##############################################################################
+    ${cmd}=    Get SNMPSET Command   OneView    ${Random_Password}     ${NitroIP2}
+    ${cmd}=    catenate    ${cmd}    1.3.6.1.4.1.11.5.7.5.8.2.2.103.1.10.0 i 1
+    ${output}=     Execute Command    ${cmd}
+    ${set_image}=    set variable    SNMPv2-SMI::enterprises.11.5.7.5.8.2.2.103.1.10.0 = INTEGER: 1
+    run keyword and continue on failure  Should Contain    ${output}    ${set_image}
+
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP2}
+    ${cmd}=    catenate    ${cmd}    1.3.6.1.4.1.11.5.7.5.8.2.2.103.1.11.0
+    ${output}=     Execute Command    ${cmd}
+    Sleep  5 minutes
+    ${image_update}=    set variable    No log handling enabled - turning on stderr logging
+    run keyword and continue on failure  Should Contain    ${output}    ${image_update}
+    Sleep  5 minutes
+
+    ############################################################################
+    #Check firmware version on Stand-by and Master
+    #############################################################################
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP2}
+    ${cmd}=    catenate    ${cmd}    1.3.6.1.4.1.11.5.7.5.8.1.81.1.3.0
+    ${output}=     Execute Command    ${cmd}
+
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP}
+    ${cmd}=    catenate    ${cmd}    1.3.6.1.4.1.11.5.7.5.8.1.81.1.3.0
+    ${output}=     Execute Command    ${cmd}
+
+    #############################################################################
+    # Check stand-by switch joins in DUS as stand-by only.
+    # Master switch should return 1 and whereas stand-by should return 2
+    #############################################################################
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP}
+    ${cmd}=    catenate    ${cmd}    1.3.6.1.4.1.11.5.7.5.8.1.99.1.4.0
+    ${output}=     Execute Command    ${cmd}
+
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP2}
+    ${cmd}=    catenate    ${cmd}    1.3.6.1.4.1.11.5.7.5.8.1.99.1.4.0
+    ${output}=     Execute Command    ${cmd}
+
+    ############################################################################
+    # Force switchover master
+    ############################################################################
+    ${cmd}=    Get SNMPSET Command   OneView    ${Random_Password}     ${NitroIP}
+    ${cmd}=    catenate    ${cmd}    1.3.6.1.4.1.11.5.7.5.8.1.99.1.8.0 i 1
+    ${output}=     Execute Command    ${cmd}
+    ${switchover_master}=    set variable    SNMPv2-SMI::enterprises.11.5.7.5.8.1.99.1.8.0 = INTEGER: 1
+    run keyword and continue on failure  Should Contain    ${output}    ${switchover_master}
+
+    #Wait For 60 Sec
+
+    ##########################################################################
+    #Checking status of Force Switchover on master switch
+    ###########################################################################
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP}
+    ${cmd}=    catenate    ${cmd}   1.3.6.1.4.1.11.5.7.5.8.1.99.1.8.0
+    ${output}=     Execute Command    ${cmd}
+    ${switchover_status}=    set variable    SNMPv2-SMI::enterprises.11.5.7.5.8.1.99.1.8.0 = INTEGER: 2
+    run keyword and continue on failure  Should Contain    ${output}    ${switchover_status}
+
+    ##########################################################################
+    # Check the switch roles are swapped
+    # Master switch should return 1 and whereas stand-by should return 2
+    ##########################################################################
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP}
+    ${cmd}=    catenate    ${cmd}   1.3.6.1.4.1.11.5.7.5.8.1.99.1.4.0
+    ${output}=     Execute Command    ${cmd}
+    ${switchover_roles}=    set variable    SNMPv2-SMI::enterprises.11.5.7.5.8.1.99.1.4.0 = INTEGER: 2
+    run keyword and continue on failure  Should Contain    ${output}    ${switchover_roles}
+
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP2}
+    ${cmd}=    catenate    ${cmd}   1.3.6.1.4.1.11.5.7.5.8.1.99.1.4.0
+    ${output}=     Execute Command    ${cmd}
+    ${switchover_roles1}=    set variable    SNMPv2-SMI::enterprises.11.5.7.5.8.1.99.1.4.0 = INTEGER: 1
+    run keyword and continue on failure  Should Contain    ${output}    ${switchover_roles1}
+
+    ############################################################################
+    # Loading image on Master switch
+    ############################################################################
+    ${cmd}=    Get SNMPSET Command   OneView    ${Random_Password}     ${NitroIP}
+    ${cmd}=    catenate    ${cmd}    1.3.6.1.4.1.11.5.7.5.8.2.2.103.1.10.0 i 1
+    ${output}=     Execute Command    ${cmd}
+    ${load_image}=    set variable    SNMPv2-SMI::enterprises.11.5.7.5.8.2.2.103.1.10.0 = INTEGER: 1
+    run keyword and continue on failure  Should Contain    ${output}    ${load_image}
+
+    Sleep  3 minutes
+
+    #################################################################################
+    # Checking ISSU command status Master switch should update
+    # the firmware and status should return success
+    ################################################################################
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP}
+    ${cmd}=    catenate    ${cmd}   1.3.6.1.4.1.11.5.7.5.8.2.2.103.1.11.0
+    ${output}=     Execute Command    ${cmd}
+    ${update_firmware}=    set variable    SNMPv2-SMI::enterprises.11.5.7.5.8.2.2.103.1.11.0 = INTEGER: 1
+    run keyword and continue on failure  Should Contain    ${output}    ${update_firmware}
+    Sleep  3 minutes
+
+    ################################################################################
+    # Check firmware version on Stand-by and Master
+    ###############################################################################
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP2}
+    ${cmd}=    catenate    ${cmd}   1.3.6.1.4.1.11.5.7.5.8.1.81.1.3.0
+    ${output}=     Execute Command    ${cmd}
+
+    ${cmd}=    Get SNMPGET Command    OneView    ${Random_Password}     ${NitroIP}
+    ${cmd}=    catenate    ${cmd}   1.3.6.1.4.1.11.5.7.5.8.1.81.1.3.0
+    ${output}=     Execute Command    ${cmd}
+
+
+###################################################################################
+# FC :: Verify Traffic after Firmware Upgrade.
+###################################################################################
+FC :: Verify Traffic after Firmware Upgrade
+    [Documentation]    Verification of Traffic
+    [Arguments]         ${OneViewIP}  ${Random_Password}  ${NitroIP}  ${NitroIP2}  ${Nitro_IP_1}  ${Nitro_IP_2}  ${FC_Downlink_Port1}  ${FC_Downlink_Port2}
+    FC/FCOE - Check Traffic    ${OneViewIP}  ${Random_Password}  ${NitroIP}  ${FC_Downlink_Port1}  ${FC_Downlink_Port2}
+    Check and update the Nitro module on latest firmware     ${OneViewIP}  ${Random_Password}  ${NitroIP}   ${NitroIP2}  ${NitroIP1_Login}  ${NitroIP2_Login}
+    FC/FCOE - Check Traffic    ${OneViewIP}  ${Random_Password}  ${NitroIP}  ${FC_Downlink_Port1}  ${FC_Downlink_Port2}
+
+
+###################################################################################
+# FCOE :: Verify Traffic after Firmware Upgrade.
+###################################################################################
+FCOE :: Verify Traffic after Firmware Upgrade
+    [Documentation]    Verification of Traffic
+    [Arguments]         ${OneViewIP}  ${Random_Password}  ${NitroIP}  ${NitroIP2}  ${Nitro_IP_1}  ${Nitro_IP_2}  ${FCOE_Downlink_Port1}  ${FCOE_Downlink_Port2}
+    FC/FCOE - Check Traffic    ${OneViewIP}  ${Random_Password}  ${NitroIP}  ${FCOE_Downlink_port1}  ${FCOE_Downlink_port2}
+    Check and update the Nitro module on latest firmware     ${OneViewIP}  ${Random_Password}  ${NitroIP}   ${NitroIP2}  ${NitroIP1_Login}  ${NitroIP2_Login}
+    FC/FCOE - Check Traffic    ${OneViewIP}  ${Random_Password}  ${NitroIP}  ${FCOE_Downlink_port1}  ${FCOE_Downlink_port2}
+
+
+#############################################################################
+# FC :: Check FC Connectivity whether the Flogi is happened in Nitro module
+#############################################################################
+FC :: Check FC Connectivity whether the Flogi is happened in Nitro module
+    [Documentation]    Check FC Connectivity whether the Flogi is happened in Nitro module
+    [Arguments]          ${OneViewIP}  ${Random_Password}  ${NitroIP}
+
+    Open Connection And Log In      ${OneViewIP}
+    ${snmp_walk_cmd}=    Get SNMPWALK Command    OneView    ${Random_Password}     ${NitroIP}
+
+
+    ###################################################################################################
+    #Check the Flogi details for getting the informations required for FC - For getting Server Port WWN
+    ###################################################################################################
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.4.1.11.5.7.5.8.1.4054.1.19.1.7
+    ${output}=     Execute Command    ${cmd}
+    run keyword and continue on failure  Should Match Regexp    ${output}   \\s*[\\w\\W]*?Hex-STRING:\\s*[\\w\\W]*?
+    #run keyword and continue on failure    Validate output     ${output}
+
+    ###################################################################################################
+    # For getting the npPort index
+    ###################################################################################################
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.4.1.11.5.7.5.8.1.4054.1.19.1.8
+    ${output}=     Execute Command    ${cmd}
+    run keyword and continue on failure  Should Match Regexp    ${output}    \\s*[\\w\\W]*?INTEGER:\\s*[\\w\\W]*?
+
+
+
+###################################################################################
+#  FC :: Verify the scenario of creating a fabric login using automatic login
+#  distribution method without traffic
+###################################################################################
+FC :: Verify the scenario of creating a fabric login using automatic login distribution method without traffic
+    [Documentation]    FC :: Verify the scenario of creating a fabric login using automatic login distribution method without traffic
+    [Arguments]          ${OneViewIP}  ${Random_Password}  ${NitroIP}  ${FC_Uplink_Port1}  ${FC_Uplink_Port2}
+
+    Log   ${Random_Password}
+
+    ${OID1}=    Get OID for Interface     ${OneViewIP}  ${Random_Password}    ${FC_Uplink_Port1}   ${NitroIP}
+    ${OID2}=    Get OID for Interface     ${OneViewIP}  ${Random_Password}    ${FC_Uplink_Port2}   ${NitroIP}
+
+    Open Connection And Log In      ${OneViewIP}
+
+    ###################################################################################
+    # Enable both uplink ports
+    ###################################################################################
+    ${snmp_set_cmd}=    Get SNMPSET Command    OneView    ${Random_Password}     ${NitroIP}
+
+    ${cmd}=    catenate    ${snmp_set_cmd}    IF-MIB::ifAdminStatus.${OID1} i 1
+    ${output}=     Execute Command    ${cmd}
+    run keyword and continue on failure  Should Contain     ${output}  INTEGER: up(1)
+
+    ${cmd}=    catenate    ${snmp_set_cmd}    IF-MIB::ifAdminStatus.${OID2} i 1
+    ${output}=     Execute Command    ${cmd}
+    run keyword and continue on failure  Should Contain     ${output}  INTEGER: up(1)
+
+    ###################################################################################
+    # Check hpFcNpvFlogiInfoServerPortWwn in hpFcNpvFlogiInfoTable
+    ###################################################################################
+    ${snmp_walk_cmd}=    Get SNMPWALK Command    OneView    ${Random_Password}     ${NitroIP}
+
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.4.1.11.5.7.5.8.1.4054.1.19.1.7
+    ${output}=     Execute Command    ${cmd}
+    run keyword and continue on failure  Should Match Regexp    ${output}   \\s*[\\w\\W]*?Hex-STRING:\\s*[\\w\\W]*?
+
+    ###################################################################################
+    # Check hpFcNpvFlogiInfoNpPortIndex in hpFcNpvFlogiInfoTable
+    ###################################################################################
+    ${snmp_walk_cmd}=    Get SNMPWALK Command    OneView    ${Random_Password}     ${NitroIP}
+
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.4.1.11.5.7.5.8.1.4054.1.19.1.8
+    ${output}=     Execute Command    ${cmd}
+    run keyword and continue on failure  Should Match Regexp    ${output}    \\s*[\\w\\W]*?INTEGER:\\s*[\\w\\W]*?
+
+    ###################################################################################
+    #Disable one of the uplink ports, and enable the port again
+    ###################################################################################
+    ${cmd}=    catenate    ${snmp_set_cmd}    IF-MIB::ifAdminStatus.${OID2} i 2
+    ${output}=     Execute Command    ${cmd}
+    run keyword and continue on failure  Should Contain     ${output}  INTEGER: down(2)
+
+    ${cmd}=    catenate    ${snmp_set_cmd}    IF-MIB::ifAdminStatus.${OID2} i 1
+    ${output}=     Execute Command    ${cmd}
+    run keyword and continue on failure  Should Contain     ${output}  INTEGER: up(1)
+
+    Sleep  4 minutes
+
+    ###################################################################################
+    # After disabling and enabling the uplinkports,
+    # Check hpFcNpvFlogiInfoServerPortWwn in hpFcNpvFlogiInfoTable
+    ###################################################################################
+    ${snmp_walk_cmd}=    Get SNMPWALK Command    OneView    ${Random_Password}     ${NitroIP}
+
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.4.1.11.5.7.5.8.1.4054.1.19.1.7
+    ${output}=     Execute Command    ${cmd}
+    run keyword and continue on failure  Should Match Regexp    ${output}   \\s*[\\w\\W]*?Hex-STRING:\\s*[\\w\\W]*?
+
+    ###################################################################################
+    # After disabling and enabling the uplinkports,
+    # Check hpFcNpvFlogiInfoNpPortIndex in hpFcNpvFlogiInfoTable
+    ###################################################################################
+    ${snmp_walk_cmd}=    Get SNMPWALK Command    OneView    ${Random_Password}     ${NitroIP}
+
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.4.1.11.5.7.5.8.1.4054.1.19.1.8
+    ${output}=     Execute Command    ${cmd}
+    run keyword and continue on failure  Should Match Regexp    ${output}    \\s*[\\w\\W]*?INTEGER:\\s*[\\w\\W]*?
+
+
+
+#############################################################################
+#   FC/FCOE - Check counters and Verify Traffic.
+#############################################################################
+FC/FCOE - Check Traffic
+    [Documentation]    FC/FCOE - Check counters and Verify Traffic.
+    [Arguments]         ${OneViewIP}  ${Random_Password}  ${NitroIP}  ${Downlink_Port1}  ${Downlink_Port2}
+
+    Log   ${Random_Password}
+    Log     ${Downlink_Port1}
+    Log     ${Downlink_Port2}
+
+    ${OID1}=    Get OID for Interface     ${OneViewIP}  ${Random_Password}    ${Downlink_port1}  ${NitroIP}
+    ${OID2}=    Get OID for Interface     ${OneViewIP}  ${Random_Password}    ${Downlink_port2}  ${NitroIP}
+
+    Open Connection And Log In      ${OneViewIP}
+
+
+    #############################################################################
+    # Note initial traffic reading in port1.
+    #############################################################################
+    ${snmp_walk_cmd}=    Get SNMPWALK Command    OneView    ${Random_Password}     ${NitroIP}
+
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.10.${OID1}
+    ${outputIn}=     Execute Command    ${cmd}
+
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.16.${OID1}
+    ${outputOut}=     Execute Command    ${cmd}
+
+    ${Traffic_First_Port}=    Extract Counters    ${outputIn}    ${outputOut}
+    log    ${Traffic_First_Port}
+
+    #############################################################################
+    # Note initial traffic reading in port2.
+    #############################################################################
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.10.${OID2}
+    ${outputIn}=     Execute Command    ${cmd}
+
+    ${cmd}=    catenate    ${snmp_walk_cmd}    1.3.6.1.2.1.2.2.1.16.${OID2}
+    ${outputOut}=     Execute Command    ${cmd}
+
+    ${Traffic_Second_Port}=    Extract Counters    ${outputIn}    ${outputOut}
+    log    ${Traffic_Second_Port}
+
+
+
+
+###################################################################################
+# Do a Reapply configuration from Logical Interconnects page.
+###################################################################################
+Reapply Configuration
+    [Documentation]    Keyword to Reapply Configuration from Logical Interconnects page
+    ${resp} =    Fusion Api Get Li
+    log to console  \nget li Li with output ${resp}
+    ${uri} =     Get From Dictionary        ${resp['members'][0]}    uri
+    log to console  \nget li Li with uri ${uri}
+    ${response}=  fusion_api_reapply_li_configuration       uri=${uri}
+    log to console  \nget response ${response}
+    Sleep  14 minutes
+
+
+
+###################################################################################
+# Test Case to Reapply configuration.
+# Verify Traffic before reapply configuration
+# Reapply configuration from logical interconnects page
+# Verify Traffic after reapply configuration
+###################################################################################
+Verify Traffic after Reapply Configuration
+    [Documentation]    Keyword to Verify Traffic after Reapply Configuration
+    [Arguments]         ${OneViewIP}  ${Random_Password}  ${NitroIP}  ${FC_Downlink_Port1}  ${FC_Downlink_Port2}  ${FCOE_Downlink_Port1}  ${FCOE_Downlink_Port2}
+    FC/FCOE - Check Traffic    ${OneViewIP}  ${Random_Password}  ${NitroIP}  ${FC_Downlink_Port1}  ${FC_Downlink_Port2}
+    FC/FCOE - Check Traffic    ${OneViewIP}  ${Random_Password}  ${NitroIP}  ${FCOE_Downlink_port1}  ${FCOE_Downlink_port2}
+
+    Reapply Configuration
+    Sleep  2 minutes
+
+    FC/FCOE - Check Traffic    ${OneViewIP}  ${Random_Password}  ${NitroIP}  ${FC_Downlink_Port1}  ${FC_Downlink_Port2}
+    FC/FCOE - Check Traffic    ${OneViewIP}  ${Random_Password}  ${NitroIP}  ${FCOE_Downlink_port1}  ${FCOE_Downlink_port2}
+
+
+###################################################################################
+# Create a network set with tagged networks and single untagged network.
+###################################################################################
+Create networkset
+    [Documentation]    Keyword to create networkset
+    #Add Ethernet Networks from variable    ${expected_ethernet_networks}
+    #${connection} =      fusion_api_get_ethernet_networks
+    ${connections} =    Lookup Connection Uris  ${server_profiles[0]['connections']}
+    Log to console and logfile  ${connections}
+    ${conns} =  Create List
+    ${net1} =    Get From Dictionary      ${connections[0]}  networkUri
+    Log   ${net1}
+    append to list  ${conns}    ${net1}
+    ${net2} =    Get From Dictionary      ${connections[1]}  networkUri
+    Log to console and logfile  ${net2}
+    append to list  ${conns}    ${net2}
+    Log to console and logfile  ${conns}
+    ${set1} =     Set to Dictionary   ${networkset[0]}  networkUris     ${conns}
+    ${set2} =     Set to Dictionary   ${networkset[0]}  nativeNetworkUri    ${conns[1]}
+    Log to console and logfile  ${set1}
+    Log to console and logfile  ${set2}
+    Log to console and logfile  ${networkset}
+    ${netset} =    fusion_api_create_network_set    ${networkset[0]}
+
+############################################################################
+# Creating LIG - With combination of networks with specified uplink ports
+############################################################################
+LIG creation
+    [Documentation]    Creation of LIG
+    [Arguments]         ${lig_test}
+    Set Suite Variable      ${TRUE}                 True
+    ${resp} =    Build LIG body    ${lig_test}
+    Log to Console    ${resp}
+    ${resp1} =    fusion_api_create_lig    ${resp}
+    Log to Console    ${resp1}
+    Run keyword unless   ${resp1['status_code']}== 202    Fail    ${resp1['message']}
+    Sleep    60s
+    #${task} =   Wait For Task   ${resp1}    60s
+    Log to console and logfile    LIG created successfully ${resp1['stateReason']}
+
+
+############################################################################
+# To poweroff /poweron the interconnect
+############################################################################
+Power off/on interconnect
+    [Documentation]    Powering OFF of Interconnect
+    [Arguments]         ${OneViewIP}  ${Random_Password}  ${interconnect}  ${subordinate_Nitro_ip}
+    ${resp} =    Fusion Api Get Interconnect    param=?filter="'name'=='${interconnect}'"
+    Log to console and logfile    ${resp}
+
+    #power off interconnect
+    ${uri} =    Set Variable    ${resp['members'][0]['uri']}
+    ${resp} =   fusion api patch interconnect   body=${interconnect_poweroff}    uri=${uri}
+    Log to console and logfile   ${resp}
+    Run Keyword If  '${resp['status_code']}' != '202'  Fail    ELSE  log to console   \n-Successfully Powered OFF the Interconnect
+    Sleep    300
+
+    #power on interconnect
+    #${uri} =    Set Variable    ${resp['members'][0]['uri']}
+    ${resp} =   fusion api patch interconnect   body=${interconnect_poweron}    uri=${uri}
+    Run Keyword If  '${resp['status_code']}' != '202'  Fail    ELSE  log to console   \n-Successfully Powered ON the Interconnect
+
+    Sleep  14 minutes
+
+    Open Connection And Log In      ${OneViewIP}
+    # Subordinate Nitro should have been turned to Master after poweroff and poweron ICM
+    Verify_Master_Nitro    OneView    ${Random_Password}    ${subordinate_Nitro_ip}
+
+
+
+#############################################################################################
+#  FC - Check the SAN Boot scenario where the OV managing the boot mode UEFI Mode/Legacy Mode
+#  After BFS FC Testing - Verify FC Connectivity whether Flogi is happened in Nitro Module
+#############################################################################################
+FC - Check the SAN Boot scenario where the OV managing the boot mode - UEFI Mode/Legacy Mode
+    [Documentation]    FC - Check the SAN Boot scenario where the OV managing the boot mode - UEFI Mode/Legacy Mode
+    [Arguments]          ${OneViewIP}  ${Random_Password}  ${NitroIP}
+    FC :: Check FC Connectivity whether the Flogi is happened in Nitro module   ${OneViewIP}  ${Random_Password}  ${NitroIP}
+
+#############################################################################################
+#  FC - Check the SAN boot traffic using multipath
+#  After BFS FC Testing, Check the Mutltipath - Enable/Disable the ports and verify traffic
+#############################################################################################
+FC - Check the SAN boot traffic using multipath
+    [Documentation]    FC - Check the SAN boot traffic using multipath
+    [Arguments]         ${OneViewIP}  ${Random_Password}  ${NitroIP}  ${FC_Downlink_Port1}  ${fc_Downlink_Port2}
+    FC/FCOE - Check the multipath by enabling and disabling the ports In Mezz    ${OneViewIP}  ${Random_Password}  ${NitroIP}  ${FC_Downlink_Port1}  ${FC_Downlink_Port2}
+
+
+################################################################################################
+#   FCOE - Check the SAN Boot scenario where the OV managing the boot mode UEFI Mode/Legacy Mode
+#   After completing BFS FCOE Testing - verify FCoE Connectivity whether
+#   the Flogi is happened in Nitro Module
+################################################################################################
+FCOE - Check the SAN Boot scenario where the OV managing the boot mode - UEFI Mode/Legacy Mode
+    [Documentation]    FCOE - Check the SAN Boot scenario where the OV managing the boot mode - UEFI Mode/Legacy Mode
+    [Arguments]       ${OneViewIP}  ${Random_Password}  ${NitroIP}   ${Downlink_Port1}   ${Downlink_Port2}
+    Check FCoE Connectivity whether the Flogi is happened in Nitro module   ${OneViewIP}  ${Random_Password}  ${NitroIP}   ${FCOE_Downlink_Port1}   ${FCOE_Downlink_Port2}
+
+
+#############################################################################
+#   FCOE - Check the SAN boot traffic using multipath
+#   After completing BFS FCoE Testing - verify the multipath -
+#   Enable/Disable the ports and verify traffic
+#############################################################################
+FCOE - Check the SAN boot traffic using multipath
+    [Documentation]    FCOE - Check the SAN boot traffic using multipath
+    [Arguments]         ${OneViewIP}  ${Random_Password}  ${NitroIP}  ${FCOE_Downlink_Port1}  ${FCOE_Downlink_Port2}
+    FC/FCOE - Check the multipath by enabling and disabling the ports In Mezz    ${OneViewIP}  ${Random_Password}  ${NitroIP}  ${FCOE_Downlink_Port1}  ${FCOE_Downlink_Port2}
+
+Get Server Ip Windows
+    [Documentation]    Gets the valid ip of the server
+    [Arguments]         ${ilo_details}
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=20s
+    ${login} =    SSHLibrary.Login    ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Read Until    SAC>
+    Sleep    5sec
+    SSHLibrary.Write    i
+    Sleep    5sec
+    ${stdout}    SSHLibrary.Read
+    ${cmd_output}=    Get Regexp Matches    ${stdout}    Ip=90\\.\\d+\\.\\d+\\.\\d+
+    ${ip_list_new}    Create List
+    ${len}    Get Length    ${cmd_output}
+    :FOR    ${x}    IN RANGE    ${len}
+    \    ${ip_lists}    Remove String    ${cmd_output[${x}]}    Ip=
+    \    Append To List   ${ip_list_new}    ${ip_lists}
+    Log    \n IP's are is ${ip_list_new}    console=True
+    SSHLibrary.Close All Connections
+    [Return]    ${ip_list_new}
+
+Get Interconnect StackingDomainRole
+    [Documentation]    Get Interconnect StackingDomainRole
+    [Arguments]     ${ic_name}    ${expected_role}
+    ${resp} =   Get Interconnect    ${ic_name}
+    ${Role}    Get From Dictionary    ${resp}    stackingDomainRole
+    Should Be Equal As Strings    ${Role}    ${expected_role}
+    [Return]    ${Role}
+
+Get Master ICM IP
+    [Arguments]    ${username}    ${Password}    ${NitroIP1}    ${NitroIP2}
+    [Documentation]     keyword to return IP of master potash ICM
+    ${Snmp_Nitro}=    Get SNMPGET Command   ${username}    ${Password}     ${NitroIP1}
+    ${Snmp_Get_Nitro}=    catenate    ${Snmp_Nitro}    1.3.6.1.4.1.11.5.7.5.9.1.99.1.4.0
+    ${output_module}=     Execute Command    ${Snmp_Get_Nitro}
+    ${module_status}=    Run Keyword And Return Status    Should Match Regexp    ${output_module}   \\s*[\\w\\W]*?INTEGER: 1\\s*[\\w\\W]*?
+    ${master_ip}=  Run Keyword If    '${module_status}'=='True'  Set Variable  ${NitroIP1}
+    ...    ELSE IF    '${module_status}'=='False'    Set Variable  ${NitroIP2}
+    [Return]  ${master_ip}
+
+Get ICMs Configuration State
+    [Arguments]    ${ICM}    ${state}    ${timeout}=1200s  ${interval}=2s
+    ${ICM_uri} =    Get IC URI    ${ICM}
+    #Log to Console    ${ICM_uri}
+    Wait Until Keyword Succeeds  ${timeout}  ${interval}    IC reached state    ${ICM_uri}    ${state}
+    Log to Console    ICM ${ICM} changed to ${state} state
+    [Return]    ${ICM}
+
+
+Execute Traffic And Validate Windows LUN
+    [Documentation]    Execute Traffic And Validate Windows LUN
+    [Arguments]     ${ilo_details}    ${server_credentials}    ${lun_count_total}
+    ${l}    Get Length    ${ilo_details}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${serverIp}    Get Server Ip Windows    ${ilo_details[${x}]}
+    \    Wait For Appliance To Become Pingable    ${serverIp[0]}
+
+    \    ${output}    execute_windows_commands    ${serverIp[0]}    ${server_credentials[${x}]['userName']}    ${server_credentials[${x}]['password']}    ${diskspd_cmd[0]}
+    \    Run Keyword If  ${output} == 0    Log    \n Successfully passed the traffic    console=True    ELSE    Fail    Log    Unable to pass traffic    console=True
+
+    \    ${lun_count}    validate_windows_lun_count    ${serverIp[0]}    ${server_credentials[${x}]['userName']}    ${server_credentials[${x}]['password']}
+    \    Run Keyword If    ${lun_count}== ${lun_count_total[${x}]}    Log    \n Expected LUN disks are available in local server   console=True    ELSE    Fail    Log    LUN's are not available    console=True

@@ -1,0 +1,117 @@
+*** Settings ***
+Documentation    Test suite to validate Interconnect Manager related events on OneView and FLM
+...    = GENERIC USAGE =
+...    | pybot | -v ENC_SERIAL_NO:[enclosure serial #] | -v APPLIANCE_IP:<ipv4> | -v CIM_Linux_IP:<ipv4> |-v GIT_REPO_ROOT: | ICM_ManagerFault_event.txt |
+...    = Variables =
+...    | GIT_REPO_ROOT |      Required: Repo root path if NOT defined in environment variable this is mgmtfw root location|
+...    | ENC_SERIAL_NO |      Optional: If omitted, will use the 1st enclosure detected in OV |
+...    | APPLIANCE_IP |       Required: OneView IPv4 address |
+...    | CIM_Linux_IP |       Required:CI Manager ipv4 under test |
+
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Library           RoboGalaxyLibrary
+Library           MgmtFWLibrary
+Library           json
+
+Suite Setup       Configure Events Test Environment
+Suite Teardown    Run Keywords  Logout of EM RIS   AND    Logout of Fusion Via REST
+
+*** Test Case ***
+TC 01: Interconnect Manager Internal Fault/cleared Events show up in OV UI
+    [Documentation]    This test is to verify events for Interconnect status change Using OsHealth
+    ...                InterconnectManagerInternalCritical
+    ...                InterconnectManagerInternalCriticalCleared
+    ...                InterconnectManagerInternalWarning
+    ...                InterconnectManagerInternalWarningCleared
+    [Tags]    ICM    Alert    Events    FLM1.01     FLM2.00    OV3.10    Automated
+    ${icm_list}=    Get ICM Bay List
+    Should Not Be Empty    ${icm_list}    msg=No Interconnect present in the enlcosure
+    :FOR    ${bay}   IN   @{icm_list}
+    \    Log    message=Failing the Interconnect for bay:${bay} and verify failed status/alert event in diags audit log    console=True
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${Interconnect_Fault_Status}=    Set EM RIS Faults   ICMFaultInjection    ${bay}    OsHealth    Critical
+    \    Should Be Equal As Strings    ${Interconnect_Fault_Status}    <Response [200]>
+    \    Sleep    20
+    \    Wait for Device Critical    ${ICM_Device}    ${bay}
+    \    #Verifying alert event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_ICM_Critical}    ${ICM_Device}    ${bay}    250
+    \    Verify Audit Log Alert Event    ${EL_ICM_InternalCritical}    ${ICM_Device}    ${bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_ICM_InternalCritical}    ${last_fusion_event_id}
+    \    Log    message=Setting Interconnect fault injection for bay:${bay} and verify Warning status/alert event in diags audit log    console=True
+    \    ${Interconnect_Fault_Status}=    Set EM RIS Faults   ICMFaultInjection    ${bay}    OsHealth    Warning
+    \    Should Be Equal As Strings    ${Interconnect_Fault_Status}    <Response [200]>
+    \    Sleep    200
+    \    Wait for Device Degraded    ${ICM_Device}    ${bay}
+    \    #Verifying alert event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_ICM_Warning}    ${ICM_Device}    ${bay}    250
+    \    Verify Audit Log Alert Event    ${EL_ICM_InternalCriticalCleared}    ${ICM_Device}    ${bay}    250
+    \    Verify Audit Log Alert Event    ${EL_ICM_Manager_Warning}    ${ICM_Device}    ${bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_ICM_InternalCriticalCleared}    ${last_fusion_event_id}
+    \    Verify Fusion Event Sent By EM    ${EL_ICM_Manager_Warning}    ${last_fusion_event_id}
+    \    ${Interconnect_Fault_Status}=    Set EM RIS Faults   ICMFaultInjection    ${bay}    OsHealth    OK
+    \    Should Be Equal As Strings    ${Interconnect_Fault_Status}    <Response [200]>
+    \    Sleep    200
+    \    Wait for Device OK    ${ICM_Device}    ${bay}
+    \    #Verifying alert event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_ICM_OK}    ${ICM_Device}    ${bay}    250
+    \    Verify Audit Log Alert Event    ${EL_ICM_Manager_Warning_Cleared}    ${ICM_Device}    ${bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_ICM_Manager_Warning_Cleared}    ${last_fusion_event_id}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Set EM RIS Faults   ICMFaultInjection    ${bay}    OsHealth    OK    AND
+    ...    EM Clear Interconnect Status    ${bay}   AND   Validate Interconnect Availability in Fusion    ${bay}
+
+TC 02: Verify RIS Diag Command EnableMpActivityDetection
+    [Documentation]    This test will verify RIS Diag Command EnableMpActivityDetection
+    ...                InterconnectManagerFault
+    ...                InterconnectManagerFaultCleared
+    [Tags]    ICM    Alert    Events    FLM1.01     FLM2.00    OV3.10    Automated
+    ${present_list}=    Get List of Occupied Interconnect Bays
+    Should Not Be Empty    ${present_list}    msg=No Interconnect present in the enclosure
+    : FOR    ${bay}    IN    @{present_list}
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    RIS EM Efuse On Interconnect    ${bay}
+    \    Sleep    10
+    \    RIS EM Efuse Off Interconnect    ${bay}
+    \    Sleep   900
+    \    Validate Interconnect Availability in Fusion    ${bay}
+    \    ${ICM_Bay_ID}=    Get Static Node ID For ICM Diags    ${bay}
+    \    Set EM RIS Faults    EnableMpActivityDetection   ${ICM_Bay_ID}   false
+    \    Sleep    10
+    \    #Verifying alert event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_ICM_Manager_Fault}    ${ICM_Device}    ${bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_ICM_Manager_Fault}    ${last_fusion_event_id}
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    Set EM RIS Faults    EnableMpActivityDetection    ${ICM_Bay_ID}   true
+    \    Sleep    10
+    \    #Verifying alert event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_ICM_Manager_Fault_Cleared}    ${ICM_Device}    ${bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_ICM_Manager_Fault_Cleared}    ${last_fusion_event_id}
+    [Teardown]    Run Keyword If Test Failed    Set EM RIS Faults    EnableMpActivityDetection    ${ICM_Bay_ID}   true
+
+TC 03: Validate InterconnectManagerICMReadyFault/Cleared Events
+    [Documentation]    This test detect InterconnectManagerICMReadyFault event when block 31 is populating and detect cleared event when block 31 ports are populated
+    [Tags]    ICM    Alert    Events    FLM2.00    OV3.10    Automated    OVD8527
+    ${block_num}=    Set Variable    31
+    ${blade_present_list}=    Get List of Occupied Blade Bays
+    Should Not Be Empty    ${blade_present_list}    msg=No iLO Blades present in the enclosure
+    # Simulate InterconnectManagerICMReadyFault & InterconnectManagerICMReadyFaultCleared events
+    : FOR    ${blade_bay}    IN    @{blade_present_list}
+    \    ${ready_flag_supported_icm_list}=    Get Ready Flag Supported ICM List For Blade    ${blade_bay}
+    \    ${ready_flag_len}=    Get Length   ${ready_flag_supported_icm_list}
+    \    Run Keyword If    ${ready_flag_len}!=0    Inject InterconnectManagerICMReadyFault Event    ${ready_flag_supported_icm_list}    ${blade_bay}    ${block_num}
+    \    Run Keyword If    ${ready_flag_len}!=0    Clear InterconnectManagerICMReadyFaultCleared Event    ${ready_flag_supported_icm_list}    ${block_num}
+    [Teardown]    Run Keyword If Test Failed    Clear InterconnectManagerICMReadyFaultCleared Event    ${ready_flag_supported_icm_list}    ${block_num}
+
+    

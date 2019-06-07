@@ -1,0 +1,498 @@
+*** Settings ***
+Documentation       This resource keyword file for PEM testing
+
+Library             RoboGalaxyLibrary
+Library             FusionLibrary
+Library             OperatingSystem
+Library             BuiltIn
+Library             Collections
+Library             SSHLibrary
+Library             String
+
+*** Keywords ***
+Get Trusted Token
+    [Documentation]    Get Trusted Token for PERM Calls
+    Execute SSH Command    HOST=localhost
+    Execute SSH Command    AUTH=$(psql -A -t --dbname=ueproto --user=postgres -c "select session_id from session.session where username='erm'";)
+    ${auth_key}=    Read Authentication Key
+    [Return]    ${auth_key}
+
+Get PEM User Defined Trusted Component Token
+    [Documentation]    Get Trusted Token for PERM Calls
+    Execute SSH Command    HOST=localhost
+    Execute SSH Command    AUTH=$(psql -A -t --dbname=ueproto --user=postgres -c "select session_id from session.session where userdefineddata='TrustedComponent' LIMIT 1";)
+    ${auth_key}=    Read Authentication Key
+    [Return]    ${auth_key}
+
+Get Trusted PEM Token
+    [Documentation]    Get Trusted Token for PERM Calls for 3.00/3.10 OV 
+    Execute SSH Command    HOST=localhost
+    ${get_ov_version_string}=  Execute SSH Command   cat /ci/etc/version
+    ${get_ov_version}=  Get Substring  ${get_ov_version_string}  0  4
+    Runkeyword If   '${get_ov_version}' < '3.10'  
+    ...  Execute SSH Command    AUTH=$(psql -A -t --dbname=ueproto --user=postgres -c "select session_id from session.session where userdefineddata='TrustedComponent' LIMIT 1";)
+    ...  ELSE  Execute SSH Command    AUTH=$(psql -A -t --dbname=cidb --user=postgres -c "select session_id from session.session where userdefineddata='TrustedComponent' LIMIT 1";)
+    ${auth_key}=    Read Authentication Key    
+    [Return]    ${auth_key.strip()}
+
+Set Port Mode
+    [Documentation]    Keyword to Set Port Mode
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${bay_number}    ${port_mode}
+    ${bay}=    Convert To Integer    ${bay_number}
+    ${parameters}=    Create Dictionary    BayNumber=${bay}    PortMode=${port_mode}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    EmSwitchMgmtPortSet    ${parameters}
+    ${status}=    Get From Dictionary    ${response}    CallStatus
+    [Return]    ${response}
+
+Check For Single Enclosure and Get UUID
+    [Documentation]    Verify SINGLE enclosure is presence and get it's UUID for usage
+    ${response}=    Fusion Api Get Enclosures
+    ${encl_list}=    Get From Dictionary    ${response}    members
+    ${encl_count}=    Get Length    ${encl_list}
+    Should Be Equal    ${encl_count}    ${1}
+    ${uuid}=    Get From Dictionary    ${encl_list[0]}    uuid
+    [Return]    ${uuid}
+
+Get CIManager Presence
+    [Documentation]    Get CIManagers current presence
+    [Arguments]    ${response}    ${index}
+    ${appliances}=    Get From Dictionary    ${response['members'][0]}    applianceBays
+    ${appliance_bay}=    Get From List    ${appliances}    ${index}
+    ${device_presence}=    Get From Dictionary    ${appliance_bay}    devicePresence
+    ${bay_number}=    Get From Dictionary    ${appliance_bay}    bayNumber
+    [Return]    ${device_presence}    ${bay_number}
+
+Get Enclosure CIManager Serial Number
+    [Documentation]    Get enclsoure's CIManagers serial number(s)
+    [Arguments]    ${response}
+    ${cim_serial_num_list}=    Create List
+    ${appliance_cnt}=    Get From Dictionary    ${response['members'][0]}    applianceBayCount
+    :FOR    ${index}    IN RANGE    0    ${appliance_cnt}
+    \    ${appliances}=    Get From Dictionary    ${response['members'][0]}    applianceBays
+    \    ${appliance_bay}=    Get From List    ${appliances}    ${index}
+    \    ${device_presence}=    Get From Dictionary    ${appliance_bay}    devicePresence
+    \    Run Keyword If    '${device_presence}' == 'Present'     Add Serial Number To List    ${appliance_bay}    ${cim_serial_num_list}
+    [Return]    ${cim_serial_num_list}
+
+Get Existing CIManager Presence Count
+    [Documentation]    Validate test environment contains 2 CIManagers
+    ${filled}=    Create List
+    ${response}=    Fusion Api Get Enclosures
+
+    # Validate CIMs counts
+    ${appliance_num}=    Get From Dictionary    ${response['members'][0]}    applianceBayCount
+    Should Be Equal As Integers    ${appliance_num}    2
+
+    # Validate CIMs presence
+    :FOR    ${index}    IN RANGE    0    ${appliance_num}
+    \    ${device_presence}    ${bay_number}=    Get CIManager Presence    ${response}    ${index}
+    \    Run Keyword If    '${device_presence}'=='Present'     Append To List    ${filled}    ${bay_number}
+    ...   ELSE    Log    No CIManager Available in bay number, ${bay_number}
+    ${presence_cnt}=    Get Length    ${filled}
+    [Return]    ${presence_cnt}
+
+Get EMs Presence
+    [Documentation]    Get Enclosure Manager current presence
+    [Arguments]    ${response}    ${index}
+    ${enclosures}=    Get From Dictionary    ${response['members'][0]}    managerBays
+    ${enclosure_bay}=    Get From List    ${enclosures}    ${index}
+    ${device_presence}=    Get From Dictionary    ${enclosure_bay}    devicePresence
+    ${bay_number}=    Get From Dictionary    ${enclosure_bay}    bayNumber
+    [Return]    ${device_presence}    ${bay_number}
+
+Get Existing EM Presence Count
+    [Documentation]    Validate ALL EMs are Presence in test environment
+    ${filled}=    Create List
+    ${response}=    Fusion Api Get Enclosures
+    ${em_num}=    Get From Dictionary    ${response['members'][0]}    managerBayCount
+    :FOR    ${index}    IN RANGE    0    ${em_num}
+    \    ${device_presence}    ${bay_number}=    Get EMs Presence    ${response}    ${index}
+    \    Run Keyword If    '${device_presence}'=='Present'     Append To List    ${filled}    ${bay_number}
+    ...   ELSE    Log    EM in bay ${bay_number} is EMPTY
+    ${total_em}=    Get Length    ${filled}
+    Should Be Equal As Integers    ${total_em}    2
+    [Return]    ${total_em}
+
+EFuse CI Manager Bays
+    [Documentation]    Keyword to Efuse CIManager bays
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${bay_number}
+    ${bay}=    Convert To Integer    ${bay_number}
+    ${parameters}=    Create Dictionary    BayNumber=${bay}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    CiManagerBayEfuse    ${parameters}
+    [Return]    ${response}
+
+EFuse EM Bays
+    [Documentation]    Keyword to Efuse EM bays
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${bay_number}
+    ${bay}=    Convert To Integer    ${bay_number}
+    ${parameters}=    Create Dictionary    BayNumber=${bay}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    EmBayEfuse    ${parameters}
+    [Return]    ${response}
+
+Read Post Data 
+    [Documentation]    Keyword to do generic post to fusion
+    [Arguments]    ${auth}    ${body}    ${uri}    ${api}    ${header}
+    ${response}=    fusion_api_generic_post    ${body}    ${uri}    ${api}    ${auth}
+    [Return]    ${response}
+
+Add Baynumber To List
+    [Documentation]    Keyword to add CIM bay number to list
+    [Arguments]    ${appliance_bay}    ${filled}
+    ${bay_num}=    Get From Dictionary    ${appliance_bay}    bayNumber
+    Append To List    ${filled}    ${bay_num}
+    [Return]    ${filled}
+
+Add Serial Number To List
+    [Documentation]    Keyword to add CIM serial number to list
+    [Arguments]    ${appliance_bay}    ${cim_serial_no}
+    ${serial_num}=    Get From Dictionary    ${appliance_bay}    serialNumber
+    Append To List    ${cim_serial_no}    ${serial_num}
+    [Return]    ${cim_serial_no}
+
+Validate PEM Action Result For Reapplying CIM iLO Credential
+    [Documentation]    Keyword to validate the response after executing the PEM Action to 
+    ...                Re-apply the CIM iLO credentials
+    [Arguments]    ${response}    ${cim_serial_no}
+    ${output}=    Fetch From Left    ${response}    [root@
+    @{lines}=    Split To Lines    ${output}
+    List Should Contain Value    ${lines[0]}    200
+    List Should Contain Value    ${lines[-1]}    "sn":"${cim_serial_no}"
+    Sleep    10
+
+Get Blade FRU Data From EM
+    [Documentation]    Keyword to get blade FRU information from EM side
+    [Arguments]    ${blade_num}
+    ${result}=    Get Blade FRU Information    ${blade_num}
+    ${output}=    Fetch From Left    ${result}    [root@
+    ${output}=    Fetch From Right    ${output}    \json
+    ${em_fru_resource}=    json.loads    ${output.strip()}
+    Log    ${output}
+    [Return]    ${em_fru_resource}
+
+Get Blade FRU Data From PEM Command
+    [Documentation]    Keyword to get blade FRU information from PEM Action Command
+    [Arguments]    ${blade_num}    ${fusion_uuid}    ${auth}
+    ${pem_result}=    Read Post Data    ${auth}    {"actionId":"BladeFruRead", "actionParams":{"BayNumber":${blade_num}}}    /perm/rest/enclosure-modules/actions/${fusion_uuid}    200    ${auth}
+    ${status_code}=    Get From Dictionary    ${pem_result}    status_code
+    Should Be Equal As Strings   ${status_code}    200
+    Log    ${pem_result}
+    [Return]    ${pem_result}
+
+PEM Action To EFuse Blade Bay
+    [Documentation]    Keyword to Efuse Blade bay
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${bay_number}    ${efuse_action}
+    ${bay}=    Convert To Integer    ${bay_number}
+    ${parameters}=    Create Dictionary    BayNumber=${bay}    Action=${efuse_action} 
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    BladeBayEfuse    ${parameters}
+    [Return]    ${response}
+
+PEM Action To Get Blade Bay Empty Status
+    [Documentation]    Keyword to Get Empty Blade Bay Information Using PEM Action
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${bay_number}
+    ${bay}=    Convert To Integer    ${bay_number}
+    ${parameters}=    Create Dictionary    BayNumber=${bay}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    BladeBayEmpty    ${parameters}
+    [Return]    ${response}
+
+PEM Action To Get Blade Resource Read
+    [Documentation]    Keyword to Get Blade Bay Resource Info Using PEM Action
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${bay_number}
+    ${parameters}=    Create Dictionary    BayNumber=${bay_number}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    BladeResourceRead    ${parameters}
+    [Return]    ${response}
+
+PEM Action To Get Blade Bay Numbers
+    [Documentation]    Keyword to Get Blade Bay Numbers Min And Max Using PEM Action
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${bay_ids}
+    ${parameters}=    Create Dictionary    BayIds=${bay_ids}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    BladeBayNumbersGet    ${parameters}
+    [Return]    ${response}
+
+PEM Action To Get Blade Manager Config
+    [Documentation]    Keyword to Get Blade Manager Configuration details Using PEM Action
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${bay_number}
+    ${parameters}=    Create Dictionary    BayNumber=${bay_number}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    BladeManagerGetConfig    ${parameters}
+    [Return]    ${response}
+
+PEM Action To Get Icm Manager UID State
+    [Documentation]    Keyword to Get ICM Manager UID State using PEM Action
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${icm_bay}
+    ${parameters}=    Create Dictionary    BayNumber=${icm_bay}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    IcmManagerUidState    ${parameters}
+    [Return]    ${response}
+
+PEM Action To EFuse Icm Bay
+    [Documentation]    Keyword to Efuse ICM bay
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${bay_number}    ${efuse_action}
+    ${bay}=    Convert To Integer    ${bay_number}
+    ${parameters}=    Create Dictionary    BayNumber=${bay}    Action=${efuse_action}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    IcmBayEfuse    ${parameters}
+    [Return]    ${response}
+
+PEM Action To Set Icm Manager UID Control
+    [Documentation]    Keyword to Set ICM Manager UID Control
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${bay_number}    ${uid_action}
+    ${bay}=    Convert To Integer    ${bay_number}
+    ${parameters}=    Create Dictionary    BayNumber=${bay}    UidState=${uid_action}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    IcmManagerUidControl    ${parameters}
+    [Return]    ${response}
+
+PEM Action To Get Power Supply FRU
+    [Documentation]    Keyword to Read Power Supply FRU Data using PEM Action
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${bay_number}
+    ${parameters}=    Create Dictionary    BayNumber=${bay_number}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    PowerSupplyFruRead    ${parameters}
+    [Return]    ${response}
+
+PEM Action To EFuse Power Supply Bay
+    [Documentation]    Keyword to Efuse Power Supply bay
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${bay_number}    ${efuse_action}
+    ${bay}=    Convert To Integer    ${bay_number}
+    ${parameters}=    Create Dictionary    BayNumber=${bay}    Action=${efuse_action}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    PowerSupplyBayEfuse    ${parameters}
+    [Return]    ${response}
+
+PEM Action To Icm Manager Read Canmic Blocks
+    [Documentation]    Keyword to Read ICM Manager Canmic Blocks
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${bay_number}    ${block_list}
+    ${bay}=    Convert To Integer    ${bay_number}
+    ${parameters}=    Create Dictionary    BayNumber=${bay}    List=${block_list}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    IcmManagerReadCanmicBlocks    ${parameters}
+    [Return]    ${response}
+
+PEM Action To Read Canmic Blocks From ICM Bay
+    [Documentation]    Keyword to Read ICM Manager Canmic Blocks
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${bay_number}
+    # blocks 51-160 are Reserved for public use, blocks 161-240 Private Message Blocks, 241-252 Reserved for CANMIC use
+    :FOR    ${index}    IN RANGE    0    50
+    \    Continue For Loop If    ${index} == 17
+    \    Continue For Loop If    ${index} == 33
+    \    Continue For Loop If    ${index} == 36
+    \    ${index_list}=    Create List    ${index}
+    \    ${resp}=    PEM Action To Icm Manager Read Canmic Blocks    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${bay_number}    ${index_list}
+    \    Should Be Equal As Strings    ${resp["CallStatus"]}    SUCCESS
+
+PEM Action To Icm Manager Write Canmic Blocks
+    [Documentation]    Keyword to Write ICM Manager Canmic Blocks
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${bay_number}    ${block_dict}
+    ${bay}=    Convert To Integer    ${bay_number}
+    ${block_list}=    Create List    ${block_dict}
+    ${parameters}=    Create Dictionary    BayNumber=${bay}    List=${block_list}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    IcmManagerWriteCanmicBlocks    ${parameters}
+    [Return]    ${response}
+
+PEM Action To Get Enclosure Managed Status
+    [Documentation]    Keyword to Get Managed State of Enclosure using PEM Action
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    IsManaged
+    [Return]    ${response}
+
+PEM Action To Get Chassis UID State
+    [Documentation]    Keyword to Get Chassis UID State using PEM Action
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    ChassisUidState
+    [Return]    ${response}
+
+PEM Action To Set Chassis UID Control
+    [Documentation]    Keyword to Set Chassis UID Control using PEM Action
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${uid_action}
+    ${parameters}=    Create Dictionary    UidState=${uid_action}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    ChassisUidControl    ${parameters}
+    [Return]    ${response}
+
+PEM Action To Get Active Alerts
+    [Documentation]    Keyword to Get Active Alerts using PEM Action
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    GetActiveAlerts
+    [Return]    ${response}
+
+PEM Action To Get Enclosure FRU Read
+    [Documentation]    Keyword to Get Enclosure Fru Data using PEM Action
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    EnclosureFruRead
+    [Return]    ${response}
+
+PEM Action To Efuse Fan Bay
+    [Documentation]    Keyword to Efuse Fan bay using PEM action
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${bay_number}    ${efuse_action}
+    ${bay}=    Convert To Integer    ${bay_number}
+    ${parameters}=    Create Dictionary    BayNumber=${bay}    Action=${efuse_action}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    FanBayEfuse    ${parameters}
+    [Return]    ${response}
+
+PEM Action To Get Fan FRU
+    [Documentation]    Keyword to Read Fan FRU Data using PEM action
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${bay_number}
+    ${parameters}=    Create Dictionary    BayNumber=${bay_number}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    FanFruRead    ${parameters}
+    [Return]    ${response}
+
+PEM Action To Get Blade Manager Uri Bay Numbers
+    [Documentation]    Keyword to Get Blade Manager Uri Bay Numbers Using PEM Action
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${blade_manager_uri}
+    ${parameters}=    Create Dictionary    Uri=${blade_manager_uri}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    BladeManagerUriBayNumbersGet    ${parameters}
+    [Return]    ${response}
+
+PEM Action To Get Blade Bay Power Hold Info
+    [Documentation]    Keyword to Get Blade Bay Power Hold Info using PEM Action
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${bay_number}
+    ${bay}=    Convert To Integer    ${bay_number}
+    ${parameters}=    Create Dictionary    BayNumber=${bay}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    BladeBayPowerHoldGet    ${parameters}
+    [Return]    ${response}
+
+PEM Action To Set Blade Bay Power Hold
+    [Documentation]    Keyword to Set Blade Bay Power Hold using PEM Action
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${bay_number}    ${power_hold_action}
+    ${bay}=    Convert To Integer    ${bay_number}
+    ${parameters}=    Create Dictionary    BayNumber=${bay}    PowerHold=${power_hold_action}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    BladeBayPowerHoldSet    ${parameters}
+    [Return]    ${response}
+    
+PEM Action To Get Chassis Midplane FRU Read
+    [Documentation]    Keyword to Get Chassis Midplane Fru Data using PEM Action
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    ChassisMidplaneFruRead
+    [Return]    ${response}
+    
+PEM Action To Get Blade FRU Data
+    [Documentation]    Keyword to get blade FRU information from PEM Action Command
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${bay_number}
+    ${bay}=    Convert To Integer    ${bay_number}
+    ${parameters}=    Create Dictionary    BayNumber=${bay}
+    ${response}=    HAL API Perform Post Action    ${APPLIANCE_IP}    BladeFruRead    ${parameters}
+    [Return]    ${response}
+   
+PEM Action To Get EM Switch Port Resource
+    [Documentation]    Keyword Retrieves EM Switch Port Information
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${bay_number}    ${port_type}    ${port_number}
+    ${bay}=    Convert To Integer    ${bay_number}
+    ${port_number}=    Convert To Integer    ${port_number}
+    ${parameters}=    Create Dictionary    BayNumber=${bay}    PortType=${port_type}    PortNumber=${port_number}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    EmSwitchPortsResourceGet    ${parameters}
+    [Return]    ${response}
+    
+PEM Action To Get EM Switch Port LLDP Receive
+    [Documentation]    Keyword Retrieves EM Switch Port LLDP Receive Information
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${bay_number}    ${port_type}    ${port_number}
+    ${bay}=    Convert To Integer    ${bay_number}
+    ${port_number}=    Convert To Integer    ${port_number}
+    ${parameters}=    Create Dictionary    BayNumber=${bay}    PortType=${port_type}    PortNumber=${port_number}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    EmSwitchPortsLldpReceiveRead    ${parameters}
+    [Return]    ${response}
+
+PEM Action To Get EM Switch Port LLDP Send
+    [Documentation]    Keyword Retrieves EM Switch Port LLDP Send Information
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${bay_number}    ${port_type}    ${port_number}
+    ${bay}=    Convert To Integer    ${bay_number}
+    ${port_number}=    Convert To Integer    ${port_number}
+    ${parameters}=    Create Dictionary    BayNumber=${bay}    PortType=${port_type}    PortNumber=${port_number}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    EmSwitchPortsLldpSendRead    ${parameters}
+    [Return]    ${response}
+    
+PEM Action To Manage Tagged VLAN
+    [Documentation]    Keyword Modifies Tagged VLAN
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${bay_number}    ${vlan_id}    ${port_type}
+    ${bay}=    Convert To Integer    ${bay_number}
+    ${parameters}=    Create Dictionary    BayNumber=${bay}    TaggedVLANs=${vlan_id}    PortType=${port_type}
+    ${response}=    HAL API Perform Post Action    ${FUSION_IP}    EmSwitchPortsTaggedvLANSManage    ${parameters}
+    [Return]    ${response}
+    
+PEM Command EmSwitchPorts Resource Get On Ports
+    [Documentation]    Keyword to Run PEM command EmSwitchPortsResourceGet for CIManager on ports
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${em_bay}
+    # create port list and run pem command for each port
+    ${port_numbers}=    Create List    ${1}    ${2}
+    :FOR    ${port}    IN    @{port_numbers}
+    \    ${pem_response}=    PEM Action To Get EM Switch Port Resource    ${auth}    ${APPLIANCE_IP}    ${enc_serial_number}    ${em_bay}    CIManager    ${port}
+    \    Should Be Equal As Strings    ${pem_response["CallStatus"]}    SUCCESS
+    # read port type and port number from pem response
+    \    ${port_type_pem}=    Read Mgmt Port value    ${pem_response}
+    \    ${get_port_from_pem}=    Set Variable    ${pem_response["OperationResult"]["EmSwitchPorts"][0]["links"]["LLDPReceive"]["href"]}
+    \    ${pem_port_number}=    Set Variable    ${pem_response["OperationResult"]["EmSwitchPorts"][0]["PortNumber"]}
+    \    ${vport}=    Fetch From Right    ${get_port_from_pem}    /
+    \    ${device_id}=    Convert To String    EnclosureManagerSwitchPorts/${vport}
+    # validate the pem response with info obtained through EM using SSH command via rest
+    \    ${ssh_resp}=    Run SSH Command Using EM    ${device_id}
+    \    ${get_port_type}=    Fetch From Right    ${ssh_resp}    "PortType": "
+    \    ${port_type}=    Fetch From Left    ${get_port_type}    "
+    \    Should Be Equal As Strings    ${port_type_pem}    ${port_type}
+    \    ${get_port_number}=    Fetch From Right    ${ssh_resp}    PortNumber": 
+    \    ${port_number}=    Fetch From Left    ${get_port_number}    , "
+    \    Should Be Equal As Strings    ${pem_port_number}    ${port_number[1]}
+    
+Get Port ID For EM Switch Ports
+    [Documentation]    Keyword to set communication port for EM Switch Ports LLDP Receive corresponding to bay, port type and port number
+    [Arguments]    ${bay}    ${port_type}    ${port_number}
+    # verify the arguments passed and return the port ids
+    Run Keyword If    "${bay}" == "1" and "${port_type}" == "Mgmt"    Return From Keyword    ${EM_switch_port_mgmt_bay1}
+    Run Keyword If    "${bay}" == "2" and "${port_type}" == "Mgmt"    Return From Keyword    ${EM_switch_port_mgmt_bay2}
+    Run Keyword If    "${bay}" == "1" and "${port_type}" == "CIManager" and "${port_number}" == "1"    Return From Keyword    ${EM_switch_port_cim_bay1_port1}
+    Run Keyword If    "${bay}" == "1" and "${port_type}" == "CIManager" and "${port_number}" == "2"    Return From Keyword    ${EM_switch_port_cim_bay1_port2}
+    Run Keyword If    "${bay}" == "2" and "${port_type}" == "CIManager" and "${port_number}" == "1"    Return From Keyword    ${EM_switch_port_cim_bay2_port1}
+    Run Keyword If    "${bay}" == "2" and "${port_type}" == "CIManager" and "${port_number}" == "2"    Return From Keyword    ${EM_switch_port_cim_bay2_port2}
+    
+PEM Command EmSwitchPorts LLDP Send On Ports
+    [Documentation]    Keyword to Run PEM command EmSwitchPortsLldpSendRead for CIManager on ports
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${em_bay}
+    # create port list and run pem command for each port
+    ${port_numbers}=    Create List    ${1}    ${2}
+    :FOR    ${port}    IN    @{port_numbers}
+    \    ${response_lldp_send}=    PEM Action To Get EM Switch Port LLDP Send    ${auth}    ${APPLIANCE_IP}    ${enc_serial_number}    ${em_bay}    CIManager    ${port}
+    \    Should Be Equal As Strings    ${response_lldp_send["CallStatus"]}    SUCCESS
+    # read network address from pem response
+    \    ${network_address_pem}=    Read Lldp Send Network Address        ${response_lldp_send}
+    # obtain communication port for EM Switch LLDP Send as per bay, port type and port number
+    \    ${vport}=    Get Port ID For EM Switch Ports    ${em_bay}    CIManager    ${port}
+    \    ${device_id}=    Convert To String    EnclosureManagerSwitchPortsLLDPSend/${vport}
+    # validate the pem response with info obtained through EM using SSH command via rest
+    \    ${ssh_resp}=    Run SSH Command Using EM    ${device_id}
+    \    ${get_nw_ip}=    Fetch From Right    ${ssh_resp}    IPv6Addresses": [ "
+    \    ${nw_ip}=    Fetch From Left    ${get_nw_ip}    "
+    \    Should Be Equal As Strings    ${network_address_pem}    ${nw_ip}
+    
+PEM Command EmSwitchPorts LLDP Receive On Ports
+    [Documentation]    Keyword to Run PEM command EmSwitchPortsLldpReveiveRead for CIManager on ports
+    [Arguments]    ${auth}    ${FUSION_IP}    ${ENC_SERIAL_NUMBER}    ${em_bay}
+    # create port list and run pem command for each port
+    ${port_numbers}=    Create List    ${1}    ${2}
+    :FOR    ${port}    IN    @{port_numbers}
+    \    ${response_lldp_receive}=    PEM Action To Get EM Switch Port LLDP Receive    ${auth}    ${APPLIANCE_IP}    ${enc_serial_number}    ${em_bay}    CIManager    ${port}
+    \    Should Be Equal As Strings    ${response_lldp_receive["CallStatus"]}    SUCCESS
+    # read MAC ID from pem response
+    \    ${mac_address_pem}=    Read Lldp Receive MAC Address    ${response_lldp_receive}
+    # obtain communication port for EM Switch LLDP Receive as per bay, port type and port number
+    \    ${vport}=    Get Port ID For EM Switch Ports    ${em_bay}    CIManager    ${port}
+    \    ${device_id}=    Convert To String    EnclosureManagerSwitchPortsLLDPReceive/${vport}
+    # validate the pem response with info obtained through EM using SSH command via rest
+    \    ${ssh_resp}=    Run SSH Command Using EM    ${device_id}
+    \    ${get_mac_id}=    Fetch From Right    ${ssh_resp}    "MacAddress": "
+    \    ${mac_id}=    Fetch From Left    ${get_mac_id}    "
+    \    Should Be Equal As Strings    ${mac_address_pem}    ${mac_id}
+    
+Convert CIM into DevMode
+    [Documentation]    Keyword to convert the CIM into devmode
+    [Arguments]    ${FUSION_IP}    ${CIM_Type}         # FUSION_IP: Active CIM IP|StandBy CIM IP, Cim_Type :  Active|Standby
+    Login to Fusion via SSH   ${FUSION_IP}  ${SSH_USERNAME}  ${SSH_PASSWORD}  ${FUSION_PROMPT}  5m
+    ${download_setup_file}=    Execute SSH Command    wget http://${CIM_developer_tar_path}
+    ${download_setup_status}=    Run Keyword And Return Status  Should Contain  ${download_setup_file}  unable to resolve host address
+    ${check_devmode}=    Execute SSH Command    cat /ci/etc/developer-mode
+    ${demode_status}=    Run Keyword And Return Status  Should Contain  ${check_devmode}  this CIC appliance is in \"developer mode\"
+    :For  ${index}  IN RANGE  1  2
+    \    Run Keyword If    "${demode_status}" == 'True'  Run Keywords  Log  ${CIM_Type} CIM in already in Dev Mode  AND  Exit For Loop
+    \    Run Keyword If    "${download_setup_status}"== 'True'  Run Keywords  Fail  Check the CIM network  AND  Exit For Loop
+    \    Execute SSH Command    tar xvf setup_customized_fusion.tar       # Extract the tar file
+    \    Execute SSH Command    chmod 755 setup_customized_fusion.sh      # Change permissions
+    \    Execute SSH Command    echo source /ci/lib/feature-switch.sh>>.bashrc           # Append to end of file .bascrc file
+    \    ${execute_setupfile}=    Runkeyword If  '${FUSION_IP}'=='Active'  Execute SSH Command    ./setup_customized_fusion.sh --notz  root@    #
+    \    ...  ELSE  Execute SSH Command    ./setup_customized_fusion.sh --nohost  root@    #
+    \    ${execution_status}=    Run Keyword And Return Status  Should Contain  ${execute_setupfile}  setup customized fusion is done!, rebooting
+    \    Run Keyword If    "${execution_status}" == 'False'  run keyword   Fail  Errors in converting dev mode
+    \    sleep  1500                  # wait time till the OV comes back after CIM reset
+    \    Login to Fusion via SSH  ${FUSION_IP}
+    \    ${get_devmode_status}=    Execute SSH Command    cat /ci/etc/developer-mode
+    \    ${chec_devmode_status}=    Run Keyword And Return Status  Should Contain  ${get_devmode_status}  this CIC appliance is in \"developer mode\"
+    \    Run Keyword If    "${chec_devmode_status}" == 'True'  Log  ${CIM_Type} CIM in now converted into Dev Mode
+    \    ...  ELSE  Fail  ${CIM_Type} CIM not converted into Dev Mode

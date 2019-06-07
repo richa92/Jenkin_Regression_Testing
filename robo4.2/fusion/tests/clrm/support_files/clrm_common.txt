@@ -1,0 +1,594 @@
+*** Settings ***
+Library             RoboGalaxyLibrary
+Library             FusionLibrary
+Library             OperatingSystem
+Library             BuiltIn
+Library             Collections
+Library             XML
+Library             SSHLibrary
+Library             String
+Library             Dialogs
+
+Resource            ../../../Resources/api/fusion_api_resource.txt
+Resource            ../testcases/OVF1024/resource.robot
+Library             clrm_support_functions.py
+
+*** Keywords ***
+Reset Refresh server hardware
+    [Documentation]     Refresh and rest a list of server hardwares before deploying
+    ${hardwares}=    create List
+    ${servers} =    Fusion Api Get Server Hardware
+    :FOR    ${server}    in    @{servers['members']}
+    \    run keyword if    '${server['status']}'!='OK'    Append to list    ${hardwares}    ${server['name']}
+    Log    ${hardwares}    console=True
+    :FOR    ${hw}   in  @{hardwares}
+    \   run keyword and continue on failure     Power on server     SH:${hw}
+    \   run keyword and continue on failure     Reset Server    SH:${hw}
+    \   run keyword and continue on failure     Power off Server    SH:${hw}
+    \   run keyword and continue on failure     Refresh Server Hardware     SH:${hw}
+    ${hardwares}=    create List
+    ${servers} =    Fusion Api Get Server Hardware
+    :FOR    ${server}    in    @{servers['members']}
+    \    run keyword if    '${server['status']}'!='OK'    Append to list    ${hardwares}    ${server['name']}
+    Log    List of hardwares not in good state\n${hardwares}    console=True
+
+Get Server Hardwares in cluster
+    [Documentation]    Powers down the hosts present in the cluster
+    [Arguments]    ${cluster_name}
+    ${hcp}=     Get Cluster Profile     ${cluster_name}
+    ${host_list}=    Get from Dictionary    ${hcp[0]}    hypervisorHostProfileUris
+    ${server_hardware_list}=    Create List
+    Return From Keyword If    ${host_list} is ${None}    ${server_hardware_list}
+    :For    ${host}    in    @{host_list}
+    \    ${host_resp}=    Get Host Profile by Uri    ${host}
+    \    ${server_resp} =       Fusion Api Get Server Profiles     uri=${host_resp['serverProfileUri']}
+    \    Append to List    ${server_hardware_list}    ${server_resp['serverHardwareUri']}
+    [return]    ${server_hardware_list}
+
+clrm task detail
+    [Documentation]  Detail task response
+    [Arguments]    ${resp}
+    Set Log Level   TRACE
+    Should Contain  ${resp['headers']}  Location
+    ${task_uri} =       Get From Dictionary     ${resp['headers']}   Location
+    Log to logfile      taskUri:${task_uri}
+    ${task} =           Fusion Api Get Task     uri=${task_uri}?view=tree
+    Remove from dictionary  ${task} headers
+    ${isTaskerror}= get length  ${task['resource']['taskErrors']}
+    run keyword if  ${isTaskerror}>0    Log to logfile      task:${task['resource']['taskErrors']}  WARN
+    ${isChild}= get length  ${task['children']}
+    run keyword if  ${isChild}>0    Log to logfile      \n ERROR:sub-task\t${task['children']}  WARN
+    ##Log to console        taskUri:${task}
+
+Clrm Wait For Task
+    [Documentation]     Waits for a task to reach an end-state
+    [Arguments]     ${resp}   ${timeout}=300 s   ${interval}=2 s
+    ${task} =   Wait Until Keyword Succeeds     ${timeout}  ${interval}    Clrm Task Reached Endstate   ${resp}
+    ${status}=  Run Keyword And Return Status   should be equal      ${task['taskState']}   Completed
+    Run Keyword if  '${task['taskState']}'=='Error' clrm task detail    ${resp}
+    Log to console  taskstate:${status}
+    [Return]    ${status}   ${task}
+
+Clrm Task Reached Endstate
+    [Documentation]  Validate that task response has reach the end state
+    [Arguments]    ${resp}
+    # Set Log Level   TRACE
+    Should Contain  ${resp['headers']}  Location
+    ${task_uri} =       Get From Dictionary     ${resp['headers']}   Location
+    # Log to console        taskUri:${task_uri}
+    ${task} =           Fusion Api Get Task     uri=${task_uri}
+    # Log to console      \t Task: [${task['category']}:${task['name']}] is: ${task['taskState']} for resource: ${task['associatedResource']['resourceName']} ${task['associatedResource']['resourceUri']}
+    Should Match Regexp     ${task['taskState']}   ((?i)Warning|Unknown|Terminated|Killed|Error|Completed)
+    [Return]    ${task}
+
+# Keywords for hypervisor cluster profile test cases
+Status check
+    [Documentation]  check status of cluster profile operation
+    [Arguments]     ${resp}     ${operation}    ${isNegative}=False     ${name}=${EMPTY}
+    :FOR    ${res}  in  @{resp}
+    \   ${temp}     Create List
+    \   Append to list    ${temp}     ${res}
+    \   run keyword if     ${isNegative}==False    run keywords
+    \   ...     Run keyword if    ${res['status']}==False         Response error Message  ${res}      AND
+    \   ...     Run keyword if    ${res['status']}==False         Delete cluster profile   ${temp}    AND
+    \   ...     Run keyword if    ${res['status']}==False         FAIL    Failed to ${operation} Cluster ${name}  AND
+    \   ...     Run keyword if    ${res['task_status']}==False    Task Error Message  ${res}      AND
+    \   ...     Run keyword if    ${res['task_status']}==False    Delete cluster profile   ${temp}    AND
+    \   ...     Run keyword if    ${res['task_status']}==False    FAIL    Failed to ${operation} Cluster ${name}
+    \   run keyword if  ${isNegative}==True     run keywords
+    \   ...     Run keyword if    ${res['status']}==False         Response error Message  ${res}      AND
+    \   ...     Run keyword if    ${res['status']}==False         Return from keyword     AND
+    \   ...     Run keyword if    ${res['task_status']}==False    Task Error Message  ${res}      AND
+    \   ...     Run keyword if    ${res['task_status']}==False    return from keyword     AND
+    \   ...     Run keyword if    ${res['status']}==True and ${res['task_status']}==True      Delete cluster profile   ${temp}    AND
+    \   ...     Run keyword if    ${res['status']}==True and ${res['task_status']}==True      FAIL    Negative Test
+
+Create cluster
+    [Documentation]  create cluster profile and validate test scenario
+    [Arguments]     ${cluster}      ${valid}=True   ${isNegative}=False     ${msg}=${EMPTY}     ${auto_hardware}=False
+    ${valid}=   Set variable if    ${isNegative}==True    False   ${valid}
+    ${message}=     Set variable if    '${msg}'!='${EMPTY}'    ${msg}
+    ...             '${msg}'=='${EMPTY}' and ${isNegative}==True    Successful Cluster creation
+    ...             '${msg}'=='${EMPTY}' and ${isNegative}==False   Failed to create Cluster
+    ${cluster_ah}=      Run keyword if  ${auto_hardware}==True  Auto Server Hardware selection for Hypervisor Cluster Profile   ${cluster}
+    ${resp}=    Run keyword if  ${auto_hardware}==False    Add Cluster Profile     ${cluster}      ${valid}
+    ...                     ELSE    Add Cluster Profile     ${cluster_ah}       ${valid}
+    set log level    TRACE
+    :FOR    ${hcp}  in  @{resp}
+    \   ${name}     Set variable    ${hcp['name']}
+    \   Run keyword if  ${hcp['status']}==False         Response error Message    ${hcp}
+    \   Run keyword if  ${hcp['task_status']}==False    Task Error Message    ${hcp}
+    \   ${valdn_status}=    Run Keyword If  ${valid}==True and ${hcp['status']}==True and ${hcp['task_status']}==True       HCP_create_validation       ${hcp['rest_body']}
+    \   set to dictionary   ${hcp}  validation_status=${valdn_status}
+    \   ${temp}     Create List
+    \   Append to list    ${temp}     ${hcp}
+    \   run keyword if    ${isNegative}==False    run keywords
+    \   ...     Run keyword if  ${hcp['status']}==False         Delete cluster profile   ${temp}    AND
+    \   ...     Run keyword if  ${hcp['status']}==False         FAIL    ${message}  AND
+    \   ...     Run keyword if  ${hcp['task_status']}==False    Delete cluster profile   ${temp}    AND
+    \   ...     Run keyword if  ${hcp['task_status']}==False    FAIL    ${message}  AND
+    \   ...     Run keyword if  ${hcp['validation_status']}==False          Delete cluster profile   ${temp}    AND
+    \   ...     Run keyword if  ${hcp['validation_status']}==False          FAIL    Validation Failed for create Cluster Profile:${name}
+    \   run keyword if    ${isNegative}==True     run keywords
+    \   ...     Run keyword if  ${hcp['status']}==True and ${hcp['task_status']}==True  Delete cluster profile   ${temp}    AND
+    \   ...     Run keyword if  ${hcp['status']}==True and ${hcp['task_status']}==True          FAIL    Negative Test : ${message}
+
+Update cluster
+    [Documentation]  Update cluster profile and validate test scenario
+    [Arguments]     ${cluster}      ${valid}=True       ${isNegative}=False     ${msg}=${EMPTY}     ${auto_hardware}=False
+    ${valid}=   Set variable if    ${isNegative}==True    False   ${valid}
+    ${message}=     Set variable if    '${msg}'!='${EMPTY}'    ${msg}
+    ...             '${msg}'=='${EMPTY}' and ${isNegative}==True    Successful Cluster Update
+    ...             '${msg}'=='${EMPTY}' and ${isNegative}==False       Failed to Update Cluster
+    ${cluster_p}=       Run keyword if  ${isNegative}==False    Populate profile name for Cluster profile update    ${cluster}
+    ${cluster_ah}=      Run keyword if  ${auto_hardware}==True and ${cluster_p} is None Auto Server Hardware selection for Hypervisor Cluster Profile   ${cluster}
+    ...                             ELSE IF ${auto_hardware}==True and ${cluster_p}  is not None     Auto Server Hardware selection for Hypervisor Cluster Profile   ${cluster_p}
+    ${resp}=    Run keyword if  ${auto_hardware}==False     Update Cluster Profile      ${cluster}      ${valid}
+    ...                     ELSE    Update Cluster Profile      ${cluster_ah}       ${valid}
+    :FOR    ${hcp}  in  @{resp}
+    \   ${name}=    get name        ${hcp}
+    \   Run keyword if  ${hcp['status']}==False         Response error Message  ${hcp}
+    \   Run keyword if  ${hcp['task_status']}==False    Task Error Message  ${hcp}
+    \   ${valdn_status}     Run Keyword If  '${valid}'=='True' and ${hcp['status']}==True and ${hcp['task_status']}==True   HCP_update_validation       ${hcp['cp']}        ${hcp['resp_data']}     ${hcp['get_cp_res_data']}       ${hcp['deleted_hhps']}      ${hcp['name_flag']}
+    \   set to dictionary   ${hcp}  validation_status=${valdn_status}
+    \   ${temp}     Create List
+    \   Append to list   ${temp}     ${hcp}
+    \   run keyword if   ${isNegative}==False    run keywords
+    \   ...     Run keyword if  ${hcp['status']}==False         Delete cluster profile   ${temp}    AND
+    \   ...     Run keyword if  ${hcp['status']}==False         FAIL    ${message}  AND
+    \   ...     Run keyword if  ${hcp['task_status']}==False    Delete cluster profile   ${temp}    AND
+    \   ...     Run keyword if  ${hcp['task_status']}==False    FAIL    ${message}  AND
+    \   ...     Run keyword if  ${hcp['validation_status']}==False          Delete cluster profile   ${temp}    AND
+    \   ...     Run keyword if  ${hcp['validation_status']}==False          FAIL    Validation Failed for update Cluster Profile:${name}
+    \   run keyword if   ${isNegative}==True     run keywords
+    \   ...     Run keyword if   ${hcp['status']}==True and ${hcp['task_status']}==True  Delete cluster profile   ${temp}    AND
+    \   ...     Run keyword if   ${hcp['status']}==True and ${hcp['task_status']}==True          FAIL    Negative Test : ${message}
+
+Delete cluster
+    [Documentation]  Delete cluster profile and validate test scenario
+    [Arguments]     ${cluster}  ${force}=False      ${isNegative}=False     ${msg}=${EMPTY}
+    ${message}=     Set variable if   '${msg}'!='${EMPTY}'    ${msg}
+    ...             '${msg}'=='${EMPTY}' and ${isNegative}==True    Successful Cluster deletion
+    ...             '${msg}'=='${EMPTY}' and ${isNegative}==False   Failed to Delete Cluster
+    ${name}=    get name        ${cluster[0]}
+    #${server_hardwares_list}=    Get Server Hardwares in cluster    ${name}
+    #Power off servers with uri list    ${server_hardwares_list}    powerControl=PressAndHold
+    #Run keyword if ${server_hardwares_list} != []    Sleep    4min
+
+    ${resp}=   Delete cluster profile      ${cluster}      ${force}
+    :FOR    ${d_hcp}    in  @{resp}
+    \   ${name}=    get name        ${d_hcp}
+    \   ${temp}     Create List
+    \   Append to list  ${temp}     ${d_hcp}
+    \   run keyword if  ${isNegative}==False    run keywords
+    \   ...     Run keyword if  ${d_hcp['status']}==False           Response error Message  ${d_hcp}        AND
+    \   ...     Run keyword if  ${d_hcp['status']}==False           FAIL    ${message}  AND
+    \   ...     Run keyword if  ${d_hcp['task_status']}==False  Task Error Message  ${d_hcp}    AND
+    \   ...     Run keyword if  ${d_hcp['task_status']}==False  FAIL    ${message}
+    \   run keyword if  ${isNegative}==True  run keywords
+    \   ...     Run keyword if      ${d_hcp['status']}=='True'      FAIL        Failed to delete Cluster    AND
+    \   ...     Run keyword if      ${d_hcp['task_status']}==True       Delete cluster profile   ${temp}    AND
+    \   ...     Run keyword if      ${d_hcp['task_status']}==True       FAIL    Negative Test: ${message}
+
+Get Cluster
+    [Documentation]  Get cluster profile and validate test scenario
+    [Arguments]     ${cluster}  ${isNegative}=False     ${operation}=get
+    ${name}=    get name        ${cluster[0]}
+    ${resp} ${count}=   Get Cluster Profile     ${name}
+    ${status1}=  Run keyword and return status   Dictionary should contain key   ${resp}     status
+    ${state1}=  Run keyword and return status   Dictionary should contain key   ${resp}     state
+    Run keyword if  ${isNegative}==False    run keywords
+    ...  Run keyword If  ${count}==0  FAIL    Failed to ${operation} Cluster Profile:${name}  AND
+    ...  Run keyword If  ${count}>0  Log to console and logfile  ${operation} Cluster profile Info: ${name}\n${resp}     AND
+    ...  Run keyword if  '${resp['state']}'!='Active'    Log    \n ERROR:State of Cluster Profile:${name} is ${resp['state']}    WARN    console=True    AND
+    ...  Run keyword if  '${resp['state']}'!='Active'    Run Keyword And Continue On Failure FAIL    State of Cluster Profile:${name} is ${resp['state']}    AND
+    ...  Run keyword if  '${resp['complianceState']}'!='Consistent'  Run Keyword And Continue On Failure FAIL    Compliance State of Cluster Profile:${name} is ${resp['complianceState']}   AND
+    ...  Run keyword if  '${resp['complianceState']}'!='Consistent'  Log to logfile  \n ERROR:Compliance State of Cluster Profile:${name} is ${resp['complianceState']}      WARN
+    Run keyword if  ${isNegative}==True  run keywords
+    ...  Run keyword If  ${count}>0  FAIL    Negative test Failed on ${operation} Cluster Profile:${name}    AND
+    ...  Run keyword if  ${state1}==True  run keyword  Run keyword if  '${resp['state']'=='Active'  Run Keyword And Continue On Failure FAIL    Negative test :State of Cluster Profile:${name} is ${resp['state']
+
+get name
+    [Documentation]  Get the name of the cluster profile from data variable file
+    [Arguments]     ${cluster}
+    ${newName_status}=  Run keyword and return status   Dictionary should contain key   ${cluster}  new_name
+    return from keyword if  ${newName_status}== True    ${cluster['new_name']}
+    return from keyword if  ${newName_status}== False   ${cluster['name']}
+
+Task Error Message
+    [Documentation]  Get the subtask error message from response
+    [Arguments]     ${resp}
+    Return from keyword if  ${resp['task_status']}==True
+    Log to logfile      \n ERROR:\t${resp['task_resp']['taskErrors'][0]['message']} WARN
+
+Response error Message
+    [Documentation]  Get the validation error message from response
+    [Arguments] ${resp}
+    Return from keyword if  ${resp['status']}==True
+    ${msg_status}=  Run keyword and return status   Dictionary should contain key   ${resp}     message
+    Run keyword if  ${msg_status}==True Log to logfile  \n ERROR:\t${resp['message']}   WARN
+
+Update networks
+    [Documentation]  update network
+    [Arguments]     @{networks}
+    :FOR    ${net}  in  @{networks}
+    \   ${resp}     Edit network    ${net}
+    \   Run keyword if    ${resp[0]['status']}==False         Response error Message      ${resp[0]}
+    \   Run keyword if    ${resp[0]['status']}==False         FAIL    Failed:${net['name']}
+    \   Run keyword if    ${resp[0]['task_status']}==False    Task Error Message  ${resp[0]}
+    \   Run keyword if    ${resp[0]['task_status']}==False    FAIL    Failed : ${net['name']}
+
+Revert network
+    [Arguments]     ${resp}   ${editNet}=False    ${Net}==${EMPTY}
+    [Documentation]     To revert the updated network to old info, if vcenter or cluster operation fails
+    ${isNetNone}    run keyword and return status   Should Be Empty      ${Net}
+    run keyword if  ${editNet}==True and ${resp['status']}==False and ${isNetNone}==True    run keywords
+    ...     Log to console and logfile  \n ERROR:Failed to update network due to missing info   WARN
+    ...     AND     FAIL    Failed to update network
+    run keyword if  ${editNet}==True and ${resp['status']}==False   Update networks     @{Net}
+    run keyword if  ${editNet}==True and ${resp['task_status']}==False and ${isNetNone}==True   run keywords
+    ...     Log to console and logfile  \n ERROR:Failed to update network due to missing info
+    ...     AND     FAIL    Failed to update network
+    run keyword if  ${editNet}==True and ${resp['task_status']}==False  Update networks     @{Net}
+
+# Keywords for hypervisor manager test cases
+Register vcenter
+    [Documentation]  Register vcenter to the oneview appliance and validate the test scenario
+    [Arguments]     ${vcenter}  ${valid}=True   ${isNegative}=False     ${msg}=${EMPTY}
+    ${valid}=   Set variable if   ${isNegative}==True   False   ${valid}
+    ${message}  Set variable if     '${msg}'=='${EMPTY}'    register hypervisor manager     ${msg}
+    ${resp}=    Add Hypervisor Manager      ${vcenter}      ${valid}
+    :FOR    ${vc}   in  @{resp}
+    \   ${valdn_status}=    Run Keyword If  ${valid}==True and ${vc['status']}==True and ${vc['task_status']}==True     validate_hypervisor_manager     ${vc['rest_body']}
+    \   set to dictionary   ${vc}  validation_status=${valdn_status}
+    \   ${name}=    get name        ${vc}
+    \   vcenter status check    ${vc}       ${message}  ${isNegative}   name=${name}
+
+Update vcenter
+    [Documentation]  Update Registered vcenter  and validate the test scenario
+    [Arguments]     ${vcenter}  ${valid}=True   ${isNegative}=False     ${msg}=${EMPTY}
+    ${valid}=   Set variable if   ${isNegative}==True   False   ${valid}
+    ${message}  Set variable if     '${msg}'=='${EMPTY}'    update hypervisor manager       ${msg}
+    ${resp}=    Update Hypervisor Manager       ${vcenter}  ${valid}
+    :FOR    ${vc}   in  @{resp}
+    \   ${valdn_status}=    Run Keyword If  ${valid}==True and ${vc['status']}==True and ${vc['task_status']}==True     validate_hypervisor_manager     ${vc['rest_body']}
+    \   set to dictionary   ${vc}  validation_status=${valdn_status}
+    \   ${name}=    get name        ${vc}
+    \   vcenter status check    ${vc}       ${message}  ${isNegative}   name=${name}
+
+Get vcenter by uri
+    [Documentation]  Get Registered vcenter  by URI
+    [Arguments]     ${uri}      ${isNegative}=False     ${msg}=${EMPTY}
+    ${message}=     Set variable if  '${msg}'!='${EMPTY}'    ${msg}
+    ...             '${msg}'=='${EMPTY}' and ${isNegative}==True    Hypervisor manager exist
+    ...             '${msg}'=='${EMPTY}' and ${isNegative}==False       Failed to get Hypervisor manager
+    ${resp}=    Get Hypervisor Manager by Uri   ${uri}
+    ${resp_status}      Run keyword and return status   Should not be empty     ${resp}
+    run keyword if    ${isNegative}==False    run keywords
+    ...     Run Keyword If    '${resp_status}'=='True'    Log to console  \nGet Hypervisor manager details\n${resp}   AND
+    ...     Run Keyword If    '${resp_status}'=='True'    return from keyword     ${resp}     AND
+    ...     Run Keyword If    '${resp_status}'=='False'       FAIL        ${msg}      AND
+    run keyword if    ${isNegative}==True and ${resp_status}==True    FAIL        Negative Test: ${msg}
+
+Get vcenter
+    [Documentation]  Get Registered vcenters  and validate the test scenario
+    [Arguments]     ${vcenter}      ${isNegative}=False
+    ${name}     Set variable    ${vcenter[0]['name']}
+    ${resp}=    Get Hypervisor Manager      ${name}
+    ${resp_status}      Run keyword and return status   Dictionary Should Contain Key   ${resp} status
+    run keyword if    ${isNegative}==False    run keywords
+    ...     Run Keyword If    '${resp_status}'=='True'    Log to console  \nGet Hypervisor manager details\n${resp}   AND
+    ...     Run Keyword If    '${resp_status}'=='True'    return from keyword     ${resp}     AND
+    ...     Run Keyword If    '${resp_status}'=='False'   FAIL        Failed to get Hypervisor manager
+    run keyword if   ${isNegative}==True and '${resp_status}'=='True'    FAIL        Negative Test: get Hypervisor manager
+
+Get all vcenter
+    [Documentation]  Get Registered vcenters and validate the test scenario
+    ${resp}=    Get all Hypervisor manager
+    ${resp_status}      Run keyword and return status   Dictionary Should Contain Key   ${resp} status
+    Run Keyword If   '${resp_status}'=='True'    Log to console  \nGet all Hypervisor managers details\n${resp}
+    Run Keyword If   '${resp_status}'=='False'       FAIL        Failed to get all Hypervisor managers
+
+Disconnect from vcenter
+    [Documentation]  Unregister vcenter and validate the test scenario
+    [Arguments]     ${vcenter}   ${isNegative}=False     ${msg}=${EMPTY}
+    ${message}  Set variable if     '${msg}'=='${EMPTY}'    Disconnect hypervisor manager       ${msg}
+    ${resp}=    Delete Hypervisor Manager    ${vcenter}
+    :FOR    ${vc}   in  @{resp}
+    \   ${name}     Set variable    ${vc['name']}
+    \   run keyword if  ${isNegative}==False    run keywords
+    \   ...     Run keyword if   ${vc['status']}==False          Response error Message  ${vc}   AND
+    \   ...     Run keyword if   ${vc['status']}==False          FAIL    Failed : ${msg} ${name} AND
+    \   ...     Run keyword if   ${vc['task_status']}==False  Task Error Message  ${vc}       AND
+    \   ...     Run keyword if   ${vc['task_status']}==False  FAIL    Failed : ${msg} ${name}
+    \   run keyword if  ${isNegative}==True     run keywords
+    \   ...     Run keyword if   ${vc['status']}==False          Response error Message  ${vc}       AND
+    \   ...     Run keyword if   ${vc['status']}==False          Return from keyword     AND
+    \   ...     Run keyword if   ${vc['task_status']}==False  Task Error Message  ${vc}       AND
+    \   ...     Run keyword if   ${vc['task_status']}==False  return from keyword     AND
+    \   ...     Run keyword if   ${vc['status']}==True and ${vc['task_status']}==True        FAIL    Negative Test: ${msg}
+
+vcenter status check
+    [Documentation]  vcenter status check and validate the test scenario
+    [Arguments]     ${resp}     ${operation}    ${isNegative}=False     ${name}=hypervisor manager
+    ${temp}     Create list
+    Append to list  ${temp}  ${resp}
+    run keyword if  ${isNegative}==False    run keywords
+    ...     Run keyword if  ${resp['status']}==False            Response error Message  ${resp} AND
+    ...     Run keyword if  ${resp['status']}==False            Delete Hypervisor Manager   ${temp} AND
+    ...     Run keyword if  ${resp['status']}==False            FAIL    Failed : ${operation} ${name}   AND
+    ...     Run keyword if  ${resp['task_status']}==False   Task Error Message  ${resp}     AND
+    ...     Run keyword if  ${resp['task_status']}==False           Delete Hypervisor Manager   ${temp} AND
+    ...     Run keyword if  ${resp['task_status']}==False   FAIL    Failed : ${operation} ${name}   AND
+    ...     Run keyword if  ${resp['validation_status']}==False         Delete Hypervisor Manager    ${temp}    AND
+    ...     Run keyword if  ${resp['validation_status']}==False         FAIL    Validation Failed for create vcenter:${name}
+    run keyword if  ${isNegative}==True     run keywords
+    ...     Run keyword if  ${resp['status']}==False            Response error Message  ${resp}     AND
+    ...     Run keyword if  ${resp['status']}==False            Return from keyword     AND
+    ...     Run keyword if  ${resp['task_status']}==False   Task Error Message  ${resp}     AND
+    ...     Run keyword if  ${resp['task_status']}==False   return from keyword     AND
+    ...     Run keyword if  ${resp['status']}==True and ${resp[0]['task_status']}==True     Delete Hypervisor Manager    ${temp}    AND
+    ...     Run keyword if  ${resp['status']}==True and ${resp[0]['task_status']}==True     FAIL    Negative Test: ${operation}
+
+# Keywords for deployment manager test cases
+Register Deployment manager
+    [Documentation]  Register deployment manager and validate the test scenario
+    [Arguments]     ${dm}       ${valid}=True   ${isNegative}=False     ${msg}=${EMPTY}
+    ${count}=    Deployment manager exist check    ${dm}
+    Run Keyword If    ${count}==1    Return From Keyword
+    ${valid}=   Set variable if  ${isNegative}==True  False   ${valid}
+    ${message}=     Set variable if  '${msg}'!='${EMPTY}'    ${msg}
+    ...             '${msg}'=='${EMPTY}' and ${isNegative}==True    Successful Deployment Manager creation
+    ...             '${msg}'=='${EMPTY}' and ${isNegative}==False   Failed to create Deployment Manager
+    ${resp}=    Add Deployment Manager      ${dm}       ${valid}
+    :FOR    ${dm}   in  @{resp}
+    \   ${name}     Set variable    ${dm['name']}
+    \   Run keyword if  ${dm['status']}==False          Response error Message  ${dm}
+    \   Run keyword if  ${dm['task_status']}==False Task Error Message  ${dm}
+    \   ${valdn_status}=    Run Keyword If  ${valid}==True and ${dm['status']}==True and ${dm['task_status']}==True     validate_deployment_manager     ${dm['rest_body']}
+    \   set to dictionary   ${dm}  validation_status=${valdn_status}
+    \   dp Status check ${dm}   ${message}  ${isNegative}   ${name}
+
+Get deployment managers
+    [Documentation]  Get deployment managers
+    [Arguments]     ${deployment_managers}
+    :FOR    ${dm}   IN  @{deployment_managers}
+    \   ${resp}=    Get Deployment Manager   ${dm['name']}
+    Log to Console  get_dm:${resp}
+
+unregister deployment manager
+    [Documentation]  unregister deployment manager and validate the test scenario
+    [Arguments]     ${deployment_managers}  ${force}=False      ${isNegative}=False     ${msg}=${EMPTY}
+    ${message}=     Set variable if  '${msg}'!='${EMPTY}'    ${msg}
+    ...             '${msg}'=='${EMPTY}' and ${isNegative}==True    Successful Hypervisor Manager deletion
+    ...             '${msg}'=='${EMPTY}' and ${isNegative}==False   Failed to Delete Hypervisor Manager
+    ${resp}=    Delete Deployment Manager       ${deployment_managers}
+    :FOR    ${dm}   in  @{resp}
+    \   ${name}=    get name        ${dm['name']}
+    \   run keyword if   ${isNegative}==False    run keywords
+    \   ...     Run keyword if  ${dm['status']}==False          Response error Message  ${dm}       AND
+    \   ...     Run keyword if  ${dm['status']}==False          FAIL    ${message}  AND
+    \   ...     Run keyword if  ${dm['task_status']}==False Task Error Message  ${dm}   AND
+    \   ...     Run keyword if  ${dm['task_status']}==False FAIL    ${message}
+    \   run keyword if  ${isNegative}==True     run keywords
+    \   ...     Run keyword if  ${dm['status']}==False          Response error Message  ${dm}       AND
+    \   ...     Run keyword if  ${dm['status']}==False      Return from keyword     Failed to Delete Deployment Manager     AND
+    \   ...     Run keyword if  ${dm['status']}==False          Response error Message  ${dm}       AND
+    \   ...     Run keyword if  ${dm['task_status']}==False Return from keyword     Failed to Delete Deployment Manager     AND
+    \   ...     run keyword if  ${isNegative}==True and ${dm['status']}==True and ${dm['task_status']}==True            FAIL    Negative Test: ${message}
+
+Edit deployment manager
+    [Documentation]  Update deployment manager and validate the test scenario
+    [Arguments]     ${dm}       ${valid}=True       ${isNegative}=False     ${msg}=${EMPTY}
+    ${valid}=   Set variable if  ${isNegative}==True  False   ${valid}
+    ${message}=     Set variable if  '${msg}'!='${EMPTY}'    ${msg}
+    ...             '${msg}'=='${EMPTY}' and ${isNegative}==True    Successful Deployment Manager Update
+    ...             '${msg}'=='${EMPTY}' and ${isNegative}==False       Failed to Update Deployment Manager
+    ${resp}=    Update Deployment Manager       ${dm}       ${valid}
+    :FOR    ${dep}  in  @{resp}
+    \   ${name}=    get name        ${dep}
+    \   Run keyword if  ${dep['status']}==False         Response error Message  ${dep}
+    \   Run keyword if  ${dep['task_status']}==False    Task Error Message  ${dep}
+    \   ${valdn_status}=    Run Keyword If  ${valid}==True and ${dep['status']}==True and ${dep['task_status']}==True       validate_deployment_manager     ${dep['rest_body']}
+    \   set to dictionary   ${dep}  validation_status=${valdn_status}
+    \   ${temp}     Create List
+    \   Append to list   ${temp}     ${dep}
+    \   run keyword if   ${isNegative}==False    run keywords
+    \   ...     Run keyword if  ${dep['status']}==False         Delete Deployment Manager    ${temp}    AND
+    \   ...     Run keyword if  ${dep['status']}==False         FAIL    ${message}  AND
+    \   ...     Run keyword if  ${dep['task_status']}==False    Delete Deployment Manager    ${temp}    AND
+    \   ...     Run keyword if  ${dep['task_status']}==False    FAIL    ${message}  AND
+    #\  ...     Run keyword if  ${dep['validation_status']}==False          Delete Deployment Manager    ${temp}    AND
+    \   ...     Run keyword if  ${dep['validation_status']}==False          FAIL    Validation Failed for update Deployment Manager:${name}
+    \   run keyword if  ${isNegative}==True     run keywords
+    \   ...     Run keyword if  ${dep['status']}==False  return from keyword    AND
+    \   ...     Run keyword if  ${dep['task_status']}==False    return from keyword     AND
+    \   ...     Run keyword if  ${dep['status']}==True and ${dep['task_status']}==True      Delete Deployment Manager    ${temp}    AND
+    \   ...     Run keyword if  ${dep['status']}==True and ${dep['task_status']}==True      FAIL    Negative Test: ${message}
+
+dp status check
+    [Documentation]  check deployment managers status and validate the test scenario
+    [Arguments]     ${resp}     ${message}=${EMPTY} ${isNegative}=False     ${name}=deployment manager
+    ${temp}     Create List
+    Append to list  ${temp}     ${resp}
+    run keyword if  ${isNegative}==False    run keywords
+    ...     Run keyword if   ${resp['status']}==False            Delete Deployment Manager    ${temp}    AND
+    ...     Run keyword if   ${resp['status']}==False            FAIL    ${message}  AND
+    ...     Run keyword if   ${resp['task_status']}==False   Delete Deployment Manager    ${temp}    AND
+    ...     Run keyword if   ${resp['task_status']}==False   FAIL    ${message}  AND
+    #...        Run keyword if  ${resp['validation_status']}==False         Delete Deployment Manager    ${temp}    AND
+    ...     Run keyword if   ${resp['validation_status']}==False         FAIL    Validation Failed for create deployment manager:${name}
+    run keyword if  ${isNegative}==True     run keywords
+    ...     Run keyword if   ${resp['status']}==False            return from keyword     AND
+    ...     Run keyword if   ${resp['task_status']}==False       return from keyword     AND
+    ...     Run keyword if   ${resp['status']}==True and ${resp[0]['task_status']}==True     Delete Deployment Manager    ${temp}    AND
+    ...     Run keyword if   ${resp['status']}==True and ${resp[0]['task_status']}==True     FAIL    Negative Test: ${message}
+
+Clean up
+    [Documentation]  Delete all cluster profiles
+    ${force}=       Convert to boolean  true
+    ${resp}     ${count}=   Get All Cluster Profiles
+    Run keyword If  ${count}==0     Log to console  \nNo cluster found\nclean up completed
+    return from keyword if  ${count}==0
+    Run keyword If  ${count}>0  Log to console and logfile  \n***List of clusters ***\n${resp['names']}
+    :FOR    ${name}     IN  @{resp['names']}
+    \   ${temp} Create list
+    \   ${temp_dict}    Create Dictionary
+    \   Set to dictionary   ${temp_dict}    name    ${name}
+    \   Append to list  ${temp}  ${temp_dict}
+    \   Delete cluster profile  ${temp}     ${force}
+    Log to console   clean up completed
+
+Compare Error Code Message
+    [Documentation]     Compare the error code messages
+    [Arguments]     ${errcode_input}        ${errcode_output}
+    ${status}   Set Variable    True
+    ${status}   Set variable if  '${errcode_input}' != '${errcode_output}'   False    True
+    [Return]    ${status}
+
+Build body for user update
+    [Documentation]     Build body for user update
+    [Arguments]     ${role}     ${scope}    ${userName}     ${replaceRoles}=${None}
+    ${up_list}  Create List
+    ${up_dict}  Create dictionary
+    ${bt}   convert to boolean  True
+    Set to Dictionary   ${up_dict}  type    UserAndPermissions
+    Set to Dictionary   ${up_dict}  userName    ${userName}
+    Set to Dictionary  ${up_dict}  replaceRoles    ${bt}
+    ${rb}   Run keyword if  ${replaceRoles} is not None     Convert to boolean  ${replaceRoles}
+    Run keyword if  ${replaceRoles} is not None     Set to Dictionary   ${up_dict}  replaceRoles    ${rb}
+    ${aP_list}  Create list
+    ${aP_dict}  Create dictionary
+    Set to Dictionary   ${aP_dict}  roleName    ${role}
+    Set to Dictionary   ${aP_dict}  scopeUri    ${scope}
+    append to list      ${aP_list}  ${aP_dict}
+    Set to Dictionary   ${up_dict}  permissions  ${aP_list}
+    append to list      ${up_list}  ${up_dict}
+    [Return]    ${up_list}
+
+Build body and update scope
+    [Documentation]     Build required payload to update scope
+    [Arguments]     ${scope}    ${add_resources}=${None}        ${delete_resources}=${None}     ${new_name}=${None}
+    ${add}  Create list
+    ${delete}   Create list
+    ${new_name} =    Set Variable If    '${scope}'=='${None}'    ${scope}    ${new_name}
+    ${add_resources} =    Set Variable If    ${add_resources}==${None}    ${add}    ${add_resources}
+    :FOR    ${res}  in  @{add_resources}
+    \   ${get_res}=     Get Resource    ${res}
+    \   Append to list  ${add}  ${get_res['uri']}
+    ${delete_resources} =    Set Variable If    ${delete_resources}==${None}    ${delete}    ${delete_resources}
+    :FOR    ${res}  in  @{delete_resources}
+    \   ${get_res}=     Get Resource    ${res}
+    \   Append to list  ${delete}   ${get_res['uri']}
+    Edit Scope  ${scope}    ${add}  ${delete}   ${new_name}
+
+Auto Server Hardware selection for Hypervisor Cluster Profile
+    [Documentation]    Builds the required payload for hypervisor cluster profile
+    [Arguments]    ${request_body}
+    :FOR    ${req}    in    @{request_body}
+    \   ${server_hardware_list}    Create List
+    \   ${hardware_status}= Run keyword and return status   Dictionary should contain key   ${req}      server_hardware
+    \   Continue for loop if    ${hardware_status}==False
+    \   ${hardware_req}=    Run keyword if  ${hardware_status}!=False   Should be True  ${req['server_hardware']}
+    \   Continue for loop if    ${hardware_req}==False
+    \   Continue for loop if    ${req['server_hardware'][0]}==${None}
+    \   ${server_hardware_list}=    clrm_support_functions.select_free_servers  ${req['profile_name']}  ${req['server_hardware'][0]}
+    \   ${len}=     Get Length  ${server_hardware_list}
+    \   Run keyword if  '${len}'=='${req['server_hardware'][0]}'    Set to Dictionary   ${req}      server_hardware     ${server_hardware_list}
+    \   ...         ELSE    Log    \n ERROR:Auto server hardware detection for payload failed    WARN    console=True
+    \   ${host_profiles_list}    Create List
+    \   ${host_profiles_status}=    Run keyword and return status   Dictionary should contain key   ${req}      HostProfileUris
+    \   Continue for loop if    ${host_profiles_status}==False
+    \   ${host_profiles_req}=   Run keyword if  ${host_profiles_status}!=False  Should be True  ${req['HostProfileUris']}
+    \   Continue for loop if    ${host_profiles_req}==False
+    \   Continue for loop if    ${req['HostProfileUris'][0]}==${None}
+    \   ${host_profiles_list}=  clrm_support_functions.select_assigned_servers_to_delete    ${req['HostProfileUris'][0]}    ${req['name']}
+    \   ${hp_len}=      Get Length  ${host_profiles_list}
+    \   Run keyword if  '${hp_len}'=='${req['HostProfileUris'][0]}'  Set to Dictionary   ${req}      HostProfileUris     ${host_profiles_list}
+    \   ...         ELSE    Log    \n ERROR:Auto server hardware detection for payload failed    WARN    console=True
+    [Return]    ${request_body}
+
+Populate profile name for Cluster profile update
+    [Documentation] Populate profile name for Cluster profile update
+    [Arguments] ${clusters}
+    :FOR    ${cls}  in  @{clusters}
+    \   ${profile_status}=  Run keyword and return status   Dictionary should contain key   ${cls}  profile_name
+    \   ${res}  ${count}=   Run keyword if  ${profile_status}==True    Get Cluster Profile     ${cls['name']}
+    \   ${res_spt}=  Run keyword if  ${profile_status}==True    Run keyword if  ${count}!=0     Fusion Api Get Server Profile Templates    ${res['hypervisorHostProfileTemplate']['serverProfileTemplateUri']}
+    \   Run keyword if  ${profile_status}==True    Run keyword if  ${res_spt} is not None  Set to Dictionary   ${cls}  profile_name    ${res_spt['name']}
+    [Return]    ${clusters}
+    
+Deployment manager exist check
+    [Documentation]    check deployment manager exist or not
+    [Arguments]    ${deployment_managers}
+    ${resp}=    Fusion Api Get Deployment Manager
+    Log    ${resp}    console=True
+    Run Keyword If  ${resp['count']}==1    Log    \n***deployment manager exists and validation not performed***\n    console=True
+    [Return]    ${resp['count']}
+
+Enter Host into Maintenance Mode
+    [Documentation]    Puts the host into maintenance mode and returns the task response for enter maintenance mode task
+    [Arguments]    ${host_profile_uri}
+    ${host_resp}=    Fusion Api Get Hypervisor Host Profile    uri=${host_profile_uri}
+    Remove from dictionary      ${host_resp}      headers    status_code
+    set to dictionary       ${host_resp}      powerState    InMaintenance    "ExitMaintenance"
+    ${enter_maintenance_mode_response}=      Fusion Api Update Hypervisor Cluster Profile    body=${hcp_response}    uri=${hcp_response['uri']}
+    [return]    ${enter_maintenance_mode_response}
+
+
+Host power state Operations
+    [Documentation]    Pusts the host into desired power state
+    ...    ${power_state} =  InMaintenance  puts the host to maintenance mode
+    ...    ${power_state} =  ExitMaintenance  Exits the host from maintenance mode
+    ...    ${power_state} =  On  Powerons the host
+    ...    ${power_state} =  Off  power offs the host (uses only Momentory Press)
+    [Arguments]    ${host_profile_uri}    ${power_state}
+    ${host_resp}=    Fusion Api Get Hypervisor Host Profile    uri=${host_profile_uri}
+    Remove from dictionary      ${host_resp}      headers    status_code
+    set to dictionary       ${host_resp}      powerState    ${power_state}
+    ${host_power_operation_response}=      Fusion Api Update Hypervisor Host Profile    body=${host_resp}    uri=${host_resp['uri']}
+    [return]    ${host_power_operation_response}
+
+Wait For Appliance To Become Pingable
+    [Documentation]    Waits for an appliance to become pingable
+    [Arguments]    ${appliance}={IP}    ${timeout}=1 min    ${interval}=5 s
+    Wait Until Keyword Succeeds    ${timeout}    ${interval}    clrm_common.Appliance is pingable    ${appliance}
+
+Appliance is pingable
+    [Documentation]    Checks the IPV6 Ping in Windows
+    [Arguments]    ${appliance}
+    Run keyword if    os.name == "nt"    clrm_common.Windows ping    ${appliance}
+    ...    ELSE    Unix ping    ${appliance}
+
+Appliance is unreachable
+    [Documentation]    Waits for an appliance to become unreachable
+    [Arguments]    ${appliance}    ${timeout}=1 min    ${interval}=5 s
+    Wait Until Keyword Succeeds    ${timeout}    ${interval}    Windows ping unreachable check    ${appliance}
+    Run keyword if    os.name == "nt"    Windows ping unreachable check    ${appliance}
+
+Windows ping
+    [Documentation]    Windows Ping
+    [Arguments]    ${host}
+    ${Output}=    Run    ping -n 4 ${host}
+    Should Contain    ${Output}     Lost = 0
+

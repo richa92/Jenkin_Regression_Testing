@@ -1,0 +1,123 @@
+*** Settings ***
+Library				RoboGalaxyLibrary
+Library				FusionLibrary
+Library				OperatingSystem
+Library				BuiltIn
+Library				Collections
+Library				XML
+Library		        SSHLibrary
+Library				String
+Library				Dialogs
+
+*** Keywords ***
+First Time Setup
+	[Documentation]	Changes intial administrator password, answers EULA, enables service access, adds licenses, configures appliance interfaces.
+	...	If args are null, uses XML ${DATAFILE}
+	[Arguments]	${DATAFILE}=${null}	${password}=${null}	${interfaces}=${null}
+	#${password} =	Set Variable	${password}
+	Log 	[FIRST TIME SETUP]     console=True
+	Wait For Appliance To Become Pingable	${APPLIANCE_IP}
+	Wait For Appliance To Be Ready			${APPLIANCE_IP}
+	Log 	-Agree to EULA    console=True
+	${eula}=    Fusion Api Save EULA    ${APPLIANCE_IP}
+    Return From Keyword If    ${eula['status_code']}!=200    FAIL   msg=EULA is not saved
+	Log 	-Enable service access    console=True
+	${access}=  Fusion Api Get service access   ${APPLIANCE_IP}
+	Run Keyword If   ${access['_content_consumed']}==True    Log  Service access is True
+    Return From Keyword If    ${access['status_code']}==400    FAIL   msg=Service Access is not proper
+	${req} = 		Create Dictionary		newPassword=${password}
+	...										oldPassword=admin
+	...										userName=Administrator
+	#Run Keyword If	${password} is not ${null}	Fusion Api Change Administrator password	host=${APPLIANCE_IP}	body=${req}
+	${password}=   Fusion Api Change Administrator password	  host=${APPLIANCE_IP}	body=${req}
+	Run Keyword If  ${password['status_code']}==400  Log   Password is already set  WARN
+	Run Keyword If    ${password['status_code']}==200    Log   Password is set
+	${login}=   Fusion Api Login Appliance 		${APPLIANCE_IP}		${admin_credentials}
+	${response}=  Convert to List  ${login}
+	Return From Keyword If    ${response[0]['status_code']}!=200    FAIL   msg=Failed to login
+	#Add licenses from variable		${licenses}
+	Configure Appliance Interfaces
+
+Wait For Appliance To Be Ready
+	[Documentation]	Waits for an appliance reach a the ready state
+	[Arguments]		${appliance}	${timeout}=20 min	${interval}=30 s
+	Wait Until Keyword Succeeds		${timeout}	${interval}	Appliance Reached Ready State	${appliance}
+
+Wait For Appliance To Become Pingable
+	[Documentation]	Waits for an appliance to become pingable
+	[Arguments]		${appliance}	${timeout}=1 min	${interval}=5 s
+	Log 		Pinging: ${appliance} ...    console=True
+	Wait Until Keyword Succeeds		${timeout}	${interval}	Appliance is pingable 	${appliance}
+
+Appliance is pingable
+	[Arguments]		${appliance}
+	Set Log Level	TRACE
+	Run keyword if	os.name == "nt"	Windows ping	${appliance}
+	...	ELSE	Unix ping	${appliance}
+
+Unix ping
+	[Arguments]		${host}
+    ${Output}=    Run    ping -c 4 ${host}
+    Log    ${Output}    console=True
+    Should Contain    ${Output}    ttl=
+	[Return]	${Output}
+
+Windows ping
+	[Arguments]		${host}
+    ${Output}=    Run    ping -n 4 ${host}
+    Log    ${Output}    console=True
+    Should Contain    ${Output}    TTL=
+	[Return]	${Output}
+
+Appliance Reached Ready State
+	[Arguments]		${appliance}
+	${state} = 	Fusion Api Get Resource		${appliance}/controller-state.json
+	Log 	-Appliance state: ${state['state']}    console=True
+	Should Match Regexp	${state['state']}	((?i)OK)
+
+Configure Appliance Interfaces
+	[Arguments]    ${interface}=eth0
+	Log 	-Configuring Appliance Interfaces, Time, Locale    console=True
+	${resp} =	Fusion Api Get Appliance Interface Mac	${interface}
+	Return From Keyword If  '${resp}' is '${null}'  FAIL  msg=Failed to get mac address
+	Set to dictionary	${appliance['applianceNetworks'][0]}	macAddress	${resp}
+	${ipv4Type} = 		Get Variable Value 	${appliance['applianceNetworks'][0]['ipv4Type']}
+	${app1Ipv4Addr} = 	Get Variable Value	${appliance['applianceNetworks'][0]['app1Ipv4Addr']}
+    ${virtIpv4Addr} = 	Get Variable Value	${appliance['applianceNetworks'][0]['virtIpv4Addr']}
+	Sleep 	10s
+	${resp} = 	Fusion Api Configure Appliance Interfaces   ${appliance}
+	Run Keyword If  ${resp['status_code']!=202}   FAIL  msg=Appliance Network interfaces are not correct
+	# if STATIC, get new IP and login. for 2.00, use virtIpv4Addr (Tbird), otherwise use app1Ipv4Addr
+    Run Keyword If	'${virtIpv4Addr}' is not 'None'     			Set New IP and Login	${virtIpv4Addr}
+	...             ELSE IF     '${app1Ipv4Addr}' is not 'None'     Set New IP and Login	${app1Ipv4Addr}
+	...             ELSE    Log     Either app1Ipv4Addr or virtIpv4Addr must be provided in the 'appliance' variable in your data file     WARN
+
+	Wait For Task	${resp}		timeout=200s		interval=5s
+    Appliance Network Interface Should Exist    ${appliance}
+	${resp} = 	Fusion Api Configure Appliance Time and Locale			${timeandlocale}
+	Run Keyword If  ${resp['status_code']!=202}   FAIL  msg=Time and Locale is not set
+	Wait For Task	${resp}		timeout=200s		interval=5s
+
+
+Set New IP and Login
+	[Arguments]	${IP}
+	Set Suite Variable		${APPLIANCE_IP}	${IP}
+	Sleep 	60s
+	Wait For Appliance To Become Pingable	${APPLIANCE_IP}
+	Fusion Api Login Appliance 		${APPLIANCE_IP}		${admin_credentials}
+
+Appliance Network Interface Should Exist
+    [Documentation]  Appliance Network Interface Should Exist
+    ...              Example:
+    ...                Appliance Network Interface Should Exist  ${appliance}
+    ...              Data Required:
+    ...                Appliance networking details
+    [Arguments]  ${appliance}  ${uri}=/rest/appliance/network-interfaces  &{kwargs}
+    ${status}  ${name} =  Run Keyword and Ignore Error  Get From Dictionary  ${appliance}  type
+    Return from keyword if    '${status}'=='FAIL'    ${appliance} doesn't contain the key ${name}
+    Log  ${\n}Verifying appliance network  console=yes
+    ${new_expected_dto} =  Add Key Value to DTO  ${appliance}  &{kwargs}
+    ${dto} =    Get Resource by URI     ${uri}
+    ${validate_status} =  Fusion api validate response follow  ${new_expected_dto}  ${dto}  wordy=${False}
+    Run Keyword If  '${validate_status}'=='False'  Fail  Verify network Interfaces ${name} failed
+    Log  Verify Network Interfaces ${name} succeeded  console=yes

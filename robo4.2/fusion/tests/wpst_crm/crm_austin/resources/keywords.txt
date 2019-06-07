@@ -1,0 +1,1736 @@
+*** Settings ***
+Documentation     OneView CRM Rest API keywords
+...               = Usage =
+...               | Resource | resources/keywords.txt |
+
+Library             RoboGalaxyLibrary
+Library             FusionLibrary
+Library             OperatingSystem
+Library             BuiltIn
+Library             Collections
+Library             XML
+Library             String
+Library             SSHLibrary
+Library             ../lib/WPSTUtil.py
+Resource            ../resources/keywords_ovcli.txt
+Resource            ../resources/keywords_ssh.txt
+*** Variables ***
+# ==========DO NOT OVERWRITE or MODIFY the variables below=============
+#Global variables
+${dataFileDir}   dataFiles/
+# Global variables from Variable file
+${OV_IP}
+${OV_USERNAME}
+${OV_PASSWORD}
+${ADMIN_CREDENTIALS}
+${VC_CREDENTIAL_DATA}
+${OA_CREDENTIAL_DATA}
+${OAVC_CREDENTIALS}
+# Global session variables
+${AUTHTOKEN}
+# Constants
+@{OVRESALL}                         server-profiles  enclosures  enclosure-groups  logical-interconnect-groups  ethernet-networks  fc-networks  fcoe-networks  network-sets  users  server-hardware-types
+@{AllResourcesList}                 ethNets  fcNets  fcoeNets  ic  ictype  networkset  uplinkset  lig  li  encGrp  encs  servers  profiles  users
+@{AllResourcesCommonList}           ethNets  fcNets  fcoeNets   networkset   lig  encGrp   profiles
+@{AllResourcesCommonVariableList}   ethNets  fcNets  fcoeNets  networkset  lig  encGrp  encs  servers  profiles  ic
+@{allIssueLevels}               Critical   High   Medium   Low
+${IsCompare}                    ${True}
+${defaultCleanVCWaitTime}       ${120}
+${fcoeMinXAPIVersion}           200
+${newMigrRespMinXAPIVersion}    300
+${ethNetsSelectDataFile}        ../resources/public/ethernet.conf
+${fcNetsSelectDataFile}         ../resources/public/fc.conf
+${fcoeNetsSelectDataFile}       ../resources/public/fcoe.conf
+${encsSelectDataFile}           ../resources/public/enclosures.conf
+${serversSelectDataFile}        ../resources/public/servers.conf
+${encGrpSelectDataFile}         ../resources/public/enclosure-group.conf
+${profilesSelectDataFile}       ../resources/public/profiles.conf
+${networksetSelectDataFile}     ../resources/public/networksets.conf
+${ligSelectDataFile}            ../resources/public/lig-payload.conf
+${lig-as-isSelectDataFile}      ../resources/public/lig.conf
+${vc_config_showDomain}         ../Common/config/vc_showDomain.txt
+${vc_config_removeAll}          ../Common/config/vc_removeAll.txt
+${grepDefaultString1}           grep 'ERROR\\|at com\\|rollback\\|jdbc\\|NullPointerException\\|OutOfMemoryError'
+${grepDefaultString2}           grep 'ERROR\\|at com\\|rollback\\|jdbc|Error\\|NullPointerException\\|OutOfMemoryError' | grep -v 'security-base-web'
+# Initialization
+${EMPTYDICTIONARY}
+${ENC_RESOURCE}
+${EXISTING_RSC}
+${RPTURI}
+@{EMPTYLIST}
+${LOGGED}                       ${False}
+${BUG_IN_API}                   ${False}
+${CIFIT_TYPE_CONV}              ${False}
+${RUNMODE}                      NORMAL      # Valid values: NORMAL, DEBUG, MONITOR
+# ==========DO NOT OVERWRITE or MODIFY the variables above=============
+
+
+*** Keywords ***
+#######################
+#      Test Flow
+#######################
+Suite Setup Tasks
+    [Documentation]   Suite setup tasks
+    Set Log Level   DEBUG
+    @{suiteNames}=   Override Suite Name If Needed   ${SUITE NAME}
+    ${suiteNamesVarLength}=   Get Length   ${suiteNames}
+    ${SUITE NAME}=   Run Keyword If   ${suiteNamesVarLength} == 1   Set Variable   ${suiteNames[0]}
+    ...                            ELSE   Set Variable   ${suiteNames[1]}
+    @{secondValidation} =   Split String   ${SUITE NAME}   .   1
+    ${returnStatus}  ${returnMsg} =   Run Keyword And Ignore Error   OperatingSystem.Directory Should Exist   ../${secondValidation[0]}
+    Run Keyword If   "${returnStatus}" == "PASS"   Set Global Variable   ${SUITE NAME}   ${secondValidation[1]}
+    ...         ELSE   Set Global Variable   ${SUITE NAME}   ${SUITE NAME}
+    Run Keyword If  '${RUNMODE}' == 'MONITOR'     Start Monitor Session
+
+Suite Teardown Tasks
+    [Documentation]   Suite teardown tasks
+    [Arguments]    ${grepString}=${EMPTY}
+    Return from Keyword If  '${RUNMODE}' != 'MONITOR'
+    End Monitor Session
+    ${strLen}=    Get Length   ${grepString}
+    Run Keyword If  ${strLen}>0      Search for Patterns     ${grepDefaultString2}
+
+Test Setup Tasks
+    [Documentation]   Test setup tasks
+    Set Default FileNames
+
+
+##########################
+#   High-level
+##########################
+Import.ConfigVC
+    [Documentation]     Import VC domain and configure from VC config file
+    [Arguments]  ${vc_config_file}=None  ${vc_credential}=${VC_CREDENTIAL_DATA}  ${oa_credential}=${OA_CREDENTIAL_DATA}    ${saveConfig}=${True}   ${importTimeout}=5 min
+    Import VC   ${vc_credential}   ${oa_credential}   ${importTimeout}
+    # Added this Save VC Config to help debug intermittent issue of missing ICM/Server Blade (No Quix)
+    Run Keyword If   ${saveConfig} == ${True}   Save VC Config   ${SUITE_NAME}-${TEST_NAME}-import.ConfigVC.saveconfig
+    Config VC   ${vc_config_file}   ${False}   ${vc_credential}  ${oa_credential}   ${True}
+
+Report.SelectCompare
+    [Documentation]  Generate Compatibility report, write to JSON file (if no prior saved file) and do select compare with saved JSON file
+    ...             Example:    Report.SelectCompare   ${False}  ${OAVC_CREDENTIALS}  dataFiles   ${False}   EG1
+    [Arguments]     ${forceReport}=${False}   ${credDict}=${OAVC_CREDENTIALS}   ${dataFileDir}=${dataFileDir}   ${saveConfig}=${True}   ${preserveDataFile}=${False}   @{migTarget}
+    Run Keyword If  ${LOGGED} == ${False}     Login to OneView Via REST
+    Log    ${SAVE_RPT}
+    ${returnStatus}  ${returnMsg} =   Run Keyword And Ignore Error   OperatingSystem.File Should Exist   ${dataFileDir}/${SAVE_RPT}
+    Run Keyword If   "${returnStatus}" == "FAIL"   Create Report And Save Json To File   ${credDict}   ${saveConfig}   @{migTarget}
+    ...         ELSE IF   "${forceReport}" == ${True}   Create Report And Save Json To File   ${credDict}   ${saveConfig}   @{migTarget}
+    ...         ELSE   Create Report and Validate Response     Completed   None   None  ${credDict}   ${saveConfig}   @{migTarget}
+    ${variableFile} =    Create Generated Test Compatibility Variable File   ${dataFileDir}   saveConfig=${saveConfig}
+    ${compareResult} =   Run Keyword If  ${IsCompare} == ${True}   WPST Select Data Compare    ${SAVE_RPT}   ${variableFile}   ${dataFileDir}   preserveDataFile=${preserveDataFile}
+    Should Be True   ${compareResult}   msg=Assert: JSON compare failed. Check the diff prints above or if you are looking at RG log, expand Wpst Select Data Compare keyword above to see the diff
+
+Create Report And Save Json To File
+    [Documentation]    Create compatibility report and save the data to .json file
+    [Arguments]    ${credDict}=${OAVC_CREDENTIALS}   ${saveConfig}=${True}   @{migTarget}
+    Create Report and Validate Response     Completed   None   None  ${credDict}   ${saveConfig}   @{migTarget}
+    ${resp}  ${resp_state}    Get Compatibility Report    ${RPTURI}   saveConfig=${saveConfig}
+    Write JSONfile   ${resp}  ${SAVE_RPT}
+
+Report.Write.Compare
+    [Documentation]  Generate Compatibility report; write to Json file and compare with saved Json file
+    ...             Example:    Report.Write.Compare   ${EMPTYLIST}  ${OAVC_CREDENTIALS}  ${EMPTYLIST}   ${saveConfig}   EG1
+    [Arguments]     ${ignoreList}=${EMPTYLIST}   ${credDict}=${OAVC_CREDENTIALS}   ${conditionalExcL}=${EMPTYLIST}   ${saveConfig}=${True}   @{migTarget}
+    Run Keyword If  ${LOGGED} == ${False}     Login to OneView Via REST
+    Create Report and Validate Response     Completed   None   None  ${credDict}   ${saveConfig}   @{migTarget}
+    ${resp}  ${resp_state}    Get Compatibility Report    ${RPTURI}   saveConfig=${saveConfig}
+    Write JSONfile   ${resp}  ${DATA_RPT}
+    Run Keyword If  ${IsCompare} == True     Compare All with Expected    ${SAVE_RPT}   ${DATA_RPT}   ${ignoreList}   ${conditionalExcL}
+
+    [Return]   ${RPTURI}
+
+ReportDetail.Write.Compare
+    [Documentation]  Generate Detailed Compatibility report; write to Json file and compare with saved Json file
+    [Arguments]     ${ignoreList}=${EMPTYLIST}  ${credDict}=${OAVC_CREDENTIALS}   ${conditionalExcL}=${EMPTYLIST}   @{migTarget}
+    Run Keyword If  ${LOGGED} == ${False}     Login to OneView Via REST
+    ${resp}  ${resp_state}=      ReportDetail
+    Write JSONfile   ${resp}  ${DATA_RPT}
+    Run Keyword If  ${IsCompare} == True     Compare All with Expected    ${SAVE_RPT}   ${DATA_RPT}   ${ignoreList}   ${conditionalExcL}
+    [Return]   ${RPTURI}
+
+ReportDetail
+    [Arguments]      ${credDict}=${OAVC_CREDENTIALS}   ${saveConfig}=${True}   @{migTarget}
+    [Documentation]  Generate detailed Compatibility report
+    Run Keyword If  ${LOGGED} == ${False}     Login to OneView Via REST
+    Create Report and Validate Response     Completed   None   None  ${credDict}   ${saveConfig}   @{migTarget}
+    ${resp}  ${resp_state}=    Get Compatibility Detail Report    ${RPTURI}   ${saveConfig}
+    [Return]   ${resp}  ${resp_state}
+
+ReportDetail against Existing EG
+    [Documentation]   Generate detailed compatibility report against existing EG
+    [Arguments]      ${egName}   ${credDict}=${OAVC_CREDENTIALS}   ${saveConfig}=${True}
+    ${resp}  ${resp_state}     ReportDetail    ${credDict}   ${saveConfig}   ${egName}
+    [Return]   ${resp}  ${resp_state}
+
+Create Report and Validate Response
+    [Documentation]     Create compatiblity report and compare results with expected ones
+    [Arguments]    ${expected_State}   ${expected_ErrorCode}   ${expected_ErrorMsg}  ${credDict}=${OAVC_CREDENTIALS}   ${saveConfig}=${True}    @{migTarget}
+    Run Keyword If  ${LOGGED} == ${False}     Login to OneView Via REST
+    ${resourceUri}  ${task_State}   ${task_ErrorCode}     ${task_ErrorMsg}=    Build Create Compatibility Report      ${credDict}   @{migTarget}
+    Log to console and logfile    VC Migration - Test Compatibility: Task ${task_State} with error code (${task_ErrorCode}) and error message (${task_ErrorMsg}).
+    Should be equal   ${expected_state}     ${task_State}   msg=The expected state did not match actual one
+    Run Keyword If   '${expected_ErrorCode}' != 'None'    Should be equal   ${expected_ErrorCode}    ${task_ErrorCode}   msg=The expected error code did not match actual one
+    Run Keyword If   '${expected_ErrorMsg}' != 'None'     Should be equal   ${expected_ErrorMsg}   ${task_ErrorMsg}   msg=The expected error message did not match actual one
+    Run Keyword If    '${task_state}' == 'Completed'    Set Suite Variable   ${RPTURI}  ${resourceUri}
+
+Create Report and Validate Response with Retry
+    [Documentation]     Create compatiblity report and compare results with expected ones. Retries on failure until timeout is reached.
+    [Arguments]    ${expected_State}   ${expected_ErrorCode}   ${expected_ErrorMsg}  ${credDict}=${OAVC_CREDENTIALS}   ${timeout}=60 s   ${interval}=2 s   ${saveConfig}=${True}   @{migTarget}
+    Wait Until Keyword Succeeds   ${timeout}   ${interval}   Create Report and Validate Response   ${expected_State}   ${expected_ErrorCode}   ${expected_ErrorMsg}   ${credDict}   ${saveConfig}   @{migTarget}
+
+Migrate.GetOVResources.Write.SelectCompare
+    [Documentation]  Migrate from VC to OV, get resources in OneView, generate temporary data file based on resource config and compare select data with that of the saved Json file
+    [Arguments]     ${ResourcesList}=${AllResourcesCommonList}   ${timeout}=60 min   ${runReport}=${False}   ${migrationUri}=${RPTURI}
+    Migrate   migrationUri=${migrationUri}   timeout=${timeout}   runReport=${runReport}
+    GetOVResources.Write.SelectCompare   ${ResourcesList}
+
+Migrate.GetOVResources.Write.Compare
+    [Documentation]  Migrate from VC to OV; get resources in OneView; write to Json file and compare with saved Json file
+    [Arguments]     ${ResourcesList}=${AllResourcesCommonList}    ${ignoreList}=${EMPTYLIST}   ${conditionalExcL}=${EMPTYLIST}   ${timeout}=60 min   ${runReport}=${False}   ${migrationUri}=${RPTURI}
+    Migrate   migrationUri=${migrationUri}   timeout=${timeout}   runReport=${runReport}
+    GetOVResources.Write.Compare   ${ResourcesList}   ${ignoreList}   ${conditionalExcL}
+
+Migrate
+    [Documentation]  Migrate from VC to OV
+    [Arguments]     ${migrationUri}=${RPTURI}   ${timeout}=60 min   ${runReport}=${False}
+    Run Keyword If  ${LOGGED} == ${False}     Login to OneView Via REST
+    Variable Should Exist   ${migrationUri}   To migrate, you need to either run compatibility report OR pass a valid Migratable VC Domain URI.
+    ${returnStatus}   ${returnUri}=    Add Enclosure By Migration   migrationUri=${migrationUri}   timeout=${timeout}
+    Run Keyword If  ${runReport} == ${True}     Generate Migrate Task Statistics Report   ${returnUri}
+    Run Keyword If  '${returnStatus}'== 'FAIL'  Fail   msg=Please check the message above for details
+
+GetOVResources.Write.SelectCompare
+    [Documentation]  Get resources in OneView, generate temporary data file based on resource config and compare select data with that of the saved Json file
+    [Arguments]    ${forceReport}=${False}   ${ResourcesList}=${AllResourcesCommonList}   ${ethNetsSelectDataFile}=${ethNetsSelectDataFile}   ${fcNetsSelectDataFile}=${fcNetsSelectDataFile}   ${fcoeNetsSelectDataFile}=${fcoeNetsSelectDataFile}   ${networksetSelectDataFile}=${networksetSelectDataFile}   ${ligSelectDataFile}=${lig-as-isSelectDataFile}   ${encGrpSelectDataFile}=${encGrpSelectDataFile}   ${profilesSelectDataFile}=${profilesSelectDataFile}   ${encsSelectDataFile}=${encsSelectDataFile}   ${serversSelectDataFile}=${serversSelectDataFile}   ${preserveDataFile}=${False}
+    Run Keyword If  ${LOGGED} == ${False}     Login to OneView Via REST
+    ${ovData}=   Get OneView Resources    ${ResourcesList}
+    ${returnStatus}  ${returnMsg} =   Run Keyword And Ignore Error   OperatingSystem.File Should Exist   ${dataFileDir}/${SAVE_OV}
+    Run Keyword If   "${returnStatus}" == "FAIL"   Write JSONfile   ${ovData}  ${SAVE_OV}
+    ...         ELSE IF   "${forceReport}" == ${True}   Write JSONfile   ${ovData}  ${SAVE_OV}
+    ${variableFile} =   Create Generated Test Resources Variable File    ResourcesVariableList=${ResourcesList}   ethNetsSelectDataFile=${ethNetsSelectDataFile}   fcNetsSelectDataFile=${fcNetsSelectDataFile}   fcoeNetsSelectDataFile=${fcoeNetsSelectDataFile}   networksetSelectDataFile=${networksetSelectDataFile}   ligSelectDataFile=${ligSelectDataFile}   encGrpSelectDataFile=${encGrpSelectDataFile}   profilesSelectDataFile=${profilesSelectDataFile}   encsSelectDataFile=${encsSelectDataFile}   serversSelectDataFile=${serversSelectDataFile}
+    ${compareResult} =   Run Keyword If  ${IsCompare} == ${True}   WPST Select Data Compare    ${SAVE_OV}   ${variableFile}   ${dataFileDir}   preserveDataFile=${preserveDataFile}
+    Should Be True   ${compareResult}   msg=Assert: JSON compare failed. Check the diff prints above or if you are looking at RG log, expand Wpst Select Data Compare keyword above to see the diff
+
+GetOVResources.Write.Compare
+    [Documentation]  Get resources in OneView; write to Json file and compare with saved Json file
+    [Arguments]     ${ResourcesList}=${AllResourcesCommonList}    ${ignoreList}=${EMPTYLIST}   ${conditionalExcL}=${EMPTYLIST}
+    Run Keyword If  ${LOGGED} == ${False}     Login to OneView Via REST
+    ${ovData}=   Get OneView Resources    ${ResourcesList}
+    Write JSONfile   ${ovData}  ${DATA_OV}
+    Run Keyword If  ${IsCompare} == True     Compare All with Expected    ${SAVE_OV}   ${DATA_OV}   ${ignoreList}   ${conditionalExcL}   ${dataFileDir}
+
+CleanOV.CleanVC.ConfigVC.Migrate
+    [Documentation]  Clean OneView and Virtual Connect, configure VC, perform test compatibility and migrate
+    ...             Example:    Config VC Test Compatibility And Migrate   ${EMPTYLIST}  ${OAVC_CREDENTIALS}  ${EMPTYLIST}   ${saveConfig}   EG1
+    [Arguments]     ${vcConfigFile}   ${ignoreList}=${EMPTYLIST}   ${credDict}=${OAVC_CREDENTIALS}   ${conditionalExcL}=${EMPTYLIST}   ${saveConfig}=${True}   @{migTarget}
+    Run Keyword If  ${LOGGED} == ${False}     Login to OneView Via REST
+    CleanOV
+    CleanVC
+    Import.ConfigVC   ${vcConfigFile}
+    Create Report and Validate Response     Completed   None   None  ${credDict}   ${saveConfig}   @{migTarget}
+    ${resp}  ${resp_state}    Get Compatibility Report    ${RPTURI}   saveConfig=${saveConfig}
+    ${returnStatus}   ${returnUri}=    Add Enclosure By Migration   migrationUri=${RPTURI}
+    Run Keyword If  '${returnStatus}'== 'FAIL'  Fail   msg=Please check the message above for details
+
+CleanOV
+    [Documentation]  Delete all resources in OV
+    [Arguments]  ${OV_IP}=${OV_IP}    ${admin_credentials}=${ADMIN_CREDENTIALS}    ${vc_credential}=${VC_CREDENTIAL_DATA}    ${oa_credential}=${OA_CREDENTIAL_DATA}
+    Run Keyword If  ${LOGGED} == ${False}     Login to OneView Via REST
+    Delete OneView All     ${OV_IP}   ${admin_credentials}
+    #Delete OneView Selected   ${OVRESALL}   ${OV_IP}   ${admin_credentials}
+
+CleanVC
+    [Documentation]  Delete VC domain. Optional argument waitTime is in seconds.
+    [Arguments]  ${vc_credential}=${VC_CREDENTIAL_DATA}    ${oa_credential}=${OA_CREDENTIAL_DATA}   ${waitTime}=${defaultCleanVCWaitTime}
+    Delete VC Domain     ${vc_credential}    ${oa_credential}   ${waitTime}
+
+CleanOV.CleanVC
+    [Documentation]  Delete all resources in OV; delete VC domain
+    [Arguments]  ${OV_IP}=${OV_IP}    ${admin_credentials}=${ADMIN_CREDENTIALS}    ${vc_credential}=${VC_CREDENTIAL_DATA}    ${oa_credential}=${OA_CREDENTIAL_DATA}   ${waitTime}=${defaultCleanVCWaitTime}
+    CleanOV   ${OV_IP}   ${admin_credentials}
+    CleanVC   ${vc_credential}   ${oa_credential}   ${waitTime}
+
+##########################
+#    Migration Manager
+##########################
+Create Compatibility Report
+    [Documentation]  Generate Compatibility report from raw request body
+    [Arguments]    ${rptBODY}   ${waitTimeout}=600s   ${waitInterval}=5s
+    Run Keyword If  ${LOGGED} == ${False}     Login to OneView Via REST
+    Log to console and logfile     \n Test Compatibility Started:
+    ${resp}=    Fusion Api Create Compatibility Report      ${rptBODY}
+    ${task} =   Wait For Task   ${resp}     ${waitTimeout}     ${waitInterval}
+    ${task_state} =     Get From Dictionary     ${task}     taskState
+    ${resourceUri} =   Get From Dictionary     ${task['associatedResource']}   resourceUri
+    Set Suite Variable    ${RPTURI}  ${resourceUri}
+    Return From Keyword If    '${task_state}' == 'Completed'    ${resourceUri}
+    ${task_ErrorCode} =    Get From Dictionary     ${task['taskErrors'][0]}   errorCode
+    ${task_ErrorMsg} =    Get From Dictionary     ${task['taskErrors'][0]}   message
+    Log to console and logfile    Task failed: (${task_ErrorCode}) ${task_ErrorMsg}
+
+Build Create Compatibility Report
+    [Documentation]  Generate Compatibility report
+    ...     Usage:
+    ...        Build Create Compatibility Report  |  ${credDict}
+    ...        Build Create Compatibility Report  |  ${credDict} | <Existing EG Name>
+    ...        Build Create Compatibility Report  |  ${credDict} | <New Customized EG Name>  |  <New Customized LIG Name>
+    [Arguments]   ${credDict}   @{migTarget}
+    Run Keyword If  ${LOGGED} == ${False}     Login to OneView Via REST
+    ${varNum}=    Get Length  ${migTarget}
+    Run Keyword If  '${varNum}' == '0'   Report Against New EG     ${credDict}
+    Run Keyword If  '${varNum}' == '1'   Report Against Existing EG    ${credDict}   @{migTarget}[0]
+    Run Keyword If  '${varNum}' == '2'   Report Against New EG Customized   ${credDict}   @{migTarget}[0]  @{migTarget}[1]
+    ${OVAVersion}   ${OVXAPIVersion}   Get OneView Appliance And Api Versions
+    ${task} =   Run Keyword If  ${OVXAPIVersion} >= ${newMigrRespMinXAPIVersion}   Wait For MigratableVcDomainV300 Response Task   ${resp}     600 s     5 s
+    ...         ELSE   Wait For Task   ${resp}     600 s     5 s
+    ${task_State} =     Get From Dictionary     ${task}     taskState
+    ${resourceUri} =   Get From Dictionary     ${task['associatedResource']}   resourceUri
+    ${task_ErrorCode}=    Run Keyword If  '${task_State}' != 'Completed'    Get From Dictionary     ${task['taskErrors'][0]}   errorCode
+    ...  ELSE   Set Variable   None
+    ${task_ErrorMsg} =    Run Keyword If  '${task_State}' != 'Completed'    Get From Dictionary     ${task['taskErrors'][0]}   message
+    ...  ELSE   Set Variable   None
+    [Return]    ${resourceUri}   ${task_State}   ${task_ErrorCode}     ${task_ErrorMsg}
+
+Build Create Compatiblity Report Against New EG
+    [Documentation]  Generate Compatibility report against new EG
+    # will replace kw "report against new eg"
+    [Arguments]   ${credDict}=${OAVC_CREDENTIALS}
+    Run Keyword If  ${LOGGED} == ${False}     Login to OneView Via REST
+    Log to console and logfile     \n Test Compatibility Against New EG Started:
+    ${resp}=    Fusion Api Build Create Compatibility Report    ${credDict}
+    Set Suite Variable    ${resp}
+    [Return]   ${resp}
+
+Report Against New EG
+    [Documentation]   See keyword 'Build Create Compatibility Report'
+    [Arguments]    ${credDict}
+    Log to console and logfile     \n Test Compatibility Against New EG Started:
+    ${resp}=    Fusion Api Build Create Compatibility Report    ${credDict}
+    Set Suite Variable    ${resp}
+    [Return]   ${resp}
+
+Report Against Existing EG
+    [Documentation]   See keyword 'Build Create Compatibility Report'
+    [Arguments]    ${credDict}  ${egName}
+    ${egUri}=   Get EGUri By Name    ${egName}
+    ${migVar}=  Create Dictionary   enclosureGroupUri=${egUri}
+    Log to console and logfile     \n Test Compatibility Against Existing EG (${egName}) Started:
+    ${resp}=    Fusion Api Build Create Compatibility Report    ${credDict}   ${migVar}
+    Set Suite Variable    ${resp}
+    [Return]   ${resp}
+
+Report Against New EG Customized
+    [Documentation]   See keyword 'Build Create Compatibility Report'
+    [Arguments]    ${credDict}  ${egName}   ${ligName}
+    ${migVar}=  Create Dictionary   enclosureGroupName=${egName}
+    ...                             logicalInterconnectGroupName=${ligName}
+    Log to console and logfile     \n Test Compatibility Against New EG (${egName}) and LIG (${ligName}) Started:
+    ${resp}=    Fusion Api Build Create Compatibility Report    ${credDict}   ${migVar}
+    Set Suite Variable    ${resp}
+    [Return]   ${resp}
+
+Get Compatibility Report
+    [Documentation]  Generate VC migration compatibility report
+    [Arguments]    ${uri}=${RPTURI}   ${saveConfig}=${True}
+    Run Keyword If  ${LOGGED} == ${False}     Login to OneView Via REST
+    # Added Save VC Config 09/25/2015 because this will be a handy information in triaging issues
+    Run Keyword If   ${saveConfig} == ${True}   Save VC Config    ${SUITE_NAME}-${TEST_NAME}.saveconfig
+    Should Not Be Empty   ${uri}   msg=Check if a valid compatibility report URI was passed. To view compatiblity report, you need to either run compatibility report OR pass a valid Migratable VC Domain URI.
+    ${resp}=    Fusion Api Get Compatibility Report     ${uri}
+    ${resp_state}=      Get From Dictionary     ${resp}     migrationState
+    Log to console and logfile    \n Test Compatibility Completed: ${resp_state}
+    [Return]       ${resp}  ${resp_state}
+
+Get Compatibility Detail Report
+    [Documentation]  Generate VC migration detailed compatibility report
+    [Arguments]    ${uri}=${RPTURI}   ${saveConfig}=${True}
+    Run Keyword If  ${LOGGED} == ${False}     Login to OneView Via REST
+    # Added Save VC Config 09/25/2015 because this will be a handy information in triaging issues
+    Run Keyword If   ${saveConfig} == ${True}   Save VC Config    ${SUITE_NAME}-${TEST_NAME}.saveconfig
+    Should Not Be Empty   ${uri}   msg=Check if a valid compatibility report URI was passed. To view compatiblity report, you need to either run compatibility report OR pass a valid Migratable VC Domain URI.
+    ${resp}=    Fusion Api Get Compatibility Report    ${uri}   ?view=detail
+    ${resp_state}=      Get From Dictionary     ${resp}     migrationState
+    Log to console and logfile    \n Test Compatibility Completed: ${resp_state}
+    [Return]       ${resp}  ${resp_state}
+
+Add Enclosure By Migration
+    [Documentation]  Migrate VC Domain to OV
+    [Arguments]    ${migrationUri}=${RPTURI}   ${timeout}=60 min
+    Run Keyword If  ${LOGGED} == ${False}     Login to OneView Via REST
+    # Run quick DB verification for interconnects. This is a required information for triaging. Added 09/25/2015. -jason
+    ${response} =    Fusion Api Get Resource   /rest/interconnects
+    Should Not Be Empty   ${migrationUri}   msg=Check if a valid compatibility report URI was passed. To migrate, you need to either run compatibility report OR pass a valid Migratable VC Domain URI.
+    ${resp}=    Fusion Api Import Migratable Vcdomain    ${migrationUri}
+    ${OVAVersion}   ${OVXAPIVersion}   Get OneView Appliance And Api Versions
+    ${returnStatus}  ${returnValue}=   Run Keyword If  ${OVXAPIVersion} >= ${newMigrRespMinXAPIVersion}   Run Keyword and Ignore Error   Wait For MigratableVcDomainV300 Task and Fail On Error   ${resp}     ${timeout}     10 s
+    ...         ELSE   Run Keyword and Ignore Error   Wait For Task and Fail On Error   ${resp}     ${timeout}     10 s
+    Return From Keyword If  ${OVXAPIVersion} >= ${newMigrRespMinXAPIVersion}   ${returnStatus}   ${resp['headers']['location']}
+    [Return]      ${returnStatus}   ${resp['uri']}
+
+Generate Migrate Task Statistics Report
+    [Documentation]     Generate Migrate Task Statistics Report and group by name and order in taskGrp parameters
+    ...         NOTE: In OV 1.20 migrate report did not have all children tasks and report may be incomplete
+    [Arguments]   ${taskUri}   ${taskGrpSN}=${TASK_GROUP_SN}   ${taskGrpLN}=${TASK_GROUP_LN}   ${dataFiles_loc}=${dataFileDir}
+    Run Keyword If  ${LOGGED} == ${False}     Login to OneView Via REST
+    ${rptFN}  Set Variable   migtask-${FN_API}.txt
+    ${resp}=   Fusion Api Get Resource   ${taskUri}?view=tree
+    Should Match StatusCode in Response     ${resp}   ${200}
+    WPST Generate Migrate Task Statistics   ${resp}   ${TASK_GROUP_SN}   ${TASK_GROUP_LN}    ${rptFN}    ${dataFiles_loc}
+
+Validate If Key-Value Pairs Exist
+    [Documentation]   Validate key-value pair or pre-generated detail report as your ${targetDict} argument
+    ...               Syntax: Validate If Key-Value Pairs Exist   <target dictionary>   <positiveValidation=[${True}|${False}>   <uniqueValidationKey>    <list of dictionaries to validate>
+    [Arguments]    ${targetDict}   ${positiveValidation}   ${uniqueValidationKey}=errorCode   @{validateDict}
+    :FOR  ${expectedKeyValue}  IN   @{validateDict}
+    \   ${lookupKeyValue}    ${errMsg}=   Run Keyword And Ignore Error   Get From Dictionary   ${expectedKeyValue}   ${uniqueValidationKey}
+    \   ${lookupKeyValue} =   Run Keyword If   "${lookupKeyValue}" == "PASS"   Create Dictionary    ${uniqueValidationKey}=${expectedKeyValue['${uniqueValidationKey}']}
+    \   Run Keyword If   ${positiveValidation} == ${True}   Get Positive Key-Value Pair Validation Result   ${targetDict}   ${lookupKeyValue}   ${expectedKeyValue}
+    \   ...         ELSE   Get Negative Key-Value Pair Validation Result   ${targetDict}   ${lookupKeyValue}   ${expectedKeyValue}
+
+Create List Of Dictionaries Of OneView Issue Levels
+    [Documentation]    Create List Of Dictionaries Of All OneView Issue Levels
+    [Arguments]   ${issueLevels}=${allIssueLevels}
+    ${allOVIssueLevels} =   Create List
+    :FOR   ${issueLevel}   IN   @{issueLevels}
+    \   ${tmpDict}   Create Dictionary   level=${issueLevel}
+    \   Append To List   ${allOVIssueLevels}   ${tmpDict}
+
+    [Return]   ${allOVIssueLevels}
+
+Get Positive Key-Value Pair Validation Result
+    [Documentation]   Positive key-value pair validation result
+    [Arguments]    ${targetDict}   ${lookupKeyValue}   ${expectedKeyValue}
+    ${matched_issues} =   Find Matched Dictionary in List   ${targetDict}   ${lookupKeyValue}
+    ${validationResult}   ${resultMessage} =   Run Keyword And Ignore Error   Dictionary Should Contain Sub Dictionary    ${matched_issues}   ${expectedKeyValue}
+    Run Keyword If  '${validationResult}'=='PASS'   Log to console and logfile     Validated ${expectedKeyValue} exists in response
+    Run Keyword If  '${validationResult}'=='FAIL'   Fail   msg=Validation failed. Expected:${expectedKeyValue} | Actual: ${matched_issues}
+
+Get Negative Key-Value Pair Validation Result
+    [Documentation]   Negative key-value pair validation result
+    [Arguments]    ${targetDict}   ${lookupKeyValue}   ${expectedKeyValue}
+    ${validationResult}   ${resultMessage} =   Run Keyword And Ignore Error   Find Matched Dictionary in List   ${targetDict}   ${lookupKeyValue}
+    Run Keyword If  '${validationResult}'=='FAIL'   Log to console and logfile     Validated ${expectedKeyValue} does NOT exist in response
+    Run Keyword If  '${validationResult}'=='PASS'   Fail   msg=Found unexpected ${expectedKeyValue} in response
+
+Validate Detail Report with Existing EG If General Issues Exists
+    [Documentation]   Generate Detailed Report Off An Existing EG And Validate If General Issues Exists
+    [Arguments]      ${path}   ${egName}   ${uniqueValidationKey}=errorCode   @{expectedKeyValues}
+    ${resp}  ${resp_state}=     ReportDetail against Existing EG     ${egName}
+    Run Keyword If  '${RUNMODE}' == 'DEBUG'    Write JSONfile   ${resp}  ${DATA_RPT}
+    Validate Existing Detail Report with Existing EG If General Issues Exists   ${resp}   ${path}   ${uniqueValidationKey}   @{expectedKeyValues}
+
+Validate Detail Report with Existing EG If General Issues Exists With Filter
+    [Documentation]   Generate Detailed Report Off An Existing EG And Validate If General Issues Exists Using a Filter
+    [Arguments]      ${path}   ${egName}   ${filter}   ${uniqueValidationKey}=errorCode   @{expectedKeyValues}
+    ${resp}  ${resp_state}=     ReportDetail against Existing EG     ${egName}
+    Run Keyword If  '${RUNMODE}' == 'DEBUG'    Write JSONfile   ${resp}  ${DATA_RPT}
+    Validate Existing Detail Report with Existing EG If General Issues Exists With Filter   ${resp}   ${path}   ${filter}   ${uniqueValidationKey}   @{expectedKeyValues}
+
+Validate Existing Detail Report with Existing EG If General Issues Exists
+    [Documentation]    Validate If A Specific General Issue Under EG Exists Using A Pre-generated Detailed Report
+    [Arguments]     ${resp}   ${path}   ${uniqueValidationKey}=errorCode   @{expectedKeyValues}
+    ${current_issues}   Get SubDictionary By Path    ${resp}    ${path}
+    Validate If Key-Value Pairs Exist   ${current_issues}   ${True}   ${uniqueValidationKey}   @{expectedKeyValues}
+
+Validate Existing Detail Report with Existing EG If General Issues Exists With Filter
+    [Documentation]    Validate If A Specific Filtered General Issue Under EG Exists Using A Pre-generated Detailed Report
+    [Arguments]     ${resp}   ${path}   ${filter}   ${uniqueValidationKey}=errorCode   @{expectedKeyValues}
+    ${subD}   Get SubDictionary By Path    ${resp}    ${path}
+    ${current_issues}   Find Matched Dictionary in List    ${subD}    ${filter}
+    Validate If Key-Value Pairs Exist   ${current_issues}   ${True}   ${uniqueValidationKey}   @{expectedKeyValues}
+
+Validate Existing Detail Report If General Issues Exists
+      [Documentation]   Validate If Specific General Issues Exists In A Pre-Generated Detailed Report
+      [Arguments]    ${resp}   ${path}   ${uniqueValidationKey}=errorCode   @{expectedKeyValues}
+      ${current_issues}   Get SubDictionary By Path    ${resp}    ${path}
+      Validate If Key-Value Pairs Exist   ${current_issues}   ${True}   ${uniqueValidationKey}   @{expectedKeyValues}
+
+Validate Detail Report If General Issue Exists
+    [Documentation]   Generate Detailed Report And Validate If A Specific General Issue Exists
+    [Arguments]      ${path}   ${uniqueValidationKey}=errorCode   @{expectedKeyValues}
+    ${resp}  ${resp_state}=      ReportDetail
+    Validate Existing Detail Report If General Issues Exists   ${resp}   ${path}   ${uniqueValidationKey}   @{expectedKeyValues}
+
+Validate Existing Detail Report If General Issues Removed
+    [Documentation]   Validate If Specific General Issues Were Removed In A Pre-Generated Detailed Report
+    [Arguments]    ${resp}   ${path}   ${uniqueValidationKey}=errorCode   @{expectedKeyValues}
+    ${current_issues}   Get SubDictionary By Path    ${resp}    ${path}
+    Validate If Key-Value Pairs Exist   ${current_issues}   ${False}   ${uniqueValidationKey}   @{expectedKeyValues}
+
+Validate Detail Report If General Issues Removed
+    [Documentation]   Generate Detailed Report And Validate If Specific General Issues Were Removed
+    [Arguments]    ${path}   ${expectedKeyValues}
+    ${resp}  ${resp_state}      ReportDetail
+    Validate Existing Detail Report If General Issues Removed   ${resp}   ${path}   ${expectedKeyValues}
+
+Validate Detail Report with Existing EG If General Issues Removed
+    [Documentation]   Generate Detailed Report Against an Existing EG And Validate If Specific General Issues Were Removed
+    [Arguments]    ${path}   ${egName}   ${expectedKeyValues}   ${uniqueValidationKey}=errorCode
+    ${resp}  ${resp_state}=     ReportDetail against Existing EG     ${egName}
+    Validate Existing Detail Report If General Issues Removed   ${resp}   ${path}   ${uniqueValidationKey}   ${expectedKeyValues}
+
+Validate Existing Detail Report If Issues Exists with Filter
+    [Documentation]    Validate If A Specific General Issue Under Filter Exists Using A Pre-generated Detailed Report
+    [Arguments]     ${resp}   ${path}   ${expectedKeyValues}   ${filter}
+    ${subD}   Get SubDictionary By Path    ${resp}    ${path}
+    ${result}=    Find Matched Dictionary in List     ${subD}   ${filter}
+    ${current_issues}   Get SubDictionary By Path    ${result}    issues
+    ${lookupKeyValue}=    Create Dictionary    errorCode=${expectedKeyValues['errorCode']}
+    Get Positive Key-Value Pair Validation Result   ${current_issues}   ${lookupKeyValue}   ${expectedKeyValues}
+
+Validate Detail Report If Issues Exists with Filter
+    [Documentation]    Generate Detailed Report And Validate If A Specific General Issue Under Filter Exists
+    [Arguments]     ${path}   ${expectedKeyValues}   ${filter}
+    ${resp}  ${resp_state}      ReportDetail
+    Validate Existing Detail Report If Issues Exists with Filter    ${resp}   ${path}   ${expectedKeyValues}   ${filter}
+
+Validate Existing Detail Report If Issues Removed with Filter
+    [Documentation]    Validate If Specific General Issues Under Filter Were Removed Using A Pre-generated Detailed Report
+    [Arguments]       ${resp}   ${path}   ${expectedKeyValues}   ${filter}
+    ${subD}   Get SubDictionary By Path    ${resp}    ${path}
+    ${foundFilter}  ${result}=    Run Keyword And Ignore Error      Find Matched Dictionary in List     ${subD}   ${filter}
+    Return From Keyword If  '${foundFilter}' == 'FAIL'
+    ${current_issues}   Get SubDictionary By Path    ${result}    issues
+    ${lookupKeyValue}=    Create Dictionary    errorCode=${expectedKeyValues['errorCode']}
+    ${foundError}  ${matched_issues}=    Run Keyword And Ignore Error    Find Matched Dictionary in List    ${current_issues}   ${lookupKeyValue}
+    Return From Keyword If  '${foundError}' == 'FAIL'
+    ${validated}   ${result}   Run Keyword And Ignore Error     Dictionary Should Contain Sub Dictionary    ${matched_issues}    ${expectedKeyValues}
+    Return From Keyword If    '${validated}'=='FAIL'
+    Run Keyword If  '${validated}'=='PASS'   Fail   msg=Found unexpected ${expectedKeyValues} in response
+    ...         ELSE   Log to console and logfile     Validated ${expectedKeyValue} does NOT exist in response
+
+Validate Detail Report If Issues Removed with Filter
+    [Documentation]    Generate Detailed Report And Validate If Specific General Issues Under Filter Were Removed
+    [Arguments]       ${path}   ${expectedKeyValues}   ${filter}
+    ${resp}  ${resp_state}      ReportDetail
+    Validate Existing Detail Report If Issues Removed with Filter    ${resp}   ${path}   ${expectedKeyValues}   ${filter}
+
+Validate Detail Report with Existing EG If General Issues Removed With Filter
+    [Documentation]    Generate Detailed Report And Validate If Specific General Issues Under Filter Were Removed
+    [Arguments]       ${path}   ${egName}   ${expectedKeyValues}   ${filter}
+    ${resp}  ${resp_state}=     ReportDetail against Existing EG     ${egName}
+    Validate Existing Detail Report If Issues Removed with Filter    ${resp}   ${path}   ${expectedKeyValues}   ${filter}
+
+Get SubDictionary By Path
+    [Arguments]   ${dict}  ${path}
+    [Documentation]    Get matched sub-dictionary from list of dictionaries
+    ${keys}   Split String   ${path}     /
+    :FOR   ${key}   IN   @{keys}
+    \    ${dict}=   Get From Dictionary   ${dict}     ${key}
+    [Return]   ${dict}
+
+Find Matched Dictionary in List
+    [Documentation]   Search for key-value pair in list
+    [Arguments]   ${dictL}  ${lookupKeyValue}
+    ${list_len}  Get Length  ${dictL}
+    : For   ${index}   IN RANGE  0  ${list_len}
+        \    ${item}     Get From List   ${dictL}    ${index}
+        \    ${isFound}=   Run Keyword and Return Status  Dictionary Should Contain Sub Dictionary    ${item}   ${lookupKeyValue}
+        \    Return From Keyword If  ${isFound}    ${item}
+    Run Keyword    Fail   msg=Could not find given key-value pair: ${lookupKeyValue}
+
+Find Matched String In List
+    [Documentation]   Search for string in the list
+    [Arguments]   ${listOfStrings}   ${string}
+    :FOR   ${listString}   IN   @{listOfStrings}
+    \   Return From Keyword If   '${listString}' == '${string}'  ${True}
+
+    [Return]   ${False}
+
+Append String To List If Unique
+    [Documentation]   Append string to list if that string is not present in the list
+    [Arguments]   ${listOfStrings}   ${string}
+    ${retval} =   Find Matched String In List   ${listOfStrings}   ${string}
+    Run Keyword If   ${retval} == ${False}   Append To List   ${listOfStrings}   ${string}
+
+    [Return]   ${listOfStrings}
+
+
+##########################
+#    OneView
+##########################
+Login to OneView Via REST
+    [Documentation]    Connects to the Appliance and creates a session using the Username and Password.
+    ...                Example:\n| Login to Fusion Via REST
+    [Arguments]        ${OV_IP}=${OV_IP}    ${admin_credentials}=${ADMIN_CREDENTIALS}
+    Should Not Be Equal    ${OV_IP}    'unknown'    msg=Please specify a valid Fusion IP address or hostname
+    keywords.Log to console and logfile  \n With IP ${OV_IP} (${admin_credentials})...
+    ${Response}    ${AUTHTOKEN}    Fusion Api Login Appliance    ${OV_IP}    ${admin_credentials}
+    Set Suite Variable   ${AUTHTOKEN}
+    keywords.Log to console and logfile      ${AUTHTOKEN}
+    Set OneView Version Metadata
+    Should Match StatusCode in Response      ${Response}   ${200}
+    Set Suite Variable    ${LOGGED}  ${True}
+
+Set OneView Version Metadata
+    [Documentation]    Get the version ident string from OneView
+    ${Response}=    Fusion Api Get Appliance Version
+    Log    ${Response}
+    Set Suite Metadata     OneView Version    ${Response['softwareVersion']} : ${Response['date']}    top=True
+
+Get OneView Resources
+    [Documentation]  Get resources off list of valid names;
+    ...              choose from [ethnets, fcnets, fcoenets, ic, ictype, icstate, networkset, uplinkset, lig, li, encGrp, encs, servers, profiles, users]
+    [Arguments]    ${ResourcesList}=${AllResourcesCommonList}   ${tbirdEnv}=${False}
+    Run Keyword If  ${LOGGED} == ${False}     Login to OneView Via REST
+    ${OVAVersion}   ${OVXAPIVersion}   Get OneView Appliance And Api Versions
+    ${OVResource} =   Create Dictionary
+    keywords.Log to console and logfile     \n Get Resources in OneView Started: ${ResourcesList}
+    :FOR   ${resourceName}   IN   @{ResourcesList}
+    \       keywords.Log to console and logfile    \t Getting ${resourceName} Resource
+    \       ${resourceData} =   Run Keyword If     '${resourceName}' == 'ethNets'   Fusion Api Get Ethernet Networks
+    \       ...                         ELSE IF     '${resourceName}' == 'fcNets'   Fusion Api Get Fc Networks
+    \       ...                         ELSE IF     '${resourceName}' == 'fcoeNets'   Run Keyword If   ${OVXAPIVersion} >= ${fcoeMinXAPIVersion}   Fusion Api Get Fcoe Networks   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'ic'   Fusion Api Get Interconnect
+    \       ...                         ELSE IF     '${resourceName}' == 'ictype'   Fusion Api Get Interconnect Types
+    \       ...                         ELSE IF     '${resourceName}' == 'icstate'   Fusion Api Get Interconnect Types
+    \       ...                         ELSE IF     '${resourceName}' == 'networkset'   Fusion Api Get Network Set
+    \       ...                         ELSE IF     '${resourceName}' == 'uplinkset'   Fusion Api Get Uplink Set
+    \       ...                         ELSE IF     '${resourceName}' == 'lig'   Fusion Api Get Lig
+    \       ...                         ELSE IF     '${resourceName}' == 'li'   Fusion Api Get Li
+    \       ...                         ELSE IF     '${resourceName}' == 'encGrp'   Fusion Api Get Enclosure Groups
+    \       ...                         ELSE IF     '${resourceName}' == 'encs'   Fusion Api Get Enclosures
+    \       ...                         ELSE IF     '${resourceName}' == 'profiles'   Fusion Api Get Server Profiles
+    \       ...                         ELSE IF     '${resourceName}' == 'servers'   Fusion Api Get Server Hardware
+    \       ...                         ELSE IF     '${resourceName}' == 'users'   Fusion Api Get User
+    \       ...                         ELSE        Fail     msg=Invalid resource name found while trying to get raw resource data: ${resourceName}
+    \       keywords.Log to console and logfile    \t\t Adding resource data items
+    \    ${resourceDataModified} =   Run Keyword If   '${resourceName}' == 'ethNets'   WPST Add EthNets Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'fcNets'   WPST Add FcNets Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'fcoeNets'   Run Keyword If   ${OVXAPIVersion} >= ${fcoeMinXAPIVersion}   WPST Add FcoeNets Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'ic'   WPST Add Interconnect Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'ictype'   WPST Add InterconnectType Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'icstate'   WPST Add InterconnectState Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'networkset'   WPST Add NetworkSet Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'uplinkset'   WPST Add UplinkSet Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'lig'   WPST Add Lig Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'li'   WPST Add Li Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}   tbirdEnv=${tbirdEnv}
+    \       ...                         ELSE IF     '${resourceName}' == 'encGrp'   WPST Add EncGrp Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'encs'   WPST Add Encs Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'profiles'   WPST Add Profiles Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'servers'   WPST Add Server Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'users'   WPST Add User Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE        Fail     msg=Invalid resource name found while trying to add resource data items: ${resourceName}
+    \   ${OVResource} =   Run Keyword If   '${resourceName}' == 'ethNets'   Set To Dictionary   ${OVResource}   ethNets=${resourceDataModified}
+    \       ...                         ELSE IF     '${resourceName}' == 'fcNets'   Set To Dictionary   ${OVResource}   fcNets=${resourceDataModified}
+    \       ...                         ELSE IF     '${resourceName}' == 'fcoeNets'   Validate And Update Resource Data For FCoE As Needed   ${resourceDataModified}   ${OVResource}
+    \       ...                         ELSE IF     '${resourceName}' == 'ic'   Set To Dictionary   ${OVResource}   ic=${resourceDataModified}
+    \       ...                         ELSE IF     '${resourceName}' == 'ictype'   Set To Dictionary   ${OVResource}   ictype=${resourceDataModified}
+    \       ...                         ELSE IF     '${resourceName}' == 'icstate'   Set To Dictionary   ${OVResource}   icstate=${resourceDataModified}
+    \       ...                         ELSE IF     '${resourceName}' == 'networkset'   Set To Dictionary   ${OVResource}   networkset=${resourceDataModified}
+    \       ...                         ELSE IF     '${resourceName}' == 'uplinkset'   Set To Dictionary   ${OVResource}   uplinkset=${resourceDataModified}
+    \       ...                         ELSE IF     '${resourceName}' == 'lig'   Set To Dictionary   ${OVResource}   lig=${resourceDataModified}
+    \       ...                         ELSE IF     '${resourceName}' == 'li'   Set To Dictionary   ${OVResource}   li=${resourceDataModified}
+    \       ...                         ELSE IF     '${resourceName}' == 'encGrp'   Set To Dictionary   ${OVResource}   encGrp=${resourceDataModified}
+    \       ...                         ELSE IF     '${resourceName}' == 'encs'   Set To Dictionary   ${OVResource}   encs=${resourceDataModified}
+    \       ...                         ELSE IF     '${resourceName}' == 'profiles'   Set To Dictionary   ${OVResource}   profiles=${resourceDataModified}
+    \       ...                         ELSE IF     '${resourceName}' == 'servers'   Set To Dictionary   ${OVResource}   servers=${resourceDataModified}
+    \       ...                         ELSE IF     '${resourceName}' == 'users'   Set To Dictionary   ${OVResource}   users=${resourceDataModified}
+    \       ...                         ELSE        Fail     msg=Invalid resource name found while trying to set resource data dictionary: ${resourceName}
+
+    [Return]   ${OVResource}
+
+Validate And Update Resource Data For FCoE As Needed
+    [Documentation]  Check and update if there is a need to do so for resource data when dealing with FCoE resource
+    ...              This is necessary in case API version is less than the minimum version that supports FCoE
+    [Arguments]   ${resourceDataModified}   ${OVResource}
+    ${OVResource} =   Run Keyword If   "${resourceDataModified}" != "None"   Set To Dictionary   ${OVResource}   fcoeNets=${resourceDataModified}
+    ...				ELSE   Set Variable   ${OVResource}
+
+   [Return]   ${OVResource}
+
+Create Variable File
+    [Documentation]  Get resources off list of valid names; Parse data needed for variable file; Write them to variable file
+    ...              choose from [ethnets, fcnets, fcoenets, networkset, lig, encgrp, profiles (more supported ones will be added soon)]
+    [Arguments]    ${variable_filename}  ${ResourcesList}=${AllResourcesCommonList}  ${resume}=${False}   ${ethNetsSelectDataFile}=${ethNetsSelectDataFile}   ${fcNetsSelectDataFile}=${fcNetsSelectDataFile}   ${fcoeNetsSelectDataFile}=${fcoeNetsSelectDataFile}   ${networksetSelectDataFile}=${networksetSelectDataFile}   ${ligSelectDataFile}=${ligSelectDataFile}   ${encGrpSelectDataFile}=${encGrpSelectDataFile}   ${profilesSelectDataFile}=${profilesSelectDataFile}   ${encsSelectDataFile}=${encsSelectDataFile}   ${serversSelectDataFile}=${serversSelectDataFile}  ${CIFIT_TYPE_CONV}=${False}
+    Run Keyword If  ${LOGGED} == ${False}     Login to OneView Via REST
+    Log to console and logfile     \n Create Variable File Off OneView Started: ${ResourcesList}
+    ${OVAVersion}   ${OVXAPIVersion}   Get OneView Appliance And Api Versions
+    :FOR   ${resourceName}   IN   @{ResourcesList}
+    \       ${resourceData} =   Run Keyword If     '${resourceName}' == 'ethnets'   Fusion Api Get Ethernet Networks
+    \       ...                         ELSE IF     '${resourceName}' == 'fcnets'   Fusion Api Get Fc Networks
+    \       ...                         ELSE IF     '${resourceName}' == 'fcoenets'   Run Keyword If   ${OVXAPIVersion} >= ${fcoeMinXAPIVersion}   Fusion Api Get Fcoe Networks   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'networkset'   Fusion Api Get Network Set
+    \       ...                         ELSE IF     '${resourceName}' == 'lig'   Fusion Api Get Lig
+    \       ...                         ELSE IF     '${resourceName}' == 'encgrp'   Fusion Api Get Enclosure Groups
+    \       ...                         ELSE IF     '${resourceName}' == 'profiles'   Fusion Api Get Server Profiles
+    \       ...                         ELSE IF     '${resourceName}' == 'encs'   Fusion Api Get Enclosures
+    \       ...                         ELSE IF     '${resourceName}' == 'servers'   Fusion Api Get Server Hardware
+    \       ...                         ELSE        Fail     msg=Invalid/unsupported resource name found while trying to get raw resource for variable file: ${resourceName}
+    \       Run Keyword If      '${resourceName}' == '${ResourcesList[0]}'  Run Keyword If  ${resume} == ${False}   WPST Create Variable File Header    ${variable_filename}    write
+    \    ${resourceDataModified} =   Run Keyword If   '${resourceName}' == 'ethnets'   WPST Generate EthNets Variable File   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   ${variable_filename}   ${resourceName}   ${ethNetsSelectDataFile}
+    \       ...                         ELSE IF     '${resourceName}' == 'fcnets'   WPST Generate FcNets Variable File   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   ${variable_filename}   ${resourceName}   ${fcNetsSelectDataFile}
+    \       ...                         ELSE IF     '${resourceName}' == 'fcoenets'   Run Keyword If   ${OVXAPIVersion} >= ${fcoeMinXAPIVersion}   WPST Generate FcoeNets Variable File   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   ${variable_filename}   ${resourceName}   ${fcoeNetsSelectDataFile}
+    \       ...                         ELSE IF     '${resourceName}' == 'networkset'   WPST Generate NetworkSets Variable File   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   ${variable_filename}   ${resourceName}   ${networksetSelectDataFile}
+    \       ...                         ELSE IF     '${resourceName}' == 'lig'   WPST Generate Lig Variable File   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   ${variable_filename}   ${resourceName}   ${ligSelectDataFile}
+    \       ...                         ELSE IF     '${resourceName}' == 'encgrp'   WPST Generate EncGrp Variable File   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   ${variable_filename}   ${resourceName}   ${encGrpSelectDataFile}
+    \       ...                         ELSE IF     '${resourceName}' == 'profiles'   WPST Generate Profiles Variable File   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   ${variable_filename}   ${resourceName}   ${profilesSelectDataFile}   CIFIT_TYPE_CONV=${CIFIT_TYPE_CONV}
+    \       ...                         ELSE IF     '${resourceName}' == 'encs'   WPST Generate Enclosures Variable File   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   ${variable_filename}   ${resourceName}   ${encsSelectDataFile}
+    \       ...                         ELSE IF     '${resourceName}' == 'servers'   WPST Generate Servers Variable File   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   ${variable_filename}   ${resourceName}   ${serversSelectDataFile}
+    \       ...                         ELSE        Fail     msg=Invalid/unsupported resource name found while trying to generate variable file: ${resourceName}
+    WPST Set Variables In File    ${variable_filename}   ${ResourcesList}
+
+Create Select Data Compare Variable File
+    [Documentation]  Get resources off list of valid names; Parse data needed for select data compare variable file; Write them to a python variable file
+    ...              choose from [ethnets, fcnets, fcoenets, networkset, lig, encgrp, profiles (more supported ones will be added soon)]
+    [Arguments]    ${variable_filename}  ${ResourcesVariableList}=${AllResourcesCommonVariableList}  ${resume}=${False}   ${ethNetsSelectDataFile}=${ethNetsSelectDataFile}   ${fcNetsSelectDataFile}=${fcNetsSelectDataFile}   ${fcoeNetsSelectDataFile}=${fcoeNetsSelectDataFile}   ${networksetSelectDataFile}=${networksetSelectDataFile}   ${ligSelectDataFile}=${lig-as-isSelectDataFile}   ${encGrpSelectDataFile}=${encGrpSelectDataFile}   ${profilesSelectDataFile}=${profilesSelectDataFile}   ${encsSelectDataFile}=${encsSelectDataFile}   ${serversSelectDataFile}=${serversSelectDataFile}
+    Run Keyword If  ${LOGGED} == ${False}     Login to OneView Via REST
+    Log to console and logfile     \n Create Select Data Compare Variable File Off OneView Started: ${ResourcesVariableList}
+    ${OVAVersion}   ${OVXAPIVersion}   Get OneView Appliance And Api Versions
+    :FOR   ${resourceName}   IN   @{ResourcesVariableList}
+    \       ${resourceData} =   Run Keyword If     '${resourceName}' == 'ethNets'   Fusion Api Get Ethernet Networks
+    \       ...                         ELSE IF     '${resourceName}' == 'fcNets'   Fusion Api Get Fc Networks
+    \       ...                         ELSE IF     '${resourceName}' == 'fcoeNets'   Run Keyword If   ${OVXAPIVersion} >= ${fcoeMinXAPIVersion}   Fusion Api Get Fcoe Networks   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'networkset'   Fusion Api Get Network Set
+    \       ...                         ELSE IF     '${resourceName}' == 'lig'   Fusion Api Get Lig
+    \       ...                         ELSE IF     '${resourceName}' == 'encGrp'   Fusion Api Get Enclosure Groups
+    \       ...                         ELSE IF     '${resourceName}' == 'profiles'   Fusion Api Get Server Profiles
+    \       ...                         ELSE IF     '${resourceName}' == 'encs'   Fusion Api Get Enclosures
+    \       ...                         ELSE IF     '${resourceName}' == 'servers'   Fusion Api Get Server Hardware
+    \       ...                         ELSE IF     '${resourceName}' == 'ic'   Fusion Api Get Server Hardware
+    \       ...                         ELSE        Fail     msg=Invalid/unsupported resource name found while trying to get raw resource for variable file: ${resourceName}
+    \       Run Keyword If      '${resourceName}' == '${ResourcesVariableList[0]}'  Run Keyword If  ${resume} == ${False}   WPST Create Variable File Header    ${variable_filename}    write
+    \    ${resourceDataModified} =   Run Keyword If   '${resourceName}' == 'ethNets'   WPST Add EthNets Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'fcNets'   WPST Add FcNets Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'fcoeNets'   Run Keyword If   ${OVXAPIVersion} >= ${fcoeMinXAPIVersion}   WPST Add FcoeNets Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'ic'   WPST Add Interconnect Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'ictype'   WPST Add InterconnectType Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'icstate'   WPST Add InterconnectState Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'networkset'   WPST Add NetworkSet Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'uplinkset'   WPST Add UplinkSet Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'lig'   WPST Add Lig Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'li'   WPST Add Li Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'encGrp'   WPST Add EncGrp Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'encs'   WPST Add Encs Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'profiles'   WPST Add Profiles Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'servers'   WPST Add Server Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE IF     '${resourceName}' == 'users'   WPST Add User Items   ${OV_IP}   ${AUTHTOKEN}   ${resourceData}   api=${OVXAPIVersion}
+    \       ...                         ELSE        Fail     msg=Invalid resource name found while trying to add resource data items: ${resourceName} 
+    \    ${resourceDataModified} =   Run Keyword If   '${resourceName}' == 'ethNets'   WPST Generate EthNets Variable File   ${OV_IP}   ${AUTHTOKEN}   ${resourceDataModified}   ${variable_filename}  ${resourceName}   ${ethNetsSelectDataFile}
+    \       ...                         ELSE IF     '${resourceName}' == 'fcNets'   WPST Generate FcNets Variable File   ${OV_IP}   ${AUTHTOKEN}   ${resourceDataModified}   ${variable_filename}  ${resourceName}   ${fcNetsSelectDataFile}
+    \       ...                         ELSE IF     '${resourceName}' == 'fcoeNets'   Run Keyword If   ${OVXAPIVersion} >= ${fcoeMinXAPIVersion}   WPST Generate FcoeNets Variable File   ${OV_IP}   ${AUTHTOKEN}   ${resourceDataModified}   ${variable_filename}   ${resourceName}   ${fcoeNetsSelectDataFile}
+    \       ...                         ELSE IF     '${resourceName}' == 'networkset'   WPST Generate NetworkSets Variable File   ${OV_IP}   ${AUTHTOKEN}   ${resourceDataModified}   ${variable_filename}   ${resourceName}   ${networksetSelectDataFile}
+    \       ...                         ELSE IF     '${resourceName}' == 'lig'   WPST Generate Lig Variable File As Is   ${OV_IP}   ${AUTHTOKEN}   ${resourceDataModified}   ${variable_filename}   ${resourceName}   ${ligSelectDataFile}
+    \       ...                         ELSE IF     '${resourceName}' == 'encGrp'   WPST Generate EncGrp Variable File   ${OV_IP}   ${AUTHTOKEN}   ${resourceDataModified}   ${variable_filename}  ${resourceName}   ${encGrpSelectDataFile}
+    \       ...                         ELSE IF     '${resourceName}' == 'profiles'   WPST Generate Profiles Variable File   ${OV_IP}   ${AUTHTOKEN}   ${resourceDataModified}   ${variable_filename}   ${resourceName}   ${profilesSelectDataFile}
+    \       ...                         ELSE IF     '${resourceName}' == 'encs'   WPST Generate Enclosures Variable File   ${OV_IP}   ${AUTHTOKEN}   ${resourceDataModified}   ${variable_filename}   ${resourceName}   ${encsSelectDataFile}
+    \       ...                         ELSE IF     '${resourceName}' == 'servers'   WPST Generate Servers Variable File   ${OV_IP}   ${AUTHTOKEN}   ${resourceDataModified}   ${variable_filename}   ${resourceName}   ${serversSelectDataFile}
+    \       ...                         ELSE        Fail     msg=Invalid/unsupported resource name found while trying to generate variable file: ${resourceName}
+    WPST Set Variables In File    ${variable_filename}   ${ResourcesVariableList}
+
+Generate Test Variable File Name
+    [Documentation]   This will generate a variable file named <testSuite>-<testCase>-<timeStamp>
+    ...               Example: Generate Test Variable File Name
+    [Arguments]       ${ResourcesList}=${AllResourcesCommonList}
+    ${timestamp} =   Get Concatenated Timestamp
+    ${suitename}=  Fetch From Left   ${SUITE NAME}  --
+    ${testname}=  Fetch From Left   ${TEST_Name}  --
+    ${generatedFile} =   Catenate   ${suitename}-${testname}-${timestamp}.py
+
+    [Return]    ${generatedFile}
+
+Create Generated Test Resources Variable File
+    [Documentation]   This keyword will create variable file using a generated name of <testSuite>-<testCase>-<timeStamp>
+    [Arguments]   ${dataFileDir}=${dataFileDir}   ${ResourcesVariableList}=${AllResourcesCommonVariableList}  ${ethNetsSelectDataFile}=${ethNetsSelectDataFile}   ${fcNetsSelectDataFile}=${fcNetsSelectDataFile}   ${fcoeNetsSelectDataFile}=${fcoeNetsSelectDataFile}   ${networksetSelectDataFile}=${networksetSelectDataFile}   ${ligSelectDataFile}=${lig-as-isSelectDataFile}   ${encGrpSelectDataFile}=${encGrpSelectDataFile}   ${profilesSelectDataFile}=${profilesSelectDataFile}   ${encsSelectDataFile}=${encsSelectDataFile}   ${serversSelectDataFile}=${serversSelectDataFile}
+    ${generatedFile} =    Generate Test Variable File Name
+    Create Select Data Compare Variable File   ${dataFileDir}/${generatedFile}   ResourcesVariableList=${ResourcesVariableList}   resume=${False}   ethNetsSelectDataFile=${ethNetsSelectDataFile}   fcNetsSelectDataFile=${fcNetsSelectDataFile}   fcoeNetsSelectDataFile=${fcoeNetsSelectDataFile}   networksetSelectDataFile=${networksetSelectDataFile}   ligSelectDataFile=${ligSelectDataFile}   encGrpSelectDataFile=${encGrpSelectDataFile}   profilesSelectDataFile=${profilesSelectDataFile}   encsSelectDataFile=${encsSelectDataFile}   serversSelectDataFile=${serversSelectDataFile}
+
+    [Return]    ${generatedFile}
+
+Create Generated Test Compatibility Variable File
+    [Documentation]   This keyword will create compatibility report variable file using a generated name of <testSuite>-<testCase>-<timeStamp>
+    [Arguments]   ${dataFileDir}=${dataFileDir}   ${saveConfig}=${True}
+    ${compatibility} =   Create List   compatibility
+    ${generatedFile} =    Generate Test Variable File Name
+    ${resp}  ${resp_state}    Get Compatibility Report    ${RPTURI}   ${saveConfig}
+    Log   ${dataFileDir}/${generatedFile}
+    WPST Generate Compatibility Variable File   ${resp}   ${dataFileDir}/${generatedFile}   ${compatibility[0]}
+    WPST Set Variables In File    ${dataFileDir}/${generatedFile}   ${compatibility}
+
+    [Return]    ${generatedFile}
+
+Copy OneView Config
+    [Documentation]   Copy OneView configuration and deploy it to the destination appliance
+    ...               Example: Copy OneView Config   15.186.21.246   15.186.21.158   generatedFile=mygeneratedvariablefile.py   transferEnclosure=${False}
+    [Arguments]   ${sourceOVIP}   ${destOVIP}   ${generatedFile}=generatedVariableFile   ${ResourcesList}=${AllResourcesCommonList}   ${transferEnclosure}=${False}
+
+    # [Documentation]   Login to the source OneView IP
+    # Set Test Variable   ${ov_ip_orig}   ${OV_IP}
+    Set Test Variable   ${OV_IP}   ${sourceOVIP}
+    Login to OneView Via REST
+    ${generatedFile} =   Run Keyword If   '${generatedFile}' == 'generatedVariableFile'   Generate Test Variable File Name
+    ...                              ELSE   Set Variable   ${generatedFile}
+    Run Keyword If   ${transferEnclosure} == ${True}   Append String To List If Unique   ${ResourcesList}   encs
+    Create Variable File   ${generatedFile}   ResourcesList=${ResourcesList}
+    Run Keyword If   ${transferEnclosure} == ${True}   Prepare Enclosure For Transfer From One OneView To Another
+    Set Test Variable   ${importEnclosure}   ${transferEnclosure}
+    Deploy OneView Resources From Variable File   ${generatedFile}   ${destOVIP}   ${ResourcesList}   importEnclosure=${importEnclosure}
+
+    # [Documentation]   Restore the original OneView login/connection
+    # Set Test Variable   ${OV_IP}   ${ov_ip_orig}
+    # Login to OneView Via REST
+
+Prepare Enclosure For Transfer From One OneView To Another
+    [Documentation]   Delete profiles, remove enclosures, reset VC
+    Remove All Server Profiles
+    Remove All Enclosures
+
+Get Concatenated Timestamp
+    [Documentation]   Get concatenated timestamp.
+    @{timestamp} =   Get Time   year month day hour min sec
+    ${timestamp} =   Catenate   SEPARATOR=   @{timestamp}
+
+    [Return]   ${timestamp}
+
+Deploy OneView Resources From Variable File
+    [Documentation]   Deployment of generated variable file to destination appliance IP
+    ...               Example: Deploy OneView Resources From Variable File   ${generatedFile}   ${destOVIP}   [Optional arguments: ResourcesList and importEnclosure]
+    [Arguments]   ${generatedFile}   ${destOVIP}   ${ResourcesList}=${AllResourcesCommonList}   ${importEnclosure}=${False}
+
+    Log  ${importEnclosure}
+    # Set Test Variable   ${ov_ip_orig}   ${OV_IP}
+    Set Test Variable   ${OV_IP}   ${destOVIP}
+    Login to OneView Via REST
+    ${OVAVersion}   ${OVXAPIVersion}   Get OneView Appliance And Api Versions
+    Import Variables   ${generatedFile}
+    :FOR   ${resourceName}   IN   @{ResourcesList}
+    \       Run Keyword If     '${resourceName}' == 'ethnets'   Adding Ethernet Networks From Variable File
+    \       ...    ELSE IF     '${resourceName}' == 'fcnets'   Adding FC Networks From Variable File
+    \       ...    ELSE IF     '${resourceName}' == 'fcoenets'   Run Keyword If   ${OVXAPIVersion} >= ${fcoeMinXAPIVersion}   Adding FCoE Networks From Variable File
+    \       ...    ELSE IF     '${resourceName}' == 'networkset'   Adding Network Sets From Variable File
+    \       ...    ELSE IF     '${resourceName}' == 'lig'   Create LIG From Variable File
+    \       ...    ELSE IF     '${resourceName}' == 'encgrp'   Create Enclosure Group From Variable File
+    \       ...    ELSE IF     '${resourceName}' == 'profiles' and ${importEnclosure} == ${True}   Import Enclosures And Create Server Profiles From Variable File
+    \       ...    ELSE IF     '${resourceName}' == 'profiles'   Create Server Profile From Variable File
+    \       ...    ELSE IF     '${resourceName}' == 'encs'   Run Keyword If   ${importEnclosure} != ${True}   Import Enclosures From Variable File
+    \       ...    ELSE        Fail     msg=Invalid/unsupported resource name ${resourceName} while trying to apply config from variable file ${generatedFile}.
+
+    # [Documentation]   Restore the original OneView login/connection
+    # Set Test Variable   ${OV_IP}   ${ov_ip_orig}
+    # Login to OneView Via REST
+
+Import Enclosures And Create Server Profiles From Variable File
+    [Documentation]   Import Enclosures And Create Server Profiles From Variable File
+    Import Enclosures From Variable File
+    Create Server Profile From Variable File
+
+Adding Ethernet Networks From Variable File
+    [Documentation]   Adding Ethernet Networks From Variable File
+    Log to console and logfile   \n-Adding Ethernet Networks
+    :FOR   ${ethnet}   IN   @{ethnets}
+    \                   ${resp} =       Fusion Api Create Ethernet Network   body=${ethnet}
+
+Adding Network Sets From Variable File
+    [Documentation]   Adding Network Sets From Variable File
+    Log to console and logfile   \n-Adding Network Sets
+    :FOR   ${netset}   IN   @{networkset}
+    \   ${uriList} =   Get Ethernet Uris By Name   ${netset['networkUris']}
+    \   Set to dictionary   ${netset}   networkUris   ${uriList}
+    \   ${resp} =   Run Keyword If   "${netset['nativeNetworkUri']}" is not "${null}"  Fusion Api Get Ethernet Networks   param=?filter="name=${netset['nativeNetworkUri']}"
+    \   ${nativeNetworkUri} =   Run Keyword If   "${netset['nativeNetworkUri']}" is not "${null}"   Get From Dictionary   ${resp['members'][0]}   uri
+    \   ...                     	ELSE   Set Variable   ${null}
+    \   Set to dictionary   ${netset}   nativeNetworkUri   ${nativeNetworkUri}
+    \   ${resp} =   Fusion Api Create Network Set   body=${netset}
+
+Adding FC Networks From Variable File
+    [Documentation]   Adding FC Networks From Variable File
+    Log to console and logfile   \n-Adding FC Networks
+    :FOR   ${fcnet}   IN   @{fcNets}
+    \                   ${resp} =       Fusion Api Create FC Network   body=${fcnet}
+
+Adding FCoE Networks From Variable File
+    [Documentation]   Adding FCoE Networks From Variable File
+    Log to console and logfile   \n-Adding FCoE Networks
+    :FOR   ${fcoenet}   IN   @{fcoeNets}
+    \                   ${resp} =       Fusion Api Create FCoE Network   body=${fcoenet}
+
+Create LIG From Variable File
+    [Documentation]   Create LIG From Variable File
+    Set Log Level   TRACE
+    :FOR   ${oneLig}   IN   @{lig}
+    \    Create Lig   ${oneLig}
+
+Create Enclosure Group From Variable File
+    [Documentation]   Create Enclosure Group From Variable File
+    :FOR   ${eg}   IN   @{encGrp}
+    \   ${eg} =   Update Lig Uri From Enclosure Group Interconnect Bay Mappings   ${eg}
+    \   Log To Console and logfile   \n-Create EG
+    \   ${resp} =   Fusion Api Create Enclosure Group   ${eg}
+
+Import Enclosures From Variable File
+    [Documentation]   Import Enclosures From Variable File
+    :FOR   ${enc}   IN   @{encs}
+    \   ${oaIpAddress} =   Get From Dictionary   ${enc}   activeOaPreferredIP
+    \   Remove From Dictionary   ${enc}   activeOaPreferredIP
+    \   Set To Dictionary   ${enc}   hostname   ${oaIpAddress}
+    \   Set To Dictionary   ${enc}   username   ${OA_CREDENTIAL_DATA['oaUsername']}
+    \   Set To Dictionary   ${enc}   password   ${OA_CREDENTIAL_DATA['oaPassword']}
+    \   ${encGroupUriName} =   Get From Dictionary   ${enc}   enclosureGroupUri
+    \   ${encGroupUri} =   Get Enclosure Group Uri By Name   ${encGroupUriName}
+    \   Set To Dictionary   ${enc}   enclosureGroupUri   ${encGroupUri}
+    \   Log to console and logfile   \n-Add Enclosure
+    \   ${resp} =   Fusion Api Add Enclosure   ${enc}
+    \   ${task} =   Wait For Task   ${resp}   20min   10s
+
+Create Server Profile From Variable File
+    [Documentation]   Create Server Profile From Variable File
+    Power Off All Servers
+    Log To Console and logfile   \n-Create Server Profile
+    :FOR   ${profile}   IN   @{profiles}
+    \   ${profile} =   Update Connections From Profiles   ${profile}
+    \   ${serverHardwareUri} =   Get Server Hardware Uri By Name   ${profile['serverHardwareUri']}
+    \   Set To Dictionary   ${profile}   serverHardwareUri   ${serverHardwareUri}
+    \   ${enclosureGroupUri} =   Get Enclosure Group Uri By Name   ${profile['enclosureGroupUri']}
+    \   Set To Dictionary   ${profile}   enclosureGroupUri   ${enclosureGroupUri}
+    \   ${enclosureUri} =   Get Enclosure Uri By Name   ${profile['enclosureUri']}
+    \   Set To Dictionary   ${profile}   enclosureUri   ${enclosureUri}
+    \   ${resp} =   Fusion Api Create Server Profile   body=${profile}
+    \   Wait For Task and Fail On Error    ${resp}   timeout=20 mins   interval=10s
+
+Get EGUri By Name
+    [Documentation]  Get enclosure group Uri by EG name
+    [Arguments]    ${egName}
+    ${resp}=   Fusion Api Get Enclosure Groups  ${None}   ?filter="name='${egName}'"
+    Log to console and logfile   ${resp['members'][0]['uri']}
+    Return from Keyword If  ${resp['count']}>${0}   ${resp['members'][0]['uri']}
+    Run keyword if    ${resp['count']}==${0}    Fail   msg=Could not find the Enclosure Group with specified name
+
+Delete OneView All
+    [Documentation]    Returns appliance to a 'clean' state by removing all resources\enclosures
+    [Arguments]        ${OV_IP}=${OV_IP}    ${admin_credentials}=${ADMIN_CREDENTIALS}
+    Run Keyword If  ${LOGGED} == ${False}     Login to OneView Via REST
+    Log to console and logfile     \n Delete All Resources in OneView Started:
+    Power off All Servers
+    Remove All Server Profiles
+    Remove All Enclosures
+    Remove All Enclosure Groups
+    Remove All Server Hardware Types
+    Remove All LIGs
+    Remove All Ethernet Networks
+    Remove All FC Networks
+    Remove All FCoE Networks
+    Remove All Network Sets
+    Remove All Users
+
+Delete OneView Selected
+    [Documentation]    Returns appliance to a 'clean' state by removing selected resources\enclosures
+    [Arguments]     ${resList}=${OVRESALL}   ${OV_IP}=${OV_IP}    ${admin_credentials}=${ADMIN_CREDENTIALS}
+    Run Keyword If  ${LOGGED} == ${False}     Login to OneView Via REST
+    Log to console and logfile     \n Delete Selected Resources in OneView Started: ${resList}
+    Set Flags   ${resList}
+    Run Keyword If  ${If_server-profiles} == ${True}    Power off All Servers
+    Run Keyword If  ${If_server-profiles} == ${True}    Remove All Server Profiles
+    Run Keyword If  ${If_enclosures} == ${True}         Remove All Enclosures
+    Run Keyword If  ${If_enclosure-groups} == ${True}   Remove All Enclosure Groups
+    Run Keyword If  ${If_server-hardware-types} == ${True}   Remove All Server Hardware Types
+    Run Keyword If  ${If_logical-interconnect-groups} == ${True}    Remove All LIGs
+    Run Keyword If  ${If_ethernet-networks} == ${True}   Remove All Ethernet Networks
+    Run Keyword If  ${If_fc-networks} == ${True}        Remove All FC Networks
+    Run Keyword If  ${If_fcoe-networks} == ${True}        Remove All FCoE Networks
+    Run Keyword If  ${If_network-sets} == ${True}   Remove All Network Sets
+    Run Keyword If  ${If_users} == ${True}          Remove All Users
+
+Set Flags
+    [Documentation]  Helper keyword. See 'Delete OneView Selected'
+    [Arguments]     ${resList}
+    Set Suite Variable  ${If_server-profiles}   ${False}
+    Set Suite Variable  ${If_enclosures}   ${False}
+    Set Suite Variable  ${If_enclosure-groups}   ${False}
+    Set Suite Variable  ${If_server-hardware-types}   ${False}
+    Set Suite Variable  ${If_logical-interconnect-groups}   ${False}
+    Set Suite Variable   ${If_ethernet-networks}   ${False}
+    Set Suite Variable   ${If_fc-networks}   ${False}
+    Set Suite Variable   ${If_fcoe-networks}   ${False}
+    Set Suite Variable  ${If_network-sets}   ${False}
+    Set Suite Variable  ${If_users}   ${False}
+    :FOR    ${item}   IN   @{resList}
+    \       Run Keyword If      '${item}' == 'server-profiles'     Set Suite Variable  ${If_server-profiles}   ${True}
+    \       ...    ELSE IF      '${item}' == 'enclosures'      Set Suite Variable  ${If_enclosures}   ${True}
+    \       ...    ELSE IF      '${item}' == 'enclosure-groups'      Set Suite Variable  ${If_enclosure-groups}   ${True}
+    \       ...    ELSE IF      '${item}' == 'server-hardware-types'      Set Suite Variable  ${If_server-hardware-types}   ${True}
+    \       ...    ELSE IF      '${item}' == 'logical-interconnect-groups'      Set Suite Variable  ${If_logical-interconnect-groups}   ${True}
+    \       ...    ELSE IF      '${item}' == 'ethernet-networks'   Set Suite Variable   ${If_ethernet-networks}   ${True}
+    \       ...    ELSE IF      '${item}' == 'fc-networks'   Set Suite Variable   ${If_fc-networks}   ${True}
+    \       ...    ELSE IF      '${item}' == 'fcoe-networks'   Set Suite Variable   ${If_fcoe-networks}   ${True}
+    \       ...    ELSE IF      '${item}' == 'network-sets'      Set Suite Variable  ${If_network-sets}   ${True}
+    \       ...    ELSE IF      '${item}' == 'users'      Set Suite Variable  ${If_users}   ${True}
+    \       ...    ELSE         Fail   msg=Unsupported resource type ${item}
+
+
+##########################
+#    Virtual Connect
+##########################
+Import VC
+    [Documentation]  Import VC enclosure
+    [Arguments]  ${vc_credential}=${VC_CREDENTIAL_DATA}   ${oa_credential}=${OA_CREDENTIAL_DATA}   ${timeOut}=5 min
+    Wait Until Keyword Succeeds  ${timeOut}   2 min   Config VC    ${vc_config_showDomain}   ${True}   ${vc_credential}   ${oa_credential}   ${True}   ${True}
+
+Config VC
+    [Documentation]  Configure VC based on VC CLI config file
+    ...              Parameters:
+    ...                vc_credential: VC credentials from credentials file
+    ...                oa_credential: OA credentials from credentials file
+    ...                vc_config_file: Configuration file to be loaded
+    ...                import_enclosure:True if domain should be imported, default value is false
+    ...                verbose: False if Verbose mode should not be set, default value is True
+    ...                check_VC_mode: To validate VC Mode before starting VC Configuration. Default to True.
+    [Arguments]   ${vc_config_file}=None   ${import_enclosure}=${False}  ${vc_credential}=${VC_CREDENTIAL_DATA}    ${oa_credential}=${OA_CREDENTIAL_DATA}   ${verbose}=${True}   ${check_VC_mode}=${True}
+    WPST Configure VC      ${vc_credential}    ${oa_credential}   ${vc_config_file}  ${import_enclosure}  ${verbose}  ${check_VC_mode}
+
+Delete VC Config
+    [Documentation]  Delete VC Configuration
+    [Arguments]  ${vc_credential}=${VC_CREDENTIAL_DATA}    ${oa_credential}=${OA_CREDENTIAL_DATA}
+    Config VC    ${vc_config_removeAll}   ${False}   ${vc_credential}   ${oa_credential}   ${True}
+
+Delete VC Domain
+    [Documentation]  Delete VC Domain. Optional argument waitTime is in  seconds
+    [Arguments]  ${vc_credential}=${VC_CREDENTIAL_DATA}    ${oa_credential}=${OA_CREDENTIAL_DATA}   ${waitTime}=${defaultCleanVCWaitTime}
+    Log to console and logfile     Deleting VC Domain...
+    WPST Delete Domain VC       ${vc_credential}    ${oa_credential}   ${waitTime}
+
+Reset VC
+    [Documentation]  Reset VC
+    [Arguments]  ${vc_credential}=${VC_CREDENTIAL_DATA}    ${oa_credential}=${OA_CREDENTIAL_DATA}   ${waitTime}=3 min
+    Log to console and logfile     Resetting VC modules...
+    WPST Reset VC       ${vc_credential}    ${oa_credential}
+    Log to console and logfile     Waiting ${waitTime}...
+    Sleep    ${waitTime}
+
+Clear VC Mode
+    [Documentation]  Clear VC Mode
+    [Arguments]  ${vc_credential}=${VC_CREDENTIAL_DATA}    ${oa_credential}=${OA_CREDENTIAL_DATA}
+    Log to console and logfile     Clear VC Mode in OA ...
+    WPST Clear VC Mode       ${vc_credential}    ${oa_credential}
+
+Get VC Version
+    # WARNING: THIS IS NOT A STABLE KEYWORD. PLEASE BE WARNED AND REFRAIN FROM USING THIS.
+    [Documentation]    Connect to Virtual Connect Interconnect via SSH And Get VC Version
+    [Arguments]    ${IP}=${VC_CREDENTIAL_DATA['vcmIpAddress']}   ${USERNAME}=${VC_CREDENTIAL_DATA['vcmUsername']}    ${PASSWORD}=${VC_CREDENTIAL_DATA['vcmPassword']}
+    #...            ${PROMPT}=>    ${TIMEOUT}=${120}
+    Log Many    ${IP}    ${USERNAME}    ${PASSWORD}
+    # Set Default Configuration    prompt=${PROMPT}    timeout=${TIMEOUT}
+    Open Connection    ${IP}
+    ${Output}=   Login    ${USERNAME}    ${PASSWORD}
+    ${status}   ${Output}=   Run Keyword And Ignore Error   Get Lines Matching Regexp   ${Output}   (Please use IP Address: ${OV_IP}|Build: .*)
+    Run Keyword If   "${status}" == "FAIL"   Fail   msg=Unable to get the expected response from VCMCLI
+    ${filteredOutput}=   Get Lines Matching Regexp   ${Output}   Please use IP Address: ${OV_IP}
+    ${VCVersion}=   Run Keyword If   "${filteredOutput}" == "${EMPTY}"   Get VC Version Thru VCMCLI   ${Output}
+    ...				ELSE   Attempt To Get VC Version Thru OneView   ${Output}
+
+    [Return]   ${VCVersion}
+
+Attempt To Get VC Version Thru OneView
+    [Documentation]   Get VC Version from OneView if possible
+    [Arguments]   ${Output}
+    ${VCMChecker}=   Get Lines Containing String   ${Output}   Please use IP Address:
+    @{VCMPrimaryIp}=   Split String From Right   ${VCMChecker}   ${SPACE}   1
+    ${VCMPrimaryIp}=   Set Variable   ${VCMPrimaryIp[1]}
+    ${VCVersion}=   Run Keyword If   "${VCMPrimaryIp}" == "${OV_IP}"   Get VC Version From OV
+    ...		ELSE   Fail     msg=It appears that your primary ICM was not found in either OneView IP (${IP}) or expected primary ip.
+
+    [Return]   ${VCVersion}
+
+Get VC Version From OV
+    [Documentation]   Query OneView Using Fusion Api For VC Version
+    ${response}=   Fusion Api Get Interconnect
+    Run Keyword If   ${response['members']} == []   Fail   msg=Unable to get response using fusion api get interconnect
+
+    Set Test Variable   ${VCVersion}   ${response['members'][0]['firmwareVersion']}
+
+    [Return]   ${VCVersion}
+
+Get VC Version Thru VCMCLI
+    [Documentation]   Parse VC Version returned by VCMCLI ssh session
+    [Arguments]   ${Output}
+    ${VCBuild}=    Get Lines Containing String    ${Output}   Build:
+    @{VCVersion}=   Split String   ${VCBuild}   ${SPACE}   2
+    @{VCVersion}=   Split String   ${VCVersion[1]}   -   1
+    Set Test Variable   ${VCVersion}   ${VCVersion[0]}
+
+    [Return]    ${VCVersion}
+
+Check Interconnect In No Comm And Recover If Needed
+    [Documentation]   This is to detect an issue described in QXCR1001467844: Utah module in No Comm state after import enclosure
+    [Arguments]   ${bayNumbers}   ${vc_credential}=${VC_CREDENTIAL_DATA}   ${oa_credential}=${OA_CREDENTIAL_DATA}
+    Set Test Variable  ${needSleep}  ${False}
+    :FOR  ${bayNumber}  IN  @{bayNumbers}
+    \  ${icmStatus} =   WPST Check No Comm Status   ${vc_credential}  ${oa_credential}  ${bayNumber}
+    \  Run Keyword If   ${icmStatus} == ${True}   Execute OA Diag Command   reset_io ${bayNumber}
+    \  Run Keyword If   ${icmStatus} == ${True}   Set Test Variable   ${needSleep}  ${True}
+    Run Keyword If   ${needSleep} == ${True}   Sleep   4 min
+
+
+##########################
+#    Onnboard Administrator
+##########################
+Execute OA Diag Command
+    [Documentation]   Accept OA diag command and execute it
+    [Arguments]  ${oaDiagCmd}   ${oa_credential}=${OA_CREDENTIAL_DATA}   ${maxRetry}=${5}
+    WPST Execute Diag Command   ${oa_credential}   ${oaDiagCmd}   ${maxRetry}
+
+
+##########################
+#    General
+##########################
+
+Write JSONfile
+    [Documentation]  Write JSON to file
+    [Arguments]   ${json_data}   ${json_file}   ${dataFiles_loc}=${dataFileDir}
+    ${absoluteJsonFile} =   Catenate   ${dataFiles_loc}/${json_file}
+    keywords.Log to console and logfile   Writing resource data to JSON file... ${absoluteJsonFile}
+    WPST Write Json      ${json_data}   ${json_file}   ${dataFiles_loc}
+
+Compare All with Expected
+    [Documentation]   Compare two files and output diff if any
+    [Arguments]   ${file1}  ${file2}  ${moreList}=${EMPTYLIST}   ${conditionalExcL}=${EMPTYLIST}   ${dataFiles_loc}=${dataFileDir}   ${resolve_name}=${False}
+    ${excList}=  Combine Lists  ${excList}  ${moreList}
+    Log  ${excList}
+    ${compareResult}=   WPST DIFF JSON   ${file1}  ${file2}  ${dataFiles_loc}   ALL   ${excList}   ${conditionalExcL}   resolve_name=${resolve_name}
+    Should Be True              ${compareResult}           msg=Assert: JSON compare failed. Please expand Wpst Diff Json keyword above to see the diff
+
+Compare Resource with Expected
+    [Documentation]   Compare two file and output diff if any
+    ...               recType: one from (ethnets, fcnets, lig, networkset, profiles, uplinkset)
+    [Arguments]   ${file1}  ${file2}  ${recType}  ${moreList}=${EMPTYLIST}   ${conditionalExcL}=${EMPTYLIST}  ${dataFiles_loc}=${dataFileDir}
+    ${excList}=  Combine Lists  ${excList}  ${moreList}
+    Log  ${excList}
+    ${compareResult}=   WPST DIFF JSON    ${file1}  ${file2}  ${dataFiles_loc}   ${recType}   ${excList}   ${conditionalExcL}
+    Should Be True              ${compareResult}           msg=Assert: JSON compare failed. Please expand Wpst Diff Json keyword above to see the diff
+
+Override Suite Name If Needed
+    [Documentation]   Set the SUITE NAME variable to the appropriate value
+    [Arguments]   ${suiteName}
+    ${wildcard} =   Get Lines Containing String   ${suiteName}   &
+    @{suiteNames} =   Run Keyword If   "No${wildcard}ne" != "${null}"   Split String   ${suiteName}   .
+    ...                            ELSE   Create List   ${suiteName}
+
+    [Return]   @{suiteNames}
+
+Set Default FileNames
+    [Documentation]   Set the default data/save JSON file names
+    Run Keyword If   ${BUG_IN_API} == ${True}   Set Default FileNames With OV And API Version
+    ...				ELSE   Set Default FileNames With API Version Only
+
+Set Default FileNames With OV And API Version
+    [Documentation]   Set the default file names with OV and API version.
+    ...               Example:\n| save-3.1.1-fcoeSans-7-2-api120-ov120.json
+    ${OVAVersion}   ${OVXAPIVersion}   Get OneView Appliance And Api Versions
+    # ${VCVersion}   Get VC Version
+    # Log to console and logfile    VC Version: ${VCVersion}
+    Log to console and logfile    OV Version: ${OVAVersion}
+    Log to console and logfile    X-API-Version: ${OVXAPIVersion}
+    # Set Suite Metadata     VC Version   ${VCVersion}
+    Set Suite Metadata     OV Version   ${OVAVersion}
+    Set Suite Metadata     X-API-Version   ${OVXAPIVersion}
+    # ${VCVersionPre}   ${VCVersionSuf}   Split Extension   ${VCVersion}
+    # ${VCVersion}=   Catenate   ${VCVersionPre}${VCVersionSuf}
+    ${suitename}=  Fetch From Left   ${SUITE NAME}  --
+    ${testname}=  Fetch From Left   ${TEST_Name}  --
+    Set Suite Variable   ${SUITE_NAME}   ${suitename}
+    Set Suite Variable   ${TEST_NAME}   ${testname}
+    Set Suite Variable   ${FN_API}    ${suitename}-${testname}-api${OVXAPIVersion}-ov${OVAVersion}
+    Set Suite Variable   ${DATA_RPT}  data-${suitename}-${testname}-rpt-api${OVXAPIVersion}-ov${OVAVersion}.json
+    Set Suite Variable   ${SAVE_RPT}  save-${suitename}-${testname}-rpt-api${OVXAPIVersion}-ov${OVAVersion}.json
+    Set Suite Variable   ${DATA_OV}  data-${FN_API}.json
+    Set Suite Variable   ${SAVE_OV}  save-${FN_API}.json
+
+Set Default FileNames With API Version Only
+    [Documentation]   Set the default file names with API version only.
+    ...               Example:\n| save-3.1.1-fcoeSans-7-2-api120.json
+    ${OVAVersion}   ${OVXAPIVersion}   Get OneView Appliance And Api Versions
+    # ${VCVersion}   Get VC Version
+    # Log to console and logfile    VC Version: ${VCVersion}
+    Log to console and logfile    OV Version: ${OVAVersion}
+    Log to console and logfile    X-API-Version: ${OVXAPIVersion}
+    # Set Suite Metadata     VC Version   ${VCVersion}
+    Set Suite Metadata     OV Version   ${OVAVersion}
+    Set Suite Metadata     X-API-Version   ${OVXAPIVersion}
+    # ${VCVersionPre}   ${VCVersionSuf}   Split Extension   ${VCVersion}
+    # ${VCVersion}=   Catenate   ${VCVersionPre}${VCVersionSuf}
+    Log to console and logfile    Suite Name: ${SUITE NAME}
+    Log to console and logfile    Test Name: ${TEST_Name}
+    ${suitename}=  Fetch From Left   ${SUITE NAME}  --
+    ${testname}=  Fetch From Left   ${TEST_Name}  --
+    Set Suite Variable   ${SUITE_NAME}   ${suitename}
+    Set Suite Variable   ${TEST_NAME}   ${testname}
+    Set Suite Variable   ${FN_API}    ${suitename}-${testname}-api${OVXAPIVersion}
+    Set Suite Variable   ${DATA_RPT}  data-${suitename}-${testname}-rpt-api${OVXAPIVersion}.json
+    Set Suite Variable   ${SAVE_RPT}  save-${suitename}-${testname}-rpt-api${OVXAPIVersion}.json
+    Set Suite Variable   ${DATA_OV}  data-${FN_API}.json
+    Set Suite Variable   ${SAVE_OV}  save-${FN_API}.json
+
+Get OneView Appliance And Api Versions
+    [Documentation]   Get both OneView appliance version and API version
+    Run Keyword If   ${LOGGED} == ${False}   Login to OneView Via REST
+    ${response} =    Fusion Api Get Resource   /rest/version
+    ${defaultOVXAPIVersion} =   Set Variable   ${response['currentVersion']}
+    ${response} =    Fusion Api Get Appliance Version
+    @{softwareVersion} =   Split String   ${response['softwareVersion']}   .   2
+    ${OVAVersion} =   Catenate   ${softwareVersion[0]}${softwareVersion[1]}
+    ${status}   ${message} =   Run Keyword And Ignore Error   Variable Should Exist   ${X-API-Version}
+    ${OVXAPIVersion} =   Run Keyword If   "${status}" == "FAIL"   Set Variable   ${defaultOVXAPIVersion}
+    ...                         ELSE   Set Variable   ${X-API-Version}
+    Set Suite Variable    ${X-API-Version}   ${OVXAPIVersion}
+
+    [Return]   ${OVAVersion}   ${OVXAPIVersion}
+
+Generate OneView Resource Data And Compare
+    [Documentation]   Generate OneView resource data and compare against the golden file.
+    [Arguments]   ${goldenFile}   ${currentFile}   ${moreIgnoreList}=${EMPTYLIST}   ${tbirdEnv}=${False}   ${AllResourcesList}=${AllResourcesList}
+    ${ovData} =   Get OneView Resources    ${AllResourcesList}   tbirdEnv=${tbirdEnv}
+    Write JSONfile   ${ovData}  ${currentFile}
+    Compare All with Expected    ${goldenFile}   ${currentFile}   moreList=${moreIgnoreList}
+
+
+############################################################################
+#    OneView (Some are modified from WPST CRM and other team
+############################################################################
+Log to console and logfile
+    [Documentation]  Log data to console and logfile
+    [Arguments]     ${data}
+    Log     ${data}
+    Log to console      ${data}
+
+Wait For Task
+    [Documentation]     Waits for a task to reach an end-state
+    [Arguments]     ${resp}   ${timeout}=60 s   ${interval}=2 s
+    ${task} =   Wait Until Keyword Succeeds     ${timeout}  ${interval}    Task Reached Endstate   ${resp}
+    [Return]    ${task}
+
+Wait For MigratableVcDomainV300 Response Task
+    [Documentation]     Waits for a task to reach an end-state under MigratableVcDomainV300 response
+    [Arguments]     ${resp}   ${timeout}=60 s   ${interval}=2 s
+    Log   ${resp}
+    ${task} =   Wait Until Keyword Succeeds     ${timeout}  ${interval}    MigratableVcDomainV300 Task Reached Endstate   ${resp}
+    [Return]    ${task}
+
+Wait For Task and Fail On Error
+    [Documentation]     Waits for a task to reach an end-state
+    [Arguments]     ${resp}   ${timeout}=60 s   ${interval}=2 s
+    ${task} =   Wait Until Keyword Succeeds     ${timeout}  ${interval}    Task Reached Endstate   ${resp}
+    Run Keyword If    '${task['taskState']}' == 'Error'    Output Task Error Messages    ${task['taskErrors']}
+    Run Keyword If    '${task['taskState']}' == 'Error'   Fail
+    [Return]    ${task}
+
+Wait For MigratableVcDomainV300 Task and Fail On Error
+    [Documentation]     Waits for a task to reach an end-state under MigratableVcDomainV300 response
+    [Arguments]     ${resp}   ${timeout}=15 min   ${interval}=10 s
+    Log   ${resp}
+    ${task} =   Wait Until Keyword Succeeds     ${timeout}  ${interval}    MigratableVcDomainV300 Task Reached Endstate   ${resp}
+    Run Keyword If    '${task['taskState']}' == 'Error'    Output Task Error Messages    ${task['taskErrors']}
+    Run Keyword If    '${task['taskState']}' == 'Error'   Fail
+    [Return]    ${task}
+
+Output Task Error Messages
+    [Documentation]     Output all task errors
+    [Arguments]     ${taskErrors}
+    :FOR   ${taskError}  IN  @{taskErrors}
+    \       Log to console and logfile      \nTask completed with errors
+    \       Log to console and logfile      \nMessage: ${taskError['message']}
+    \       Log to console and logfile      \nRecommended Action: ${taskError['recommendedActions']}
+
+Task Reached Endstate
+    [Documentation]  Validate that task response has reach the end state
+    [Arguments]    ${resp}
+    # Set Log Level   TRACE
+    Should Contain  ${resp}  uri
+    ${task_uri} =       Get From Dictionary     ${resp}   uri
+    ${task} =           Fusion Api Get Task     uri=${task_uri}
+    Log to console and logfile      \t Task: [${task['category']}:${task['name']}] is: ${task['taskState']} for resource: ${task['associatedResource']['resourceName']} ${task['associatedResource']['resourceUri']}
+    Should Match Regexp     ${task['taskState']}   ((?i)Warning|Unknown|Terminated|Killed|Error|Completed)
+    [Return]    ${task}
+
+MigratableVcDomainV300 Task Reached Endstate
+    [Documentation]  Validate that the new migration task response has reach the end state (API 300)
+    [Arguments]    ${resp}
+    # Set Log Level   TRACE
+    Log    ${resp}
+    ${task} =           Fusion Api Get Task     uri=${resp['headers']['location']}
+    Log to console and logfile      \t Task: [${task['category']}:${task['name']}] is: ${task['taskState']} for resource: ${task['associatedResource']['resourceName']} ${task['associatedResource']['resourceUri']}
+    Should Match Regexp     ${task['taskState']}   ((?i)Warning|Unknown|Terminated|Killed|Error|Completed)
+    [Return]    ${task}
+
+Validate StatusCode in Response
+    [Documentation]  Validate Status Code in Response and return Boolean validation status and error message if fails
+    #    Replace with 'Should Match xxx in Response". It can be removed later
+    [Arguments]    ${resp}   ${expected_status_code}
+    ${status_code}=    Get From Dictionary    ${resp}   status_code
+    Return From Keyword If    '${status_code}'=='${expected_status_code}'     ${True}   ${EMPTY}
+    ${errorMsg}=   Catenate    ${status_code}   ${resp['errorCode']}   ${resp['message']}
+    Return From Keyword   ${False}   ${errorMsg}
+
+Should Match StatusCode in Response
+    [Documentation]  Validate status code in Response and fail with error message if not matched with expected one
+    ...   Example:   Should Match StatusCode in Response    ${resp}    ${200}
+    [Arguments]    ${resp}  ${expectedValue}
+    ${containResp}=     Run Keyword and Return Status      Should contain    ${resp}   status_code
+    ${actualValue}=      Run Keyword If    ${containResp} == ${True}      Get From Dictionary    ${resp}   status_code
+    ...        ELSE     Set Variable     ${resp.status_code}
+    Run Keyword If    ${containResp} == ${False}    Convert to Integer       ${actualValue}
+    Run Keyword and Return If    '${actualValue}'=='${expectedValue}'   Log to console and logfile     Assert: status_code is ${actualValue} as expected.
+    ${status}=     Run Keyword and Return Status     Should contain    ${resp}    errorCode
+    ${errorMsg}=    Run Keyword If  ${status}        Catenate    Error:   ${actualValue}   ${resp['errorCode']}   ${resp['message']}
+    ...             ELSE    Set Variable    ${EMPTY}
+    Fail    msg=Assert: validation failed. Expected:${expectedValue} | Actual:${actualValue}. ${errorMsg}
+
+Should Match Dictionary in Response
+    [Documentation]   Validate mulitple attributes in Response and fail with error message if not matched with expected one
+    ...   Example:    Should Match Dictionary in Response    ${resp}    ${validationDict}
+    [Arguments]    ${resp}    ${expectedKeyValue}
+    ${actualKeyValue}=   Create Dictionary
+    ${expectedKeys}=    Get Dictionary Keys    ${expectedKeyValue}
+    :FOR    ${k}   IN   @{expectedKeys}
+    \       Dictionary Should Contain Key      ${resp}   ${k}
+    \       Run Keyword If   '${k}' != 'taskErrors'     Set To Dictionary   ${actualKeyValue}    ${k}   ${resp['${k}']}
+    \       Run Keyword If   '${k}' == 'taskErrors'     Should Match Task Error    ${resp['${k}']}   ${expectedKeyValue['${k}']}
+    \       Run Keyword If   '${k}' == 'taskErrors'     Remove From Dictionary   ${resp}    ${k}
+    \       Run Keyword If   '${k}' == 'taskErrors'     Remove From Dictionary   ${expectedKeyValue}    ${k}
+    ${validationResult}   ${resultMessage} =   Run Keyword And Ignore Error   Dictionary Should Contain Sub Dictionary    ${resp}   ${expectedKeyValue}
+    Run Keyword and Return If  '${validationResult}'=='PASS'   Log to console and logfile     Assert: expected values ${expectedKeyValue} exist in response
+    Fail   msg=Assert: validation failed. Expected:${expectedKeyValue} | Actual:${actualKeyValue}
+
+Should Match Task Error
+    [Documentation]   Validate expected error exist in list of task errors
+    ...     helper keyword for 'Should Match Dictionary in Response'
+    [Arguments]   ${actualErrors}    ${expectedError}
+    :FOR    ${e}   IN   @{actualErrors}
+    \       ${status}=     Run Keyword and Return Status    Dictionary Should Contain Sub Dictionary    ${e}    ${expectedError}
+    \       Run Keyword and Return If   ${status}    Log to console and logfile     Assert: error is ${expectedError} as expected.
+    Fail  msg=Assert: task error validation failed. Expected:${expectedError} | Actual:${actualErrors}
+
+Remove All Enclosures
+    [Documentation]  Querys the appliance for all Enclosures and then removes them
+    Log to console and logfile      Removing ENCLOSURES
+    ${encs} =   Fusion Api Get Enclosures
+    ${OVAVersion}   ${OVXAPIVersion}   Get OneView Appliance And Api Versions
+    :FOR    ${enc}  IN  @{encs['members']}
+    \       ${resp} =   Fusion Api Remove Enclosure     uri=${enc['uri']}
+    \       ${task} =   Run Keyword If  ${OVXAPIVersion} >= ${newMigrRespMinXAPIVersion}   Wait For MigratableVcDomainV300 Task and Fail On Error   ${resp}     5 min     5 s
+    \       ...         ELSE   Wait For Task and Fail On Error   ${resp}     5 min     5 s
+    Sleep   15 sec
+    ${resp}=    Fusion Api Get Enclosures
+    Should Be Equal As Integers    ${resp['count']}    0    msg="Found Enclosures after deletion"
+
+Remove All Enclosure Groups
+    [Documentation]  Querys the appliance for all Enclosure Groups and then removes them
+    Log to console and logfile      Removing ENCLOSURE GROUPS
+    ${encs} =   Fusion Api Get Enclosure Groups
+    :FOR    ${enc}  IN  @{encs['members']}
+    \       ${resp} =   Fusion Api Delete Enclosure Group       uri=${enc['uri']}
+    #\       ${task} =   Wait For Task   ${resp}     240s    2s
+    ${resp}=    Fusion Api Get Enclosure Groups
+    Should Be Equal As Integers    ${resp['count']}    0    msg="Found Enclosure Groups after deletion"
+
+Remove All Server Hardware Types
+    [Documentation]  Query the appliance for all existing Server Hardware Types and remove them
+    Log to console and logfile   Removing SERVER HARDWARE TYPES
+    ${serverHwTypes} =   Fusion Api Get Server Hardware Types
+    :FOR   ${serverHwType}   IN   @{serverHwTypes['members']}
+    \        ${resp} =    Fusion Api Delete Resource   uri=${serverHwType['uri']}
+    \        ${task} =   Wait for task   ${resp}   15s
+    \        ${valDict} =    Create Dictionary   status_code=${200}
+    \        Validate Response   ${task}   ${valDict}
+    ${resp} =   Fusion Api Get Server Hardware Types
+    Should Be Equal As Integers   ${resp['count']}   0   msg="Found Server Hardware Types after deletion"
+
+Remove All Ethernet Networks
+    [Documentation]  Querys the appliance for all Ethernet networks and then removes them
+    Log to console and logfile      Removing ETHERNET NETWORKS
+    ${networks} =   Fusion Api Get Ethernet Networks
+    :FOR    ${net}  IN  @{networks['members']}
+    \       ${resp} =   Fusion Api Delete Ethernet Network      uri=${net['uri']}
+    \       ${task} =   Wait For Task   ${resp}     240s    2s
+    ${resp}=    Fusion Api Get Ethernet Networks
+    Should Be Equal As Integers    ${resp['count']}    0    msg="Found Ethernet Networks after deletion"
+
+Remove All FC Networks
+    [Documentation]  Querys the appliance for all FC networks and then removes them
+    Log to console and logfile      Removing FC NETWORKS
+    ${networks} =   Fusion Api Get FC Networks
+    :FOR    ${net}  IN  @{networks['members']}
+    \       ${resp} =   Fusion Api Delete FC Network        uri=${net['uri']}
+    \       ${task} =   Wait For Task   ${resp}     240s    2s
+    ${resp}=    Fusion Api Get FC Networks
+    Should Be Equal As Integers    ${resp['count']}    0    msg="Found FC Networks after deletion"
+
+Remove All FCoE Networks
+    [Documentation]  Querys the appliance for all FCoE networks and then removes them
+    ...              NOTE: Since VC Migration does NOT restrict API limitations like FCoE
+    ...                    That is, it will still migrate FCoE. We have to
+    ...                    override API version so we can clean FCoE networks.
+    Log to console and logfile      Removing FCoE NETWORKS
+    ${OVAVersion}   ${OVXAPIVersion}   Get OneView Appliance And Api Versions
+    Set Test Variable   ${OrigOVXAPIVersion}   ${OVXAPIVersion}
+    Return From Keyword If   ${OVAVersion} < ${fcoeMinXAPIVersion}   ${OVXAPIVersion}
+    Run Keyword If   ${OVXAPIVersion} < ${fcoeMinXAPIVersion}   Set Test Variable   ${OVXAPIVersion}   ${fcoeMinXAPIVersion}
+    ${networks} =   Fusion Api Get FCoE Networks   api=${OVXAPIVersion}
+    :FOR    ${net}  IN  @{networks['members']}
+    \       ${resp} =   Fusion Api Delete FCoE Network      uri=${net['uri']}   api=${OVXAPIVersion}
+    \       ${task} =   Wait For Task   ${resp}     240s    2s
+    ${resp}=    Fusion Api Get FCoE Networks   api=${OVXAPIVersion}
+    Set Test Variable   ${OVXAPIVersion}   ${OrigOVXAPIVersion}
+    Should Be Equal As Integers    ${resp['count']}    0    msg="Found FCoE Networks after deletion"
+
+Remove All LIGs
+    [Documentation]  Querys the appliance for all LIGs and then removes them
+    Log to console and logfile      Removing LIGS
+    ${ligs} =   Fusion Api Get LIG
+    :FOR    ${lig}  IN  @{ligs['members']}
+    \       ${resp} =   Fusion Api Delete LIG       uri=${lig['uri']}
+    \       ${task} =   Wait For Task   ${resp}     240s    2s
+    ${resp}=    Fusion Api Get LIG
+    Should Be Equal As Integers    ${resp['count']}    0    msg="Found LIG after deletion"
+
+Remove All Network Sets
+    [Documentation]  Querys the appliance for all Network Sets and then removes them
+    Log to console and logfile      Removing NETWORK SETS
+    ${networks} =   Fusion Api Get Network Set
+    :FOR    ${net}  IN  @{networks['members']}
+    \       ${resp} =   Fusion Api Delete Network Set       uri=${net['uri']}
+    \       ${task} =   Wait For Task   ${resp}     240s    2s
+    ${resp}=    Fusion Api Get Network Set
+    Should Be Equal As Integers    ${resp['count']}    0    msg="Found Network Set after deletion"
+
+Power off ALL servers
+    [Documentation]  Querys the appliance for all Servers and then Powers them off if power is on
+    Log to console and logfile      Powering off SERVERS
+    ${body} =   Create Dictionary   powerState=Off
+    ...                             powerControl=MomentaryPress
+    ${servers} =    Fusion Api Get Server Hardware
+    :FOR    ${server}  IN  @{servers['members']}
+    \       Continue For Loop If  "${server['powerState']}" =='Off'
+    \       ${resp} =   Fusion Api Edit Server Hardware Power State     body=${body}    uri=${server['uri']}
+    \       ${task} =   Wait For Task and Fail On Error   ${resp}     240 s    10 s
+
+Power On Server
+    [Documentation]  Querys the appliance for a server by name and then powers it on
+    [Arguments]    ${server}
+    Log to console and logfile    Powering on ${server}
+    ${body} =       Create Dictionary    powerState=On
+    ...                                  powerControl=MomentaryPress
+    ${servers} =    Fusion Api Get Server Hardware
+    :FOR    ${s}    IN    @{servers['members']}
+    \       Continue For Loop If    '${s['name']}' != '${server}'
+    \       ${resp} =    Fusion Api Edit Server Hardware Power State    body=${body}    uri=${s['uri']}
+    \       ${task} =    Wait For Task    ${resp}    240s    10s
+
+Remove All Server Profiles
+    [Documentation]  Querys the appliance for all Server Profiles and then removes them
+    Log to console and logfile      Removing SERVER PROFILES
+    ${profiles} =   Fusion Api Get Server Profiles
+    :FOR    ${profile}  IN  @{profiles['members']}
+    \       ${resp} =   Fusion Api Delete Server Profile        uri=${profile['uri']}
+    \       ${task} =   Wait For Task and Fail On Error   ${resp}     360 s    5 s
+    ${resp}=    Fusion Api Get Server Profiles
+    Should Be Equal As Integers    ${resp['count']}    0    msg="Found server profiles after deletion"
+
+
+Remove All Users
+    [Documentation]  Querys the appliance for all Users and then removes them
+    Log to console and logfile      Removing USERS
+    ${users} =  Fusion Api Get User
+    :FOR    ${user}  IN  @{users['members']}
+    \       Continue For Loop If    '${user['userName']}'=='Administrator'
+    \       Continue For Loop If    '${user['userName']}'=='administrator'
+    \       ${resp} =   Fusion Api Remove User      uri=${user['uri']}
+
+Validate Response
+    [Documentation]     Validates data in a response body against expected values
+    ...                 Example:
+    ...                 ${rc} =    Convert to Integer   400
+    ...                 ${valDict} =    Create Dictionary   status_code=${rc}
+    ...                                                     errorCode=CRM_DUPLICATE_NETWORK_NAME
+    ...                 Validate Response    ${respDict}   ${valDict}
+    [Arguments]         ${resp}   ${validation}
+
+    #Set Log Level  TRACE
+    ${response} =   Copy Dictionary   ${resp}
+    @{vkeys} =      Get Dictionary Keys     ${validation}
+    ${rkeys} =      Get Dictionary Keys     ${response}
+    @{keys} =       Remove all the keys in response that are not in validation      ${vkeys}        ${rkeys}
+    :FOR    ${x}    IN      @{keys}
+    \       Remove From Dictionary  ${response}     ${x}
+    Dictionaries Should Be Equal    ${validation}   ${response}     msg=Response does not match validation dictionary       values=True
+
+Remove all the keys in response that are not in validation
+    [Documentation]  Remove all the keys in response dictionary that are not specified in validation
+    [Arguments]     ${vkeys}        ${rkeys}
+    :FOR    ${x}    IN      @{vkeys}
+    \       Remove Values From List   ${rkeys}   ${x}
+    [Return]    ${rkeys}
+
+Get Ethernet Uris By Name
+    [Documentation]  Get ethernet network uris by name
+    [Arguments]   ${networkNames}
+    ${uriList} =   Create List
+    :FOR   ${netName}   IN   @{networkNames}
+    \   ${uri} =   Get Ethernet Uri By Name   ${netName}
+    \   Continue For Loop If   '${uri}' == '${null}'
+    \   Append To List   ${uriList}   ${uri}
+
+    [Return]   ${uriList}
+
+Get Ethernet Uri By Name
+    [Documentation]  Get ethernet network uri by name
+    [Arguments]   ${networkName}
+
+    ${resp} =   Fusion Api Get Ethernet Networks   param=?filter="'name'=='${networkName}'"
+    Return From Keyword If   ${resp['members']} == []   None
+    ${uri} =   Get From Dictionary   ${resp['members'][0]}   uri
+
+    [Return]   ${uri}
+
+Get FC Uris By Name
+    [Documentation]  Get fibre channel network uris by name
+    [Arguments]   ${networkNames}
+    ${uriList} =   Create List
+    :FOR   ${netName}   IN   @{networkNames}
+    \   ${uri} =   Get FC Uri By Name   ${netName}
+    \   Continue For Loop If   '${uri}' == '${null}'
+    \   Append To List   ${uriList}   ${uri}
+
+    [Return]   ${uriList}
+
+Get FC Uri By Name
+    [Documentation]  Get fibre channel network uri by name
+    [Arguments]   ${networkName}
+
+    ${resp} =   Fusion Api Get FC Networks   param=?filter="'name'=='${networkName}'"
+    Return From Keyword If   ${resp['members']} == []   None
+    ${uri} =   Get From Dictionary   ${resp['members'][0]}   uri
+
+    [Return]   ${uri}
+
+Get Enclosure Uri By Name
+    [Documentation]  Get enclosure uri by name
+    [Arguments]   ${enc}
+    ${resp} =   Fusion Api Get Enclosures   param=?filter="'name'=='${enc}'"
+    ${uri} =   Get From Dictionary   ${resp['members'][0]}   uri
+    [Return]   ${uri}
+
+Get Enclosure Group Uri By Name
+    [Documentation]  Get enclosure group uri by name
+    [Arguments]   ${eg}
+    ${resp} =   Fusion Api Get Enclosure Groups
+    ${l} =   Get Length   ${resp['members']}
+    :FOR   ${x}   IN RANGE   0   ${l}
+    \   Run Keyword If   '${resp['members'][${x}]['name']}' != '${eg}'   Continue For Loop
+    \   ${uri} =   Get From Dictionary   ${resp['members'][${x}]}   uri
+    [Return]   ${uri}
+
+Get Server Hardware Uri By Name
+    [Documentation]  Get server hardware uri by name
+    [Arguments]   ${enc_server}
+    ${resp} =   Fusion Api Get Server Hardware
+    ${shlist} =   Get From Dictionary   ${resp}   members
+    :FOR   ${sh}   IN   @{shlist}
+    \   ${name} =   Get From Dictionary   ${sh}   name
+    \   Run Keyword If   '${name}' != '${enc_server}'   Continue For Loop
+    \   ${uri} =   Get From dictionary   ${sh}   uri
+    [Return]   ${uri}
+
+Update Lig Uri From Enclosure Group Interconnect Bay Mappings
+    [Documentation]  Update Lig Uri From Enclosure Group Interconnect Bay Mappings
+    [Arguments]   ${encGrp}
+    ${interconnectBayMappings} =   Get Variable Value   ${encGrp['interconnectBayMappings']}
+    ${icBayMapLength} =   Get Length   ${interconnectBayMappings}
+
+    :FOR   ${i}   IN RANGE   0   ${icBayMapLength}
+    \   ${ligUriName} =   Get From Dictionary   ${interconnectBayMappings[${i}]}   logicalInterconnectGroupUri
+    \   ${resp} =   Fusion Api Get Lig   param=?filter="'name'=='${ligUriName}'"
+    \   ${ligUri} =   Run Keyword If   "${ligUriName}" == "None"   Set Variable   ${null}
+    \	...			ELSE   Get From Dictionary   ${resp['members'][0]}   uri
+    \   Set To Dictionary   ${encGrp['interconnectBayMappings'][${i}]}   logicalInterconnectGroupUri   ${ligUri}
+
+    [Return]   ${encGrp}
+
+Update Connections From Profiles
+    [Documentation]  Update connections from resource profiles
+    [Arguments]   ${profile}
+    ${connections} =   Get Variable Value   ${profile['connections']}
+    ${connectionsLength} =   Get Length   ${connections}
+
+    :FOR   ${i}   IN RANGE   0   ${connectionsLength}
+    \   ${networkUriName} =   Get From Dictionary   ${connections[${i}]}   networkUri
+    \   ${netsetResp} =   Fusion Api Get Network Set   param=?filter="'name'=='${networkUriName}'"
+    \   ${ethResp} =   Fusion Api Get Ethernet Networks   param=?filter="'name'=='${networkUriName}'"
+    \   ${resp} =   WPST Return Nonzero Count   ${netsetResp}   ${ethResp}
+    \   ${networkUri} =   Get From Dictionary   ${resp['members'][0]}   uri
+    \   Set To Dictionary   ${profile['connections'][${i}]}   networkUri   ${networkUri}
+
+    [Return]   ${profile}
+
+Create Lig
+    [Documentation]  Create LIG from variable file
+    [Arguments]   ${lig}
+    ${X-API-version} =  Convert To Integer  ${X-API-version}
+    ${ligCopy} =        WPST Deep Copy  ${lig}
+
+    ${name} =                       Get Variable Value  ${ligCopy['name']}
+    ${ethernetSettings} =           Get Variable Value  ${ligCopy['ethernetSettings']}
+    ${fcoeSettings} =               Get Variable Value  ${ligCopy['fcoeSettings']}
+    ${interconnectMapTemplate} =    Get Variable Value  ${ligCopy['interconnectMapTemplate']}
+    ${telemetryConfiguration} =     Get Variable Value  ${ligCopy['telemetryConfiguration']}
+    ${snmpConfiguration} =          Get Variable Value  ${ligCopy['snmpConfiguration']}
+    ${uplinkSets} =                 Get Variable Value  ${ligCopy['uplinkSets']}
+    ${qosConfiguration} =           Get Variable Value  ${ligCopy['qosConfiguration']}
+
+    ${uplinkSetsLength} =   Get Length   ${uplinkSets}
+    :FOR   ${i}   IN RANGE   0   ${uplinkSetsLength}
+    \   ${networkType} =   Get From Dictionary   ${uplinkSets[${i}]}   networkType
+    \   ${networkNames} =   Get From Dictionary   ${uplinkSets[${i}]}   networkUris
+    \   ${nativeNetworkName} =   Get From Dictionary   ${uplinkSets[${i}]}   nativeNetworkUri
+    \   Run Keyword If   '${networkType}' == 'Ethernet'   Continue For Loop
+    \   ${networkUris} =   Get FC Uris By Name   ${networkNames}
+    \   ${nativeNetworkUri} =   Run Keyword If   '${nativeNetworkName}' != '${null}'   Get FC Uri By Name   ${nativeNetworkName}
+    \   ...                                 ELSE   Set Variable   None
+    \   Set to dictionary   ${ligCopy['uplinkSets'][${i}]}   networkUris   ${networkUris}
+    \   Run Keyword If   '${nativeNetworkName}' != '${null}'   Set To Dictionary   ${ligCopy['uplinkSets'][${i}]}   nativeNetworkUri   ${nativeNetworkUri}
+
+    :FOR   ${i}   IN RANGE   0   ${uplinkSetsLength}
+    \   ${networkType} =   Get From Dictionary   ${uplinkSets[${i}]}   networkType
+    \   ${networkNames} =   Get From Dictionary   ${uplinkSets[${i}]}   networkUris
+    \   ${nativeNetworkName} =   Get From Dictionary   ${uplinkSets[${i}]}   nativeNetworkUri
+    \   Run Keyword If   '${networkType}' == 'FibreChannel'   Continue For Loop
+    \   ${networkUris} =   Get Ethernet Uris By Name   ${networkNames}
+    \   ${nativeNetworkUri} =   Run Keyword If   '${nativeNetworkName}' != '${null}'   Get Ethernet Uri By Name   ${nativeNetworkName}
+    \   ...                                 ELSE   Set Variable   None
+    \   Set To Dictionary   ${ligCopy['uplinkSets'][${i}]}   networkUris   ${networkUris}
+    \   Run Keyword If   '${nativeNetworkName}' != '${null}'   Set To Dictionary   ${ligCopy['uplinkSets'][${i}]}   nativeNetworkUri   ${nativeNetworkUri}
+
+    ${body} =       Fusion Api Create LIG Payload   name=${name}
+    ...                                         fcoeSettings=${fcoeSettings}
+    ...                                         interconnectMapTemplate=${interconnectMapTemplate}
+    ...                                         telemetryConfiguration=${telemetryConfiguration}
+    ...                                         ethernetSettings=${ethernetSettings}
+    ...                                         snmpConfiguration=${snmpConfiguration}
+    ...                                         uplinkSets=${ligCopy['uplinkSets']}
+    ...                                         qosConfiguration=${qosConfiguration}
+    ...                                         api=${X-API-version}
+
+    Log to console and logfile    \n-Create LIG
+    ${resp} =    Fusion Api Create LIG   ${body}
+    ${task} =   Wait for task   ${resp}   5min   3s
+    ${valDict} =    Create Dictionary   status_code=${200}
+    Validate Response   ${task}   ${valDict}
+
+
+######################################
+#            First Time Setup
+######################################
+First Time Setup
+    [Documentation]   Given ${vmName}, perform first time setup
+    [Arguments]   ${vmName}    ${newAdminPassword}=${ADMIN_CRED['password']}
+    connect to vi_server    ${VCENTER_IP}  ${VCENTER_USER}  ${VCENTER_PWD}
+    Log to console and logfile    Connected to vCenter ${VCENTER_IP}
+    vi server should be connected
+    ${vmStatus}=    get vm status    ${vmName}
+    Run Keyword If   '${vmStatus}' == 'POWERED OFF'    Power VM On   ${vmName}
+    ${IPS} =    Get VM IPv4 Addresses   ${vmName}
+    ${APPLIANCE_IP} =   Get From List   ${IPS}  0
+    Set Suite Variable   ${APPLIANCE_IP}   ${APPLIANCE_IP}
+    ${newVmName}=    Replace String   ${vm}   [Installed]   [FTS]
+    ${newVmName}=    Replace String   ${newVmName}   (Unknown)   (${APPLIANCE_IP})
+    Change VM Name   ${vmName}   ${newVMName}
+    ${vmName}=    Set Variable    ${newVMName}
+    Wait For Appliance Startup   ${APPLIANCE_IP}
+    Save EULA Set Access
+    Change Administrator password    ${APPLIANCE_IP}    ${newAdminPassword}
+    Login to OneView Via REST      ${APPLIANCE_IP}     ${ADMIN_CRED}
+    Add licenses from variable      ${licenses}
+    Configure Appliance Interfaces DHCP
+    ${Response}=    Fusion Api Get Appliance Version
+    ${build}=    Fetch From Right    ${Response['softwareVersion']}   -
+    ${newVmName}=    Remove String   ${newVmName}   [FTS]
+    rename vm    ${vmName}  ${newVmName}
+    Disconnect From VI Server
+    Log to console and logfile    Disconnected to vCenter ${VCENTER_IP}
+
+Save EULA Set Access
+    [Documentation]   Save EULA set service access.
+    Log to console and logfile  [FTS]....Agree to EULA
+    Fusion Api Save EULA    ${APPLIANCE_IP}
+    Log to console and logfile  [FTS]....Enable service access
+    Fusion Api Set service access   ${APPLIANCE_IP}
+
+Change Administrator password
+    [Documentation]  Change administrator password of the OV appliance
+    [Arguments]   ${APPLIANCE_IP}=${APPLIANCE_IP}     ${newAdminPassword}=${ADMIN_CRED['password']}
+    Log to console and logfile  [FTS]....Change Administrator password
+    ${req} =        Create Dictionary       newPassword=${newAdminPassword}
+    ...                                     oldPassword=admin
+    ...                                     userName=Administrator
+    Fusion Api Change Administrator password    host=${APPLIANCE_IP}    body=${req}
+
+Add Licenses from variable
+    [Documentation]   Adds licenses to an appliance from a variable which contains the license keys
+    [Arguments]     ${licenses}
+    Log to console and logfile      [FTS]....Add License
+    :FOR    ${license}  IN  @{licenses}
+    \       ${resp} =   Fusion Api Add License      key=${license['key']}
+
+Configure Appliance Interfaces DHCP
+    [Documentation]  Configure OV appliance interfaces, time, and locale
+    Log to console and logfile     [FTS]....Configure Appliance Interfaces, Time, Locale
+    ${resp} =   Fusion Api Get Appliance Interface Mac   eth0
+    Set to dictionary   ${appliance['applianceNetworks'][0]}    macAddress  ${resp}
+    Sleep   10s
+    ${resp} =   Fusion Api Configure Appliance Interfaces           ${appliance}
+    Wait For Task   ${resp}     timeout=200s        interval=5s
+    ${resp} =   Fusion Api Configure Appliance Time and Locale          ${timeandlocale}
+    Wait For Task   ${resp}     timeout=200s        interval=5s
+
+Wait For Appliance Startup
+    [Documentation]  Wait for OV appliance start up
+    [Arguments]    ${OV_IP}
+    Login to Fusion via SSH   ${OV_IP}
+    Log to console and logfile  [FTS]....Wait for appliance to start up
+    @{Commands}    Create List    /ci/bin/wait-for-cic
+    :FOR    ${Command}    IN    @{Commands}
+    \    ${stdout}    ${stderr}    ${rc}=    Execute Command    ${Command}    return_stderr=True    return_rc=True
+    \    Log    ${stdout}
+    \    Should Be Empty    ${stderr}                 msg=Error returned: ${rc} ${stderr}
+    \    Should Be Equal As Integers    ${rc}    0    msg=non-zero return code ${rc}
+    Logout of Fusion Via SSH
+
+Login to Fusion via SSH
+    [Documentation]    Connect to Fusion VM via SSH
+    ...                Example:\n| Login to Fusion Via SSH | 10.0.12.106 | Administrator | hpvse123 |
+    [Arguments]    ${IP}    ${USERNAME}=${FUSION_SSH_USERNAME}    ${PASSWORD}=${FUSION_SSH_PASSWORD}
+    ...            ${PROMPT}=${FUSION_PROMPT}    ${TIMEOUT}=${FUSION_TIMEOUT}
+    Log Many    ${IP}    ${USERNAME}    ${PASSWORD}    ${PROMPT}    ${TIMEOUT}
+    Set Default Configuration    prompt=${PROMPT}    timeout=${TIMEOUT}
+    ${Id}=    Open Connection    ${IP}
+    ${Output}=    Login    ${USERNAME}    ${PASSWORD}
+    [Return]    ${Id}
+
+Logout of Fusion Via SSH
+    [Documentation]    Exits the current SSH session
+    ...                Example:\n| Logout Of Fusion Via SSH |
+    Close Connection
+
+Power VM On
+    [Documentation]  Power on VM
+    [Arguments]    ${vmName}
+    power on vm   ${vmName}
+    Log to console and logfile  Powered on ${vmName} and sleeping 2 min while it boots...
+    Sleep   2 min
+
+Change VM Name
+    [Documentation]  Change name of the VM
+    [Arguments]   ${oldVMName}  ${newVMName}
+    Log to console and logfile    Rename vm to ${newVMName}
+    rename vm    ${oldVMName}  ${newVMName}
+
+
+######################################
+#            Notifications
+######################################
+
+Send Email
+    [Documentation]  Send email using smtplib
+    [Arguments]      ${fromAddr}   ${toAddr}   ${subject}   ${message}   ${attach}=${null}
+    WPST Send Email  ${fromAddr}   ${toAddr}   ${subject}   ${message}   ${attach}
+
+#  TODO
+# - Make resource name consistent between getovresource and deleteovserouce

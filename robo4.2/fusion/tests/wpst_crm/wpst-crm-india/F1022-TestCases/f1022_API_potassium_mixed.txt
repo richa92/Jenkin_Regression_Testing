@@ -1,0 +1,384 @@
+*** Settings ***
+Documentation		Feature Test: F1022 Synergy FC Upgrade Licensing
+...                 Includes FC licensing for Potash and Potassium API Tests
+...
+Variables     data_variables.py
+#Suite Setup   Run FTS and test-specific setup
+#Suite Teardown   Suite Teardown
+Resource            ../../../resource/fusion_api_all_resource_files.txt
+Library      Collections
+Library      json
+Library      OperatingSystem
+
+*** Variables ***
+${SSH_PASS}                 hpvse1
+${APPLIANCE_IP}    15.212.160.153
+${VM}     15.212.160.153
+${POTASH}     Virtual Connect SE 40Gb F8 Module for Synergy
+${CHLORIDE20}   Synergy 20Gb Interconnect Link Module
+${expired_key_mesg}    EXPIRED_LICENSE_KEY
+${invalid_key_mesg}    INVALID_LICENSE_KEY
+${EM_SN1}    EM1FFFF500
+${LI_warning1}              The logical interconnect is not licensed for 'Synergy 8Gb FC Upgrade'. Fibre Channel uplink sets will be non-operational until a license has been applied to all Fibre Channel capable interconnects.
+${LI_CA1}    Add at least 2 'Synergy 8Gb FC Upgrade' licenses for this logical interconnect, and reapply configuration. If sufficient licenses are added for all interconnects requiring them, licenses will be automatically applied to all of them.
+${encic3}    EM1FFFF500, interconnect 3
+${encic2}    EM1FFFF500, interconnect 2
+${encic6}    EM1FFFF500, interconnect 6
+
+*** Test Cases ***
+
+# Pre-requisite: covers single LI scenarios
+# single enclosure setup must have Potash in Bay3 and Bay6
+
+*** comment ***
+F1022_TC_1: Remove and add 3 Licenses
+  #[Tags]   Performance   license-condition-remove
+  Fusion Api Login Appliance   ${APPLIANCE_IP}  ${admin_credentials}
+  remove fc licenses
+  Add Licenses from variable    ${licenses_1}
+  Add Licenses from variable    ${licenses_2}
+
+  ${resp}=  Get available Licenses Count
+  should be equal as numbers   ${resp['totallicense']}  3   
+  
+
+F1022_TC_3: Create 3 networks for LIG for single MutiLI
+  [Documentation]   "Create networks for LIG"
+  [Tags]   Performance   networks-condition-multi
+  
+  ${ethnet}=  Get Variable Value   ${ethernet_networks}
+  Run Keyword If   ${ethnet} is not ${null}    Add Ethernet Networks from variable    ${ethnet}
+  ${fcnet}=  Get Variable Value   ${fc_networks}
+  Run Keyword If   ${fcnet} is not ${null}   Add FC Networks from variable     ${fcnet}
+  ${fcoenet}=   Get Variable Value   ${fcoe_networks}
+  Run Keyword If   ${fcoenet} is not ${null}   Add FCoE Networks from variable   ${fcoenet}
+  
+  ${ligs}=  Create LIG TBird Payload   ${lig_tbird_1enc}
+  Log to Console and logfile    CreateLIG ${ligs['name']} with FC-Uplink and Ethernet in Bayset3
+  ${resp}=  fusion api create lig   ${ligs}
+  sleep  20
+  ${enc_groups} =   Get Variable Value    ${enc_groups_1enc}
+  Run Keyword If    ${enc_groups} is not ${null}    Run Keyword for List   ${enc_groups}    Add Enclosure Group from variable
+  ${le}=  fusion_api_get_logical_enclosure
+  run keyword if  '${le['count']}'== '${0}'   Add Logical Enclosure from variable       ${les_potash_1enc}
+  ...  ELSE  FAIL   LE could not be created, since LE already exists
+
+
+
+F1022_TC_3: License Potassium using LE_Edit
+  [Documentation]  Manually lincese potassium
+ 
+  Fusion Api Login Appliance   ${APPLIANCE_IP}    ${admin_credentials}
+  Get LI License state   ${li_1enc['name']}   Yes   2   0
+  Get CANMIC     ${EM_SN1}   3    AAEA
+  Get CANMIC     ${EM_SN1}   6    AAEA
+  Update LE   ${LE_license_intent_yes}
+  sleep  30
+  validate FCLicense status for potassium   ${encic2}    Yes
+  ${resp}=  Get available Licenses Count
+  should be equal as numbers   ${resp['totallicense']}  3
+  should be equal as numbers   ${resp['availablelicense']}   0
+  
+	  
+F1022_TC_4: DeLicense Potassium using LE_Edit
+  [Documentation]  Manually delincese potassium
+ 
+  Fusion Api Login Appliance   ${APPLIANCE_IP}    ${admin_credentials}
+  Get LI License state   ${li_1enc['name']}   Yes   2   0
+  Get CANMIC     ${EM_SN1}   3    AAEA
+  Get CANMIC     ${EM_SN1}   6    AAEA
+  Update LE   ${LE_license_intent_no}
+  sleep  30
+  validate FCLicense status for potassium   ${encic2}    No
+  ${resp}=  Get available Licenses Count
+  should be equal as numbers   ${resp['totallicense']}  3
+  should be equal as numbers   ${resp['availablelicense']}   1
+
+
+
+
+F1022_TC22/TC23: Delicensing LI when FCuplink is removed
+  [Tags]   Performance   uplink-condition-remove
+  Fusion Api Login Appliance   ${APPLIANCE_IP}   ${admin_credentials}
+  Log to console and logfile    REmove FCUplink from LI.Deleting the only available FCuplink SAN-1-A    
+    
+  #${resp}=   fusion_api_delete_uplink_set    SAN-1-A
+  #${task} =  Wait For Task   ${resp}   600s   30s
+  #sleep  50
+  Get LI License state   ${li_1enc['name']}   No   0   0
+  ${resp}=  Get available Licenses Count
+  should be equal as numbers   ${resp['totallicense']}  3
+  should be equal as numbers   ${resp['availablelicense']}   3
+  remove fc licenses
+
+
+ 
+F1022_TC_24: LI Auto Licensing via LI update from group
+  [Tags]   Performance   update from group-condition-single
+  Fusion Api Login Appliance  ${APPLIANCE_IP}  ${admin_credentials}
+  ${LI}=   Get Variable value    ${li_1enc['name']}
+  ${Uri}=  Get LI URI   ${LI}
+  ${upd}=   fusion_api_update_from_group    ${Uri}
+  ${task} =  Wait For Task   ${upd}   600s   30s
+  sleep  60
+  Get LI License state   ${li_1enc['name']}   YesWillBeApplied   0   2
+  Update LE   ${LE_license_intent_yes}
+  sleep  30
+  validate FCLicense status for potassium   ${encic2}    YesWillBeApplied
+  
+
+
+F1022_TC_24:FC-license Alert
+  Fusion Api Login Appliance  ${APPLIANCE_IP}  ${admin_credentials}
+  ${lis1}=   Get Active Alerts 
+  ${pot_war}=  get matches    ${lis1}      {"name":"EM1FFFF500, interconnect2"*
+  ${uri}=   get ic uri   ${encic2}
+  should contain    ${pot_war}   {"name":"EM1FFFF500, interconnect2","uri": "${uri}"} is not licensed for \'Synergy 8Gb FC Upgrade\', all Fibre Channel capabilities will be disabled until a license has been applied.
+  ${li_war}=  get matches    ${lis1}    The logical interconnect is not licensed for*
+  should contain   ${li_war}   ${LI_warning1}
+
+
+F1022_TC_25:Multi-LI AutoLicensing
+  [Documentation]  Depends on F1022_TC_24 testcase as prerequisite
+  Fusion Api Login Appliance  ${APPLIANCE_IP}  ${admin_credentials}
+  Get LI License state   ${li_1enc['name']}   YesWillBeApplied   0   2
+  Add Licenses from variable   ${licenses_1}
+  sleep   30
+  ${resp}=  Get available Licenses Count
+  should be equal as numbers   ${resp['availablelicense']}   2
+  validate FCLicense status for potassium   ${encic2}   YesWillBeApplied
+  
+  Add Licenses from variable   ${licenses_2}
+  
+  sleep   60
+  Get LI License state   ${li_1enc['name']}   Yes   2   0
+  validate FCLicense status for potassium   ${encic2}    Yes
+  ${resp}=  Get available Licenses Count
+  should be equal as numbers   ${resp['totallicense']}  3
+  should be equal as numbers   ${resp['availablelicense']}   0
+  Get CANMIC     ${EM_SN1}   3    AAEA
+  Get CANMIC     ${EM_SN1}   6    AAEA
+
+
+*** Test Cases *** 
+F1022_TC_17: Delete LE will release all the licenses
+  Fusion Api Login Appliance  ${APPLIANCE_IP}  ${admin_credentials}
+  ${resp}=  fusion_api_delete_logical_enclosure   ${les_potash_1enc['name']}
+  Wait For Task   ${resp}   800s   30s
+  sleep   30
+  ${resp}=  Get available Licenses Count
+  should be equal as numbers   ${resp['totallicense']}  3
+  should be equal as numbers   ${resp['availablelicense']}   3
+  Get CANMIC     ${EM_SN1}   3    AAAA
+  Get CANMIC     ${EM_SN1}   6    AAAA
+
+
+
+*** Keywords ***
+SSH to host and ping x
+    [Documentation]    SSH's to a given host, then pings an IP from that host
+    [Arguments]	       ${HOST}    ${HOST2}
+    Open Connection And Log In      ${HOST}
+    ${Output}=    Execute Command    ping -c 4 ${HOST2}    return_stdout=True    return_rc=False
+    Log to console and logfile    ${Output}
+    Should Contain    ${Output}    ttl=
+    Close All Connections
+    
+Update LE
+	[Arguments]    ${LE_edit_intent}
+	
+	
+    ${resp} =    Fusion Api Get Logical Enclosure    
+    ${headers} =   Get From Dictionary     ${resp}  headers
+    ${Le_eTag} =    Get From Dictionary  ${resp['members'][0]}  eTag
+    Set To Dictionary    ${headers}    If-Match    ${Le_eTag}
+    ${le_edit}=  Get Variable value   ${LE_edit_intent}
+    log to console and logfile   ${le_edit['enclosureGroupUri']}
+	${enclosureGroupUri}=   Get Enclosure Group URI   ${le_edit['enclosureGroupUri']}
+	${le_uri}=   Get LE URI   ${le_edit['name']}
+	Set to Dictionary    ${le_edit}   uri=${le_uri}    enclosureGroupUri=${enclosureGroupUri}  logicalInterconnectUris=${resp['members'][0]['logicalInterconnectUris']}
+	${lic_int_resp}=   fusion_api_update_logical_enclosure    body=${le_edit}   uri=${le_uri}    headers=${headers}
+	${task}=	Wait For Task 	${lic_int_resp} 	200s	30s
+	Remove From Dictionary    ${headers}    If-Match
+	
+	[return]    ${task}
+    
+
+
+remove fc licenses
+  ${resp1}=  fusion api get licenses
+  ${avlic}=  Get From Dictionary   ${resp1}   members
+  
+
+  
+  :FOR  ${av}  IN  @{avlic}
+  \   ${uri}=  Get From Dictionary   ${av}   uri
+  \   ${resp}=   fusion_api_remove_license    uri=${uri}
+  ${count}=   fusion api get licenses
+  run keyword if  '${count['count']}'!= '0'  Log to console and logfile   Not able to remove one or more licenses   warn
+
+Get LE license Intent
+  [Arguments]    ${EM_SN}   ${icmbay}   ${intent}
+  ${log_enc}=   fusion_api_get_logical_enclosure
+  ${uri_m}=    Get From Dictionary     ${log_enc}   members
+  ${urile} =   Get From List  ${uri_m}  0
+  ${uri}=   Get From Dictionary     ${urile}   uri
+  ${le}=   fusion_api_get_logical_enclosure   uri=${uri}
+  ${encl}=  get from Dictionary  ${le}  enclosures
+  ${encuri}=  catenate  SEPARATOR=  /rest/enclosures/000000   ${EM_SN}
+  ${x}=  get from dictionary  ${encl}   ${encuri}
+  ${icb}=  get from dictionary  ${x}  interconnectBays
+  :FOR  ${bay}  IN  @{icb}
+  \  run keyword if  '${bay['bayNumber']}' != '${icmbay}'   Continue For Loop
+  \  ${y}=  get from dictionary   ${bay['licenseIntents']}   FCUpgrade
+  \  run keyword if  '${y}' == '${intent}'  Log to console and logfile  intent of ${EM_SN} interconnect ${icmbay}is ${y} as expected
+     ...  ELSE   FAIL   Intent of ${EM_SN} interconnect ${icmbay}is ${y},is not same as expected ${intent}
+
+
+FTS
+  Set Log Level   DEBUG
+    Get VM IP   ${VM}
+  First Time Setup    password=hpvse123
+
+Test Specific Setup
+  Set Log Level	TRACE
+  ${TEST_NAME} =      Set Variable    TEST-SPECIFIC SETUP
+  Run Keyword and Ignore Error    Write To ciDebug Log
+  Log to console and logfile  [TEST-SPECIFIC SETUP]
+  Fusion Api Login Appliance   ${APPLIANCE_IP}  ${admin_credentials}
+  ${users} =  Get Variable Value  ${users}
+  Run Keyword If   ${users} is not ${null}    Add Users from variable   ${users}
+  ${ethernet_networks} =   Get Variable Value    ${ethernet_networks}
+  Run Keyword If    ${ethernet_networks} is not ${null}    Add Ethernet Networks from variable   ${ethernet_networks}
+  ${ethernet_ranges} =   Get Variable Value   ${ethernet_ranges}
+  Run Keyword If   ${ethernet_ranges} is not ${null}   Run Keyword for List  ${ethernet_ranges}  Create Ethernet Range
+  ${fc_networks} =   Get Variable Value   ${fc_networks}
+  Run Keyword If   ${fc_networks} is not ${null}    Add FC Networks from variable   ${fc_networks}
+  ${fcoe_networks} =   Get Variable Value   ${fcoe_networks}
+  Run Keyword If  ${fcoe_networks} is not ${null}    Add FCoE Networks from variable   ${fcoe_networks}
+  ${licenses} =   Get Variable Value   ${licenses}
+  Run Keyword If   ${licenses} is not ${null}   Add Licenses from variable   ${licenses}
+
+    Login all users     ${users}
+
+Run FTS and test-specific setup
+    Set Log Level   TRACE
+    FTS
+    Test Specific Setup
+
+Get available Licenses Count
+
+    Fusion Api Login Appliance 		${APPLIANCE_IP}		${admin_credentials}
+    ${resp}=  fusion api get licenses
+    ${total_count}=  Get From Dictionary   ${resp}   count
+    
+    ${avlic1}=    set variable    ${0}
+    ${avlic}=  Get From Dictionary   ${resp}   members
+    ${nodes_list}=   Create List
+    :FOR   ${av}  IN  @{avlic}
+    \   ${avlic2}=  Get From Dictionary   ${av}   availableCapacity
+    \   ${avlic1}=   Evaluate   ${avlic1}+${avlic2}
+    \   ${nodes}=   Get From Dictionary  ${av}   nodes
+    \   Append to List   ${nodes_list}    ${nodes}
+    \   Run keyword if   ${resp['status_code']} != ${200}   Log to console   Error getting license count   WARN
+    ${license_info}=   Create Dictionary
+    Set to Dictionary   ${license_info}   availablelicense=${avlic1}
+    Set to Dictionary   ${license_info}   totallicense=${total_count}
+    Set to Dictionary   ${license_info}   nodes=${nodes_list}
+    [return]   ${license_info}
+
+Get LI License state
+   [Arguments]   ${liname}   ${state}   ${consumed}   ${required}
+   ${LIS}=   Get LI member    ${liname}
+   Log to console and logfile   Verifying License state of Logical interconnect ${liname}
+   ${license}=  Get variable value   ${LIS['icmLicenses']['license'][0]}
+   run keyword if   ${license} is not ${null}   should match  ${license['state']}  ${state}
+   run keyword if   ${license} is not ${null}   should be equal as numbers   ${license['consumedCount']}   ${consumed}
+   run keyword if   ${license} is not ${null}  should be equal as numbers  ${license['requiredCount']}   ${required}
+   ...   ELSE   log to console    LI ICM license is null as it is delicensed
+
+
+Create LIG TBird Payload
+  [Arguments]   ${ligs}
+  Set Log Level    Trace
+  ${Potash}=   Get Interconnect Type URI     ${POTASH}
+  ${Chloride}=     Get Interconnect Type URI    ${CHLORIDE20}
+  ${Response}=   Get From Dictionary     ${ligs}    interconnectMapTemplate
+  ${interconnectMapEntryTemplates}=    Create List
+  ${interconnectMapEntryTemplates1}=    Get From Dictionary     ${Response}     interconnectMapEntryTemplates
+  :For  ${item}  IN   @{interconnectMapEntryTemplates1}
+  \   ${ICM}=   Get From Dictionary    ${item}   permittedInterconnectTypeUri
+  \   Run keyword If   '${ICM}' == 'Virtual Connect SE 40Gb F8 Module for Synergy'     Set to Dictionary     ${item}   permittedInterconnectTypeUri=${Potash}
+  \   Run keyword If   '${ICM}' == '${CHLORIDE20}'     Set to Dictionary     ${item}   permittedInterconnectTypeUri=${Chloride}
+  \   Append To List    ${interconnectMapEntryTemplates}     ${item}
+  # Create LIG Body
+  ${ls}=    Set to Dictionary     ${Response}   interconnectMapEntryTemplates=${interconnectMapEntryTemplates}
+  Set to Dictionary	  ${ligs}		interconnectMapTemplate=${Response}
+  ${uplinkSets1} =   Get From Dictionary  ${ligs}   uplinkSets
+  ${uplinkSets2} =   Create List
+  ${fcnetworkuri}=   Create List
+  ${ethnetworkuri}=   Create List
+  :FOR  ${x}  IN   @{uplinkSets1}
+  \  ${networkType} =   Get From Dictionary   ${x}  networkType
+  \  ${networks} =   Get From Dictionary   ${x}  networkUris
+  \  Run Keyword If   '${networkType}' == 'Ethernet'   Continue For Loop
+  \  ${networkUris} =   Get FC Uris   ${networks}
+  \  log to console and logfile   ${networkUris}
+  \  Set to dictionary   ${x}  networkUris=${networkUris}
+  \  Append to List    ${uplinkSets2}    ${x}
+  :FOR   ${x}  IN    @{uplinkSets1}
+  \  ${networkType} =   Get From Dictionary   ${x}  networkType
+  \  ${networks} =    Get From Dictionary   ${x}   networkUris
+  \  Run Keyword If   '${networkType}' == 'FibreChannel'   Continue For Loop
+  \  ${networkUris} =    Get FCoE Uris   ${networks}
+  \  ${ethernetUris} =   Get Ethernet URIs   ${networks}
+  \  ${networkUris} =    combine lists   ${networkUris}  ${ethernetUris}
+  \  Set to dictionary   ${x}   networkUris=${networkUris}
+  \  Append to List    ${uplinkSets2}    ${x}
+  Set to Dictionary   ${ligs}   uplinkSets=${uplinkSets2}
+  [Return]   ${ligs}
+
+GET Interconnect license status
+  [Arguments]    ${ICM_NAME}
+  ${icmuri}=  Get IC URI    ${ICM_NAME}
+  ${lic_status}=   fusion_api_index_resource   ${icmuri}
+  ${attributes}=    Get from Dictionary    ${lic_status}   multiAttributes
+  ${fclicenseapplied}=    Get from Dictionary    ${attributes}   icmLicenses
+  log to console and logfile   ${fclicenseapplied[0]}
+  [Return]    ${fclicenseapplied[0]}
+
+Get active alerts
+  
+  ${alert1}=   fusion_api_get_alerts
+  ${resp}=   Get From Dictionary   ${alert1}  members
+  ${lis1}=   create list
+  :FOR   ${x}  IN  @{resp}
+  \  run keyword if   '${x['alertState']}' != 'Active'  Continue For Loop
+
+  \  append to list   ${lis1}   ${x['description']}   ${x['correctiveAction']}
+  
+  [return]   ${lis1}
+
+validate FCLicense status for potassium 
+	[Arguments]    ${ICM}   ${state}
+	${icmuri}=	get ic uri    ${ICM}
+	${fclic_nodes}=  Create Dictionary
+	${node}=   fusion_api_index_resource   ${icmuri}
+	${attr}=   get variable value    ${node['multiAttributes']['icmLicenses'][0]}   
+	should contain     ${attr}   licenseType=Synergy 8Gb FC Upgrade
+	should contain     ${attr}   state=${state}
+
+
+Get CANMIC
+  [Arguments]     ${EM_SN}   ${Bay}    ${canmic_value}
+  Open Connection And Log In      ${APPLIANCE_IP}
+  #${EM_SN}=   Execute Command   /ci/bin/tbird/appliance-hal.sh list-enclosures
+  ${EM1}=  Execute Command   /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${EM_SN}
+  ${EM1}=  catenate   SEPARATOR=   ${EM1}  %bond0
+  ${XAUTH1}=  Execute Command  /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${EM_SN} -o t
+    Log to console   Fetching Canmic Block 161 byte 1 Values of Interconnect ${Bay} Potash/Potassium
+    ${canmic1}=   Execute Command   curl --globoff -ki -x "" --request POST --header "x-auth-token:${XAUTH1}" https://${EM1}/rest/v1/InterconnectManager/${Bay} -H 'Content-Type: application/json' -d '{ "Action": "ReadCanmicBlocks","List": [161]}' | grep } | python -m json.tool | grep Data | cut -d "\\"" -f 4
+    ${canmic}=   Get substring   ${canmic1}   0  4
+  Close All Connections
+  run keyword if  '${canmic}' == '${canmic_value}'    Log to COnsole   Base64 value of Licensed Potashes is ${canmic} as expected.
+    ...   ELSE   FAIL  Base64 value of Licensed Potashes are ${canmic} while expected for both was ${canmic_value}

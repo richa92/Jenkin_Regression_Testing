@@ -1,0 +1,134 @@
+*** Settings ***
+Documentation
+...    = Usage =
+...    | pybot | -L DEBUG | server_hardware.txt |
+...    = Variables =
+...    | ENCLOSURE | Required. Dictionary key from variables.py representing the desired enclosure. |
+
+Library           Collections
+Library           json
+Library           String
+Variables         ../resources/variables.py    ${ENCLOSURE}
+Resource          ../resources/defaults.txt
+Resource          ../resources/fusion_api.txt  # DVT fusion API extensions
+Force Tags        API    HW
+
+Suite Setup       Login To Fusion Via REST
+Suite Teardown    Logout Of Fusion Via REST
+
+*** Test Cases ***
+Verify Mezz Locations
+    Get Server Hardware Info
+    # First, make sure all mezz cards on server are known about in variables.py
+    Variable Should Exist    ${BLADE_DATA}    msg="BLADE_DATA undefined, no info to verify against."
+    :FOR    ${server}     IN    @{serverList}
+    \    ${slot}    Set Variable    ${server["position"]}
+    \    Verify Server Slot Exists    ${slot}
+    \    Verify Mezz Info    ${slot}
+    # Also, verify that there isn't anything defined in variables.py that isn't present in server data
+    ${knownServerSlots}=    Get Dictionary Keys    ${BLADE_DATA}
+    :FOR    ${slot}     IN    @{knownServerSlots}
+    \    Run Keyword If     "${BLADE_DATA["${slot}"]["MEZZ_1"]}"!="${Empty}"    Verify Known Mezz Exists in OneView    ${slot}    1
+    \    Run Keyword If     "${BLADE_DATA["${slot}"]["MEZZ_2"]}"!="${Empty}"    Verify Known Mezz Exists in OneView    ${slot}    2
+    \    Run Keyword If     "${BLADE_DATA["${slot}"]["MEZZ_3"]}"!="${Empty}"    Verify Known Mezz Exists in OneView    ${slot}    3
+
+Verify Interconnect Exists
+    ${Uri}=     Fetch From Right    ${interconnectUri},     /
+    ${Uri}=     Fetch From Left     ${Uri},     ,
+    Log     \nuri:${Uri}   console=true
+    ${Response}=    Fusion API Get Interconnect    /${Uri}
+    Should Be Equal as Strings    ${Response['status_code']}    200
+    ...    msg=Failed to Get Interconnects.
+    #Should Not Be Equal as Integers    ${Response['count']}    0
+    #...    msg=Failed to find Interconnects.
+    #Log     \n\n Interconnect Data: ${Response}   console=true
+    Search For Present Ports on Interconnect    ${Response}
+    
+ 
+*** Keywords ***
+Verify Known Mezz Exists in OneView
+    [Arguments]    ${slot}    ${mezzSlot}
+    ${mezz}=    Find Corresponding Mezz    ${slot}    ${mezzSlot}
+    ${verifyString}=    Catenate    SEPARATOR=    MEZZ_    ${mezzSlot}
+    Should Be Equal as Strings   ${BLADE_DATA["${slot}"]["${verifyString}"]}    ${mezz}   
+    
+Find Corresponding Mezz
+    [Arguments]    ${knownSlot}    ${currentMezz}
+    :FOR    ${server}     IN    @{serverList}
+    \    Continue For Loop If    "${server['position']}"!="${knownSlot}"
+    \    ${mezzList}=    Set Variable    ${server["portMap"]["deviceSlots"]}
+    :FOR    ${mezz}    IN    @{mezzList}
+    \    Return From Keyword If    "${mezz["slotNumber"]}"=="${currentMezz}"    ${mezz["deviceName"]}    
+
+Verify Server Slot Exists
+    [Arguments]    ${slotNum}
+    Should Not Be Empty    ${BLADE_DATA["${slotNum}"]}
+
+Verify Mezz Info
+    [Arguments]    ${slot}
+    :FOR    ${deviceSlot}    IN    @{deviceSlots}
+    \    Continue For Loop If    "${deviceSlot['deviceName']}"=="${Empty}"
+    \    ${verifyString}=    Catenate    SEPARATOR=    MEZZ_    ${deviceSlot['slotNumber']}
+    \    Should Be Equal as Strings     ${deviceSlot["deviceName"]}       ${BLADE_DATA["${slot}"]["${verifyString}"]}
+
+Get Server Hardware Info 
+    ${Response}=    Fusion API Get Server Hardware
+    Should Be Equal as Strings    ${Response['status_code']}    200
+    ...    msg=Failed to Get Server Hardware.
+    Should Not Be Equal as Integers    ${Response['count']}    0
+    ...    msg=Failed to find Server Hardware present.
+    Set Global Variable    ${serverList}    ${Response['members']}
+    Search For Present Server Hardware    ${Response['members']}
+    
+Search For Present Server Hardware
+    [Arguments]    ${servers}
+    # There are 12 blade bays in a Tbird chassis.
+    # Find which bays have Server Hardware present.
+    :FOR    ${ServerHardware}    IN    @{servers}
+    \    Log    \nServer Hardware: ${ServerHardware['name']}    console=true
+    \    Search Server Hardware For Present Mezz Cards    ${ServerHardware}
+    
+Search Server Hardware For Present Mezz cards
+    [Arguments]    ${ServerHardware}
+    # There are three mezzanine slots on a server blade.
+    # Find which mezzanine slots have cards present (on this Server Hardware).
+    Set Global Variable    ${deviceSlots}     ${ServerHardware['portMap']['deviceSlots']}
+    :FOR    ${deviceSlot}    IN    @{deviceSlots}
+    \    Continue For Loop If    "${deviceSlot['deviceName']}"=="${Empty}"
+    \    Log    \thas a ${deviceSlot['location']} in mezz slot ${deviceSlot['slotNumber']} named ${deviceSlot['deviceName']}    console=true
+    \    Verify Interconnects Are In Correct Ports    ${deviceSlot['physicalPorts']}
+    \    Search Physical Ports For Interconnects    ${deviceSlot}
+
+Verify Interconnects Are In Correct Ports
+    [Arguments]    ${mezzPorts}
+    @{mezz1InterconnectPorts}=    Create List    '1'   '2'    '3'
+    @{mezz2InterconnectPorts}=    Create List    '4'    '5'    '6'
+    :FOR    ${mezzPort}    IN    @{mezzPorts}
+    \    Continue For Loop If    "${mezzPort['interconnectPort']}"=="0"
+    \    Run Keyword If    "${mezzPort['portNumber']}"=="1"    List Should Contain Value    ${mezz1InterconnectPorts}    '${mezzPort['interconnectPort']}'
+    \    Run Keyword If    "${mezzPort['portNumber']}"=="2"    List Should Contain Value    ${mezz2InterconnectPorts}    '${mezzPort['interconnectPort']}'
+    
+Search Physical Ports For Interconnects
+    [Arguments]    ${deviceSlots}
+    # Find the physical ports connected to Interconnects on this mezzanine
+    :FOR    ${physicalPort}    IN    @{deviceSlots['physicalPorts']}
+    \    #Log Formatted Dictionary    ${physicalPort}
+    \    Continue For Loop If    "${physicalPort['interconnectUri']}"=="${Empty}"
+    \    Continue For Loop If    "${physicalPort['interconnectUri']}"=="None"
+    \    Log    \tmezz port ${physicalPort['portNumber']} is connected to icm in slot ${physicalPort['interconnectPort']} uri: ${physicalPort['interconnectUri']}    console=true
+    \    Set Global Variable     ${interconnectUri}    ${physicalPort['interconnectUri']}
+
+    
+Search For Present Ports on Interconnect
+    [Arguments]     ${interconnect}
+    # There are $interconnects['portCount']} ports
+    # Looping through each port
+    :FOR    ${port}     IN    @{interconnect['ports']}
+    #\      Continue For Loop If "${port['portStatus']}"=="Unlinked"
+    \       Log    \tPort ${port['portName']} health status: ${port['portHealthStatus']}
+    
+Log Formatted Dictionary
+    [Arguments]    ${Dictionary}
+    # Print a nicely formatted copy on the console
+    ${NicelyFormattedJsonString}    json.dumps    ${Dictionary}    indent=${4}    sort_keys=${True}
+    Log    \nFormatted Dictionary:\n${NicelyFormattedJsonString}    console=true

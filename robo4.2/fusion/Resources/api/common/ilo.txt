@@ -1,0 +1,139 @@
+*** Settings ***
+Library    OperatingSystem
+
+*** Variables ***
+${frxml}     SEPARATOR=\n    <RIBCL VERSION="2.0">
+...    <LOGIN USER_LOGIN="adminname" PASSWORD="password">
+...    <RIB_INFO MODE="write">
+...    <FACTORY_DEFAULTS/>
+...    </RIB_INFO>
+...    </LOGIN>
+...    </RIBCL>
+
+${isourl}     http://10.178.12.99/deployment/iso/hpip/IP321.2018_1126.48.iso
+
+${mediaxml}     SEPARATOR=\n    <RIBCL VERSION="2.0">
+...    <LOGIN USER_LOGIN="adminname" PASSWORD="password">
+...    <RIB_INFO MODE="write">
+...    <INSERT_VIRTUAL_MEDIA DEVICE="CDROM" IMAGE_URL="${isourl}"/>
+...    <SET_VM_STATUS DEVICE="CDROM">
+...    <VM_BOOT_OPTION VALUE="CONNECT"/>
+...    <VM_BOOT_OPTION VALUE="BOOT_ONCE"/>
+...    <VM_WRITE_PROTECT VALUE="YES" />
+...    </SET_VM_STATUS>
+...    </RIB_INFO>
+...    </LOGIN>
+...    </RIBCL>
+
+
+*** Keywords ***
+Get Trusted Token
+    [Documentation]    Retrieve a trusted token for the given appliance <IP>
+    [Arguments]    ${APPLIANCE_IP}
+    ${id}=        Open Connection         ${APPLIANCE_IP}
+    ${output} =   Login    root     hpvse1
+    ${token} =    Execute Command    psql -A -t --dbname=cidb --user=postgres -c "select session_id from session.session where username='erm'";
+    Close Connection
+    [Return]    ${token}
+
+Get _HPOneViewAdmin iLO credentials
+    [Documentation]    Query OV using <trusted token> for a given <serverHardwareUri> _HPOneViewAdmin iLO credentials
+    [Arguments]    ${token}    ${uri}
+    ${id}=        Open Connection         ${APPLIANCE_IP}
+    ${output} =   Login    root     hpvse1
+    ${command} =  set variable    curl -gk -s -H "Auth:${token}" https://localhost/rest/credentials | jq -r '.members' | jq -c '.[] | select(.username == "_HPOneViewAdmin" and .resourceURI == "${uri}")' | jq -r '.password'
+    ${cred} =     Execute Command    ${command}
+    Close Connection
+    [Return]    ${cred}
+
+Get iLO ipv6
+    [Documentation]    Query OV using <trusted token> for a given <serverHardwareUri> iLO ipv6 address
+    [Arguments]    ${token}    ${uri}
+    ${id}=         Open Connection         ${APPLIANCE_IP}
+    ${output} =    Login    root     hpvse1
+    ${ipv6} =      Execute Command    curl -gk -s -H "Auth:${token}" https://localhost${uri} | jq -r '.mpIpAddress'
+    Close Connection
+    [Return]    ${ipv6}
+
+Factory reset server
+    [Documentation]   Factory resets the given <server> iLO ip.
+    ...   You can use 'Get iLO ipv6' to obtain server
+    [Arguments]    ${iUSER}    ${iPASSWORD}   ${iSERVER}
+    ${id}=              Open Connection         ${APPLIANCE_IP}
+    ${output} =         Login    root     hpvse1
+    ${output} =         Execute Command    ping6 -c4 ${iSERVER}%bond0
+    should contain      ${output}    ttl=
+    ${output}           Execute Command    echo '${frxml}' > /tmp/fr.xml
+    #Check blade power -
+    #FACTORY RESET
+    ${command} =        set variable      /ci/bin/locfg.pl -s [${iSERVER}%bond0] -u ${iUSER} -p ${iPASSWORD} -f /tmp/fr.xml
+    ${ribcl_output}  ${rc} =    Execute Command    ${command}   return_rc=True
+    should contain      ${ribcl_output}    <INFORM>Integrated Lights-Out will reset at the end of the script.</INFORM>
+    sleep    1m
+    ${output}           Execute Command    ping6 -c4 ${iSERVER}%bond0
+    should contain      ${output}    ttl=
+    Log    \nFactory reset of server iLO:${iSERVER} succeeded    console=True
+    Close Connection
+    [Return]   ${ribcl_output}
+
+Update HPIP on server
+    [Documentation]   updates HPIP
+    ...   You can use 'Get iLO ipv6' to obtain server
+    [Arguments]    ${iUSER}    ${iPASSWORD}   ${iSERVER}
+    ${id}=              Open Connection         ${APPLIANCE_IP}
+    ${output} =         Login    root     hpvse1
+    ${output} =         Execute Command    ping -c4 ${iSERVER}
+    should contain      ${output}    ttl=
+    sleep   5s
+    ${output}           Execute Command    echo '${mediaxml}' > /tmp/ilomedia.xml
+    ${command} =        set variable      /ci/bin/locfg.pl -s ${iSERVER} -u ${iUSER} -p ${iPASSWORD} -f /tmp/ilomedia.xml
+    ${ribcl_output}  ${rc} =    Execute Command    ${command}   return_rc=True
+    should contain      ${ribcl_output}    succeeded
+    sleep    1m
+    ${output}           Execute Command    ping -c4 ${iSERVER}
+    should contain      ${output}    ttl=
+    Close Connection
+    [Return]   ${ribcl_output}
+
+Execute RIBCL xml
+    [Documentation]   executes RIBCL XML on the target server from a OneView appliance <APPLIANCE_IP>
+    ...    You can provide the XML in a variable (shown above) or read it from a file into a variable (shown below).
+    ...    You can also get the IP, user and password for a given server hardware uri as shown below.
+    ...    example:
+    ...    ${uri} =         set variable     /rest/server-hardware/32353537-3835-584D-5136-333730345A33
+    ...    ${token} =       Get Trusted Token        ${APPLIANCE_IP}
+    ...    ${iSERVER} =     Get iLO ipv6     ${token}   ${uri}
+    ...    ${iUSER} =       set variable     _HPOneViewAdmin
+    ...    ${iPASSWORD} =   Get _HPOneViewAdmin iLO credentials   ${token}   ${uri}
+    ...    ${ribcl} =       OperatingSystem.Get file   C:\\fusion\\f420\\fusion\\Tools\\cpqlocfg\\actions\\Get_Network.xml
+    ...    ${postProcess} arg is optional.  If defined will be appended to the RIBCL command.  Sometimes easier to do stuff in Linux than in RG.
+    ...    ${postProcess} =    set variable    2>/dev/null | sed -n -e '/<EVENT_LOG DESCRIPTION="Integrated Management Log">/,/<\\/EVENT_LOG>/ p'
+    ...    ${output} =      Execute RIBCL xml     ${iUSER}    ${iPASSWORD}   ${iSERVER}   ${ribcl}    ${postProcess}
+    [Arguments]    ${iUSER}    ${iPASSWORD}   ${iSERVER}   ${ribcl}    ${postProcess}=${EMPTY}
+    ${id}=              Open Connection         ${APPLIANCE_IP}
+    ${output} =         Login    root     hpvse1
+    ${command} =        set variable      cat /ci/etc/appliance.properties | grep COMPATIBILITY_FAMILY
+    ${type} =         Execute Command    ${command}
+    # if C7000, ping, else ping6
+    ${output} =   run keyword if    '${type}' == 'COMPATIBILITY_FAMILY = HPE OneView VM'    Execute Command    ping -c4 ${iSERVER}
+    ...           ELSE   ping6 -c4 ${iSERVER}%bond0
+    should contain      ${output}    ttl=
+    ${output}           Execute Command    echo '${ribcl}' > /tmp/ribcl.xml
+    ${ribcl_command} =        run keyword if    '${type}' == 'COMPATIBILITY_FAMILY = HPE OneView VM'   _RIBCL C7000    ${iUSER}    ${iPASSWORD}   ${iSERVER}    ${postProcess}
+    ...                 ELSE   _RIBCL Synergry   ${iUSER}    ${iPASSWORD}   ${iSERVER}    ${postProcess}
+    ${ribcl_output}  ${rc} =    Execute Command    ${ribcl_command}   return_rc=True
+    Close Connection
+    should be equal as integers  ${rc}   0
+    [Return]   ${ribcl_output}
+
+_RIBCL C7000
+    [Documentation]   builds locfg.pl command for a OneView OVA appliance
+    [Arguments]    ${iUSER}    ${iPASSWORD}   ${iSERVER}    ${postProcess}
+    ${command} =   set variable      /ci/bin/locfg.pl -s ${iSERVER} -u ${iUSER} -p ${iPASSWORD} -f /tmp/ribcl.xml ${postProcess}
+    [Return]   ${command}
+
+_RIBCL Synergry
+    [Documentation]   builds locfg.pl command for a OneView Synergy appliance
+    [Arguments]    ${iUSER}    ${iPASSWORD}   ${iSERVER}    ${postProcess}
+    ${command} =   set variable      /ci/bin/locfg.pl -s [${iSERVER}%bond0] -u ${iUSER} -p ${iPASSWORD} -f /tmp/ribcl.xml ${postProcess}
+    [Return]   ${command}

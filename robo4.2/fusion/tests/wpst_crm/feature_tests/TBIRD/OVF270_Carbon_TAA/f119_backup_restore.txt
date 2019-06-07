@@ -1,0 +1,497 @@
+*** Settings ***
+
+Library                   FusionLibrary
+Library                   RoboGalaxyLibrary
+Library                   Collections
+Library                   ServerOperations
+Library                   OperatingSystem
+Library                   Process
+Variables                 data_variables.py
+
+#Suite Setup               Suite Setup Tasks
+Suite Teardown            Suite Teardown Tasks
+
+Resource            ../../../../resource/fusion_api_all_resource_files.txt
+
+*** Variables ***
+
+${BACKUPFILE_DIR}               ${CURDIR}/
+${module_file_path1}      ${CURDIR}\\PerformIO.py
+${module_file_path2}      ${CURDIR}\\FetchIO.py
+
+*** Test Cases ***
+
+
+F119_BACKUP4_20565 BACKUP4 Backup the enclosure configuration, then reset OV to factory defaults, and restore configuration
+    [Documentation]    Verify Backup the enclosure configuration, then reset OV to factory defaults, and restore configuration
+
+    Set Log Level      TRACE
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+
+    Clear Profile Configurations
+    Log to console and logfile    \n-Creating Server Profiles in OV
+    :FOR   ${serverprofile}   IN   @{server_profile_20563}
+    \    Add Server Profiles from variable    ${serverprofile}
+    Log to console and logfile   \nGetting the SP uris to verify after the restore
+    ${resp1}=      Fusion Api Get Server Profiles    param=?filter="'name'=='${PROFILE1}'"
+    ${uri1}=       Get From Dictionary     ${resp1['members'][0]}     uri
+    ${resp2}=      Fusion Api Get Server Profiles    param=?filter="'name'=='${PROFILE2}'"
+    ${uri2}=       Get From Dictionary     ${resp2['members'][0]}     uri
+
+    Log to console and logfile    \n-Creating the backup in OV
+    ${resp}=    Fusion Api Create Backup
+    Run Keyword If  ${resp['status_code']} !=202    fail    msg=\nBackup failed. \n ErrorCode:${resp['errorCode']}\n ${resp['message']}
+    ${task}    Wait For Task    ${resp}    10 min    20s
+    Run Keyword If  '${task['taskState']}' !='Completed'   or   ${task['status_code']} !=200   fail    msg=\nBackup failed. \n ErrorCode:${task['taskErrors']}\n ${task['taskStatus']}
+    ...         ELSE    Log to console and logfile  \n\nBackup Created Succesfully !! \n ${task['taskStatus']}
+
+    Log to console and logfile    \nDownloading Backup
+    ${Response}    Fusion Api Get Backup
+    Run keyword If    ${Response['status_code']}!=200   Fail      "Unable to Get the latest backup"
+    ${Backup_file_name}    Get From Dictionary    ${Response['members'][0]}    id
+    ${down}=   Fusion Api Download Backup   ${Response['members'][0]['downloadUri']}   ${Backup_file_name}
+
+    Log to console and logfile  \n\n****Reset OV Appliance to Factory Defaults****
+    ${resp}=   Fusion Api Appliance Factory Reset     ${Mode}
+    Run keyword If    ${resp['status_code']}!= 202    Fail   "Failed to do Factory Reset"
+    Log to console and logfile   \nFactory Reset In-Progress...
+    Sleep    15min
+    Log to console and logfile    \nFactory Reset Done Successfully.
+    Sleep    220s
+    ${Response}=     Fusion Api Save Eula    ${APPLIANCE_IP}
+    Run Keyword If    ${Response['status_code']}!=200    fail     "Not Saved EULA Status"
+    Sleep    120s
+
+    Log to console and logfile    Changing the password
+    ${Creds}=     Create Dictionary    newPassword=${admin_credentials['password']}
+    ...                              oldPassword=${admin_default_paswd}
+    ...                              userName=${admin_credentials['userName']}
+    ${Response}=     Fusion Api Change Administrator Password    ${appliance_IP}    ${Creds}
+    Run Keyword If    ${Response['status_code']}!=200    Fatal Error    Fatal Error Assigning Administrator Password
+    sleep    100s
+    Log To Console and logfile     Changed the password successfully
+
+    Log To Console and logfile   "Log in to Oneview"
+    Fusion Api Login Appliance    ${appliance_IP}        ${admin_credentials}
+    sleep    100s
+
+    Log to console and logfile   Uploading the backup file saved locally to OneView
+    ${Response}=    Fusion Api Upload Backup    ${BACKUPFILE_DIR}${Backup_file_name}
+    sleep    200s
+
+    Log to console and logfile    \nGetting the created Backup and starting the restore operation
+    Restore From Backup
+    Sleep     1min
+
+    Log to console and logfile   \nLogging in to Onview
+
+    Fusion Api Login Appliance   ${APPLIANCE_IP}   ${admin_credentials}
+
+    Sleep    1000s
+
+    Log to console and logfile     \nChecking if the ICs are in configured state
+    ${ic_list} =     Get ICs
+    ${len_ic} =   Get Length    ${ic_list}
+    Log to console and logfile  \n\n${len_ic} Carbon Interconnect modules are available\n
+    :FOR    ${x}    IN RANGE    0  ${len_ic}
+    \    ${ic_bay} =     Fetch from right    ${ic_list[${x}]['name']}    ${SPACE}
+    \    ${ic_uri} =     Get From Dictionary     ${ic_list[${x}]}     uri
+    \    Log to console and logfile  \n\nChecking current state
+    \    Wait Until Keyword Succeeds    5 min   15s     IC reached state    ${ic_list[${x}]['uri']}    Configured
+    \    Log to console and logfile  \n\nThe IC module ${ic_list[${x}]['name']} is in Configured state
+
+    Check LE Consistency     ${LE1}
+    Log to console and logfile    \nChecking if the Server Profiles Uri is same after the restore
+    ${x} =    Set Variable    1
+    :FOR   ${name}    IN   @{PROFILES}
+    \     ${resp}=     Fusion Api Get Server Profiles    param=?filter="'name'=='${name}'"
+    \     ${uri}=      Get From Dictionary    ${resp['members'][0]}     uri
+    \     Run Keyword If      '${uri}' != '${uri${x}}'      fail     msg="The server profile ${name} is not the same as before restore"
+    \     ...       ELSE     Log to console and logfile    \n Verified the uri of ${name} is same before and after the restore
+    \     ${x}=    Evaluate    ${x} + 1
+
+    Power on All Servers
+    Sleep   800s
+
+    Log to console and logfile    \n Verifying if the Server Profiles status is OK
+    :FOR   ${SP}   IN    @{PROFILES}
+    \    ${resp} =      Fusion Api Get Server Profiles     param=?filter="'name'=='${SP}'"
+    \    ${SpLink}=      Get From Dictionary     ${resp['members'][0]}     status
+    \    Run Keyword If     '${SpLink}' != 'OK'     fail    msg="Server Profile ${SP} status is not OK after restore
+    \    ...         ELSE    Log to console and logfile     \n The status of server profile ${SP} is verified as OK after restore
+
+    Log to console and logfile    \n Verifying if the Uplink Ports are ok after restore
+
+    ${len}    Get Length    ${US_name}
+    : For    ${x}     In Range    0    ${len}
+    \    ${US}    Fusion Api Get Uplink Set    param=?filter=name=${US_name[${x}]}
+    \    Log to console     \n Verifying the Uplink port of Uplink set ${US_name[${x}]}
+    \    ${port_uri}    Get Variable Value    ${US['members'][0]['portConfigInfos'][0]['portUri']}
+    \    ${resp}    Fusion Api Get Interconnect    uri=${port_uri}
+    \    Run Keyword If  '${resp['status']}' !='OK'   or   ${resp['status_code']} !=200   fail    msg=\nUplinPort is not Linked \n
+    \    ...         ELSE    Log to console and logfile  \n\nUplinks ports are linked after Restore!! \n ${resp['status']}
+
+
+
+
+
+F119_BACKUP3_20564 Restore the current configuration from a current backup file located on a remote host
+    [Documentation]    Verify Backup the enclosure configuration, then reset OV to factory defaults, and restore configuration
+
+    Fusion Api Login Appliance    ${appliance_IP}        ${admin_credentials}
+    Clear Profile Configurations
+    Log to console and logfile    \n-Creating Server Profiles in OV
+    :FOR   ${serverprofile}   IN   @{server_profile_20563}
+    \    Add Server Profiles from variable    ${serverprofile}
+    Log to console and logfile   \nGetting the SP uris to verify after the restore
+    ${resp1}=      Fusion Api Get Server Profiles    param=?filter="'name'=='${PROFILE1}'"
+    ${uri1}=       Get From Dictionary     ${resp1['members'][0]}     uri
+    ${resp2}=      Fusion Api Get Server Profiles    param=?filter="'name'=='${PROFILE2}'"
+    ${uri2}=       Get From Dictionary     ${resp2['members'][0]}     uri
+    Log to console and logfile    \n-Creating the backup in OV
+    ${resp}=    Fusion Api Create Backup
+    Run Keyword If  ${resp['status_code']} !=202    fail    msg=\nBackup failed. \n ErrorCode:${resp['errorCode']}\n ${resp['message']}
+    ${task} =   Wait For Task   ${resp}     10 min    20s
+    Run Keyword If  '${task['taskState']}' !='Completed'   or   ${task['status_code']} !=200   fail    msg=\nBackup failed. \n ErrorCode:${task['taskErrors']}\n ${task['taskStatus']}
+    ...         ELSE    Log to console and logfile  \n\nBackup Created Succesfully !! \n ${task['taskStatus']}
+
+    Log to console and logfile    \nDownloading Backup to a remote location
+    ${Response}=    Fusion Api Get Backup
+    Run keyword If    ${Response['status_code']}!=200   Fail      "Unable to Get the latest backup"
+    ${Backup_file_name}=     Get From Dictionary     ${Response['members'][0]}    id
+    ${down}=   Fusion Api Download Backup   ${Response['members'][0]['downloadUri']}   ${Backup_file_name}
+
+    Log to console and logfile   Uploading the backup file to OneView
+    ${Response}=    Fusion Api Upload Backup    ${BACKUPFILE_DIR}${Backup_file_name}
+    sleep   200s
+
+    Log to console and logfile    \nGetting the created Backup and starting the restore operation
+    Restore From Backup
+    Sleep     1min
+
+    Fusion Api Login Appliance   ${APPLIANCE_IP}   ${admin_credentials}
+    Sleep    1000s
+    Log to console and logfile    \nChecking if the Interconnects are in configured state after the restore
+    ${ic_list} =     Get ICs
+    ${len_ic} =   Get Length   ${ic_list}
+    Log to console and logfile  \n\n${len_ic} Carbon Interconnect modules are available\n
+    :FOR    ${x}    IN RANGE    0  ${len_ic}
+    \    ${ic_bay} =     Fetch from right    ${ic_list[${x}]['name']}    ${SPACE}
+    \    ${ic_uri} =     Get From Dictionary     ${ic_list[${x}]}     uri
+    \    Log to console and logfile  \n\nChecking current state
+    \    Wait Until Keyword Succeeds    5 min   15s     IC reached state    ${ic_list[${x}]['uri']}    Configured
+    \    Log to console and logfile  \n\nThe IC module ${ic_list[${x}]['name']} is in Configured state
+
+    Check LE Consistency     ${LE1}
+    Log to console and logfile    \nChecking if the Server Profiles Uri is same after the restore
+    ${x} =    Set Variable    1
+    :FOR   ${name}    IN   @{PROFILES}
+    \     ${resp}=     Fusion Api Get Server Profiles    param=?filter="'name'=='${name}'"
+    \     ${uri}=      Get From Dictionary    ${resp['members'][0]}     uri
+    \     Run Keyword If      '${uri}' != '${uri${x}}'      fail     msg="The server profile ${name} is not the same as before restore"
+    \     ...       ELSE     Log to console and logfile    \n Verified the uri of ${name} is same before and after the restore
+    \     ${x}=    Evaluate    ${x} + 1
+
+    Log to console and logfile     \n\n Unassigning and then reassigning the server profiles from the server hardware
+    ${uprofiles}=      Get Profiles
+    Unassign profiles      ${uprofiles}
+    Re-assign profiles     ${uprofiles}
+
+    Power on All Servers
+    Sleep   560s
+
+    Log to console and logfile    \n Verifying if the Server Profiles status is OK
+    :FOR   ${SP}   IN    @{PROFILES}
+    \    ${resp} =      Fusion Api Get Server Profiles     param=?filter="'name'=='${SP}'"
+    \    ${SpLink}=      Get From Dictionary     ${resp['members'][0]}     status
+    \    Run Keyword If     '${SpLink}' != 'OK'     fail    msg="Server Profile ${SP} status is not OK after restore
+    \    ...         ELSE    Log to console and logfile     \n The status of server profile ${SP} is verified as OK after restore
+
+
+
+F119_BACKUP6_20985 - BACKUP6 With IO traffic running to from servers, restore current configuration and verify no traffic interuption
+    [Documentation]    Verify Backup the enclosure configuration, then reset OV to factory defaults, and restore configuration
+
+    Set Log Level      TRACE
+    Fusion api login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    Clear Profile Configurations
+    Log to console and logfile    \n-Creating Server Profile in OV and Powering On with LUN mapped
+    Add Server Profiles from variable     ${server_profiles3}
+    Power on server    ${server_profiles3[0]['serverHardwareUri']}
+    sleep   460s
+    Log to console and logfile    \n-Creating the backup in OV
+    ${resp}=    Fusion Api Create Backup
+    Run Keyword If  ${resp['status_code']} !=202    fail    msg=\nBackup failed. \n ErrorCode:${resp['errorCode']}\n ${resp['message']}
+    ${task} =   Wait For Task   ${resp}     10 min    20s
+    Run Keyword If  '${task['taskState']}' !='Completed'   or   ${task['status_code']} !=200   fail    msg=\nBackup failed. \n ErrorCode:${task['taskErrors']}\n ${task['taskStatus']}
+    ...         ELSE    Log to console and logfile  \n\nBackup Created Succesfully !! \n ${task['taskStatus']}
+
+
+
+    Log to Console and Logfile   \nStarting IO traffic\n
+
+
+    # Running IO Traffic
+    Log to console    \n running IO traffic before restore\n
+    sleep   120s
+    Run IO Traffic
+    sleep   120s
+
+    Log to console and logfile     \n\nRestoring from the backup in the appliance
+    Power Off All Servers
+    Restore From Backup
+
+    Sleep   5 min
+    sleep   260s
+    Sleep   5 min
+
+    Log to Console and Logfile   \nVerifying IO traffic\n
+    Fusion api login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    Sleep    1000s
+    Log to console and logfile     \n\n Unassigning and then reassigning the server profiles from the server hardware
+    ${uprofiles}=      Get Profiles
+    Unassign profiles      ${uprofiles}
+    Re-assign profiles     ${uprofiles}
+
+    Power on All Servers
+    Sleep   560s
+
+    # Running IO Traffic
+    Log to console    \n running IO traffic after restore\n
+    sleep   120s
+    Run IO Traffic
+    sleep   120s
+
+
+
+
+
+*** Keywords ***
+
+Run IO Traffic
+    [Documentation]    Runs IO Traffic
+    # Getting the ILO IP of the  server
+
+    ${iloip} =     Get Server iLO IP    ${server_bay_3}
+    Log to Console      ${iloip}
+    Set To Dictionary    ${ilo_details}    ilo_ip   ${iloip}
+
+    # Starting the IO traffic for 60sec
+
+    Log to Console and Logfile   \nStarting IO traffic\n
+    ${cmd}    ${out_file}    ${msg}    executes    ${linux_details}    ${ilo_details}    ${server_details}    ${module_file_path1}    "${diskspd_cmd_60s}"
+    Run keyword unless  '${msg}'== 'PASS'   Fail    "Unable to Start the IO Traffic"    Log To Console   \nThe IO Traffic Details are as follows:\n
+    Log to Console and Logfile   \nStarted IO traffic\nCommand--${cmd}\nOutputFile--${out_file}\n
+
+    Sleep   60s
+
+    Log to Console and Logfile   \nVerifying IO traffic\n
+    ${cmd}    ${exeout}    ${msg}    ioresults    ${linux_details}    ${ilo_details}    ${server_details}    ${module_file_path2}    "${out_file}"
+    Run keyword unless  '${msg}'== 'PASS'   Fail    "Unable to Finish the IO Traffic"   Log To Console   \nThe IO Traffic Details are as follows:\n
+    Log to Console and Logfile   \nIO traffic Success!!\nCommand--${cmd}\nOutput--${exeout}\n
+
+Suite Setup Tasks
+    [Documentation]    Suite Setup Tasks
+    Set Log Level      TRACE
+    ${TEST_NAME} =      Set Variable    TEST-SPECIFIC SETUP
+    Run Keyword and Ignore Error    Write To ciDebug Log
+    Log to console and logfile  [TEST-SPECIFIC SETUP]
+
+
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+    Clean OV
+    Run Keyword If  ${ranges} is not ${null}                Add Ranges From variable    ${ranges}
+    ${fc_networks} =    Get Variable Value  ${fcnets}
+    Run Keyword If  ${fc_networks} is not ${null}    Add FC Networks from variable      ${fc_networks}
+    ${body} =   Build LIG body      ${ligs['lig1']}
+    Log to console and logfile    \n-Creating LIG ${LIG1}
+    ${resp} =   Fusion Api Create LIG   ${body}
+    ${task} =   Wait For Task   ${resp}    60s  2s
+    Add Enclosure Group from variable   ${enc_groups['enc_group1']}
+    Sleep   10s
+    Add Logical Enclosure from variable   ${les['le1']}
+    :FOR     ${IC}   IN   @{INTERCONNECTS}
+    \   ${ic_uri} =    Get IC URI    ${IC}
+    \   Wait Until Keyword Succeeds   10 min    10s    IC reached state    ${ic_uri}    Configured
+     \    Sleep    2min
+     \   ${resp}=    Fusion Api Get Interconnect    param=?filter="'name'=='${IC}'"
+     \  ${state}=     Get From Dictionary     ${resp['members'][0]}   state
+     \  Run Keyword If    '${state}' != 'Configured'      fail      msg="The IC module ${IC} is not in configured state"
+     \   ...     ELSE   Log to console and logfile    \n The IC module ${IC} is in configured state
+
+Restore From Backup
+    [Documentation]    Restore From Backup
+    ${status}=    Set Variable    ${EMPTY}
+    ${Response}=    Fusion Api Get Backup
+    Run keyword If    ${Response['status_code']} != 200    Fail     msg="Failed to Get the latest backup"
+    ${restore_body}=   Create Dictionary    type=RESTORE
+    ...                                     uriOfBackupToRestore=${Response['members'][0]['uri']}
+    ${output}=    Fusion Api Restore Backup    ${restore_body}
+    Run keyword If    ${output['status_code']} != 202    Fail      msg="Failed to perform the restore from backup operation"
+    Sleep    10min
+    ${restore_resp}=     Fusion Api Get Restore Status
+    Run keyword If    ${restore_resp['status_code']} != 200    fail    msg="Failed to get the restore details"
+    :FOR   ${index}   IN RANGE   ${restore_resp['count']}
+    \   Run Keyword If    '${restore_resp['members'][${index}]['backupIdToRestore']}' != '${Response['members'][0]['id']}'   Continue For Loop
+    \   ${restore_id} =    Set Variable    ${restore_resp['members'][${index}]['id']}
+    :FOR   ${index}   IN RANGE   50
+    \   sleep   30sec
+    \   Log to console and logfile      "Restoring is in Progress..."
+    \   ${resp}=    Fusion Api Get Restore Status    param=?filter="'id'=='${restore_id}'"
+    \   Run keyword If     ${resp['status_code']}!= 200     Fail      msg="Unable to get the restore id details"
+    \   Run Keyword If     '${resp['members'][0]['progressStep']}' != 'COMPLETED'    Continue For Loop
+    \   ${status} =    Set Variable    ${resp['members'][0]['status']}
+    \   Run Keyword If   '${resp['members'][0]['progressStep']}' == 'COMPLETED'    Exit For Loop
+    Should Be Equal    ${status}    SUCCEEDED
+    Log to console and logfile     \nRestore process got succeeded
+
+Get ICs
+    [Documentation]    Get ICs
+    ${resp} =    fusion api get interconnect
+    ${ic_list} =    Create List
+    ${ics} =     Get From Dictionary    ${resp}    members
+    ${l} =  Get Length  ${ics}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${ic} =     Get From List   ${ics}    ${x}
+    \    Run Keyword If    '${ic['model']}' != '${ICM_MODEL}'    Continue For Loop
+    \    Append to list    ${ic_list}    ${ic}
+    [Return]    ${ic_list}
+
+Get Profiles
+    [Documentation]    Get Profiles
+    ${resp} =             fusion api get server profiles
+    ${profiles} =         Create List
+    ${profile_list} =     Get From Dictionary     ${resp}    members
+    ${l} =  Get Length  ${profile_list}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${profile} =     Get From List   ${profile_list}    ${x}
+    \   ${profile_details} =    Create Dictionary     name=${profile['name']}
+    \   ...                                           uri=${profile['uri']}
+    \   ...                                           state=${profile['state']}
+    \   ...                                           status=${profile['status']}
+    \   ...                                           serverHardwareUri=${profile['serverHardwareUri']}
+    \   append to list    ${profiles}   ${profile_details}
+    [Return]    ${profiles}
+
+Unassign profiles
+    [Documentation]    Unassign profiles
+    [Arguments]     ${profiles}
+    Set Log Level   TRACE
+    Log to console   \nUnassigning profiles....
+    :FOR    ${p}    IN    @{profiles}
+    \   ${profile} =    Fusion Api Get Resource    uri=${p['uri']}
+    \   set to dictionary    ${profile}   serverHardwareUri=${None}
+    \   set to dictionary    ${profile}   enclosureBay=${None}
+    \   set to dictionary    ${profile}   enclosureUri=${None}
+    \   remove from dictionary    ${profile}   status_code    headers
+    \   ${resp} =   fusion api edit server profile    uri=${p['uri']}   body=${profile}
+    \   ${task} =   Wait For Task   ${resp}     6m   15s
+    ${valDict} =        Create Dictionary   status_code=${200}
+    ...                                     taskState=Completed
+    Validate Response    ${task}    ${valDict}
+
+Re-assign profiles
+    [Documentation]    Re-assign profiles
+    [Arguments]     ${profiles}
+    Set Log Level   TRACE
+    Log to console   \nRe-assigning profiles....
+    :FOR    ${p}    IN    @{profiles}
+    \   ${profile} =    Fusion Api Get Resource    uri=${p['uri']}
+    \   set to dictionary    ${profile}   serverHardwareUri=${p['serverHardwareUri']}
+    \   remove from dictionary    ${profile}   status_code    headers
+    \   ${resp} =   fusion api edit server profile    uri=${p['uri']}   body=${profile}
+    \   ${task} =   Wait For Task   ${resp}     6m   15s
+    ${valDict} =        Create Dictionary   status_code=${200}
+    ...                                     taskState=Completed
+    Validate Response    ${task}    ${valDict}
+
+Get Server iLO IP
+    [Documentation]   Keyword to retrieve iLO IP for server bay
+    [Arguments]    ${bay}
+    ${server_info}=    Get Server Info    ${bay}
+    ${ilo_ip}=    Get Server iLO Address    ${server_info}
+    [Return]    ${ilo_ip}
+
+Get Server iLO Address
+    [Documentation]   Keyword to retrieve iLO IP for server bay
+    [Arguments]    ${server_bay_info}
+    ${mpHostInfo}=    Get From Dictionary    ${server_bay_info}    mpHostInfo
+    ${mpIpAddresses} =    Get From Dictionary    ${mpHostInfo}    mpIpAddresses
+    ${l} =  Get Length  ${mpIpAddresses}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${enc} =    Get From List    ${mpIpAddresses}    ${x}
+    \    ${type}=    Get From Dictionary    ${enc}    type
+    \    Run Keyword If    '${type}'!='DHCP'    Continue For Loop
+    \    ${address}=    Get From Dictionary     ${enc}    address
+    [Return]    ${address}
+
+
+Clean OV
+    [Documentation]    Cleans the appliance
+    Log to console and logfile  \nCleaning the OV
+    Power off ALL Servers
+    Remove All Server Profiles
+    Remove All Logical Enclosures
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove ALL Ethernet Networks
+    Remove ALL FC Networks
+    Remove ALL FCoE Networks
+    Remove ALL Network Sets
+    Remove ALL Users
+
+Clear Profile Configurations
+    [Documentation]    Cleans Server Profile configurations
+    Log to console and logfile  \nCleaning the Server Profile configurations
+    Power off ALL Servers
+    Remove All Server Profiles
+
+Verify Status of Ports from IC
+    [Documentation]    Verify Status of Ports from IC
+    [Arguments]    ${port_no}   ${IC}   ${portType}
+    ${resp} =    Fusion Api Get Interconnect     param=?filter="'name'=='${IC}'"
+    ${ports} =    Get from Dictionary    ${resp['members'][0]}    ports
+    ${len} =    Get Length    ${ports}
+    :FOR    ${y}    IN RANGE    0  ${len}
+    \   Run Keyword If    '${ports[${y}]['portName']}' != '${port_no}' or '${ports[${y}]['portType']}' != '${portType}'     Continue For Loop
+    \   Should Match Regexp     ${ports[${y}]['portStatus']}    Linked
+
+
+Perform an Update From Group
+    [Documentation]    Perform an Update From Group
+    [Arguments]     ${leuri}    ${timeout}=5 min    ${interval}=15s
+    ${resp} =       Fusion Api Update Logical Enclosure from Group   uri=${le_uri}
+    ${task} =       Wait For Task   ${resp}     ${timeout}      ${interval}
+    Validate Response   ${task} ${valDict}
+
+Get LE URI
+    [Documentation]    Get LE URI
+    [Arguments]     ${le}
+    ${resp} =   Fusion Api Get Logical Enclosure        param=?filter="'name'=='${le}'"
+    ${uri} =    Get From Dictionary     ${resp['members'][0]}   uri
+    [Return]    ${uri}
+
+Check LE Consistency
+    [Documentation]    Check LE Consistency
+    [Arguments]     ${LE}
+    Log to console and logfile    \n Verifying whether LE is properly updated and in Consistent state
+    ${resp} =      Fusion Api Get Logical Enclosure     param=?filter="'name'=='${LE}'"
+    Run Keyword If      '${resp['members'][0]['state']}' != 'Consistent'   fail  msg=LE is in inconsistent state
+    ...            ELSE    Log to console and logfile   \n- LE is in Consistent state
+    [Return]    ${resp}
+
+Suite Teardown Tasks
+    [Documentation]    Returns appliance to a 'clean' state by removing all resources\enclosures
+    Log to console and logfile  [TEARDOWN]
+    Run Keyword If All Tests Passed    Power off ALL Servers
+    Run Keyword If All Tests Passed    Remove All Server Profiles
+    Run Keyword If All Tests Passed    Remove All Logical Enclosures
+    Run Keyword If All Tests Passed    Remove ALL Enclosure Groups
+    Run Keyword If All Tests Passed    Remove ALL LIGs
+    Run Keyword If All Tests Passed    Remove ALL LS
+    Run Keyword If All Tests Passed    Remove ALL LSGs
+    Run Keyword If All Tests Passed    Remove ALL Ethernet Networks
+    Run Keyword If All Tests Passed    Remove ALL FC Networks
+    Run Keyword If All Tests Passed    Remove ALL FCoE Networks
+    Run Keyword If All Tests Passed    Remove ALL Network Sets
+    Run Keyword If All Tests Passed    Remove ALL Users

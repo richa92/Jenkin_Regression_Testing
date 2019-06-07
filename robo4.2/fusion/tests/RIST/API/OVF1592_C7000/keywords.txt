@@ -1,0 +1,238 @@
+*** Settings ***
+Library              FusionLibrary
+Library              RoboGalaxyLibrary
+Library              OperatingSystem
+Library              BuiltIn
+Library              copy
+Library              Collections
+Library              String
+Resource             ../../../../Resources/api/fusion_api_resource.txt
+Resource             ../global_variables.robot
+
+*** Keywords ***
+Login Appliance
+    [Documentation]    Login oneview appliance
+    [Arguments]        ${APPLIANCE_IP}    ${credentials}
+    Log    \n- Logging in OneView appliance    console=true
+    Should Not Be Equal           ${APPLIANCE_IP}  unknown  msg=The appliance IP must be defined, Example:'APPLIANCE_IP:16.114.209.231'
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${credentials}
+
+Logout Appliance
+    [Documentation]    Logout oneview appliance
+    Log    \n- Logging out OneView appliance    console=true
+    Fusion Api Logout Appliance
+
+Prepare Environment for Test
+    [Documentation]  Prepare the test case pre condition before OVF1592 test
+
+    Log    \nClear the environment before the ENV preparation    console=True
+    Clear Environment After All Tests Completed
+
+    Add Licenses From Variable    ${licenses}
+
+    ${resps}=    Create Scopes    ${Scopes}
+    Wait For Task2    ${resps}
+
+    Add Users From Variable    ${users}
+
+    ${resplist} =   Add San Managers Async          ${SAN_Managers}
+    Wait for task2  ${resplist}  timeout=120  interval=10
+
+    Add Ethernet Networks From Variable  ${Ethernet_Networks}
+
+    Remove All FC Networks Async
+    Add FC Networks From Variable    ${fc_networks}
+
+    Add FCoE Networks From Variable    ${fcoe_networks}
+
+    Remove All Network Sets
+    Add Network Sets From Variable    ${network_sets}
+
+    Add LIG From List    ${LIG_BASE}
+
+    Add LIG From List    ${CARBONS_LIG}
+
+    Add SAS LIG From List    ${SAS_LIG}
+
+    Add Enclosure Group From List    ${EG_BASE}
+
+    Add Logical Enclosure from variable    ${LE_BASE}
+
+    ${resplist} =    Add Storage Systems Async    ${StorageSystems_Put}
+    Wait For Task2  ${resplist}  timeout=300  interval=10
+
+    ${resplist} =    Edit Storage Systems Async     ${StorageSystems_Put}
+    Wait For Task2  ${resplist}  timeout=300  interval=10
+
+    ${resplist} =    Edit Storage Pools Async            ${StoragePools}
+    Wait For Task2  ${resplist}  timeout=120  interval=10
+
+    :FOR    ${key}    IN   @{scope_resources.keys()}
+    \        Update Scope With Resources    ${key}  ${scope_resources["${key}"]}
+
+    Add Storage Volume Templates Async    ${VolumeTemplates}
+
+    Add Storage Volumes Async       ${Volumes}
+
+    ${resps}=    Add Server Profiles From Variable    ${SP}
+    Wait For Task2   ${resps}  timeout=600
+
+Clear Environment After All Tests Completed
+    [Documentation]  Clear Environment After All Tests Completed
+
+    Log    Remove all Profiles and Templates    console=True
+    Power off ALL servers    control=PressAndHold
+    ${resplist} =    Remove All Server Profiles Async    force=${True}
+    Wait For Task2    ${resplist}    timeout=600    interval=5
+    ${sptlist} =    Remove All Server Profile Templates
+    Wait For Task2    ${sptlist}    timeout=600    interval=5
+
+    Log    Remove All Volumes    console=True
+    ${resplist}=    Remove ALL Storage Volumes Async  param=?suppressDeviceUpdates=false
+    Wait For Task2    ${resplist}    timeout=60    interval=5
+
+    Log    Remove ALl Volume Templates    console=True
+    Remove ALL Storage Volume Templates Async
+
+    Log    Remove All Storage Systems    console=True
+    Remove ALL Storage Systems Async
+
+    Log    Remove All Enclosures    console=True
+    ${resp}=         Fusion Api Get Appliance Version
+    ${mode_type}=    Set Variable  ${resp["modelNumber"]}
+    Run Keyword If   '${mode_type}' == 'HPE OneView VM - VMware vSphere'
+    ...              Remove All Enclosures Async    VERIFY=${True}  timeout=600  interval=5
+
+    Log    Remove all Logical Enclosures    console=True
+    Remove All LEs    force=${True}    timeout=1800    interval=10
+
+    Log    Remove All EGS    console=True
+    Remove All Enclosure Groups
+    Sleep    30s    SAS LIGS still associated to
+
+    Log    Remove all LIGs    console=True
+    Remove All SAS LIGs
+    Remove All LIGs
+
+    Log    Remove all Networks    console=True
+    Remove All Network Sets
+    Remove All Ethernet Networks
+    Remove All FC Networks
+    Remove All FCoE Networks
+
+    Log    Remove all SAN Managers    console=True
+    Sleep    60s
+    Remove ALL San Managers Async
+
+    Log    Remove All Users    console=True
+    ${users} =    Fusion Api Get User
+    :FOR    ${user}    IN    @{users['members']}
+    \        Continue For Loop If    '${user['userName']}'=='administrator'
+    \        Continue For Loop If    '${user['userName']}'=='HardwareSetup'
+    \        ${resp} = 	Fusion Api Remove User    uri=${user['uri']}
+
+    Log    Remove All Scopes    console=True
+    Remove All Scopes
+
+    Log    Remove All Licenses    console=True
+    ${getlicresp} =    Fusion Api Get Licenses
+    :FOR    ${eachlic}     IN    @{getlicresp['members']}
+    \       ${delResp} =    Fusion Api Remove License   uri=${eachlic['uri']}
+    \       ${status} =     Run Keyword And Return Status  Should Be Equal As Integers    ${delResp["status_code"]}   204
+    \       Run Keyword If    '${status}'!='PASS'    Log  License remove failed:${eachlic}  level=WARN  console=True
+
+Validate Resource Assigned/Unassigned To Scope
+    [Documentation]  Validate Scope Has Resource
+    [Arguments]   ${scope_name}  ${resource_name}  ${assigned}
+    ${scopeUriList}=  Get Assigned Scope URIs By Resource Name  ${resource_name}
+    ${scopeUri}=  Get Scope URI By Name   ${scope_name}
+    Run Keyword If   ${assigned} == ${TRUE}
+    ...             List Should Contain Value    ${scopeUriList}  ${scopeUri}
+    ...             ELSE
+    ...             List Should Not Contain Value    ${scopeUriList}  ${scopeUri}
+
+Clear Environment After Test
+    [Documentation]  ${assigned}= Remove,Remove excess Server Profile,like sp5 or sp6
+    ...              OR  ${assigned}= Add, Add Server Profile,like sp1, sp2 , sp3 or sp4 which was deleted
+    ...           profile = {"type":"ServerProfileV6","serverHardwareUri":'SH:'+ ${ENC1SHBAY1},
+    ...                      "serverHardwareTypeUri":'SY 480 Gen9 1',
+    ...                      "enclosureGroupUri":"EG1",
+    ...                       ...}
+    [Arguments]   ${profile}   ${assigned}
+    ${resp}=  Run Keyword If  '${assigned}' == 'Remove'
+              ...          Remove Server Profile   ${profile}
+              ...          ELSE
+              ...          Add Server Profile    ${profile}
+    Wait For Task2   ${resp}   timeout=600
+    Logout Appliance
+
+Validate Volume Assigned/Unassigned To Server Profile
+    [Documentation]  Validate Volume Has server profile
+    [Arguments]   ${volume}  ${serverprofile_name}  ${assigned}
+    ${volume_uri}=  Get Storage Volume URI  ${volume}
+    ${uri}=  Get Server Profile Uri  ${serverprofile_name}
+    ${resp}=  Get Server Profile Transformation  ${uri}
+    ${volume_uri_sp}=  Set Variable  ${resp['sanStorage']['volumeAttachments'][0]['volumeUri']}
+    Run Keyword If   ${assigned} == ${TRUE}
+    ...              Should Be Equal     ${volume_uri}  ${volume_uri_sp}
+    ...              ELSE
+    ...              Should Not Contain     ${volume_uri}  ${volume_uri_sp}
+
+Edit User Active Permission
+    [Arguments]   ${body}    ${credential}
+    [Documentation]    Creates a new user session from an existing session, controlling which user assigned permissions are active and inactive
+    ...              Example:
+    ...              Data Required:
+    ...                credentia:                 "na_credentials": {'userName': 'NA',
+    ...                                                              'password': 'wpsthpvse1'},
+    ...                body:   edit_ia_users_permission = {
+    ...                                                      "sessionID": None,
+    ...                                                      "permissionsToActivate": [
+    ...                                                                                  {
+    ...                                                                                     "roleName": "Infrastructure administrator",
+    ...                                                                                     "scopeUri": "Test"
+    ...                                                                                  }
+    ...                                                                               ]
+    ...                                                    }
+    ${body} =    Copy Dictionary    ${body}
+    ${sessionID} =    Get Credential SessionID   ${credential}
+    Set To Dictionary    ${body}    sessionID    ${sessionID}
+    ${permissions} =    Get From Dictionary    ${body}    permissionsToActivate
+    :FOR    ${permission}    IN    @{permissions}
+    \       ${scopeName} =    Get From Dictionary    ${permission}    scopeUri
+    \       ${scopeUri} =    Get Scope Uri By name    ${scopeName}
+    \       Set To Dictionary    ${permission}    scopeUri    ${scopeUri}
+    Set To Dictionary    ${body}    permissionsToActivate    ${permissions}
+    ${response} =    Fusion Api Modify Active Permissions    body=${body}
+    ${sessionID} =    Get From Dictionary    ${response}    sessionID
+    Should Be Equal    '${response["status_code"]}'   '200'    msg= Failed to Modify session!
+    [Return]    ${sessionID}
+
+Get Credential SessionID
+    [Arguments]    ${credential}
+    [Documentation]  Get the sessionID of given credential username and password
+    ...              Example:
+    ...              Data Required:
+    ...                credentia:                 "na_credentials": {'userName': 'NA',
+    ...                                                              'password': 'wpsthpvse1'},
+    ${response} =    Fusion Api Login Appliance      ${APPLIANCE_IP}    ${credential}
+    [Return]    ${response[1]}
+
+Active Permission Session
+    [Arguments]    ${body}    ${credential}
+    [Documentation]  Use current credential and then active some permission of them
+    ...              Example:
+    ...              Data Required:
+    ...                credentia:                 "na_credentials": {'userName': 'NA',
+    ...                                                              'password': 'wpsthpvse1'},
+    ...                body:   edit_ia_users_permission = {
+    ...                                                      "sessionID": None,
+    ...                                                      "permissionsToActivate": [
+    ...                                                                                  {
+    ...                                                                                     "roleName": "Infrastructure administrator",
+    ...                                                                                     "scopeUri": "Test"
+    ...                                                                                  }
+    ...                                                                               ]
+    ...                                                    }
+    ${session_id} =    Edit User Active Permission    ${body}    ${credential}
+    ${resp} =    Fusion Api Set Active Session    ${sessionId}

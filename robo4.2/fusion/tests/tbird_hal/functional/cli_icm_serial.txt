@@ -1,0 +1,189 @@
+*** Settings ***
+Documentation   Tests Interactive Fusion CLI serial Potash ICM connection (US35824)
+...             Requires a Claimed and Added enclosure.
+...             = Usage =
+...             | pybot | -L DEBUG | -v FUSION_IP:<IP> | -v ENCLOSURE:<name> | -v POTASH_SLOT:<slot> | cli_icm_serial.txt |
+...             = Variables =
+...             | FUSION IP     | Required; IP address of the FusionVM to use |
+...             | ENCLOSURE     | Required; Enclosure name to run on (tesla, ...) |
+...             = Preconditions =
+...             Enclosure Claimed and Added so the Fusion CLI is accessable
+
+Library           RoboGalaxyLibrary            # DVTs Robot Framework extensions
+Library           FusionLibrary                # DVTs Fusion extensions
+Library           robot.api.logger
+Library           Collections
+Library           String
+Library           SSHLibrary
+Library           OperatingSystem
+Variables           ../resources/variables.py    ${ENCLOSURE}
+Resource            ../resources/defaults.txt
+Resource            ../resources/system_info.txt
+Resource            ../resources/fusion_cli.txt
+Force Tags          CLI    HW
+Suite Setup         Make Multiple Connections
+Suite Teardown      Multi Logout
+
+*** Variables ***
+# Especially important to save iteration time in the negative test cases.
+*** Variables ***
+${FUSION_TIMEOUT}    60
+${SWITCH_TIMEOUT}    60
+${CLI_TIMEOUT}       120
+${POTASH_SLOT}       1
+${LOOP_RANGE}        3
+${ICM_CONNECT_WAIT}    15
+
+***test cases ***
+Connect to ICM serial console using force with no existing connection, check ICM version and return to CLI
+    : FOR    ${INDEX}    IN RANGE    1    ${LOOP_RANGE}
+    \    ${Response}    Execute CLI Connect Interconnect Command    ${ENC_SERIAL_NUMBER}    ${POTASH_SLOT}    force
+    \    Should Contain    ${Response}    System image version:
+    \    Log    ${Response}
+    \    Console    \n Force loop ${INDEX}
+
+Reconnect and verify Without Force using the same session
+    : FOR    ${INDEX}    IN RANGE    1    ${LOOP_RANGE}
+    \    ${Response}    Execute CLI Connect Interconnect Command    ${ENC_SERIAL_NUMBER}    ${POTASH_SLOT}
+    \    Should Contain    ${Response}    System image version:
+    \    Log     ${Response}
+    \    Console    \n Without force loop ${INDEX}
+
+Reconnect Without Force using different sessions
+    : FOR    ${INDEX}    IN RANGE    1    ${LOOP_RANGE}
+    \    Switch Connection     ${Session1}
+    \    ${Response}    Execute CLI Connect Interconnect Command    ${ENC_SERIAL_NUMBER}    ${POTASH_SLOT}
+    \    Should Contain    ${Response}    System image version:
+    \    Log Many   ${Session1}    ${Response}
+    \    Switch Connection     ${Session4}
+    \    ${Response}    Execute CLI Connect Interconnect Command    ${ENC_SERIAL_NUMBER}    ${POTASH_SLOT}
+    \    Should Contain    ${Response}    System image version:
+    \    Log Many   ${Session4}    ${Response}
+    \    Switch Connection     ${Session3}
+    \    ${Response}    Execute CLI Connect Interconnect Command    ${ENC_SERIAL_NUMBER}    ${POTASH_SLOT}
+    \    Should Contain    ${Response}    System image version:
+    \    Log Many   ${Session3}    ${Response}
+    \    Switch Connection     ${Session2}
+    \    ${Response}    Execute CLI Connect Interconnect Command    ${ENC_SERIAL_NUMBER}    ${POTASH_SLOT}
+    \    Should Contain    ${Response}    System image version:
+    \    Log Many   ${Session2}    ${Response}
+    \    Console    \n Completed Set ${INDEX}
+
+Force connection multiple sessions
+    #Second connection without FORCE should not disconnect first session
+    : FOR    ${INDEX}    IN RANGE    1    ${LOOP_RANGE}
+        # First connection
+        \    Switch Connection     ${Session1}
+        \    CLI Connect Interconnect Command    ${ENC_SERIAL_NUMBER}    ${POTASH_SLOT}    force
+        # then a Second connection without FORCE
+        \    Switch Connection     ${Session2}
+        \    Run keyword and expect error    *
+             ...    CLI Connect Interconnect Command    ${ENC_SERIAL_NUMBER}    ${POTASH_SLOT}    ${null}
+        # which Should Not disconnect first session
+        \    Switch Connection     ${Session1}
+        \    ${output}      SSHLibrary.Read
+        \    Should not Contain    ${output}    Connection to the interconnect was terminated
+        #Second connection with FORCE should connect and disconnect first session
+        \    Switch Connection     ${Session2}
+        \    CLI Connect Interconnect Command    ${ENC_SERIAL_NUMBER}    ${POTASH_SLOT}    force
+        # which Should disconnect first session
+        \    Switch Connection     ${Session1}
+        \    ${output}      SSHLibrary.Read
+        \    Should Contain    ${output}    Connection to the interconnect was terminated
+
+        # now repeat Loop with sessions 3 and 4
+        \    Switch Connection     ${Session3}
+        \    CLI Connect Interconnect Command    ${ENC_SERIAL_NUMBER}    ${POTASH_SLOT}    force
+        # then a Second connection without FORCE
+        \    Switch Connection     ${Session4}
+        \    Run keyword and expect error    *
+             ...    CLI Connect Interconnect Command    ${ENC_SERIAL_NUMBER}    ${POTASH_SLOT}    ${null}
+        # which Should Not disconnect first session
+        \    Switch Connection     ${Session3}
+        \    ${output}      SSHLibrary.Read
+        \    Should not Contain    ${output}    Connection to the interconnect was terminated
+        #Second connection with FORCE should connect and disconnect first session
+        \    Switch Connection     ${Session4}
+        \    CLI Connect Interconnect Command    ${ENC_SERIAL_NUMBER}    ${POTASH_SLOT}    force
+        # which Should disconnect first session
+        \    Switch Connection     ${Session3}
+        \    ${output}      SSHLibrary.Read
+        \    Should Contain    ${output}    Connection to the interconnect was terminated
+        \    Console    \n Completed multi-session connect interconnect force loop ${INDEX}
+
+Negative Test: Empty Bays
+    @{EMPTY_ICM_BAYS}=    Create List    2    3    5    6
+    : FOR    ${BAY}    IN    @{EMPTY_ICM_BAYS}
+    \    ${response}        Run Keyword and expect Error    *    Execute CLI Connect Interconnect Command    ${ENC_SERIAL_NUMBER}    ${BAY}
+    \    Should Contain    ${response}    Bay ${BAY} is empty
+    \    Console    \n Empty bay ${BAY}
+    \    Console    \n CLI_TIMEOUT: ${CLI_TIMEOUT}
+    \    Console    \n FUSION_TIMEOUT: ${FUSION_TIMEOUT}
+
+Negative Test: Invalid Bay
+    @{INVALID_ICM_BAYS}=    Create List    12    13    42    199999
+    : FOR    ${BAY}    IN    @{INVALID_ICM_BAYS}
+    \    ${response}        Run Keyword and expect Error    *    Execute CLI Connect Interconnect Command    ${ENC_SERIAL_NUMBER}    ${BAY}
+    \    Should Contain    ${response}    Bay number specified is not valid.
+    \    Console    \n Invalid bay ${BAY}
+
+Negative Test: Invalid Bay Input
+    @{INVALID_BAYS_INPUT}=    Create List    -12    a23    1a    1_42
+    : FOR    ${BAY}    IN    @{INVALID_BAYS_INPUT}
+    \    ${response}        Run Keyword and expect Error    *    Execute CLI Connect Interconnect Command    ${ENC_SERIAL_NUMBER}    ${BAY}
+    \    Should Contain    ${response}    The input is not a valid command.
+    \    Console    \n Invalid input ${BAY}
+
+
+*** Keywords ***
+
+Execute CLI Connect Interconnect Command
+    [Documentation]     Executes "Connect ..." CLI command from console view and returns buffer as an list.
+    [Arguments]    ${enclosure}    ${bay}    ${force}=${space}
+    CLI Connect Interconnect Command    ${enclosure}    ${bay}    ${force}
+    ${output}      Execute CLI Command     screen-length disable         <HP>
+    ${output}      Execute CLI Command     sy         \[HP\]
+    ${output}      Execute CLI Command     en         Password:
+    ${output}      Execute CLI Command     diagnosis         \[HP-equipment\]
+    ${Response}      Execute CLI Command     display version         \[HP-equipment\]
+    # Nicely exit this connection
+    ${output}      Execute CLI Command     quit         \[HP\]
+    ${output}      Execute CLI Command     quit         \<HP\>
+    ${CONTROL_UNDERSCORE}    Convert To String    \x1f
+    ${output}      Execute CLI Command     ${CONTROL_UNDERSCORE}.    ${CLI_CONSOLE_PROMPT}
+    [Return]       ${Response}
+
+CLI Connect Interconnect Command
+    [Documentation]     Executes "Connect ..." CLI command from console view and returns buffer as an list.
+    [Arguments]    ${enclosure}    ${bay}    ${force}=${space}
+    ${output}      Execute CLI Command     connect interconnect ${enclosure} ${bay} 1 ${force}    by a period (.))
+    #${output}      Execute CLI Command     connect interconnect ${enclosure} ${bay} 1 ${force}    password:
+    #SSHLibrary.Write         canserial
+    # After entering the password, hit return a couple of times for prompt to appear
+    Sleep    ${ICM_CONNECT_WAIT}
+    SSHLibrary.Write Bare    \n
+    ${output}      SSHLibrary.Read
+    SSHLibrary.Write Bare    \n
+    ${output}      SSHLibrary.Read Until    <HP>
+
+Make Multiple Connections
+    ${Session1}=    Login to Fusion CLI
+    Enter CLI Console View
+    Set Suite Variable    ${Session1}
+
+    ${Session2}=    Login to Fusion CLI
+    Enter CLI Console View
+    Set Suite Variable    ${Session2}
+
+    ${Session3}=    Login to Fusion CLI
+    Enter CLI Console View
+    Set Suite Variable    ${Session3}
+
+    ${Session4}=    Login to Fusion CLI
+    Enter CLI Console View
+    Set Suite Variable    ${Session4}
+    # Default connection is to use Session 1
+    Switch Connection     ${Session1}
+
+Multi Logout
+    Close All Connections

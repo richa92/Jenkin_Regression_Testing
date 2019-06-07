@@ -1,0 +1,98 @@
+*** Settings ***
+Library				RoboGalaxyLibrary
+Library				FusionLibrary
+Library				OperatingSystem
+Library				BuiltIn
+Library				Collections
+Library				XML
+Library		        SSHLibrary
+Library				String
+
+*** Variables ***
+${key_name}                    key
+${additional_key_name}         additionalKeys
+
+
+*** Keywords ***
+Add Licenses from variable
+    [Documentation]    Adds fusion licenses from a variable file, which contains input as dictionary.
+    [Arguments]      ${licenses}    ${VERIFY}=${FALSE}   ${STATUS_CODE}=201
+	:FOR    ${ovLic}  IN  @{licenses}
+    \       ${get_ovlic}=	Get OV Licenses In List
+    \       ${keylength} =  Get Length  ${get_ovlic}
+    \       ${contostr}=	Run Keyword If  ${keylength} != 0	Convert To String	${get_ovlic}
+    \       ${matchedkeyValue} = 	Run Keyword If  ${keylength} != 0 		Get Regexp Matches     ${contostr}     ${ovLic['key']}
+    \       ${strmatched} =		Run Keyword If  ${keylength} != 0		Get Length  ${matchedkeyValue}
+    \       Run Keyword If		${strmatched} == 1
+            ...     Log  license ${ovLic['key']} exists
+            ...		WARN
+    \       Continue For Loop If		${strmatched} == 1
+    \       ${resp}=     Fusion Api Add License     ${ovLic['key']}
+    \       Run Keyword If    ${resp['status_code']}==400     Run Keyword If    '${resp['errorCode']}'=='EXPIRED_LICENSE_KEY'		Run Keyword And Continue On Failure        Fail    License Key expired ${ovLic['key']}
+    \       Run Keyword If    ${resp['status_code']}==400     Run Keyword If    '${resp['errorCode']}'=='INVALID_LICENSE_KEY'	    Run Keyword And Continue On Failure        Fail	   Invalid License Key ${ovLic['key']}
+    \       Run Keyword If    ${resp['status_code']}==400     Run Keyword And Continue On Failure	 Fail    Failed to add License Key ${ovLic['key']}
+    # Get the 'key' from the response for verification
+    \       ${responsKey} =    Run keyword if    '${VERIFY}'=='True' and '${resp['status_code']}' == '${STATUS_CODE}'      Get From Dictionary       ${resp}      ${key_name}
+    # Get the Additional key(if any) from response for verification
+    \       ${responsAddiKey} =    Run keyword if    '${VERIFY}'=='True' and '${resp['status_code']}' == '${STATUS_CODE}'      Get From Dictionary       ${resp}      ${additional_key_name}
+    \       ${length} =        Run keyword if    '${VERIFY}'=='True' and '${resp['status_code']}' == '${STATUS_CODE}'      Get Length    ${resp['additionalKeys']}
+    \       ${catenateMembers} =     Run Keyword If	    '${VERIFY}'=='True' and '${resp['status_code']}' == '${STATUS_CODE}' and '${length}' != '${0}'     Catenate    SEPARATOR=_    ${responsKey}    ${responsAddiKey[0]}
+    \       ...         ELSE IF      '${VERIFY}'=='True' and '${resp['status_code']}' == '${STATUS_CODE}' and '${length}' == '${0}'     Catenate    SEPARATOR=    ${responsKey}
+    \       ${compareResults}=     Run keyword if     '${VERIFY}'=='True' and '${resp['status_code']}' == '${STATUS_CODE}'     Should Be Equal     ${catenateMembers}    ${ovLic['key']}
+    \       Run keyword if     '${VERIFY}'=='True' and '${compareResults}' == 'None' and '${resp['status_code']}' == '${STATUS_CODE}'      Log     "Verification on Adding a License into HP OneView has PASSED"    console=True
+    \       ...         ELSE IF       '${VERIFY}'=='True' and '${compareResults}' != 'None' and '${resp['status_code']}' == '${STATUS_CODE}'      Log     "Verification on Adding a License into HP OneView has Failed"    ERROR
+
+Get All Licenses
+    [Documentation]    Get all licenses information from the appliance. Fails if licenses doesn't exists in appliance.
+    ${resp} =    Fusion Api Get Licenses
+    ${count} =   Get From Dictionary  ${resp}  count
+    Return from keyword if  ${count}==0  '/rest/licenses_not_found'
+    [Return]     ${resp["members"]}
+
+Get All OV Licenses
+	[Documentation]    Get all OV licenses from the appliance. Returns Licenses if exists else returns none
+    ${resp} =    Fusion Api Get Licenses
+    ${count} =   Get From Dictionary  ${resp}  count
+    [Return]     ${resp["members"]}
+
+Delete All Fusion License
+    [Documentation]    Deletes all the licenses from the appliances.
+    [Arguments]       ${VERIFY}=${FALSE}   ${STATUS_CODE}=204
+	${getlicresp} =     Run keyword  	     Fusion Api Get Licenses
+    :FOR	${eachlic}	IN	@{getlicresp['members']}
+    \		${delResp} = 	 Fusion Api Remove License		uri=${eachlic['uri']}
+    \       ${response_code} =     Convert To String     ${delResp}
+    \       ${matchedValue} =      Get Regexp Matches     ${response_code}     [0-9]+
+	\       Run Keyword If	       '${VERIFY}'=='True' and '${matchedValue[0]}' == '${STATUS_CODE}'     Log       Delete SUCCESS for URI:${eachlic['uri']} and its Response:${response_code}     console=True
+	\       ...    ELSE IF         '${VERIFY}'=='True' and '${matchedValue[0]}' != '${STATUS_CODE}'     Log       Deleted FAILED for URI:${eachlic['uri']} and its Response:${response_code}     ERROR
+
+Get OV Licenses In List
+    [Documentation]    Get OV Licenses In List
+	@{ret}=    Create List
+	${res} = 	Get All OV Licenses
+	@{addkey} =	Create List
+	:FOR    ${lic}  IN  @{res}
+    \    ${key}=	set variable  ${lic['key']}
+    \    ${addkey}=	set variable 	${lic['additionalKeys']}
+    \    ${lenadkey}=	get length	${addkey}
+    \    ${finalkey}=	Run Keyword if		${lenadkey}!=0	 Catenate    SEPARATOR=_    ${key}    ${addkey[0]}
+	      ...         ELSE IF    ${lenadkey}==0     Catenate    SEPARATOR=    ${key}
+    \    append to list	${ret}	${finalkey}
+	[Return]     ${ret}
+
+Delete All Fusion License with ssh
+    [Documentation]    Deletes all the licenses from the appliance with ssh.
+	${cmd} =   Set Variable    echo y | /ci/bin/licmgr --type key --delete all
+	Run Command Via SSH   ${APPLIANCE_IP}   ${ssh_credentials['userName']}   ${ssh_credentials['password']}   ${cmd}   ${FUSION_PROMPT}   ${FUSION_TIMEOUT}
+
+License Should Be Compliant
+    [Documentation]    OV Advanced License with and without iLO should be 100% compliant
+    ${1icenses} =  Fusion Api Get Licenses  /rest/licenses?view=summary
+    Run Keyword If  '${1icenses['count']}' == '0'  Fail  msg=No Licenses found
+    ${res} =  Set Variable  ${empty}
+    :FOR  ${license}  IN  @{1icenses['members']}
+    \  ${res} =  Run Keyword If  '${license['percentageCompliance']}' != '100.0'  Catenate  ${res}
+    ...  \nPercentageCompliance Expected 100.0 but found ${license['percentageCompliance']}
+    \  ...  ELSE  Set Variable  ${res}
+    ${count} =  Get Length  ${res}
+    Run Keyword If  '${count}' > '0'  Fail  ${res}

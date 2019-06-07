@@ -1,0 +1,165 @@
+*** Settings ***
+Documentation                       Common keywords used by Composable Rack Qual
+Library                             FusionLibrary
+
+Resource                            ../../../Resources/api/fusion_api_resource.txt
+Resource                            ./plexxi.txt
+
+Variables                           ./Common.py
+
+*** Variables ***
+${X-API-VERSION}                    1200
+${APPLIANCE_IP}                     YOU_MUST_SPECIFY_ON_COMMAND_LINE
+${SUITE_LOG_LEVEL}                  TRACE
+${WFT2_CONTINUE_ON_ERROR}           ${True}
+${VALIDATE_ENTIRE_DTO}              ${True}
+${CONSOLE}                          ${True}   # sends Log messages also to console.  Set to ${False} to disable
+${ALERT_COUNT_CHANGE_ACTION}        Continue  # if set to Fail, will abort entire Test Suite if Critical Alerts exist
+                                              # from previous robot test file.
+${VERIFY}                           ${True}
+${PAUSE_BEFORE_SUITE_SETUP}         ${False}  # Mostly a dev thing.  Used so one can manually confirm environment prior
+                                              # to next Test Suite execution.
+${PAUSE_BEFORE_TEST_CASE}           ${False}  # Mostly a dev thing.  Not enable on all Test Cases.  Initially just enabled
+                                              # in 44_Server_Profiles_ONE to manually inspect profiles after each test.
+${PAUSE_TO_REVIEW_OV_SWITCHES}      ${False}  # Used to enable a pause for manual verification of the switches in OV
+${PAUSE_IF_PLEXXI_CONFIRM_FAILS}    ${False}  # Used to pause so manual verification of Plexxi CFM can be performed.
+
+# For SSH commands
+${FUSION_IP}                    ${APPLIANCE_IP}
+${FUSION_PROMPT}                \#
+${FUSION_SSH_USERNAME}          root
+${FUSION_SSH_PASSWORD}          hpvse1
+${FUSION_TIMEOUT}               60
+
+# Download SPP Variables
+${WEB_USERNAME}                 ${None}
+${WEB_PASSWORD}                 ${None}
+${SPP_LOCALPATH}                qual_spp
+${WEB_URL}                      http://wpstwork4.vse.rdlabs.hpecorp.net/firmware/SPP/1.10.08-CustomSPP/   # YOU_MUST_SPECIFY_ON_COMMAND_LINE
+${THREADNUM}                    3
+${SPP_LOCAL_FILE}               Set_By: Download Latest File From Web Folder
+
+*** Keywords ***
+QUAL Suite Setup
+    [Documentation]     Suite Setup Login to appliance
+    [Arguments]     ${credentials}
+    Run Keyword If    ${PAUSE_BEFORE_SUITE_SETUP}    Pause Execution    In QUAL Suite Setup for ${SUITE NAME} on ${APPLIANCE_IP}, ready to Continue?
+
+    Set Log Level   ${SUITE_LOG_LEVEL}
+    Log   Called from ${SUITE NAME}    console=${CONSOLE}
+    Confirm APPLIANCE_IP and build PLEXXI_CFM
+    Set Suite Variable    ${LOGGED_IN}    ${False}
+    Return From Keyword If    '${SUITE NAME}'=='05 First Time Setup'  #  Remove once integrate with BTI.  BTI performs most of FTS
+    ${response}=   Create List
+    ${resp}=   Fusion Api Login Appliance  ${APPLIANCE_IP}     ${credentials}
+    ${response}=  Convert to List  ${resp}
+    Run Keyword If   ${response[0]['status_code']} is not ${BADREQUEST}  Log  Appliance is logged in
+    Run Keyword If   ${response[0]['status_code']} is ${BADREQUEST}   Fatal Error   Appliance Credentials are not correct
+    Set Suite Variable    ${LOGGED_IN}    ${True}
+    Set OneView Version Metadata    ${APPLIANCE_IP}   ${LOGGED_IN}
+    Set RoboGalaxyLibrary Version Metadata
+    Set FusionLibrary Version Metadata
+    Set Suite Metadata    Test API Version    ${X-API-VERSION}
+    Log  \nTest API Version: ${X-API-VERSION}  console=${CONSOLE}
+
+    Get Check Set Alert Count    ${ALERT_COUNT_CHANGE_ACTION}
+
+QUAL Suite Teardown
+    [Documentation]     Suite Teardown to Logout from OV
+    Run Keyword If    ${LOGGED_IN}    Fusion Api Logout Appliance
+
+Confirm APPLIANCE_IP and build PLEXXI_CFM
+    [Documentation]    Confirm -v APPLIANCE_IP is passed in and Set PLEXXI_CFM
+
+    ${appliance_ip} =    Get Variable Value    ${APPLIANCE_IP}
+    Run Keyword If    '${appliance_ip}'=='YOU_MUST_SPECIFY_ON_COMMAND_LINE'    Fatal Error   Must pass in -v APPLIANCE_IP:#.#.#.#
+
+    ${cfm} =    Get Variable Value    ${CFM}
+
+    Set Suite Variable    ${PLEXXI_CFM}    ${cfm}
+    Log    PLEXXI_CFM: ${PLEXXI_CFM}    console=${CONSOLE}
+
+Get Check Set Alert Count
+    [Documentation]    Get the current Critical alert count, Check from last run ${GLOBAL_ALERT_COUNT} and then set
+    [Arguments]    ${action}=Continue
+    ${count} =    Get Critical Alert Count
+    Run Keyword If   ${count} > 0   Log    Starting "${SUITE_NAME}". Appliance now has ${count} Active Critical Alerts   level=WARN
+    ...   ELSE   Log   Appliance is in good state for: ${SUITE NAME}   console=${CONSOLE}
+
+    ${GLOBAL_ALERT_COUNT} =    Get Variable Value    ${GLOBAL_ALERT_COUNT}
+
+    Run Keyword If    ${GLOBAL_ALERT_COUNT} is ${NULL}    Run Keywords
+    ...    Set Global Variable    ${GLOBAL_ALERT_COUNT}    ${count}
+    ...    AND    Return From Keyword
+
+    Run Keyword If    ${count} > ${GLOBAL_ALERT_COUNT}    Run Keywords
+    ...    Log Alert Count Change Error    ${count}
+    ...    AND    Run Keyword If    '${action}'=='Fail'    Set Global Alert Count and Fatal Error    ${count}
+
+    Set Global Variable    ${GLOBAL_ALERT_COUNT}    ${count}
+
+Log Alert Count Change Error
+    [Documentation]    Logs that there are additional Critical alerts left over by the previous test
+    [Arguments]    ${count}
+    Log   The previous test created and left additional critical alerts. Initially there were ${GLOBAL_ALERT_COUNT} now ${count} Critical alerts    ERROR
+    Log   \tThe previous test created and left additional critical alerts. Initially there were ${GLOBAL_ALERT_COUNT} now ${count} Critical alerts     ERROR
+    Log   \t\tThe previous test created and left additional critical alerts. Initially there were ${GLOBAL_ALERT_COUNT} now ${count} Critical alerts   ERROR
+
+Set Global Alert Count and Fatal Error
+    [Documentation]    Sets GLOBAL_ALERT_COUNT and Fails the keyword
+    [Arguments]     ${count}
+    Set Global Variable    ${GLOBAL_ALERT_COUNT}    ${count}
+    Fatal Error    Instructed to fail due to increase in Critical alerts.
+
+Add Server Profiles
+    [Documentation]    Adds Server Profiles
+    [Arguments]    ${profiles}
+    ${resp} =    Add Server Profiles from variable    ${profiles}
+    Wait For Task2    ${resp}    timeout=600    interval=15
+
+Confirm Server Profiles
+    [Documentation]    Confirms Server Profiels
+    [Arguments]    ${profiles}
+
+    @{stati} =    Create List
+    :FOR    ${profile}    IN    @{profiles}
+    \    ${uri} =  Common URI lookup by name  SP:${profile["name"]}
+    \    ${actual} =    Fusion Api Get Resource    uri=${uri}
+    \    ${status} =    Fusion Api Validate Response Follow    ${profile}    ${actual}    wordy=True
+    \    Run Keyword If     ${status}==${False}    Log   ${profile["name"]} failed to Confirm Server Profiles   level=Error    console=${CONSOLE}
+    \    Append To List    ${stati}    ${status}
+
+    Log   Stati: ${stati}    console=${CONSOLE}
+    ${failing} =    Get Count    ${stati}    ${False}
+    Should Contain X Times   ${stati}    ${False}    0    There were ${failing} non-confirmed profiles. ${stati}
+
+Get Locked and Active Alerts For Profiles and Hardware
+    [Documentation]     Gets the active alerts for profiles and the hardware that profile is applied to.
+
+    ${profiles} =    Fusion Api Get Server Profiles
+
+    ${alerts} =    Set Variable    0
+    :FOR    ${profile}    IN    @{profiles['members']}
+    \    Continue For Loop If    '${profile['serverHardwareUri']}' == '${Empty}'
+    \    Log    Get Alerts for profile: ${profile['name']} @ ${profile['uri']} and ${profile["serverHardwareUri"]}    console=${CONSOLE}
+    \    ${profile_alerts} =    Get ALL Alerts by Param    param=?query="resourceUri EQ '${profile["uri"]}' and alertState IN ('Active','Locked')"
+    \    ${blade_alerts} =    Get ALL Alerts by Param    param=?query="resourceUri EQ '${profile["serverHardwareUri"]}' and alertState in ('Active','Locked')"
+    \    Run Keyword If    ${profile_alerts["count"]} > 0    Log The Alerts     ${profile_alerts}    profile
+    \    ${alerts} =    Evaluate    ${profile_alerts["count"]} + ${alerts}
+    \    Run Keyword If    ${blade_alerts["count"]} > 0    Log The Alerts     ${blade_alerts}    server
+    \    ${alerts} =    Evaluate    ${blade_alerts["count"]} + ${alerts}
+
+#   Rich and I decided not to fail the test.  We will still have "Log The Alerts" running which will print
+#   ERROR messages with those alerts in the Test Execution Errors section.  It will be up to the triage person
+#   to make a call on whether to fail the test
+#    Should Be Equal As Integers    ${alerts}    0    Failing Test Case due to Active alerts for Profiles or Server Hardware associated with Profiles
+
+Log The Alerts
+    [Documentation]   Iterate through the passed in Alerts and log with Error highlight
+    [Arguments]    ${alerts}    ${type}
+
+    :FOR    ${alert}    IN    @{alerts["members"]}
+    \    Log    Alert associated with ${type}: ${alert["associatedResource"]["resourceName"]}    level=ERROR    console=${CONSOLE}
+    \    Log    \t${alert["description"]}    level=ERROR    console=${CONSOLE}
+    \    Log    \tAlert State: ${alert['alertState']}, Severity: ${alert['severity']}, Urgancy: ${alert['urgency']}    level=ERROR    console=${CONSOLE}
+    \    Log    \n    level=ERROR    console=${CONSOLE}

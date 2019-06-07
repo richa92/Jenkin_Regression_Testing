@@ -1,0 +1,848 @@
+*** Settings ***
+Library				RoboGalaxyLibrary
+Library				FusionLibrary
+Library				OperatingSystem
+Library				BuiltIn
+Library				Collections
+Library				XML
+Library		        SSHLibrary
+Library				String
+Library				Dialogs
+Library             json
+Library             copy
+
+Resource			../fusion_api_resource.txt
+
+
+*** Keywords ***
+
+#******************************** Get cluster and host profile : keywords ***************************************
+
+Get ip range uri by name
+	[Documentation]	Fetches the ip range uri based on name
+	[Arguments]		${name}
+	${resp}=	Fusion Api Get Ipv4 Range
+	${lst}		Create List
+	:FOR	${uri}	in	@{resp['rangeUris']}
+	\	${resp1}	Fusion Api Get Ipv4 Range	uri=${uri}
+	\	run keyword if	'${resp1['name']}'=='${name}'	Append to List	${lst}	${uri}
+	[Return]	${lst}
+
+Get Host Profile by Uri
+	[Documentation]	Get Host Profile by Uri
+	[Arguments]		${hp}	${valid}=False
+	${resp}=	Fusion Api Get Hypervisor Host Profile	uri=${hp}
+	Remove from dictionary	${resp}		headers
+	[Return]	${resp}
+
+Get Host by Uri
+    [Documentation]    Get Host by hypervisor host Uri
+    [Arguments]    ${uri}
+    ${resp}=    Fusion Api Get Hypervisor Host    uri=${uri}
+    ${status}    run keyword and return status    Dictionary should contain key    ${resp}    uri
+    Run keyword if    ${status}==True    Log to console    \nHost Uri : ${resp['uri']}
+    Run keyword if    ${status}==True    Log to console    \nHost Details  :
+    Run keyword if    ${status}==True    Log to console    ${resp}
+    Run Keyword if    ${status}==False    Log    FAIL    Unable to Get HypervisorHost
+    Run keyword if    '${resp['state']}'!='Configured'    Log    \n ERROR:Status of Host Profile with URI:${uri} is ${resp['state']}
+    Run keyword if    '${resp['state']}'!='Configured'    Run Keyword And Continue On Failure    FAIL    Status of Host Profile with URI:${uri} is ${resp['state']}
+
+Get Host Profile Uris From Cluster
+	[Documentation]	Get Host Profile Uris From Cluster
+	[Arguments]		${cluster}
+	${validation}	Set Variable	True
+	${name}		Set variable	${cluster[0]['name']}
+	${resp}	${count}=	Get Cluster Profile		${name}
+	Run keyword If	${count}==0	FAIL	Failed to get Cluster ${name}
+	Run keyword if	"${resp['status']}"=="${False}"		FAIL	Failed to get Cluster ${name}
+	${hostProfile_uris}=	Set variable	${resp['hypervisorHostProfileUris']}
+	:FOR	${hp}	in	@{hostProfile_uris}
+	\	${resp}=	Get Host Profile by Uri		${hp}	${validation}
+	\	Log to console	Host Profile Details \n${resp}
+	\	Run Keyword If	"${resp['status']}"=="${False}"    	FAIL		Failed to get HypervisorHostProfileS
+	\	${h_uri}=	Set Variable	${resp['hypervisorHostUri']}
+	\	Get Host by Uri	${h_uri}
+
+Get Host Profile Uri By Name
+	[Documentation]	Get hypervisor host profile uri, with the host profile name passed as parameter
+	...				Usage: Fusion Api Get Hypervisor Host Profile	param
+	[Arguments]		${hp_name}
+	${resp}=	Fusion Api Get Hypervisor Host Profile	param=?filter="'name'=='${hp_name}'"
+	${count_status}		run keyword and return status	Dictionary should contain key	${resp}		count
+	run keyword if	${count_status}==False	return from keyword	${EMPTY}
+	run keyword if	${resp['count']}==0		return from keyword		${EMPTY}
+	${uri}=	Run keyword if	${resp} is not None	Get From Dictionary		${resp['members'][0]}	uri
+	...						ELSE	Log to console		Could not find host profile ${hp_name}
+	[Return]	${uri}
+
+Get Cluster Profile Uri by Name
+	[Documentation]	Get Cluster Profile Uri by Name
+	#Fusion Api Get Hypervisor Cluster Profile | <uri> | <param> | <api> | <headers>
+	[Arguments]		${cpname}
+	${uri}=		Set variable	${None}
+	${resp}= 	Fusion Api Get Hypervisor Cluster Profile		param=?filter="'name'=='${cpname}'"
+	Return From Keyword If  ${resp['count']}==0		${uri}
+	${uri}=	Run keyword if	${resp['count']} != 0	Get From Dictionary		${resp['members'][0]}	uri
+	...				ELSE	Log to console		Could not find cluster profile ${cpname}
+	[Return]	${uri}
+
+Get Cluster Profile
+	[Documentation]	Get Cluster profile information by name
+	[Arguments]		${cp_name}
+	${cp_details}=	Create Dictionary
+	${resp}=	Fusion Api Get Hypervisor Cluster Profile		param=?filter="'name'=='${cp_name}'"
+	Return From Keyword If  ${resp['count']}==0  ${cp_details}	${resp['count']}
+	:FOR	${cls}	IN	${resp['members'][0]}
+	\	${cp_details}=	Run Keyword if	'${cls['name']}'=='${cp_name}'	copy dictionary		${cls}
+	[Return]	${cp_details}	${resp['count']}
+
+Get Cluster Profile by Uri
+	[Documentation]	Get Cluster profile information by uri
+	[Arguments]		${cp_uri}
+	${cp}=	Create List
+	${rest_resp}=	Fusion Api Get Hypervisor Cluster Profile		uri=${cp_uri}
+	Remove from dictionary	${rest_resp}		headers
+	${status} = 	Run Keyword And Return Status	should be equal as integers  ${rest_resp['status_code']}  202
+	${dict} =  Create dictionary
+	set to dictionary   ${dict}  status=${status}
+	set to dictionary   ${dict}  rest_resp=${rest_resp}
+	append to list  ${cp}  ${dict}
+	[Return]	${cp}
+
+Get All Cluster Profiles
+	[Documentation]	Get All Cluster profile information by name
+	${name_lst}		Create List
+	${cp_details}	Create Dictionary
+	${resp}=	Fusion Api Get Hypervisor Cluster Profile
+	${status}=	Run keyword and return status	Dictionary should contain key	${resp}		members
+	set to Dictionary	${cp_details}	detail	${resp['members']}
+	:FOR	${cls}	IN	@{resp['members']}
+	\	Exit for loop If	'${resp['count']}' == '0'
+	\	Append to List	${name_lst}		${cls['name']}
+	set to Dictionary	${cp_details}	names	${name_lst}
+	[Return]	${cp_details}	${resp['count']}
+
+#******************************** Create cluster profile : keywords ***************************************
+
+Add Cluster Profile
+	[Documentation]	Add a Hypervisor Cluster profile with profile information in dictionary format
+	...		Data File Example :
+	...		cluster_profile = 		[{"type":"HypervisorClusterProfileV2", "name": "Cluster_1", "path":"DC1", "vcenter": "172.18.13.11",
+	...		        "profile_name": "profile_template_gen8_1", "hypervisor_type": "Vmware", "deployment_manager_type": "ICSP",
+	...		        "deployment_uri": "/rest/os-deployment-build-plans/800001", "server_password": "iso*help",
+	...		        "ip_pool": "IPV4", "network": "corp"}]
+	#Fusion Api Create Hypervisor Cluster Profile  | <body> | <api> | <headers>
+	[Arguments]		${cluster_profiles}		${validation}=False		${status_code}=202
+	${add_cp} = 	Create list
+	:FOR	${cluster_profile}	in	@{cluster_profiles}
+	\	Log to Console	\n* Calling Building cluster profile...
+	\	${cpb}=	Building Cluster Profile	${cluster_profile}
+	\	Log to Console			${cpb}
+	\	Log    * Creating cluster profile..    console=true
+	\	${rest_resp} = 	Fusion Api Create Hypervisor Cluster Profile 	${cpb}
+	\	${status} = 	Run Keyword And Return Status	should be equal as integers  ${rest_resp['status_code']}  ${status_code}
+	\	${task_resp}=	Run Keyword If		'${status}'=='True'		Wait For Task	${rest_resp}	7500s	60s
+	\	${task_status}=		Run Keyword If		'${status}'=='True'		Run Keyword And Return Status	should be equal 	 ${task_resp['taskState']}	Completed
+	\	${dict} =  Create dictionary
+	\	set to dictionary   ${dict}  status=${status}
+	\	set to dictionary   ${dict}  rest_resp=${rest_resp}
+	\	set to dictionary   ${dict}  name=${cpb['name']}
+	\	set to dictionary   ${dict}  task_resp=${task_resp}
+	\	set to dictionary   ${dict}  task_status=${task_status}
+	\	set to dictionary   ${dict}  rest_body=${cpb}
+	\	append to list  ${add_cp}  ${dict}
+	[Return]    ${add_cp}
+
+##******************************** Delete cluster profile : keywords ***************************************
+
+Delete cluster profile
+	[Documentation]	Delete cluster profile by name
+	[Arguments]		${cluster_profiles}	${force}=False
+	${del_cp}	Create list
+	:FOR	${cluster_profile}	in	@{cluster_profiles}
+	\	&{dict}		Create dictionary
+	\	&{rest_resp}	Create dictionary
+	#Fusion Api Delete Hypervisor Cluster Profile | <uri> | <api> | <headers>
+	\	${new_name_status}		Run keyword and return status	Dictionary Should Contain Key	${cluster_profile}	new_name
+	\	Run keyword if	${new_name_status}==${True}	Log    \n* Initiating delete on cluster profile: ${cluster_profile['new_name']}    console=true
+	\	...			ELSE	Log    \n* Initiating delete on cluster profile: ${cluster_profile['name']}		    console=true
+	\	${uri}=		Run keyword if	${new_name_status}==${True}		Get Cluster Profile Uri by Name		${cluster_profile['new_name']}
+	\	...					ELSE	Get Cluster Profile Uri by Name		${cluster_profile['name']}
+	\	run keyword if	'${uri}'=='None' or '${uri}'=='${EMPTY}'	Return from keyword	${del_cp}
+	\	${rest_resp}= 	Fusion Api Delete Hypervisor Cluster Profile	uri=${uri}?force=${force}
+	\	${status}= 	Run Keyword And Return Status	should be equal as integers  ${rest_resp['status_code']}	202
+	\	${task_resp}=	Run Keyword If	${status}==True		Wait For Task	${rest_resp}	3600s	60s
+	\	${task_status}=		Run Keyword If		'${status}'=='True'		Run Keyword And Return Status	should be equal 	 ${task_resp['taskState']}	Completed
+	\	Set to dictionary	${dict}		status	${status}
+	\	Set to dictionary	${dict}		rest_resp	${rest_resp}
+	\	set to dictionary	${dict}		task_resp	${task_resp}
+	\	set to dictionary	${dict}		task_status		${task_status}
+	\	set to dictionary	${dict}		rest_body	${rest_resp}
+	\	set to dictionary	${dict}		name	${cluster_profile['name']}
+	\	append to list		${del_cp}	${dict}
+	[Return]	${del_cp}
+
+Delete cluster profile by url
+	[Documentation]	Delete cluster profile by url
+	[Arguments]		${url}	${force}=false
+	#Fusion Api Delete Hypervisor Cluster Profile | <uri> | <api> | <headers>
+	Log    \n* Initiating delete on cluster profile: ${url}    console=true
+	${rest_resp} = 	Fusion Api Delete Hypervisor Cluster Profile	uri=${url}?force=${force}
+	${status} = 	Run Keyword And Return Status	should be equal as integers  ${rest_resp['status_code']}	202
+	${task_resp}=	Run Keyword If	${status}==True		Wait For Task	${rest_resp}	3600s	60s
+	${task_status}=		Run Keyword If		'${status}'=='True'		Run Keyword And Return Status	should be equal 	 ${task_resp['taskState']}	Completed
+	${del_cp}=  	Create list
+	${dict}		Create dictionary
+	Set to dictionary	${dict}		status	${status}
+	Set to dictionary	${dict}		rest_resp	${rest_resp}
+	set to dictionary	${dict}		task_resp	${task_resp}
+	set to dictionary	${dict}		task_status		${task_status}
+	set to dictionary	${dict}		rest_body=${rest_resp}
+	append to list		${del_cp}	${dict}
+	[Return]	${del_cp}
+
+##******************************** Update host  profile : keywords ***************************************
+
+Update network
+	[Documentation]	Update network
+	[Arguments]		${network}	${validation}=False
+	#Fusion Api Edit Ethernet Network  | <body> | <uri> | <api> | <headers>
+	Get Ethernet URI	${name}
+	${resp}=	Fusion Api Edit Ethernet Network	${network}
+	[return]	${resp}
+
+Update host profile
+	[Documentation]	Update host profile
+	[Arguments]		${cluster}	${validation}=True
+	#Fusion Api Update Hypervisor Host Profile | <uri> | <body> | <api> | <headers>
+	${cp}=		Get Cluster Profile		${cluster[0]['name']}
+	${cluster_name}		Set variable	${cluster[0]['name']}
+	Log    Updating on host profile    console=True
+	${upd_hp}=  	Create list
+	${status}=	run keyword and return status	Should be empty		${cp[0]['hypervisorHostProfileUris']}
+	run keyword if	${status}		FAIL	Host Profile not found
+	${hpUris}	Set variable	${cp[0]['hypervisorHostProfileUris']}
+	:FOR	${hp}	in	@{hpUris}
+	\	${s}=	Get Host Profile by Uri		${hp}	${validation}
+	\	${s}=	update hhp settings	${cluster[0]['hhp_settings']}	${s}
+	\	Remove from dictionary	${s}	status_code
+	\	Remove from dictionary	${s}	headers
+	\	${rest_resp}=	Fusion Api Update Hypervisor Host Profile		${hp}	${s}
+	\	${status} = 	Run Keyword And Return Status	should be equal as integers  ${rest_resp['status_code']}	202
+	\	${task_resp}=	Run Keyword If	${status}==True		Wait For Task	${rest_resp}	7600s	60s
+	\	${task_status}=		Run Keyword If		'${status}'=='True'		Run Keyword And Return Status	should be equal 	 ${task_resp['taskState']}	Completed
+	\	${dict}		Create dictionary
+	\	Set to dictionary	${dict}		status	${status}
+	\	Set to dictionary	${dict}		rest_resp	${rest_resp}
+	\	set to dictionary	${dict}		task_resp	${task_resp}
+	\	set to dictionary	${dict}		task_status		${task_status}
+	\	set to dictionary	${dict}		rest_body=${rest_resp}
+	\	set to dictionary	${dict}		name=${cluster_name}
+	\	append to list		${upd_hp}	${dict}
+	[return]	${upd_hp}
+
+Update hhp settings
+	[Documentation]	Update hhp settings
+	[Arguments]		${hhp_settings}		${host_profile}
+	:FOR	${settings}		IN		@{hhp_settings}
+	\	${bReDeploy}=	Run keyword if	'${settings}' == 'redeploy'	convert to boolean	${hhp_settings['redeploy']}
+	\	Run keyword if	'${settings}' == 'redeploy'	Set to dictionary	${host_profile}	reDeployHost	${bReDeploy}
+	\	Run keyword if	'${settings}' == 'power_state'	Set to dictionary	${host_profile}	powerState	${hhp_settings['power_state']}
+	\	## changing  host profile name and hostname features does not work
+	\	Run keyword if	'${settings}' == 'host_name'	Set to dictionary	${host_profile}	hostname	${hhp_settings['host_name']}
+	\	run keyword if	'${settings}' == 'hhp_name'	Set to Dictionary	${host_profile}		name	${hhp_settings['hhp_name']}
+	[Return]	${host_profile}
+
+Update specific host profile
+	[Documentation]	Update specific host profile
+	[Arguments]		${host_profiles}
+	${upd_hp}	Create List
+	:FOR	${hhp}		IN		@{host_profiles['HypervisorHostProfileNames']}
+	\	${hp}=		Get Host Profile Uri By Name	${hhp}
+	\	${host_profile}=	Get Host Profile by Uri		${hp}
+	\	${s}=	update hhp settings	${host_profiles['hhp_settings']}	${host_profile}
+	\	Remove from dictionary	${s}	status_code
+	\	Remove from dictionary	${s}	headers
+	\	${rest_resp}=	Fusion Api Update Hypervisor Host Profile		${hp}	${s}
+	\	${status} = 	Run Keyword And Return Status	should be equal as integers  ${rest_resp['status_code']}	202
+	\	${task_resp}=	Run Keyword If	${status}==True		Wait For Task	${rest_resp}	9999999999s	50s
+	\	${task_status}=		Run Keyword If		'${status}'=='True'		Run Keyword And Return Status	should be equal 	 ${task_resp['taskState']}	Completed
+	\	${dict}		Create dictionary
+	\	Set to dictionary	${dict}		status	${status}
+	\	Set to dictionary	${dict}		rest_resp	${rest_resp}
+	\	set to dictionary	${dict}		task_resp	${task_resp}
+	\	set to dictionary	${dict}		task_status		${task_status}
+	\	set to dictionary	${dict}		rest_body=${s}
+	\	append to list		${upd_hp}	${dict}
+	[return]	${upd_hp}
+
+##******************************** Update cluster profile : keywords ***************************************
+
+Update cluster profile
+	[Documentation]	Update cluster profile
+	[Arguments]		${cluster_profile}		${validation}=False		${status_code}=202
+	&{rest_resp}	Create dictionary
+	&{dict} =  Create dictionary
+	${update_cp_list}=		Create list
+	##Fusion Api Update Hypervisor Cluster Profile | <uri> | <body> | <api> | <headers>
+	:FOR	${cp}	in	@{cluster_profile}
+	\	${cp_uri} = 		Get Cluster Profile Uri by Name		${cp['name']}
+	\	run keyword if	'${cp_uri}'=='None' or '${cp_uri}'=='${EMPTY}'	Return from keyword	${update_cp_list}
+	\	Log    \nUpdating cluster profile:${cp['name']}    console=True
+	\	Log    \nGet cluster profile Info:${cp['name']}    console=true
+	##***************** get cluster profile ******************
+	\	${resp_data}	${count}= 	Get Cluster Profile		${cp['name']}
+	\	${length} =  Get Length  ${resp_data}
+	\	Run Keyword If  ${length} == 0  Return from keyword	${update_cp_list}
+	\	${get_cp_res_data}=		copy.deepcopy	${resp_data}
+
+	##***************** type **********************************
+	\	${type_status}		Run keyword and return status	Dictionary Should Contain Key	${cp}	type
+	\	Run Keyword If	${type_status}==True		Set to Dictionary	${resp_data}	type	${cp['type']}
+
+	##***************** name **********************************
+	\	${name_status}		Run keyword and return status	Dictionary Should Contain Key	${cp}	name
+	\	Run Keyword If	${name_status}==True		Set to Dictionary	${resp_data}	name	${cp['name']}
+
+	\	${new_name_status}		Run keyword and return status	Dictionary Should Contain Key	${cp}	new_name
+	\	Run Keyword If	${new_name_status}==True		Set to Dictionary	${resp_data}	name	${cp['new_name']}
+	\	${name_flag}	Run Keyword If	${new_name_status}==True		Set Variable	True
+
+	##***************** path ***********************************
+	\	${path_status}		Run keyword and return status	Dictionary Should Contain Key	${cp}	path
+	\	Run Keyword If	${path_status}==True		Set to Dictionary	${resp_data}	path	${cp['path']}
+
+	##***************** hypervisor and its type ****************
+	\	${hypervisorType_status}		Run keyword and return status	Dictionary Should Contain Key	${cp}	hypervisor_type
+	\	Run Keyword If	${hypervisorType_status}==True		Set to Dictionary	${resp_data}	hypervisorType	${cp['hypervisor_type']}
+	\	${vcenter_status}		Run keyword and return status	Dictionary Should Contain Key	${cp}	vcenter
+	\	${hm_uri}=	Run Keyword If	${vcenter_status}==True		Get Hypervisor Manager	${cp['vcenter']}
+	\	${hmuri_status}		Run keyword and return status	Dictionary Should Contain Key	${hm_uri}	uri
+	\	run keyword if	${vcenter_status}==True and ${hmuri_status}==False		run keywords
+	\	...	Set to dictionary	${rest_resp}	message=Hypervisor manager: ${cp['vcenter']} not found	AND
+	\	...	Set to dictionary	Set to Dictionary	${dict}		status=False	rest_resp=${rest_resp}	AND
+	\	...	append to list		${update_cp_list}	${dict}
+	\	run keyword if	${vcenter_status}==True and ${hmuri_status}==False	Return from keyword	${update_cp_list}
+	\	Run Keyword If	${vcenter_status}==True		Set to Dictionary	${resp_data}	hypervisorManagerUri	${hm_uri['uri']}
+
+	##***************** Host profile template ***************
+	\	${hpt}=		Update host profile template	${resp_data['hypervisorHostProfileTemplate']}	${cp}
+	\	Set to Dictionary	${resp_data}	hypervisorHostProfileTemplate	${hpt}
+
+	##**************** network ********************************
+	\	${resp_net}=	update network info	${resp_data['ipPools']}	${cp}
+	\	run keyword if	${resp_net} is not None		Set to Dictionary	${resp_data}	ipPools		${resp_net}
+
+	##**************** server hardware *************************
+	\	${hw_status}=	Run keyword and return status	Dictionary should contain key	${cp}	server_hardware
+	\	${hw_list_old}	Run keyword if 	${hw_status}==True	Set Variable	${resp_data['addHostRequests']}
+	\	${hw_list}=		Run keyword if 	${hw_status}==True	Add Host Request	${cp}
+	\	Run keyword if 	${hw_status}==True	set to dictionary	${resp_data}	addHostRequests		${hw_list}
+
+	##**************** hypervisor host profile ************************
+	\	${hp_status}=	Run keyword and return status	Dictionary should contain key	${cp}	HostProfileUris
+	\	${hp_list_old}	Run keyword if 	${hp_status}==True	Set Variable	${resp_data['hypervisorHostProfileUris']}
+	\	${spUri_list}=	Run keyword if 	${hp_status}==True	Get ServerProfile From Server Hardware	${cp['HostProfileUris']}
+	\	${sp_count}=	Run keyword if 	${hp_status}==True	Get Length	${spUri_list}
+	\	${hhp}	${deleted_hhps}=		Run keyword if 	${hp_status}==True and ${sp_count}!=0	Update hostProfile info	${hp_list_old}	${spUri_list}
+
+	##**************** cluster settings ************************
+	\	${cls_set_status}=	Run keyword and return status	Dictionary should contain key	${cp}	cluster_settings
+	\	${resp_cs}=	run keyword if	${cls_set_status}==True		update cluster setting	${resp_data['hypervisorClusterSettings']}	${cp['cluster_settings']}
+	\	run keyword if	${cls_set_status}==True		Set to Dictionary	${resp_data}	hypervisorClusterSettings	${resp_cs}
+
+	##**************** shared volume ***************************
+	\	${svol_status}=		Run keyword and return status		Dictionary should contain key	${cp}	shared_volume
+	\	${resp_vol}=	Run keyword if	${svol_status}==True	update shared volume	${cp['shared_volume']}
+	\	${resp_vol_old}=	Set Variable 	${resp_data['sharedStorageVolumes']}
+	\	${resp_vol_add}=	Run keyword if	${resp_vol} is not None		Combine Lists	${resp_vol_old}		${resp_vol}
+	\	${del_svol_status}=		Run keyword and return status		Dictionary should contain key	${cp}	del_shared_volume
+	\	${resp_vol_del}		Run keyword if	${del_svol_status}==True and ${resp_vol_old}!=[]	Delete shared volume	${cp['del_shared_volume']}		${resp_vol_old}
+	\	Run keyword if	${resp_vol_add} is not None		Set to Dictionary	${resp_data}	sharedStorageVolumes	${resp_vol_add}
+	\	Run keyword if	${resp_vol_del} is not None		Set to Dictionary	${resp_data}	sharedStorageVolumes	${resp_vol_del}
+	\	${vol_list}=	Run keyword if	${resp_vol_add} is not None and ${resp_vol_del} is not None		Combine Lists	${resp_vol_del}		${resp_vol}
+	\	Run keyword if	${vol_list} is not None		Set to Dictionary	${resp_data}	sharedStorageVolumes	${vol_list}
+
+	\	${rest_resp} =		Fusion Api Update Hypervisor Cluster Profile	body=${resp_data}	uri=${cp_uri}
+	\	Log to Console		${rest_resp}
+	\	${status}=			Run Keyword and Return Status	should be equal as integers		${rest_resp['status_code']}  ${status_code}
+	\	${task_resp}=	Run Keyword If		'${status}'=='True'		Wait For Task	${rest_resp}	9999999999s	60s
+	\	${task_status}=		Run Keyword If		'${status}'=='True'		Run Keyword And Return Status	should be equal 	 ${task_resp['taskState']}	Completed
+
+	\	set to dictionary   ${dict}  status			${status}
+	\	${resp_json}=	json.dumps	${resp_data}
+	\	set to dictionary   ${dict}  rest_resp	${rest_resp}
+	\	set to dictionary   ${dict}  status			${status}
+	\	set to dictionary   ${dict}  task_resp		${task_resp}
+	\	set to dictionary   ${dict}  task_status	${task_status}
+	\	set to dictionary   ${dict}  rest_body		${resp_json}
+	\	set to dictionary   ${dict}  name			${cp['name']}
+	\	set to dictionary   ${dict}  cp				${cp}
+	\	set to dictionary   ${dict}  resp_data		${resp_data}
+	\	set to dictionary   ${dict}  get_cp_res_data		${get_cp_res_data}
+	\	set to dictionary   ${dict}  deleted_hhps		${deleted_hhps}
+	\	set to dictionary   ${dict}  name_flag		${name_flag}
+	\	Run keyword if	${name_flag}==True	set to dictionary   ${dict}  new_name		${cp['new_name']}
+	\	Log to console	${dict}
+	\	append to list  ${update_cp_list}  ${dict}
+
+	[Return]    ${update_cp_list}
+
+
+ #***********************************Sub keywords******************************************
+
+ #***********************************Update cluster profile : sub keywords******************************************
+
+Update host profile template
+	[Documentation]	Update host profile template
+	[Arguments]		${hpt}	${cp}
+
+	#### SPT ####
+	${profile_name_status}		Run keyword and return status	Dictionary Should Contain Key	${cp}	profile_name
+	${spt_uri}=		Run Keyword If	${profile_name_status}==True	Get Server Profile Template URI		${cp['profile_name']}
+	Run Keyword If	${profile_name_status}==True	Set to Dictionary	${hpt}	serverProfileTemplateUri	${spt_uri}
+
+	#### deployment plan	####
+	${dep_uri_status}=		Run keyword and return status	Dictionary should contain key	${cp}	deployment_uri
+	&{dep_uri}=		Run Keyword If	${dep_uri_status}==True		Set to Dictionary	${hpt['deploymentPlan']}	deploymentPlanUri	${cp['deployment_uri']}
+	#Run Keyword If	${dep_uri_status}==True		Set to Dictionary	${hpt}	deploymentPlan	${dep_uri}
+	#Run Keyword If	${dep_uri_status}==True		Log to Console	Updated deployment plan..
+
+	#### host prefix ####
+	${host_prefix_status}=		Run keyword and return status	Dictionary should contain key	${cp}	hostprefix
+	Run Keyword If	${host_prefix_status}==True		Set to Dictionary	${hpt}	hostprefix	${cp['hostprefix']}
+
+	#### host config policy ####
+	${hcp_set_status}=	Run Keyword and return status	Dictionary should contain key	${cp}	hostConfigPolicy_settings
+	${resp_hcp}=	run keyword if	${hcp_set_status}==True		update host config policy setting		${cp['hostConfigPolicy_settings']}
+	run keyword if	${resp_hcp}	is not None		Set to Dictionary	${hpt}	hostConfigPolicy	${resp_hcp}
+
+    #### virtual switch policy	####
+	#${vsc_status}=	Run keyword and return status		Dictionary should contain key	${cp}	virtualSwitchConfigPolicy
+	#${resp_vsc}=	Run keyword if	${vsc_status}==True		update virtual switch config policy		${cp['virtualSwitchConfigPolicy']}
+	#Run keyword if	${resp_vsc} is not None		Set to Dictionary	${hpt}	virtualSwitchConfigPolicy	${resp_vsc}
+
+	[return]	${hpt}
+
+Updating cluster profiles
+	[Documentation]	Updating cluster profiles
+	[Arguments]		${cluster_profile}
+	${rest_resp} =		Fusion Api Update Hypervisor Cluster Profile	body=${cluster_profile}
+	${status}=			Run Keyword and Return Status	should be equal as integers		${rest_resp['status_code']}  ${status_code}
+	${task_resp}=	Run Keyword If		'${status}'=='True'		Wait For Task	${rest_resp}
+	${task_status}=		Run Keyword If		'${status}'=='True'		Run Keyword And Return Status	should be equal 	 ${task_resp['taskState']}	Completed
+	${dict} =  Create dictionary
+	set to dictionary   ${dict}  rest_resp=${rest_resp}
+	set to dictionary   ${dict}  status=${status}
+	set to dictionary   ${dict}  task_resp=${task_resp}
+	set to dictionary   ${dict}  task_status=${task_status}
+	set to dictionary   ${dict}  rest_body=${resp_data}
+	append to list  ${update_cp_list}  ${dict}
+	[Return]	${update_cp_list}
+
+Delete shared volume
+	[Documentation]	Delete shared volume
+	[Arguments]		${cp_del_shared_volume}		${shared_vol_list}
+	:FOR	${vol_name}	in	@{cp_del_shared_volume}
+	\	${vol_list}=	Check shared volume		${vol_name}		${shared_vol_list}
+	[Return]	${vol_list}
+
+Check shared volume
+	[Documentation]	Search for/Check shared volume
+	[Arguments]		${get_vol}		${shared_vol_list}
+	:FOR	${vol}	IN	@{shared_vol_list}
+	\	run keyword if	'${vol['name']}'=='${get_vol}'		Remove Values from List	${shared_vol_list}	${vol}
+	[Return]	${shared_vol_list}
+
+Update shared volume
+	[Documentation]	Update shared volume
+	[Arguments]		${cp_shared_volume}
+	${vol_lst}		Create List
+	:FOR 	${v}	in	@{cp_shared_volume}
+	\	&{vol}		Create Dictionary
+	\	${pool_status}=		Run keyword and return status	Dictionary should contain key	${v}	pool_name
+	\	${spu}=		Run keyword if	${pool_status}==True	Get Storage Pool by URI		${v['pool_name']}
+	\	Run keyword if	${pool_status}==True		run keyword
+	\	...		Set to Dictionary	${vol}	storagePoolUri		${spu}
+	\	${name_status}=		Run keyword and return status	Dictionary should contain key	${v}	name
+	\	Run keyword if	${name_status}==True	Set to dictionary	${vol}	name	${v['name']}
+	\	${SvolUri}=		Run keyword if	${name_status}==True	Get Storage Volume URI	${v['name']}
+	\	Run keyword if	${name_status}==True	Set to Dictionary	${vol}	storageVolumeUri	${SvolUri}
+	\	${proviType_status}=	Run keyword and return status	Dictionary should contain key	${v}	provisionType
+	\	Run keyword if	${proviType_status}==True	Set to dictionary	${vol}	provisionType	${v['provisionType']}
+	\	${perm_status}=	Run keyword and return status	Dictionary should contain key	${v}	permanent
+	\	Run keyword if	${perm_status}==True	Set to dictionary	${vol}	name	${v['permanent']}
+	\	${reqCapa_status}=	Run keyword and return status	Dictionary should contain key	${v}	requestedCapacity
+	\	Run keyword if	${reqCapa_status}==True	Set to dictionary	${vol}	requestedCapacity	${v['requestedCapacity']}
+	\	${volFS_status}=	Run keyword and return status	Dictionary should contain key	${v}	volumeFileSystemType
+	\	Run keyword if	${volFS_status}==True	Set to dictionary	${vol}	volumeFileSystemType	${v['volumeFileSystemType']}
+	\	Append to List	${vol_lst}		${vol}
+	[Return]	${vol_lst}
+
+Get Storage Pool by URI
+	[Documentation]	Gets storage Pool Uri of a specific storage system
+	[Arguments]		${storagePool}
+	${resp} = 	Fusion Api Get Storage Pools	param=?filter="'name'=='${storagePool}'"
+	Return From Keyword If  ${resp['count']}==0  /rest/storage_pool_uri_${storagePool}_not_found
+	${poolUri} =    Set Variable  		${None}
+	:FOR	${pool}	IN	@{resp['members']}
+	\		${storageSysUri} =          Set Variable            ${pool['storageSystemUri']}
+	\		${poolUri} =                Set Variable            ${pool['uri']}
+	[Return]	${poolUri}
+
+Update virtual switch config policy
+	[Documentation]	Update virtual switch config policy
+	[Arguments]		${vsc_settings}
+
+	&{resp_vsc}=	Create Dictionary
+	:FOR	${vsc}	in	${vsc_settings}
+	\	${him_status}=	run keyword and return status	Dictionary should contain key	${vsc}	customVirtualSwitches
+	\	${cvs}=	Run keyword if	${him_status}==True		Convert to Boolean	${vsc['customVirtualSwitches']}
+	\	Run keyword if	${him_status}==True		Set to Dictionary	${resp_vsc}		customVirtualSwitches	${cvs}
+
+	\	${him_status}=	run keyword and return status	Dictionary should contain key	${vsc}	configurePortGroups
+	\	${cpg}=		Run keyword if	${him_status}==True		Convert to Boolean	${vsc['configurePortGroups']}
+	\	Run keyword if	${him_status}==True		Set to Dictionary	${resp_vsc}		configurePortGroups		${cpg}
+
+	\	${mvs_status}=	run keyword and return status	Dictionary should contain key	${vsc}	manageVirtualSwitches
+	\	${mvs}=		Run keyword if	${mvs_status}==True		Convert to Boolean	${vsc['manageVirtualSwitches']}
+	\	Run keyword if	${mvs_status}==True		Set to Dictionary	${resp_vsc}		manageVirtualSwitches	${mvs}
+
+	\	${pg_create}=	run keyword and return status	Dictionary should contain key	${vsc}	createVmPortgroup
+	\	${pg}=		Run keyword if	${pg_create}==True		Copy List	${vsc['createVmPortgroup']}
+	\	Run keyword if	${pg_create}==True		Set to dictionary	${resp_vsc}	createVmPortgroup	${pg}
+
+	[Return]	${resp_vsc}
+
+Update host config policy setting
+	[Documentation]	Update host config policy setting
+	[Arguments]		${hcp_settings}
+
+	&{h}=	Create Dictionary
+	:FOR	${hcp}	in	${hcp_settings}
+	\	${lhm_status}=	run keyword and return status	Dictionary should contain key	${hcp}	leaveHostInMaintenance
+	\	${lhm}=		Run keyword if	${lhm_status}==True		Convert to Boolean	${hcp['leaveHostInMaintenance']}
+	\	Run keyword if	${lhm_status}==True		Set to Dictionary	${h}	leaveHostInMaintenance	${lhm}
+
+	\	${hp_status}=	run keyword and return status	Dictionary should contain key	${hcp}	useHostPrefixAsHostname
+	\	${hp}=	Run keyword if	${hp_status}==True	Convert to Boolean	${hcp['useHostPrefixAsHostname']}
+	\	Run keyword if	${hp_status}==True		Set to Dictionary	${h}	useHostPrefixAsHostname		${hp}
+
+	\	${hr_status}=	run keyword and return status	Dictionary should contain key	${hcp}	useHostnameToRegister
+	\	${hr}=	Run keyword if	${hr_status}==True		Convert to Boolean	${hcp['useHostnameToRegister']}
+	\	Run keyword if	${hr_status}==True		Set to Dictionary	${h}	useHostnameToRegister	${hr}
+
+	[Return]	${h}
+
+Update Cluster Setting
+	[Documentation]	Update Cluster Setting
+	[Arguments]		${resp_cls}		${cp_cs}
+	&{t}	Create Dictionary
+
+	:FOR	${cls}	in	@{cp_cs}
+	\	${type_status}=		run keyword and return status	Dictionary should contain key	${cls}	cluster_settings_type
+	\	Run keyword if	${type_status}==True	Set to Dictionary	${t}	type	${cp_cs['cluster_settings_type']}
+	\	${vsType_status}=	Run keyword and return status	Dictionary should contain key	${cls}	virtual_switch_type
+	\	Run keyword if	${vsType_status}==True	Set to Dictionary	${t}	virtualSwitchType	${cp_cs['virtual_switch_type']}
+	\	${mnVmotion_status}=	Run keyword and return status	Dictionary should contain key	${cls}	multi_nic_vmotion
+	\	${b_multi_nic}=		Run keyword if	${mnVmotion_status}==True	Convert to boolean	${cp_cs['multi_nic_vmotion']}
+	\	Run keyword if	${mnVmotion_status}==True	Set to Dictionary	${t}	multiNicVMotion		${b_multi_nic}
+	\	${drsE_status}=	run keyword and return status	Dictionary should contain key	${cls}	drsEnabled
+	\	${b_drsE}=		Run keyword if	${drsE_status}==True	Convert to boolean	${cp_cs['drsEnabled']}
+	\	${b_drs}=	Run keyword if	${drsE_status}==True	Set variable if 	'${cp_cs['drsEnabled']}'=='NULL' or '${cp_cs['drsEnabled']}'=='None'	${None}	${b_drsE}
+	\	Run keyword if	${drsE_status}==True	Set to Dictionary	${t}	drsEnabled		${b_drs}
+	\	${haE_status}=	run keyword and return status	Dictionary should contain key	${cls}	haEnabled
+	\	${b_haE}=	Run keyword if	${haE_status}==True		Convert to boolean	${cp_cs['haEnabled']}
+	\	${b_ha}=	Run keyword if	${haE_status}==True	Set variable if 	'${cp_cs['haEnabled']}'=='NULL' or '${cp_cs['haEnabled']}'=='None'	${None}	${b_haE}
+	\	Run keyword if	${haE_status}==True		Set to Dictionary	${t}	haEnabled	${b_ha}
+	\	${dsu_status}=	Run Keyword If	'${cp_cs['virtual_switch_type']}'== 'Distributed'	 run keyword and return status	Dictionary should contain key	${cls}	distributed_switch_usage
+	\	Run keyword if	${dsu_status}==True		set to Dictionary	${t}	distributedSwitchUsage	${cp_cs['distributed_switch_usage']}
+	\	${dsv_status}=	run keyword and return status	Dictionary should contain key	${cls}	distributed_switch_version
+	\	Run keyword if	${dsu_status}==True		set to Dictionary	${t}	distributedSwitchVersion	${cp_cs['distributed_switch_version']}
+
+	[return]	${t}
+
+#*************************hardware info *****************
+Update hardware info
+	[Documentation]	Update hardware information
+	[Arguments]		${hw}	${cp_hw}
+	:FOR	${h}	in	@{cp_hw}
+	\	${hwUri}=	Get Server Hardware URI		${h}
+	\	&{hd}	Create Dictionary	serverHardwareUri=${hwUri}
+	\	Append to List	${hw}	${hd}
+	[return]	${hw}
+
+Update HostProfile Info
+	[Documentation]	Update HostProfile information
+	[Arguments]		${hp}	${cp_sp}
+	${hp_match}		Create List
+	${hpUri}=	Fusion Api Get Hypervisor Host Profile
+	:FOR	${h}	in	@{hpUri['members']}
+	\	${hpUri}=	Get From Dictionary		${h}	uri
+	\	${spUri}=	Get From Dictionary		${h}	serverProfileUri
+	\	${status}=	Find Server Profile in List		${spUri}	${cp_sp}
+	\	run keyword if	${status}==True		Append to list	${hp_match}		${hpUri}
+	${del_hhps}=	Get Length	${hp_match}
+	:FOR	${h}	in	@{hp_match}
+	\	Remove Values from List		${hp}	${h}
+	[Return]	${hp}	${del_hhps}
+
+Find Server Profile in List
+	[Documentation]	Search/find server profile from list
+	[Arguments]		${spUri}	${sp_list}
+	:FOR	${sp}	IN	@{sp_list}
+	\	Continue for loop if	'${sp}'=='None'
+	\	${ret}=		run keyword and return status	Should Match		${sp}		${spUri}
+	\	Return from keyword if	${ret}==True	True
+	[return]	False
+
+Get ServerProfile From Server Hardware
+	[Documentation]	Fetches the server profile associated with server hardware
+	[Arguments]		${enc_server}
+	${sp_list}	Create List
+	:FOR	${enc}	in	@{enc_server}
+	\	${resp} = 	Fusion Api Get Server Hardware	param=?filter="'name'=='${enc}'"
+	\	${sp}=	Run keyword If	${resp['count']}==0		Log to console	Server hardware ${enc} not found
+	\	${sp}=	Run keyword If	${resp['count']}!=0		Get From Dictionary		${resp['members'][0]}	serverProfileUri
+	\	Append to List	${sp_list}	${sp}
+	[Return]	${sp_list}
+
+#**************************network info******************
+Update network info
+	[Documentation]	Update network information
+	[Arguments]		${ippools}	${cp}
+	${net_status}=		Run keyword and return status	Dictionary should contain key	${cp}	network
+	${net}=	run keyword if	${net_status}==True	Get Ethernet URI	${cp['network']}
+	${range_status}=	Run keyword and return status	Dictionary should contain key	${cp}	ip_pool
+	${iprange}=		run keyword if	${range_status}==True	Get ip range uri by name	${cp['ip_pool']}
+	:FOR	${ip}	in	@{ippools}
+	\	Run keyword if	${net_status}==True		Set to Dictionary	${ip}	networkUri	${net}
+	\	Run keyword if	${range_status}==True		Set to Dictionary	${ip}	rangeUris	${iprange}
+	[return]	${ippools}
+
+#******************************** create cluster profile : sub keywords ***************************************
+
+Building Cluster Profile
+	[Documentation]	Building payload for cluster profile
+	...				Data example:
+	...				cluster_profile= {'type':'HypervisorClusterProfileV2', 'name': 'Cluster_1', 'path': 'DC1', 'vcenter': '172.18.13.11',
+	...					                'profile_name': 'profile_template_gen8_1', 'hypervisor_type': 'Vmware', 'deployment_manager_type': 'ICSP',
+	...					                'deployment_uri': '/rest/os-deployment-build-plans/800001', 'server_password': 'iso*help',
+	...					                'ip_pool': 'IPV4', 'network': 'corp'}
+	[Arguments]		${cp}
+
+	${dict}=		Create dictionary
+	Log to console	* Creating cluster profile Body
+
+	##********** hypervisor manager **********
+	${hm_uri}=	Get Hypervisor Manager	${cp['vcenter']}
+	${hm_count}=	get length	${hm_uri}
+	run keyword if	${hm_count}>0	Set To Dictionary	${dict}		hypervisorManagerUri	 ${hm_uri['uri']}
+
+	##********** Ip Pools ********************
+	${ipPools}=		Create List 
+	${ip_dict}=		Create dictionary
+	${nw_status}=	run keyword and return status	Dictionary should contain key	${cp}	network
+	${corp_uri}=	Run Keyword if	${nw_status}==True	Run Keyword if	'${cp['network']}'!=''	Get Ethernet URI	${cp['network']}
+	${ipPool_status}=	run keyword and return status	Dictionary should contain key	${cp}	ip_pool
+	${iprange}=		Run Keyword if	${ipPool_status}==True	Get ip range uri by name	${cp['ip_pool']}
+
+	Run Keyword if	${nw_status}==True	Set to Dictionary	${ip_dict}		networkUri	${corpUri}
+	Run Keyword if	${ipPool_status}==True	Set to Dictionary	${ip_dict}		rangeUris	${iprange}
+	Run Keyword if	${ipPool_status}==True or ${nw_status}==True	Append to List		${ipPools}		${ip_dict}
+	Set to Dictionary	${dict}		ipPools		${ipPools}
+
+	##**********	name ***********************
+	${name_status}=	run keyword and return status	Dictionary should contain key	${cp}	name
+	Run keyword if	${name_status}==True	Set to Dictionary	${dict}		name		${cp['name']}
+
+	##********** Add Host Request************
+	${hardware_lst}=		Create List
+	${hw_status}=	run keyword and return status	Dictionary should contain key	${cp}	server_hardware
+	${hardware_lst}=	Run keyword if	${hw_status}==True	Add Host Request	${cp}
+	Set to Dictionary	${dict}		addHostRequests		${hardware_lst}
+
+	##************Host Profile***************
+	${host_profile}	Create Dictionary
+	####SPT and deployment manager####
+	${spt_status}=	run keyword and return status	Dictionary should contain key	${cp}	profile_name
+	${spt}=	Run Keyword if	${spt_status}==True		Run keyword if	'${cp['profile_name']}'!=''	Get Server Profile Template URI		${cp['profile_name']}
+	Run keyword if	'${spt}'!=''	Set to Dictionary	${host_profile}		serverProfileTemplateUri	${spt}
+	${dep_body_us_stat}=		run keyword and return status	Dictionary should contain key	${cp}	deployment_manager_type
+	run keyword if	${dep_body_us_stat}==True	Build deployment manager body of cluster for User Managed	${cp}	${host_profile}
+	${dep_body_stat}=	run keyword and return status	Dictionary should not contain key	${cp}	deployment_manager_type
+	run keyword if	${dep_body_stat}==True	Build deployment manager body of cluster		${cp}	${host_profile}
+	####host_prefix####
+	${hp_status}=	run keyword and return status	Dictionary should contain key	${cp}	hostprefix
+	Run keyword if	${hp_status}==True	Set to Dictionary	${host_profile}		hostprefix		${cp['hostprefix']}
+	####virtualSwitchPolicy####
+	${vsc_status}=	run keyword and return status	Dictionary should contain key	${cp}	virtualSwitchConfigPolicy
+	${resp_vsc}=	run keyword if	${vsc_status}==True		update virtual switch config policy		${cp['virtualSwitchConfigPolicy']}
+	run keyword if	${vsc_status}==True	Set to Dictionary	${host_profile}		virtualSwitchConfigPolicy	${resp_vsc}
+	####hostConfigPolicy####
+	${hcp_set_status}=	Run Keyword and return status	Dictionary should contain key	${cp}	hostConfigPolicy_settings
+	${resp_hcp}=	run keyword if	${hcp_set_status}==True		update host config policy setting		${cp['hostConfigPolicy_settings']}
+	run keyword if	${hcp_set_status}==True		Set to Dictionary	${host_profile}		hostConfigPolicy		${resp_hcp}
+	Set to Dictionary		${dict}		hypervisorHostProfileTemplate		${host_profile}
+
+	##*************hypervisorClusterSettings******
+	&{settings}=		Create Dictionary
+	${value}=	Evaluate	$cp.get("cluster_settings")
+	${settings}=		Run keyword if	${value} is not None	Cluster Settings	${cp}
+	Run keyword if	${settings} is not None	Set to Dictionary		${dict}		hypervisorClusterSettings		${settings}
+
+	##************** other ***********************
+	Run Keyword if	'${cp['type']}'!=''		Set to Dictionary	${dict}		type	${cp['type']}
+	Run Keyword if	'${cp['path']}'!=''		Set to Dictionary	${dict}		path	${cp['path']}
+	Run Keyword if	'${cp['hypervisor_type']}'!=''		Set to Dictionary	${dict}		hypervisorType		${cp['hypervisor_type']}
+
+	##**************** shared volume ***************************
+	${svol_status}=	Run keyword and return status		Dictionary should contain key	${cp}	shared_volume
+	${resp_vol}=	Run keyword if	${svol_status}==True	update shared volume	${cp['shared_volume']}
+	Run keyword if	${svol_status}==True	Set to Dictionary	${dict}	sharedStorageVolumes	${resp_vol}
+	Log to Console		* Completed building cluster profile body
+
+	[Return]	${dict}
+
+Cluster Settings
+	[Documentation]	Building body for cluster settings
+	[Arguments]		${cp}
+	&{settings}=		Create Dictionary
+	${value}=	Evaluate	$cp.get("cluster_settings")
+	:FOR	${s}	in	@{value}
+	\	Run Keyword if	'${s}'== 'cluster_settings_type'		Set to Dictionary	${settings}		type	${value['cluster_settings_type']}
+	\	Run Keyword if	'${s}'== 'multi_nic_vmotion'		Set to Dictionary	${settings}		multiNicVMotion		${value['multi_nic_vmotion']}
+	\	Run Keyword if	'${s}'== 'virtual_switch_type'		Set to Dictionary	${settings}		virtualSwitchType	${value['virtual_switch_type']}
+	\	Run Keyword if	'${s}'== 'distributed_switch_version'		Set to Dictionary	${settings}		distributedSwitchVersion	${value['distributed_switch_version']}
+	\	Run Keyword if	'${s}'== 'distributed_switch_usage'		Set to Dictionary	${settings}		distributedSwitchUsage	${value['distributed_switch_usage']}
+	\	${b_drsE}=	Run Keyword if	'${s}'== 'drsEnabled'		Convert to boolean	${value['drsEnabled']}
+	\	${b_drs}=	Run Keyword if	'${s}'== 'drsEnabled'	Set variable if 	'${value['drsEnabled']}'=='NULL' or '${value['drsEnabled']}'=='None'	${None}	${b_drsE}
+	\	Run Keyword if	'${s}'== 'drsEnabled'		Set to Dictionary	${settings}		drsEnabled	${b_drs}
+	\	${b_haE}=	Run Keyword if	'${s}'== 'haEnabled'	Convert to boolean	${value['haEnabled']}
+	\	${b_ha}=	Run Keyword if	'${s}'== 'haEnabled'	Set variable if 	'${value['haEnabled']}'=='NULL' or '${value['haEnabled']}'=='None'	${None}	${b_haE}
+	\	Run Keyword if	'${s}'== 'haEnabled'	Set to Dictionary	${settings}		haEnabled	${b_ha}
+	[return]	${settings}
+
+Add Host Request
+	[Documentation]	Add Host Request
+	[Arguments]		${cp}
+	${hardware_lst}		Create List
+	:FOR	${hw}	in 	@{cp['server_hardware']}
+	\	${dict}	Create Dictionary
+	\	${hwUri}=	Get Server Hardware URI		${hw}
+	\	Run Keyword if	'${hwUri}'!=''	Set to Dictionary	${dict}	serverHardwareUri	${hwUri}
+	\	Run Keyword if	'${hwUri}'!=''	Append to List	${hardware_lst}		${dict}
+	[Return]	${hardware_lst}
+
+Edit network
+	[Documentation]	Update network
+	[Arguments]		${net}
+	# Fusion Api Get Ethernet Networks  | <uri> | <param> | <api> | <headers>
+	${add_net} = 	Create list
+	${dict} =  Create dictionary
+	${rest_resp} =  Create dictionary
+	${get_resp}=	Fusion Api Get Ethernet Networks	param=?filter="'name'=='${net['name']}'"
+	Log to console	\n${get_resp['members']}
+	${uri_status}		run keyword and return status	Dictionary should contain key	${get_resp['members'][0]}		uri
+	${net_uri}		Set variable if	${uri_status}==True		${get_resp['members'][0]['uri']}
+	run keyword if	${uri_status}==False	run keywords
+	...		Set to dictionary	${rest_resp}	message=network:${net['name']} not found	AND
+	...		Set to Dictionary	${dict}		status=False	rest_resp=${rest_resp}		AND
+	...		append to list		${add_net}	${dict}
+	run keyword if	${uri_status}==False	Return from keyword	${add_net}
+	${body}		Fusion Api Get Ethernet Networks	uri=${net_uri}
+	${type_status}		run keyword and return status	Dictionary should contain key	${net}		type
+	run keyword if	${type_status}==True	Set to Dictionary	${body}	type	${net['type']}
+	${name_status}		run keyword and return status	Dictionary should contain key	${net}		name
+	run keyword if	${name_status}==True	Set to Dictionary	${body}	name	${net['name']}
+	${newname_status}		run keyword and return status	Dictionary should contain key	${net}		new_name
+	run keyword if	${newname_status}==True	Set to Dictionary	${body}	name	${net['new_name']}
+	${subnetUri_status}		run keyword and return status	Dictionary should contain key	${net}		subnetUri
+	${subnetUri}	run keyword if	${subnetUri_status}==True	Get ID Pools IPV4 Subnet URI By Network ID	${net['subnetUri']}
+	Run keyword if	${subnetUri_status}==True and '${subnetUri}'!=''	Set to Dictionary	${body}	subnetUri	${subnetUri}
+	remove from dictionary	${body}	headers
+	remove from dictionary	${body}	status_code
+	${rest_resp}=	Fusion Api Edit Ethernet Network	body=${body}		uri=${net_uri}
+	${status} = 	Run Keyword And Return Status	should be equal as integers  ${rest_resp['status_code']}  202
+	${task_resp}=	Run Keyword If		'${status}'=='True'		Wait For Task	${rest_resp}	3000s	60s
+	${task_status}=		Run Keyword If		'${status}'=='True'		Run Keyword And Return Status	should be equal 	 ${task_resp['taskState']}	Completed
+	set to dictionary   ${dict}  status=${status}
+	set to dictionary   ${dict}  rest_resp=${rest_resp}
+	set to dictionary   ${dict}  task_resp=${task_resp}
+	set to dictionary   ${dict}  task_status=${task_status}
+	set to dictionary   ${dict}  rest_body=${body}
+ 	append to list  ${add_net}  ${dict}
+	[Return]	${add_net}
+
+Build deployment manager body of cluster for User Managed
+	[Documentation]	Build deployment manager body of cluster for User Managed
+	[Arguments]	${cp}	${host_profile}
+	Set to Dictionary	${host_profile}		deploymentManagerType=${cp['deployment_manager_type']}
+	&{dep_plan}=		Run Keyword if	'${cp['deployment_manager_type']}'=='ICSP'		Create Dictionary
+	${duri_status}=		run keyword and return status	Dictionary should contain key	${cp}	deployment_uri
+	${serpass_status}=	run keyword and return status	Dictionary should contain key	${cp}	server_password
+	run keyword if	${duri_status}==True	Set to Dictionary	${dep_plan}		deploymentPlanUri	${cp['deployment_uri']}
+	run keyword if	${serpass_status}==True		Set to Dictionary	${dep_plan}		serverPassword	${cp['server_password']}
+	Run Keyword if	'${cp['deployment_manager_type']}'=='ICSP'		Set to Dictionary	${host_profile}		deploymentPlan	${dep_plan}
+
+Build deployment manager body of cluster
+	[Documentation]	Build deployment manager body of cluster
+	[Arguments]	${cp}	${host_profile}
+	&{dep_plan}=		Create Dictionary
+	${duri_status}=		run keyword and return status	Dictionary should contain key	${cp}	deployment_uri
+	${serpass_status}=	run keyword and return status	Dictionary should contain key	${cp}	server_password	
+	run keyword if	${duri_status}==True	Set to Dictionary	${dep_plan}		deploymentPlanUri	${cp['deployment_uri']}
+	run keyword if	${serpass_status}==True		Set to Dictionary	${dep_plan}		serverPassword	${cp['server_password']}
+	Set to Dictionary	${host_profile}		deploymentPlan	${dep_plan}
+
+Create virtual switch layout
+	[Documentation]	Create virtual switch layout
+	[Arguments]	${cluster_profile}		${status_code}=200
+	${vsl_body}		Create Dictionary
+	${hcp}=		Get Cluster Profile		${cluster_profile['name']}
+	Set to Dictionary	${vsl_body}		hypervisorManagerUri	${hcp[0]['hypervisorManagerUri']}	 
+	Set to Dictionary	${vsl_body}		serverProfileTemplateUri	${hcp[0]['hypervisorHostProfileTemplate']['serverProfileTemplateUri']}
+	Set to Dictionary	${vsl_body}		serverProfileTemplateUri	${hcp[0]['hypervisorHostProfileTemplate']['serverProfileTemplateUri']}
+	Set to Dictionary	${vsl_body}		hypervisorClusterSettings	${hcp[0]['hypervisorClusterSettings']}
+	Set to Dictionary	${vsl_body}		virtualSwitchConfigPolicy	${hcp[0]['hypervisorHostProfileTemplate']['virtualSwitchConfigPolicy']}
+	${rest_resp} = 	Fusion Api Create Virtual Switch Layout		${vsl_body}
+	${rest_resp_json}	json.loads		${rest_resp}
+	${status} = 	Run Keyword And Return Status	should be equal as integers  ${rest_resp_json['status_code']}  ${status_code}
+	Run keyword if	${status}==False	FAIL	Failed to fetch virtual switch layout
+    [Return]	${status}	${rest_resp_json}
+
+Check compliane and Remediate cluster profile
+	[Documentation]	Check compliane and Remediate cluster profile
+	[Arguments]	${cluster_profiles}
+	:FOR	${cluster}	in	@{cluster_profiles}
+	\	${hcp}=		Get Cluster Profile		${cluster['name']}
+	\	${compliance_status}	Set variable	${hcp[0]['compliance']['state']}
+	\	Run keyword if	${cluster['remediate']}==True	Run keyword if	'${compliance_status}'!='Consistent'	Remediate cluster profile	${hcp[0]}
+
+Remediate cluster profile
+	[Documentation]	Remediation for cluster profile
+	[Arguments]	${cluster_profile}		${status_code}=202
+	${cluster_profile_copy}=		copy.deepcopy	${cluster_profile}
+	${status1}	${resp_body}=		Run keyword if	'${cluster_profile['compliance']['state']}'=='ClusterTemplateError'		Create virtual switch layout	${cluster_profile_copy}
+	${vswitch_layout}	set variable		${resp_body['response_body']}
+	Run keyword if	${status1}==True	Set to dictionary	${cluster_profile_copy['hypervisorHostProfileTemplate']}	virtualSwitches		${vswitch_layout}
+	Run keyword if	'${cluster_profile_copy['compliance']['state']}'=='ClusterTemplateError'		Set to dictionary	${cluster_profile_copy['compliance']}	state	Remediate
+	${rest_resp} =		Fusion Api Update Hypervisor Cluster Profile	body=${cluster_profile_copy}	uri=${cluster_profile_copy['uri']}
+	${stat}=			Run Keyword and Return Status	should be equal as integers		${rest_resp['status_code']}  ${status_code}
+	${task_resp}=	Run Keyword If		'${stat}'=='True'		Wait For Task	${rest_resp}	9999999999s	60s
+	${task_status}=		Run Keyword If		'${stat}'=='True'		Run Keyword And Return Status	should be equal 	 ${task_resp['taskState']}	Completed
+	Run keyword if	${task_status}==False	FAIL	Failed to remediate cluster profile
+	[Return]	${task_status}	${task_resp}
+
+Hypervisor Cluster Profiles Attribute ${attribute} Should Have Value ${value}
+    [Documentation]    Profiles attribute Should be expected
+    ${profiles} =   Fusion Api Get Hypervisor Cluster Profile
+    # Make sure we get (more than zero) profile listed
+    Run Keyword If  '${profiles['count']}'=='0'    Fail    msg=No Hypervisor Cluster profiles found
+    ${res} =  Set Variable  ${empty}
+    :FOR    ${profile}  IN  @{profiles['members']}
+    \  ${res} =  Run Keyword If  '${profile['${attribute}']}' != '${value}'  Catenate  ${res}
+    ...     \nHypervisor Cluster Profile name [${profile['name']}] Expected ${attribute} ${value} but found ${profile['${attribute}']}
+    \  ...  ELSE  Set Variable  ${res}
+    ${count} =  Get Length  ${res}
+    Run Keyword If  '${count}' > '0'  Fail  ${res}

@@ -1,0 +1,293 @@
+*** Settings ***
+Documentation    Test Nitro Overview Behaviour
+...              SNMP Configurations
+...              LLDP Settings
+...              Port Statistics & Utilization sampling
+...              Remote syslog
+...              Port Status
+
+Variables       data_variables.py
+Library         data_variables.py
+Library         json
+Library         FusionLibrary
+Library         RoboGalaxyLibrary
+Library         Collections
+Library         SSHLibrary
+Library         String
+Resource        ../../../../../Resources/api/fusion_api_resource.txt
+Resource         SETUP.txt
+
+*** Test Cases ***
+1_API_TC_Verify Get method for syslog
+    [Documentation]    Get Method for syslog
+    [Tags]    SyslogOVtests
+    Set Log Level    Trace
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    #Presetup
+    Clear ULS in LIG & LI
+    Create Uplinkset
+    Power off ALL Servers
+    Remove All Server Profiles
+    ${resp}=   Add Server Profiles from variable   ${server_profile}
+    ${task}     Wait For Task2     ${resp}     10m     10
+    Power on server     ${server_profile[0]['serverHardwareUri']}
+    Log    \n Sleeping 200s for Poweron server    console=True
+    sleep   100s
+    ${resp}    Fusion Api Get Remote Syslog Configuration
+    log    \n\n The syslog config is :${resp}\n    console=True
+    Run Keyword Unless    '${resp['remoteSyslogDestination']}' == ''    Fail    msg=remoteSyslogDestination is not empty
+    Run Keyword Unless    '${resp['remoteSyslogPort']}' == ''    Fail    msg=remoteSyslogPort is not empty
+    Run Keyword Unless    '${resp['sendTestLog']}' == 'False'    Fail    msg=sendTestLog is not disabled
+    Run Keyword Unless    '${resp['enabled']}' == 'False'    Fail    msg=sendTestLog is not disabled
+    Run Keyword Unless    '${resp['type']}' == 'RemoteSyslog'    Fail    msg=RemoteSyslog is not the default type
+    log    \n\n The syslog default parameters are successfully verified \n    console=True
+
+2_API_TC_Verify Put method for syslog
+    [Documentation]    Put Method for syslog
+    [Tags]    SyslogOVtests
+    Clear Trap    ${snmp_host}    ${snmp_user}    ${snmp_pass}    ${syslog_path}    ${syslog_file}
+    Set Log Level    Trace
+    ${resp}    Fusion Api Update Remote Syslog Configuration    ${remote_syslog_body}
+    Wait For Task2    ${resp}   timeout=2m    interval=10
+    ${output}    Fusion Api Get Remote Syslog Configuration
+    Run Keyword Unless    '${output['enabled']}' == 'True' or '${output['sendTestLog']}' == 'True'   Fail    msg=remotesyslog is not enabled
+    ### Code to verify in Trap receiver ###
+    Wait Until Keyword Succeeds    12 min    1s       Verify test message in remote
+
+3_API_TC_Verify Put method for clearing Port and destination address
+    [Documentation]    Clearing port and destination address
+    [Tags]    SyslogOVtests
+    ${temp}    Copy Dictionary    ${remote_syslog_body}
+    Set To Dictionary    ${temp}    remoteSyslogPort=
+    Set To Dictionary    ${temp}    remoteSyslogDestination=
+    ${resp}    Fusion Api Update Remote Syslog Configuration    ${temp}
+    ${task} Wait For Task    ${resp}   timeout=2m    interval=10
+    Should contain   ${task['taskState']}   Error
+    Should contain   ${task['taskStatus']}  ${rsyserror}
+
+4_API_TC_Verify Put method for syslog sendTestLog disable
+    [Documentation]    Sendtestlog disable
+    [Tags]    SyslogOVtests
+    Clear Trap    ${snmp_host}    ${snmp_user}    ${snmp_pass}    ${syslog_path}    ${syslog_file}
+    ${temp}    Copy Dictionary    ${remote_syslog_body}
+    Set To Dictionary    ${temp}    sendTestLog=false
+    ${resp}    Fusion Api Update Remote Syslog Configuration    ${temp}
+    Wait For Task2    ${resp}   timeout=2m    interval=10
+    ${output}    Fusion Api Get Remote Syslog Configuration
+    Run Keyword Unless    '${output['sendTestLog']}' == 'False'    Fail    msg=sendTestLog is not disabled
+    log    \n\n The sendTestLog has been disabled successfully !! \n    console=True
+    ${test}    Syslog Receiver Output    ${snmp_host}    ${snmp_user}    ${snmp_pass}    ${syslog_path}    ${syslog_file}
+    #${Message}    Get Lines Containing String    ${test}    ${Match_message}
+    ${lines1}    Should not contain   ${test}    ${Test_messsage}
+    Log    \n The return op is :${test}    console=True
+
+5_API_TC_Verify syslog messages on receivers for enable/disable uplink/downlink ports
+    [Documentation]    Enable/disable ports and verify syslog
+    [Tags]    SyslogMessagesTest
+    Clear Trap    ${snmp_host}    ${snmp_user}    ${snmp_pass}    ${syslog_path}    ${syslog_file}
+    ${resp}    Fusion Api Update Remote Syslog Configuration    ${remote_syslog_body}
+    Wait For Task2    ${resp}   timeout=2m    interval=10
+    ${output}    Fusion Api Get Remote Syslog Configuration
+    Run Keyword Unless    '${output['sendTestLog']}' == 'True'    Fail    msg=sendTestLog is not enabled
+    sleep   60s
+    #after enabling syslog
+    Clear Trap    ${snmp_host}    ${snmp_user}    ${snmp_pass}    ${syslog_path}    ${syslog_file}
+    :FOR    ${x}    IN RANGE    0   2
+    \   Enable/disable for loop ${Linked_ports[${x}]}   ${Interconnects_ENC2[0]}
+
+6_API_TC_Verify IC reboot with syslog verification
+    [Documentation]    IC reboot with syslog verification
+    [Tags]    SyslogMessagesTest
+
+    Set Log Level    Trace
+    ${icm_uri0} Get IC URI  ${Interconnects_ENC2[0]}
+    Clear Trap    ${snmp_host}    ${snmp_user}    ${snmp_pass}    ${syslog_path}    ${syslog_file}
+    Log    \n\n Perform IC Reboot and verify syslog output\n\n
+    Patch Interconnect    ${Interconnect_dto_1IC}  op=replace  path=/powerState  value=Off  timeout=60
+    sleep    50s
+    Patch Interconnect    ${Interconnect_dto_1IC}  op=replace  path=/powerState  value=On  timeout=60
+    ${resp} Get Interconnect    ${Interconnects_ENC2[0]}
+    ${sn}=     Get From Dictionary    ${resp}    serialNumber
+    Wait Until Keyword Succeeds    8 min    20s      IC reached state    ${icm_uri0}    Configured
+    Wait Until Keyword Succeeds    8 min    1s      Verify reboot message in remote ${sn}   ${icm_uri0}
+
+7_API_TC_Verify IC reset with syslog verification
+    [Documentation]    IC reset with syslog verification
+    [Tags]    SyslogMessagesTest
+    Set Log Level    Trace
+    Clear Trap    ${snmp_host}    ${snmp_user}    ${snmp_pass}    ${syslog_path}    ${syslog_file}
+    ${icm_uri0} Get IC URI  ${Interconnects_ENC2[0]}
+    Log    \n\n Perform IC Reboot and verify syslog output\n\n
+    Patch Interconnect    ${Interconnect_dto_1IC}  op=replace  path=/deviceResetState  value=Reset  timeout=600
+    ${resp} Get Interconnect    ${Interconnects_ENC2[0]}
+    ${sn}=     Get From Dictionary    ${resp}    serialNumber
+    Wait Until Keyword Succeeds    8 min    1s      Verify reset message in remote  ${sn}
+    Wait Until Keyword Succeeds    8 min    20s      IC reached state    ${icm_uri0}    Configured
+    Wait Until Keyword Succeeds    8 min    1s      Verify reboot message in remote ${sn}   ${icm_uri0}
+
+8_API_TC_Verify IC efuse with syslog verification
+    [Documentation]    IC efuse with syslog verification
+    [Tags]    SyslogMessagesTest
+    Set Log Level    Trace
+    Clear Trap    ${snmp_host}    ${snmp_user}    ${snmp_pass}    ${syslog_path}    ${syslog_file}
+    Log    \n\n Perform IC Reboot and verify syslog output\n\n
+    @{Bay}  Split String    ${Interconnects_ENC2[0]}
+    ${icm_uri0} Get IC URI  ${Interconnects_ENC2[0]}
+    :FOR     ${x}   IN RANGE    0     2
+    \   Run Keyword If  ${x} == 0   Efuse IC    ${icm_uri0} ${Bay[-1]}  EFuseOn ELSE    Efuse IC    ${icm_uri0} ${Bay[-1]}  EFuseOff
+    \   ${test}   Syslog Receiver Output    ${snmp_host}    ${snmp_user}    ${snmp_pass}    ${syslog_path}    ${syslog_file}
+    \   Log    \n The return op is :${test}    console=True
+    Wait Until Keyword Succeeds    8 min    1s      Verify reboot message in remote ${sn}   ${icm_uri0}
+
+*** Keywords ***
+Clear rsyslog
+    [Documentation]    Clear remote syslog
+    ${resp}    Fusion Api Update Remote Syslog Configuration    ${remote_syslog_clear}
+    Run Keyword If  '${resp['status_code']}' == '202'    Log to console  \nStatus Code: ${resp['status_code']} \nSuccessfully!! Edited the remotesyslog \n
+    ...    ELSE    FAIL
+    ${Task}    Wait For Task And Validate Response    ${resp}    ${valDict}    180 s    10 s    True
+
+Enable/disable Port
+    [Documentation]    Perform port enable/disable
+    [Arguments]     ${Supported_port}   ${enabled}  ${portType} ${ICM_name}
+
+    ${ICM_Data}=    Get Interconnect    ${ICM_name}
+    ${ICM_uri}= Get From Dictionary     ${ICM_Data}   uri
+    ${Resp}    Get IC Port    ${ICM_uri}    ${Supported_port}
+    Set to Dictionary   ${Resp}   enabled    ${enabled}
+    Set to Dictionary   ${Resp}   portType    ${portType}
+    ${Return}    Update IC Port    ${ICM_name}    ${Supported_port}    ${Resp}
+    sleep   120s
+    ${Resp_after_action}    Get IC Port    ${ICM_uri}    ${Supported_port}
+    Run Keyword If  '${enabled}' == 'false' Should be Equal As Strings    ${Resp_after_action['portStatusReason']}    NotLoggedIn   ELSE    Should be Equal As Strings    ${Resp_after_action['portStatusReason']}    LoggedIn
+
+Enable/disable for loop
+    [Documentation]    Performs port enable/disable
+    [Arguments]     ${Linked_port_details}  ${ICM_name}
+
+    :FOR    ${x}    IN RANGE    0   2
+    \   ${enabled}= Set Variable If ${x}==0 false   true
+    \   ${Linked_port}  Get from Dictionary ${Linked_port_details}  portName
+    \   ${port_type}    Get from Dictionary ${Linked_port_details}  portType
+    \   Enable/disable Port     ${Linked_port}   ${enabled} ${port_type}    ${ICM_name}
+    \   ${Linked_port}= Run Keyword If  '${port_type}'=='Uplink'    Evaluate    ${Linked_port}+24   ELSE    Get Substring   ${Linked_port}  1
+    \   Log    \n\nVerify trap during Enabling & Disabling Uplink Port \n    console=True
+    \   sleep   60s
+    \   ${resp} Get Interconnect    ${ICM_name}
+    \   ${sn}=     Get From Dictionary    ${resp}    serialNumber
+    \   Wait Until Keyword Succeeds    15 min    1s     Verify Enable/disable message in remote ${sn}   ${x}    ${Linked_port}
+
+Verify Enable/disable message in remote
+    [Documentation]    Verify Enable/disable message in remote
+    [Arguments]     ${sn}   ${x}    ${Linked_port}
+    Convert To String   ${Linked_port}
+    ${test1}    Syslog Receiver Output    ${snmp_host}    ${snmp_user}    ${snmp_pass}    ${syslog_path}    ${syslog_file}
+    Log    \n The return op is :${test1}    console=True
+    ${TMessage}    Get Lines Containing String    ${test1}    ${sn}
+    ${Message}    Get Lines Containing String    ${TMessage}    (ID: ${Linked_port})
+    Run Keyword If  ${x}==0 Should contain   ${Message}    ${Linkdown_Message}  ELSE    Should contain   ${Message}    ${Linkup_Message}
+
+Verify reboot message in remote
+    [Documentation]    Verify reboot message in remote
+    [Arguments]     ${sn}   ${icm_uri}
+    ${ic_ip}    Get interconnect ip ${icm_uri}
+    ${Mod_Message}  Replace String  ${ON_Message}   ICIP    ${ic_ip}
+    ${test}    Syslog Receiver Output    ${snmp_host}    ${snmp_user}    ${snmp_pass}    ${syslog_path}    ${syslog_file}
+    ${Message}    Get Lines Containing String    ${test}    ${sn}
+    ${lines}    ${no_of_matches}    get_matching_lines_with_number  ${Message}    ${Mod_Message}
+    Run Keyword If  ${no_of_matches} < 1    Fail
+    Log    \n The return op is :${test}    console=True
+
+Verify reset message in remote
+    [Documentation]    Verify reset message in remote
+    [Arguments]     ${sn}
+    ${test}    Syslog Receiver Output    ${snmp_host}    ${snmp_user}    ${snmp_pass}    ${syslog_path}    ${syslog_file}
+    ${Message}    Get Lines Containing String    ${test}    ${sn}
+    ${lines}    ${no_of_matches}    get_matching_lines_with_number  ${Message}    ${Reload_message}
+    Run Keyword If  ${no_of_matches} < 1    Fail
+    Log    \n The return op is :${test}    console=True
+
+Verify test message in remote
+    [Documentation]    Verify test message in remote
+    ${test}    Syslog Receiver Output    ${snmp_host}    ${snmp_user}    ${snmp_pass}    ${syslog_path}    ${syslog_file}
+    ${Message}    Get Lines Containing String    ${test}    ${Test_messsage}
+    ${lines1}    Should contain   ${Message}    ${Management_IP}
+    Log    \n The return op is :${test}    console=True
+
+Efuse IC
+    [Documentation]    perform IC efuse
+    [Arguments]    ${ic_uri}    ${ic_bay}   ${Efuse_Command}
+    Get EM IP   ${ENC2}
+    Get EM Token    ${ENC2}
+    EFuse ICM    ${Efuse_Command}   ${ic_bay}
+    Run Keyword If  '${Efuse_Command}' == 'EFuseOn' Wait Until Keyword Succeeds    5 min   20s     IC reached state    ${ic_uri}    Absent
+    ... ELSE If '${Efuse_Command}' == 'EFuseOff'    Wait Until Keyword Succeeds    35 min   20s     IC reached state    ${ic_uri}    Configured
+
+Clear Trap
+    [Documentation]    Clear Old Traps
+    [Arguments] ${snmp_host}    ${snmp_user}    ${snmp_pass}    ${syslog_path}    ${syslog_file}
+    Open Connection     ${snmp_host}     timeout=180s
+    Login               ${snmp_user}     ${snmp_pass}
+    Write    cd ${syslog_path}
+    Write    > ${syslog_file}
+    #Write  service rsyslog restart
+    #sleep  10s
+    #${output}    Read
+    #Should Contain ${output}   OK
+    #sleep  60s
+    Close All Connections
+    log to console    \n Cleared the trap messages
+
+Syslog Receiver Output
+    [Documentation]    Opens the Trap receiver machine to verify the trap
+    [Arguments]        ${snmp_host} ${snmp_user}    ${snmp_pass}    ${syslog_path}    ${syslog_file}
+    Open Connection     ${snmp_host}    timeout=120s
+    Login               ${snmp_user}     ${snmp_pass}
+    Write    cd ${syslog_path}
+    Write    tail -f -n 1000 ${syslog_file}
+    Sleep    10s
+    ${output}    Read
+    Close All Connections
+    [Return]    ${output}
+
+Get IC Port
+    [Documentation]    Returns the port info of the named port of specified interconnect uri
+    [Arguments]        ${uri}    ${portName}
+    ${return} =    Create List
+    ${resp} =    fusion api get interconnect ports    uri=${uri}
+    ${ports} =    Get From Dictionary    ${resp}    members
+    :FOR    ${port}    IN    @{ports}
+    \    ${return} =    Run Keyword If    '${port['portName']}' == '${portName}'    set variable    ${port}
+    \    Exit for loop if    '${port['portName']}' == '${portName}'
+    [Return]    ${return}
+
+Clear ULS in LIG & LI
+    [Documentation]    This keyword will clear uplink sets in both LI and LIG
+    ${resp}=    Get LIG member  ${LIG_ME[1]}
+    ${liguri} = Get LIG URI ${LIG_ME[1]}
+    ${empty_list}   Create List
+    Remove From Dictionary    ${resp}    headers
+    Remove From Dictionary    ${resp}    status_code
+    Set To Dictionary    ${resp}    uplinkSets    ${empty_list}
+    ${resp1}    Fusion Api Edit Lig    ${resp}    ${liguri}
+    ${task}    Wait For Task2    ${resp1}    20m    2
+
+Create Uplinkset
+    [Documentation]    This keyword will create uplink sets in both LI and LIG
+    ${liguri} = Get LIG URI ${LIG_ME[1]}
+    ${body} =   Build LIG body      ${lig_1port}
+    ${resp} =   Fusion Api Edit Lig     ${body}     ${liguri}
+    ${task}=    Wait For Task2  ${resp}   10m    10
+    ${LE_Dto}=  Create Dictionary   name=${LI2}
+    Update Logical Interconnect from Group    ${LE_Dto}
+
+Get interconnect ip
+    [Documentation]    Fetch IC IPs
+    [Arguments]     ${icuri}
+    ${resp} Fusion Api Get Interconnect uri=${icuri}
+    ${interconnectIP} =     Get From Dictionary     ${resp} ipAddressList
+    ${len}    Get Length    ${interconnectIP}
+    :For    ${x}    In Range    0    ${len}
+    \    ${value}    Run Keyword If   '${interconnectIP[${x}]['ipAddressType']}' == 'Ipv4Dhcp'    Get Variable Value    ${interconnectIP[${x}]['ipAddress']}    ELSE    Continue For Loop
+    Log to console    \n the interconnect ip is :${value}\n
+    [Return]    ${value}

@@ -1,0 +1,105 @@
+*** Settings ***
+Documentation    Test suite to validate Front Panel related events on OneView and FLM
+...    It covers testing of:
+...      FrontPanelFault
+...      FrontPanelFaultCleared
+...      FrontPanelFruContentFault
+...      FrontPanelFruManufacturedForInvalidFault
+...      FrontPanelFruManufacturedForMismatchFault
+
+...    = GENERIC USAGE =
+...    | pybot | -v ENC_SERIAL_NO:[enclosure serial #] | -v APPLIANCE_IP:<ipv4> | -v CIM_Linux_IP:<ipv4> |-v GIT_REPO_ROOT: | FP_fru_event_test_2.txt |
+...    = Variables =
+...    | GIT_REPO_ROOT |      Required: Repo root path if NOT defined in environment variable this is mgmtfw root location|
+...    | ENC_SERIAL_NO |      Optional: If omitted, will use the 1st enclosure detected in OV |
+...    | APPLIANCE_IP |       Required: OneView IPv4 address |
+...    | CIM_Linux_IP |       Required:CI Manager ipv4 under test |
+
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Library           RoboGalaxyLibrary
+Library           MgmtFWLibrary
+Library           json
+
+Suite Setup       Configure Events Test Environment
+Suite Teardown    Run Keywords  Logout of EM RIS   AND    Logout of Fusion Via REST
+
+*** Test Case ***
+
+TC 01: Verify FrontPanelInsertFault & FrontPanelInsertFaultCleared
+    [Documentation]    This test will verify FrontPanelInsertFault & FrontPanelInsertFaultCleared
+    [Tags]    FP     FLM2.00    Automated
+    Set Test Variable    ${device}    FrontPanel
+    Set Test Variable    ${device_diag_response}    FP
+    ${last_fusion_event_id}=    get last fusion event ID
+    ${status}    ${fp_presence}=    Run Keyword And Ignore Error    Get FrontPanel Presence    ${FrontPanel_Bay_No}
+    Run Keyword If    '${fp_presence}'=='true'    FAIL    FrontPanel is not inserted/available in the enclosure to validate this test
+    ${result}=    EM API Get Diags    deviceStateTransition/${device}/${FrontPanel_Bay_No}/remove
+    Should Contain    ${result}    Successfully sent diag state transition event remove for ${device_diag_response} ${FrontPanel_Bay_No}
+    ${result}=    EM API Get Diags    ShowState/${device}/${FrontPanel_Bay_No}
+    Should Contain    ${result}    State: SM_STATE_ABSENT
+    ${result}=    EM API Get Diags    deviceStateTransition/${device}/${FrontPanel_Bay_No}/operational
+    Should Contain    ${result}    Successfully sent diag state transition event operational for ${device_diag_response} ${FrontPanel_Bay_No}
+    Sleep    60
+    ${result}=    EM API Get Diags    ShowState/${device}/${FrontPanel_Bay_No}
+#    Should Contain    ${result}    State: SM_STATE_OPERATIONAL
+    ${status}    ${result}=    Wait timeout for Device State    ${device}    ${FrontPanel_Bay_No}    SM_STATE_INSERTED_ERR
+    ...    600
+    Should Be True    ${status}    msg=expectedSM_STATE_INSERTED_ERR but got ${result}
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_FrontPanel_InsertFault}    ${FrontPanel_Device}    ${FrontPanel_Bay_No}    1000
+    Verify Fusion Event Sent By EM    ${EL_FrontPanel_InsertFault}    ${last_fusion_event_id}    ${Enclosure_category}
+    ${result}=    EM API Get Diags    deviceStateTransition/${device}/${FrontPanel_Bay_No}/insert
+    Should Contain    ${result}    Successfully sent diag state transition event insert for ${device_diag_response} ${FrontPanel_Bay_No}
+    ${result}=    EM API Get Diags    ShowState/${device}/${FrontPanel_Bay_No}
+    Should Contain    ${result}    State: SM_STATE_HW_READY
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_FrontPanel_InsertFault_Cleared}    ${FrontPanel_Device}    ${FrontPanel_Bay_No}    350
+    Verify Fusion Event Sent By EM    ${EL_FrontPanel_InsertFault_Cleared}    ${last_fusion_event_id}    ${Enclosure_category}
+    Sleep    60    #Just a wait for FrontPanel to be OK
+    [Teardown]    Run Keyword If Test Failed    EM API Get Diags    deviceStateTransition/${device}/${FrontPanel_Bay_No}/insert
+
+TC 02: Verify FrontPanelFruFault Event For FrontPanel Device
+    [Documentation]    This test will verify FrontPanelFruFault event for FrontPanel
+    [Tags]    FP    FLM2.00    Automated
+    Front Panel Is Present And Status Is OK
+    Log    message=Injecting FrontPanel fru fault and verify failed status/alert event in diags audit log    console=True
+    ${last_fusion_event_id}=    get last fusion event ID
+    ${FrontPanel_Status}=    em api set FRU fault Status    ${FrontPanel_Device}    true
+    Should Be Equal As Strings    ${FrontPanel_Status}    <Response [200]>
+    RIS EM Efuse Front Panel    ${FrontPanel_Bay_No}    8
+    Sleep    20
+    ${FrontPanel_Status}=    em api set FRU fault Status    ${FrontPanel_Device}    false
+    Should Be Equal As Strings    ${FrontPanel_Status}    <Response [200]>
+    RIS EM Efuse Front Panel    ${FrontPanel_Bay_No}    8
+    Sleep    20
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_FrontPanel_FruFault}    ${FrontPanel_Device}    ${FrontPanel_Bay_No}    350
+    Verify Fusion Event Sent By EM     ${EL_FrontPanel_FruFault}    ${last_fusion_event_id}    ${Enclosure_category}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    em api set FRU fault Status    ${FrontPanel_Device}    false
+    ...    AND    RIS EM Efuse On Front Panel    ${FrontPanel_Bay_No}    AND   Sleep    10   AND   RIS EM Efuse Off Front Panel    ${FrontPanel_Bay_No}
+    
+TC 03: Validate FrontPanelRedundantCommFault And FrontPanelRedundantCommFaultCleared
+    [Documentation]    Verify FrontPanelRedundantCommFault And FrontPanelRedundantCommFaultCleared  with Dual EM
+    [Tags]    FP    FLM2.02    Automated    QXCR1001609113
+    ${last_fusion_event_id}=    Get Last Fusion Event Id
+    Injecting Un-terminated Fault To FLM For Specific Device    ${FrontPanel_Device}    ${FrontPanel_Bay_No}    B    B    FrontPanelFanRedundantCommFault
+    Injecting Un-terminated Fault To FLM For Specific Device    ${FrontPanel_Device}    ${FrontPanel_Bay_No}    A    A    FronPanelRedundantCommFault
+    Run Keywords    Login to Fusion via SSH    AND    Login to EM And Create Session
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${FP_Redundant_CommFault}    ${FrontPanel_Device}    ${FrontPanel_Bay_No}    400 
+    Verify Fusion Event Sent By EM    ${FP_Redundant_CommFault}    ${last_fusion_event_id}
+    Verify Audit Log Alert Event    ${FP_Redundant_CommFault_Cleared}    ${FrontPanel_Device}    ${FrontPanel_Bay_No}    240
+    Verify Fusion Event Sent By EM    ${FP_Redundant_CommFault_Cleared}    ${last_fusion_event_id}
+    [Teardown]    Run Keyword if Test Failed    Run Keywords
+    ...   Set Diags CanRedFake Value    ALL    NORMAL    NORMAL
+    ...   AND   Get Diags CanRedMon
+    

@@ -1,0 +1,195 @@
+*** Settings ***
+Library				RoboGalaxyLibrary
+Library				FusionLibrary
+Library				OperatingSystem
+Library				BuiltIn
+Library				Collections
+Library				XML
+Library		        SSHLibrary
+Library				String
+Library				Dialogs
+
+*** Keywords ***
+Add FC Networks from variable
+    [Documentation]  Adds FC networks to an appliance from a variable which contains a list of dicts with the entire payload
+    ...              scope process example:
+    ...                 'initialScopeUris': ['Scope:Test', 'Scope:Production']
+    [Arguments]   ${networks}    ${status_code}=202
+    ${responses} =  Create List
+    Log     Adding FC NETWORKS   console=yes
+    :FOR   ${net}  IN  @{networks}
+    \       ${keys}=    Get Dictionary Keys     ${net}
+    \       ${skeys}=   Convert To String       ${keys}
+    \       ${count}=   Get Count               ${skeys}                    managedSanUri
+    \       ${managedSanUri}=       Set Variable If         ${count}==0     ${None}
+                                    ...                     ${count}>0      ${net['managedSanUri']}
+    \       ${keyword}=             Set Variable If         '${managedSanUri}'=='${None}'           NONE
+                                    ...                     '${managedSanUri}'!='${None}'           Common URI lookup by name
+    \       ${managedSanUri}=       Run Keyword If          '${managedSanUri}'!='${None}'
+                                    ...                     Run Keyword             ${keyword}      ${managedSanUri}
+    \       Run Keyword If          '${managedSanUri}'!='${None}'
+            ...                     Set To Dictionary   ${net}   managedSanUri  ${managedSanUri}
+
+    #       -Initial Scope process.
+    \       ${initialScopeUris}=    Pop From Dictionary  ${net}  initialScopeUris  default=${None}
+    \       ${scopeUris}=           Run Keyword If    ${initialScopeUris} != ${None}
+    \       ...                     Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    \       Run Keyword If          ${initialScopeUris} != ${None}
+    \       ...                     Set To Dictionary    ${net}  initialScopeUris  ${scopeUris}
+
+    \       ${resp} =   Fusion Api Create FC Network   body=${net}
+    \       Run Keyword If  '${resp['status_code']}'!= '${status_code}'
+            ...  Run Keyword And Continue On Failure   Fail   Adding Network ${net['name']} Failed
+    \       continue for loop if  '${resp['status_code']}'!= '${status_code}'
+    \       Append To List   ${responses}  ${resp}
+    [Return]   ${responses}
+
+Add Non Existing FC Networks
+    [Documentation]    Adds FC NWs to an appliance from a variable which contains a list of dicts with the entire payload
+    ...                Data file Ex:   fc_networks = [{'name': 'fa-switch1', 'autoLoginRedistribution': 'true', 'type': 'fc-networkV300', 'linkStabilityTime': '30', 'fabricType': 'FabricAttach', 'connectionTemplateUri': None, 'managedSanUri': 'FCSan:SAN1_0'}]
+    ...                                expected_fc_networks = [{'name': 'fa-switch1', 'type': 'fc-networkV300', 'fabricType': 'FabricAttach', 'linkStabilityTime': '30', 'managedSanUri': 'FCSan:SAN1_0', 'autoLoginRedistribution': 'True', 'description': None, 'status': 'OK', 'state': 'Active', 'category': 'fc-networks', 'uri': 'FC:fa-switch1'}]
+    [Arguments]        ${networks}        ${notFoundStatusCodeList}=404
+    ${toAdd} =  Create List
+    :FOR    ${fc}    IN    @{networks}
+    \        Log  Adding FC Networks -${fc['name']}
+    \        ${resp} =          Get Resource  FC:${fc['name']}
+    \        ${statusCode}=  Convert To String  ${resp['status_code']}
+    \        ${status}=      Run Keyword And Return Status   List Should Contain Value  ${notFoundStatusCodeList}  ${statusCode}
+    \        Run Keyword If    ${status}==True    Append To List   ${toAdd}  ${fc}
+    \        Run Keyword If    ${status}==False    Log  FC Network ${fc['name']} exists
+    \        ...     WARN
+
+    ${response} =  Add FC Networks from variable  ${toAdd}
+    [Return]    ${response}
+
+Add FC Networks from variable async
+    [Documentation]     Add FC networks to an appliance from a list of dicts with the entire payload
+    ...  Add networks asynchronously and validates network creation
+    ...  if requested (does not validate by default)
+    [Arguments]     ${networks}    ${VERIFY}=${FALSE}  ${expected_networks}=@empty  ${STATUS_CODE}=202
+    ${NetworkTasks} =  create list
+    Log    Adding FC NETWORKS    console=True
+    :FOR    ${net}    IN    @{networks}
+    #       -First, if $VERIFY, check if ${net} already exists.  Skip if it does
+    \       ${resp} =   Run Keyword If    ${VERIFY}    Get Resource    FC:${net['name']}
+    \       Run Keyword If    ${VERIFY}  Run Keyword If    ${resp['status_code']}==200
+            ...     Log  Network ${net['name']} already exists   console=True
+    \       Run Keyword If    ${VERIFY}  Continue For Loop If  ${resp['status_code']}==200
+    #       -Prepare Request Body
+    \       ${KeyIsPresent}=    Run Keyword And Return Status    Dictionary Should Contain Key    ${net}    managedSanUri
+    \       ${managedSanUri}=    Run Keyword If    ${KeyIsPresent}    Get From Dictionary     ${net}    managedSanUri
+    \       ${managedSanUri}=    Run Keyword If    '${managedSanUri}'!='${None}'           Common URI lookup by name    ${managedSanUri}
+    \       Run Keyword If    '${managedSanUri}'!='${None}'    Set To Dictionary   ${net}   managedSanUri  ${managedSanUri}
+
+    # Initial Scope process.
+    \       ${initialScopeUris}=    Pop From Dictionary  ${net}  initialScopeUris  default=${None}
+    \       ${scopeUris}=           Run Keyword If    ${initialScopeUris} != ${None}
+    \       ...                     Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    \       Run Keyword If          ${initialScopeUris} != ${None}
+    \       ...                     Set To Dictionary    ${net}  initialScopeUris  ${scopeUris}
+
+    #       -Add the network
+    \       Log  Adding network ${net['name']}
+    \       Log  ${net}
+    \       ${response} =    Fusion Api Create FC Network    body=${net}
+    #       -Check the response code to ensure the network was created as expected
+    \       Run Keyword If  ${response['status_code']}!=${STATUS_CODE}
+            ...   Run Keyword And Continue on Failure  FAIL  Failed to create FC Network ${net['name']}
+    \       continue for loop if  ${response['status_code']}!=${STATUS_CODE}
+    \       Log  ${response}  TRACE
+    #       Add response to the list for later Verification
+    \       append to list  ${NetworkTasks}  ${response}
+    # Iterate through the list of responses build in the last for loop
+    :FOR    ${task}  IN  @{NetworkTasks}
+    #       -Wait for the network creation task to finish
+    \       Run Keyword And Continue on Failure    Wait For Task2   ${task}
+    # If !{VERIFY}, then we're done
+    Return From Keyword If  ${VERIFY}==${FALSE}
+    Verify Resources for List  ${expected_networks}
+
+Get FC URI
+    [Documentation]  Get fc Uri
+	[Arguments]		${net}
+	${resp} = 	Fusion Api Get FC Networks		param=?filter="'name'=='${net}'"
+	Return From Keyword If  ${resp['count']}==0  /rest/fc_network_uri_${net}_not_found
+	${uri} = 	Get From Dictionary		${resp['members'][0]}	uri
+	[Return]	${uri}
+
+Get FC URIs
+    [Documentation]   returns a list of uris for a given list of fc network names
+	[Arguments]       ${netlist}
+	${urilist} =      Uris.get   FC    ${netlist}
+	[Return]	${urilist}
+
+Remove All FC Networks
+	[Documentation]	Querys the appliance for all FC networks and then removes them
+	Log  	Removing FC NETWORKS   console=True
+	${networks} = 	Fusion Api Get FC Networks
+	:FOR	${net}	IN	@{networks['members']}
+	\		${resp} = 	Fusion Api Delete FC Network		uri=${net['uri']}
+	\		${task} =	Wait For Task 	${resp} 	240s	2s
+
+Remove All FC Networks Async
+	[Documentation]	Querys the appliance for all FC networks and then removes them asyncronously.  As it iterates
+	...  through the list of networks, it creates a dictionary for each network containing the network name, task uri,
+	...  and resource uri.  It then adds these to a list, deleteResources, and uses this list to perform the
+	...  asyncronous task checking and optional validation that the resource uri returns a 404
+	[Arguments]  ${VERIFY}=${FALSE}  ${RETURN_CODE}=404
+	${deleteNets} =  Create List
+    ${response} =  Create List
+	Log  	Removing FC NETWORKS    console=True
+	${networks} = 	Fusion Api Get FC Networks
+    ${count}=    Convert To String  ${networks['count']}
+    Run Keyword If  '${count}'=='0'   Log  FC Network doesn't exists   WARN
+	:FOR	${net}	IN	@{networks['members']}
+	\		${resp} = 	Fusion Api Delete FC Network	uri=${net['uri']}
+	\       Log  ${resp}  TRACE
+	\       Log  Deleting network ${net['name']}
+	\       ${deleteInfo} =  Create Dictionary
+	\		Set To Dictionary  ${deleteInfo}  name=${net['name']}
+	\		Set To Dictionary  ${deleteInfo}  uri=${net['uri']}
+	\		Set To Dictionary  ${deleteInfo}  resp=${resp}
+	\       Append To List  ${deleteNets}  ${deleteInfo}
+    \       Append To List  ${response}  ${resp}
+    Wait For Task2  ${response}
+	:FOR    ${deleteNet}  IN  @{deleteNets}
+	\       Continue For Loop If   ${VERIFY}==${FALSE}
+	\       ${resp} =  Fusion Api Get Resource  ${deleteNet['uri']}
+	\       Run Keyword If  ${resp['status_code']}!=${RETURN_CODE}  Run Keyword And Continue On Failure  FAIL  msg=FC Network ${deleteNet['name']} is not Deleted
+
+Get All FC Netowrk Uris
+    [Documentation]    Get Resources Uris list and return it
+    ${resp} =    Fusion Api Get Fc Networks
+    ${memb_list} =    Get From Dictionary    ${resp}    members
+    ${uri_list} =    Create List
+    :FOR    ${memb}    IN    @{memb_list}
+    \       ${uri} =    Get From Dictionary    ${memb}    uri
+    \       Append To List    ${uri_list}    ${uri}
+    [Return]      ${uri_list}
+
+Update FC Network
+    [Documentation]  Update fc network information
+    [Arguments]     ${name}  ${body}
+    Log     Updating fc network    console=yes
+    ${resp}=  Create list
+    ${fc_resp}=    Fusion Api Get FC Networks		param=?filter="'name'=='${name}'"
+    ${uri}=   Set Variable    ${fc_resp['members'][0]["uri"]}
+    ${connTempUri}=    Set Variable    ${fc_resp['members'][0]["connectionTemplateUri"]}
+    :FOR    ${data}  IN  @{body}
+    # Process connectionTemplateUri
+    \       ${connectionTemplateUri}=  Pop From Dictionary  ${data}  connectionTemplateUri  default=${None}
+    \       ${connectionuri}=    Run Keyword If      '${connectionTemplateUri}' != '${None}'
+    \       ...                  Get connectionTemplateUri   ${name}  type=fc
+    \       run keyword if       '${connectionTemplateUri}' != '${None}'
+    \       ...                  Set To Dictionary    ${data}  connectionTemplateUri  ${connectionuri}
+    \       ...                  ELSE
+    \       ...                  Set To Dictionary    ${data}  connectionTemplateUri  ${connTempUri}
+    # Process managedSanUri
+    \       ${managedSanUri}=    Pop From Dictionary    ${data}    managedSanUri  default=${None}
+    \       ${sanUri}=           Run Keyword If    '${managedSanUri}'!='${None}'
+    \       ...                  Common URI lookup by name    ${managedSanUri}
+    \       Run Keyword If      '${managedSanUri}'!='${None}'    Set To Dictionary   ${data}   managedSanUri  ${sanUri}
+    \       Set To Dictionary    ${data}  uri  ${uri}
+    \       Append To List   ${resp}  ${data}
+    ${resps} =  Fusion Api Edit Fc Network   body=${resp[0]}   uri=${uri}
+    [Return]   ${resps}

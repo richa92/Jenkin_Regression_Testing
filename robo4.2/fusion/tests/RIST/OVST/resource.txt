@@ -1,0 +1,150 @@
+*** Settings ***
+Documentation       Configures an appliance with resources found in supplied data file. Pass in specific tags with pybot -i <tag(s)> to limit processing
+Library             RoboGalaxyLibrary
+Library             FusionLibrary
+Library             SSHLibrary
+Library             OperatingSystem
+Library             XML
+Library             String
+Library				Dialogs
+
+*** Variables ***
+${SELENIUM_TIMEOUT}         5.0
+${SELENIUM_IMPLICIT_WAIT}   0.0
+${DataFile}         dcs_data.xml
+${ConfigFile}       config.xml
+${ApplianceUrl}     https://16.125.69.228
+${Browser}          firefox
+${SeleniumSpeed}    0.1
+${ILO_PROMPT}       </>hpiLO->
+${CONSOLE_TIMEOUT}  10 min
+${RIBCL_XML}        ilo_ribcl_request_embedded_health.xml
+${PauseWhenFailed}	False
+# Mail notification related
+${SendMailWhenPaused}   True
+${Sender}       wpst-jenkins@hpe.com
+${Receiver}     mkenney@hpe.com, junshan.ma@hpe.com
+${BUILD_URL}    Jenkins built-in variable
+${NODE_NAME}    Jenkins slave node name
+${Subject}      Error encounter when running test
+#Put detail info here
+${Content}
+${rpm_file_name}  ../list_of_rpms.rpm
+${build_server_4.00}  http://ci-nexus.vse.rdlabs.hpecorp.net
+${build_server_4.10}  http://ci-artifacts02.vse.rdlabs.hpecorp.net
+${build_server_4.20}  http://ci-artifacts02.vse.rdlabs.hpecorp.net
+
+*** Keywords ***
+
+Load Test Data and Open Browser
+    [Documentation]     Load Test Data and Open Browser
+    Set Log Level    TRACE
+    Load Test Data  ${DataFile}
+    Log Variables
+    Open Browser  ${ApplianceUrl}  ${Browser}
+    Maximize Browser Window
+    Run Keyword If  "${Browser}" == "ie"   Go To  javascript:document.getElementById('overridelink').click()
+    Set Selenium Speed  ${SeleniumSpeed}
+
+Load Multi Test Data and Open Browser
+    [Documentation]     Load Multi Test Data and Open Browser
+    Set Log Level           TRACE
+    Load Multi Test Data          ${ConfigFile}   True
+    Log Variables
+    Open Browser            ${ApplianceUrl}         ${Browser}
+    Maximize Browser Window
+    Run Keyword If          "${Browser}" == "ie"    Go To   javascript:document.getElementById('overridelink').click()
+    Set Selenium Speed      ${SeleniumSpeed}
+
+Logout and Close All Browsers
+    [Documentation]    Logout and Close All Browsers
+    # Fusion UI Logout of Appliance
+    Set Global Variable     ${UiLoggedIn}    ${False}
+    Close All Browsers
+
+Log into Fusion appliance as Administrator
+    [Documentation]    Log into Fusion appliance as Administrator
+    ${user} =  Get Data By Property  ${TestData.users}  name  Administrator
+    Set Global Variable     ${UiLoggedIn}    ${False}
+    Fusion UI Login to Appliance   ${user[0].name}
+
+Wait for Controller Init
+    [Documentation]    Boots a server via iLO textcons and waits for Controller Init to complete
+    [Arguments]    ${profiles}
+    # Open serial console.  Then, make sure we reach POST
+    ${index}=    Open Connection    ${profiles.ip}    prompt=${ILO_PROMPT}    timeout=${CONSOLE_TIMEOUT}
+    ${output}=    Login    ${profiles.username}    ${profiles.password}
+    Write    textcons
+    ${output}=    Read Until    Controller Status: Init done
+    Close Connection
+
+iLO Check Local RAID Configuration
+    [Documentation]    Use RIBCL to check the RAID level and drive counts
+    [Arguments]    ${profiles}    ${RAID}    ${NUM_PHYSICAL_DRIVES}    ${NUM_LOGICAL_DRIVES}=1
+    Ilo Connect    ${profiles.ip}    ${profiles.username}    ${profiles.password}
+    ${Output}=    iLO Get Embedded Health
+    # Parse out storage.
+    ${Storage}=    Get From Dictionary    ${Output}    storage
+    # Validate storage controller
+    ${Controller}=    Get From Dictionary    ${Storage}    Controller on System Board
+    # Number of Logical Drive (currently this can only be 0 or 1 for Fusion test cases)
+    ${Logical_Drives}=    Get From Dictionary    ${Controller}    logical_drives
+    Log    ${Logical_Drives}
+    ${Count}=    Get Length    ${Logical_Drives}
+    Pass Execution If    ${Count} == 0    No need to check RAID if logical drive count == 0
+    Should Be Equal As Integers    ${Count}    ${NUM_LOGICAL_DRIVES}
+    ${Logical_Drive0}=     Get From List    ${Logical_Drives}    0
+    # RAID level
+    ${Fault_Tolerance}=    Get From Dictionary    ${Logical_Drive0}    fault_tolerance
+    Should Be Equal As Strings   ${Fault_Tolerance}    ${RAID}
+    # Number of Physical Disks
+    ${Physical_Drives}=    Get From Dictionary    ${Logical_Drive0}    physical_drives
+    ${Count}=    Get Length    ${Physical_Drives}
+    Should Be Equal As Integers    ${Count}    ${NUM_PHYSICAL_DRIVES}
+    
+Pause And Close Browser
+	[Documentation]    Popup a dialog to pause the execution if \${PauseWhenFailed} is set to True. Finally close the browser
+	Run Keyword If Test Failed		Pause Test Execution
+	Logout and close all browsers
+
+Pause And Close Browser For Suite
+	[Documentation]    Popup a dialog to pause the execution if \${PauseWhenFailed} is set to True. Finally close the browser
+	Run Keyword If Any Tests Failed		Pause Test Execution
+	Logout and close all browsers
+
+Pause Test Execution
+	[Documentation]    Pause test execution
+    Return From Keyword If   '${PauseWhenFailed.lower()}'=='false'
+
+	LOG     Encounter failure, pausing test execution, if job is launch from jenkins, please log on jenkins slave server to get job continue       level=WARN
+	Send Mail Notification
+	Pause Execution
+
+Send Mail Notification
+   [Documentation]    Send Mail Notification
+    Return From Keyword If   '${SendMailWhenPaused.lower()}'=='false'    Skipped Send Mail Notification (\${SendMailWhenPaused}=${SendMailWhenPaused})
+
+    LOG     Sending mail notification   level=WARN
+    @{receiver_lst}=    Split String	${Receiver}     ,
+
+    Run Keyword If  '${Content}' == ''  Set Suite Variable
+    ...             ${Content}
+    ...             Build URL: \n${BUILD_URL}\n\nSlave Node: \n${NODE_NAME}\n\nTest case file: \n${SUITE SOURCE}\n\nTest case name: \n${TEST NAME}\n
+
+    Connect To SMTP Server          smtp3.hpe.com  True
+    Send Email      ${Sender}    ${receiver_lst}      ${Subject}      ${Content}
+    Disconnect From SMTP Server
+
+Get List of RPMS Files
+    [Documentation]     GET RPMS file from URL
+    ${ov_version} =  Get From Dictionary  ${Suite Metadata}  OneView Version
+    ${ov_build} =  Get Substring  ${ov_version}  0  4
+    ${rpm_build_url} =  Run Keyword If  '${ov_build}' == '4.00'  Catenate  SEPARATOR=  ${build_server_4.00}  /Fusion/rel/  ${ov_build}  /YUM/Builds/  ${ov_version}
+    ...                 ELSE IF  '${ov_build}' == '4.10'  Catenate  SEPARATOR=  ${build_server_4.10}  /Fusion/rel/  ${ov_build}  /YUM/Builds/  ${ov_version}
+    ...                 ELSE IF  '${ov_build}' == '4.20'  Catenate  SEPARATOR=  ${build_server_4.20}  /Fusion/rel/  ${ov_build}  /YUM/Builds/  ${ov_version}
+    ...                 ELSE  Fail  Please check OV version and update test if new OV support required
+    ${listofrpmfilename} =  Get List Of File Names  ${rpm_build_url}  rpm
+    Create File    ${rpm_file_name}    RPMS\n
+    Log  Name of RPMs are available in ${rpm_file_name}  console=True
+    :FOR  ${filename}  IN  @{listofrpmfilename}
+    \  Append to file  ${rpm_file_name}  ${filename}\n

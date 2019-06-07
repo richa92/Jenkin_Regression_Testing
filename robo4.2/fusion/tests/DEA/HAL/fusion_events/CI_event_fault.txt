@@ -1,0 +1,147 @@
+*** Settings ***
+Documentation    Test suite to validate CI related events on OneView and FLM.
+...    It covers testing of:
+...      CIManagerCommFault
+...      CIManagerCommFaultCleared
+...      CIManagerInsertFault
+...      CIManagerInsertFaultCleared
+...    = GENERIC USAGE =
+...    | pybot | -v ENC_SERIAL_NO:[enclosure serial #] | -v APPLIANCE_IP:<ipv4> | -v CIM_Linux_IP:<ipv4> |-v GIT_REPO_ROOT: | CI_event_fault.txt |
+...    = Variables =
+...    | GIT_REPO_ROOT |      Required: Repo root path if NOT defined in environment variable this is mgmtfw root location|
+...    | ENC_SERIAL_NO |      Optional: If omitted, will use the 1st enclosure detected in OV |
+...    | APPLIANCE_IP |       Required: OneView IPv4 address |
+...    | CIM_Linux_IP |       Required:CI Manager ipv4 under test |
+
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Library           RoboGalaxyLibrary
+Library           MgmtFWLibrary
+Library           json
+
+Suite Setup       Configure Events Test Environment
+Suite Teardown    Run Keywords  Logout of EM RIS   AND    Logout of Fusion Via REST
+
+***Variables***
+${cim_bay}     2     #Use the second CI Manager bay
+
+*** Test Case ***
+TC 01: Verify CIM Fault Events/CIM Fault Cleared
+    [Documentation]    This test is to verify CiManager Fault events for CIM status change event for failed/ok using CommFaultInjection
+    [Tags]    CIM    Alert    Events    FLM2.00    OV3.10    Automated
+    # Verify avalable CI Managers
+    ${present_list}=    Get List of Occupied CIManager Bays
+    Should Not Be Empty    ${present_list}    msg=No CIManager present in the enlcosure
+    ${CI count}=    Get Length    ${present_list}
+    Should Be Equal as Strings    ${CI count}    2    msg=2 CIs are required for this test script.
+    Log    message=Failing the CIM for bay:${cim_bay} and verify failed status/alert event in diags audit log    console=True
+    ${last_fusion_event_id}=    get last fusion event ID
+    ${CIM_Fault_Status}=    Set EM RIS CANmic Faults    ${CIM_Device}    ${cim_bay}    true
+    Should Be Equal As Strings    ${CIM_Fault_Status}    <Response [200]>
+    Sleep    30
+    Wait for Device Critical    ${CIM_Device}    ${cim_bay}
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Status Change MessageID Event    ${EL_CIM_Critical}    ${CIM_Device}    ${cim_bay}    250
+    Verify Audit Log Alert Event    ${EL_CIM_CommFault}    ${CIM_Device}    ${cim_bay}    250
+    Verify Fusion Event Sent By EM    ${EL_CIM_CommFault}    ${last_fusion_event_id}
+    Log    message=Clearing CIM commfault injection for bay:${cim_bay} and verify ok status/alert event in diags audit log    console=True
+    ${CIM_Fault_Status}=    Set EM RIS CANmic Faults    ${CIM_Device}    ${cim_bay}    false
+    Should Be Equal As Strings    ${CIM_Fault_Status}    <Response [200]>
+    Sleep    5
+    Wait for Device OK    ${CIM_Device}    ${cim_bay}
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Status Change MessageID Event    ${EL_CIM_OK}    ${CIM_Device}    ${cim_bay}    250
+    Verify Audit Log Alert Event    ${EL_CIM_CommFault_Cleared}    ${CIM_Device}    ${cim_bay}    250
+    Verify Fusion Event Sent By EM    ${EL_CIM_CommFault_Cleared}    ${last_fusion_event_id}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Set EM RIS CANmic Faults    ${CIM_Device}    ${cim_bay}    false    AND
+    ...    EM Clear CIM Status    ${cim_bay}
+
+TC 02: Verify CIManagerInsertFault / CIManagerInsertFaultCleared Events
+    [Documentation]    Verify CIManagerInsertFault / CIManagerInsertFaultCleared Events using the device state machine diag commands
+    [Tags]    CIM    Alert    Events    FLM2.00    OV3.10    Automated
+    Set Test Variable    ${device}    CIManager
+    Set Test Variable    ${device_diag_response}    CIM
+    ${present_list}=    Get List of Occupied CIManager Bays
+    Should Not Be Empty    ${present_list}    msg=No CIManager present in the enlcosure
+    ${CI count}=    Get Length    ${present_list}
+    Should Be Equal as Strings    ${CI count}    2    msg=2 CIs are required for this test script.
+    Log To Console    Removing and Inserting the ${device} in bay: ${cim_bay}
+    ${result}=    RIS EM Efuse ON CIM    ${cim_bay}
+    Should be True    ${result}
+    ${result}=    RIS EM Efuse Off CIM    ${cim_bay}
+    Should be True    ${result}
+    Sleep    20
+    ${last_fusion_event_id}=    get last fusion event ID
+    ${result}=    EM API Get Diags    ShowState/${device}/${cim_bay}
+    Should Contain    ${result}    State: SM_STATE_INTEGRATED
+    ${result}=    EM API Get Diags    deviceStateTransition/${device}/${cim_bay}/remove
+    Should Contain    ${result}    Successfully sent diag state transition event remove for ${device_diag_response} ${cim_bay}
+    ${result}=    EM API Get Diags    ShowState/${device}/${cim_bay}
+    Should Contain    ${result}    State: SM_STATE_ABSENT
+    ${result}=    EM API Get Diags    deviceStateTransition/${device}/${cim_bay}/operational
+    Should Contain    ${result}    Successfully sent diag state transition event operational for ${device_diag_response} ${cim_bay}
+    ${result}=    EM API Get Diags    ShowState/${device}/${cim_bay}
+    Should Contain    ${result}    State: SM_STATE_OPERATIONAL
+    ${status}    ${result}=    Wait timeout for Device State    ${device}    ${cim_bay}    SM_STATE_INSERTED_ERR    600
+    Should Be True    ${status}    msg=expected SM_STATE_INSERTED_ERR but got ${result}
+    ${result}=    EM API Get Diags    deviceStateTransition/${device}/${cim_bay}/operational
+    Should Contain    ${result}    Successfully sent diag state transition event operational for ${device_diag_response} ${cim_bay}
+    ${result}=    EM API Get Diags    ShowState/${device}/${cim_bay}
+    Should Contain    ${result}    State: SM_STATE_INSERTED_ERR
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_CIM_InsertFault}    ${CIM_Device}    ${cim_bay}    250
+    Verify Fusion Event Sent By EM    ${EL_CIM_InsertFault}    ${last_fusion_event_id}
+    ${result}=    EM API Get Diags    deviceStateTransition/${device}/${cim_bay}/insert
+    Should Contain    ${result}    Successfully sent diag state transition event insert for ${device_diag_response} ${cim_bay}
+    ${result}=    EM API Get Diags    ShowState/${device}/${cim_bay}
+    Should Contain    ${result}    State: SM_STATE_HW_READY
+    Sleep    60
+    ${result}=    EM API Get Diags    ShowState/${device}/${cim_bay}
+    Should Contain    ${result}    State: SM_STATE_INTEGRATED
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_CIM_InsertFaultCleared}    ${CIM_Device}    ${cim_bay}    250
+    Verify Fusion Event Sent By EM    ${EL_CIM_InsertFaultCleared}    ${last_fusion_event_id}
+    [Teardown]    Run Keyword If Test Failed    EM API Get Diags    deviceStateTransition/${device}/${cim_bay}/insert
+
+TC 03: Verify CIM Fault Events /CIM Fault Cleared
+    [Documentation]    This test is to verify CiManager Fault events for CIM status change event for failed/ok using CommFaultInjection
+    [Tags]    CIM    Alert    Events    FLM1.01    OV3.10    Automated
+    # Verify avalable CI Managers
+    ${present_list}=    Get List of Occupied CIManager Bays
+    Should Not Be Empty    ${present_list}    msg=No CIManager present in the enlcosure
+    ${CI count}=    Get Length    ${present_list}
+    Should Be Equal as Strings    ${CI count}    2    msg=2 CIs are required for this test script.
+    Log    message=Failing the CIM for bay:${cim_bay} and verify failed status/alert event in diags audit log    console=True
+    ${last_fusion_event_id}=    get last fusion event ID
+    ${CIM_Fault_Status}=    Set EM RIS CANmic Faults    ${CIM_Device}    ${cim_bay}    true
+    Should Be Equal As Strings    ${CIM_Fault_Status}    <Response [200]>
+    Sleep    30
+    Wait for Device Critical    ${CIM_Device}    ${cim_bay}
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Status Change MessageID Event    ${EL_CIM_Critical}    ${CIM_Device}    ${cim_bay}    250
+    Verify Audit Log Alert Event    ${EL_CIM_Fault}    ${CIM_Device}    ${cim_bay}    250
+    Verify Fusion Event Sent By EM    ${EL_CIM_Fault}    ${last_fusion_event_id}
+    Log    message=Clearing CIM commfault injection for bay:${cim_bay} and verify ok status/alert event in diags audit log    console=True
+    ${CIM_Fault_Status}=    Set EM RIS CANmic Faults    ${CIM_Device}    ${cim_bay}    false
+    Should Be Equal As Strings    ${CIM_Fault_Status}    <Response [200]>
+    Sleep    5
+    Wait for Device OK    ${CIM_Device}    ${cim_bay}
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Status Change MessageID Event    ${EL_CIM_OK}    ${CIM_Device}    ${cim_bay}    250
+    Verify Audit Log Alert Event    ${EL_CIM_Fault_Cleared}    ${CIM_Device}    ${cim_bay}    250
+    Verify Fusion Event Sent By EM    ${EL_CIM_Fault_Cleared}    ${last_fusion_event_id}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Set EM RIS CANmic Faults    ${CIM_Device}    ${cim_bay}    false    AND
+    ...    EM Clear CIM Status    ${cim_bay}

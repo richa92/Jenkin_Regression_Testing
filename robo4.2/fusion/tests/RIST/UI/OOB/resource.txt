@@ -1,0 +1,134 @@
+*** Settings ***
+Library     RoboGalaxyLibrary
+Library     FusionLibrary
+Library     SSHLibrary
+Library     OperatingSystem
+Library     XML
+Library     String
+Library     Dialogs
+Library     Collections
+Library     robot.api.logger
+
+*** Variables ***
+${AUTOSCROLL}               ${False}
+${SELENIUM_TIMEOUT}         5.0
+${SELENIUM_IMPLICIT_WAIT}   0.0
+${DataFile}                 dcs_data.xml
+${ConfigFile}               config.xml
+${ApplianceUrl}             https://16.125.69.228
+${Browser}                  firefox
+${SeleniumSpeed}            0.1
+${ILO_PROMPT}               </>hpiLO->
+${CONSOLE_TIMEOUT}          10 min
+${RIBCL_XML}                ilo_ribcl_request_embedded_health.xml
+${PauseWhenFailed}          False
+${SendMailWhenPaused}       True
+${mail_smtp_port}           587
+${Sender}                   wpst-test-notify@hp.com
+${Receiver}                 None
+${Receivers}                ${Receiver}
+${Subject}                  [Take Action] 2.0 C7000 OOB Test Paused Since A Failure
+${Build_URL}                Local
+${Test_Server}              Local
+${Content}                  * Build URL: ${Build_URL}\n* Test Server: ${Test_Server}\n* Failed Case File: ${SUITE SOURCE}\n\nIf you don't know login credentials, please send mail to pdl-shqa-automation@hp.com
+
+*** Keywords ***
+Open Browser and Login To Appliance
+    Set Log Level           TRACE
+    Log Variables
+    Open Browser            ${ApplianceUrl}         ${Browser}
+    Maximize Browser Window
+    Run Keyword If          "${Browser}" == "ie"    Go To   javascript:document.getElementById('overridelink').click()
+    Set Selenium Speed      ${SeleniumSpeed}
+    get_variable_value      ${ApplianceUrl}
+    Fusion UI Login To Appliance    ${user}
+
+Logout and Close All Browsers
+    # Fusion UI Logout of Appliance
+    Set Global Variable     ${UiLoggedIn}    ${False}
+    Close All Browsers
+
+Wait for Controller Init
+    [Documentation]             Boots a server via iLO textcons and waits for Controller Init to complete
+    [Arguments]                 ${profiles}
+    # Open serial console.      Then, make sure we reach POST
+    ${index}=                   Open Connection     ${profiles.ip}          prompt=${ILO_PROMPT}    timeout=${CONSOLE_TIMEOUT}
+    ${output}=                  Login               ${profiles.username}    ${profiles.password}
+    Write                       textcons
+    ${output}=                  Read Until          Controller Status: Init done
+    Close Connection
+
+iLO Check Local RAID Configuration
+    [Documentation]         Use RIBCL to check the RAID level and drive counts
+    [Arguments]             ${profiles}             ${RAID}                 ${NUM_PHYSICAL_DRIVES}      ${NUM_LOGICAL_DRIVES}=1
+    Ilo Connect             ${profiles.ip}          ${profiles.username}    ${profiles.password}
+    ${Output}=              iLO Get Embedded Health
+    # Parse out storage.
+    ${Storage}=             Get From Dictionary     ${Output}               storage
+    # Validate storage controller
+    ${Controller}=          Get From Dictionary     ${Storage}              Controller on System Board
+    # Number of Logical Drive (currently this can only be 0 or 1 for Fusion test cases)
+    ${Logical_Drives}=      Get From Dictionary     ${Controller}           logical_drives
+    Log                     ${Logical_Drives}
+    ${Count}=               Get Length              ${Logical_Drives}
+    Pass Execution If       ${Count} == 0           No need to check RAID if logical drive count == 0
+    Should Be Equal As Integers                     ${Count}                ${NUM_LOGICAL_DRIVES}
+    ${Logical_Drive0}=      Get From List           ${Logical_Drives}       0
+    # RAID level
+    ${Fault_Tolerance}=     Get From Dictionary     ${Logical_Drive0}       fault_tolerance
+    Should Be Equal As Strings                      ${Fault_Tolerance}      ${RAID}
+    # Number of Physical Disks
+    ${Physical_Drives}=     Get From Dictionary     ${Logical_Drive0}       physical_drives
+    ${Count}=               Get Length              ${Physical_Drives}
+    Should Be Equal As Integers                     ${Count}                ${NUM_PHYSICAL_DRIVES}
+
+Pause Test Execution and Relogin Appliance
+    [Documentation]                 Popup a dialog to pause the execution if \${PauseWhenFailed} is set to True. And re-login the appliance.
+    Pause Test Execution
+    Close Browser and Re Login Appliance
+
+Close Browser and Re Login Appliance
+    Logout and close all browsers
+    Open Browser and Login To Appliance
+
+Pause Test Execution On Failure
+    [Documentation]                 Popup a dialog to pause the execution if \${PauseWhenFailed} is set to True.
+    Run Keyword If Test Failed      Pause Test Execution
+
+Pause Test Execution and Relogin Appliance On Failure
+    [Documentation]                 Pause the execution if \${PauseWhenFailed} is set to True. And re-login the appliance
+    Run Keyword If Test Failed      Pause Test Execution and Relogin Appliance
+
+Pause Test Execution
+    [Documentation]     Popup a dialog to pause the execution if \${PauseWhenFailed} is set to True.
+    Run Keyword If      '${PauseWhenFailed.lower()}' == 'true'      Send Mail Notification And Pause Test Execution
+
+Send Mail Notification And Pause Test Execution
+    [Documentation]     Popup a dialog to pause the execution and send mail notification if \${SendMailWhenPaused} is True
+    Run Keyword If      '${SendMailWhenPaused.lower()}' == 'true'      Send Mail Notification
+    Pause Execution
+
+Pause And Close Browser For Suite
+    [Documentation]                     Popup a dialog to pause the execution if \${PauseWhenFailed} is set to True.
+    Run Keyword If Any Tests Failed     Pause Test Execution
+    Logout and close all browsers
+
+Pause Test Execution For Suite
+    [Documentation]     Pause test execution
+    Run Keyword If      '${PauseWhenFailed.lower()}' == 'true'      Pause Execution
+
+Send Mail Notification
+    [Documentation]     Send notify mail to ${Receivers}
+    # Connect To SMTP Server          smtp-americas.hp.com  True
+    Connect To SMTP Server          smtp.hp.com  True
+    @{Receivers}=    Split String    ${Receivers}
+    ${ReceiverList}=       Create list       @{Receivers}
+    Console         Sending notification to ${Receivers}
+    Send Email      ${Sender}    ${ReceiverList}      ${Subject}      ${Content}
+    Disconnect From SMTP Server
+
+Remove All SSO Hp Sim Certificates and Snmp Trap Receivers For OA
+    [Arguments]     ${enclosure_credentials}
+    Fusion Srm OA Api User Login    ${enclosure_credentials.oa1hostname}    ${enclosure_credentials.oa1username}    ${enclosure_credentials.oa1password}
+    Fusion Srm OA Api Remove All HP Sim Certificates
+    Fusion Srm OA Api Remove All Snmp Trap Receiver

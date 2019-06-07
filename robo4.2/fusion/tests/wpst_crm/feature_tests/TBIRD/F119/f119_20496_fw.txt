@@ -1,0 +1,124 @@
+*** Settings ***
+Documentation        Feature Tests: F119_Firmware_Upgrade/Downgrade
+...                  F119_FW.1_20496--Verify able to update FW on Carbon using latest SPP package
+
+Library                   FusionLibrary
+Library                   RoboGalaxyLibrary
+Library                   Collections
+Variables                 data_variables.py
+
+Suite Setup               Suite Setup Tasks
+Suite Teardown            Suite Teardown Tasks
+
+Resource            ../../../../resource/fusion_api_all_resource_files.txt
+
+*** Variables ***
+${APPLIANCE_IP}         15.245.131.121
+${FUSION_IP}            15.245.131.121
+${SPP_Path}             ${CURDIR}/SPP/${old_SPP_bundle}
+
+*** Test Cases ***
+
+F119_FW.1_20496
+    Set Log Level      TRACE
+    Fusion Api Login Appliance 		${APPLIANCE_IP}		${admin_credentials}
+    Remove Environment Variable     https_proxy    http_proxy
+    Log to console and logfile    \nUploading spp bundle for Update"
+    ${resp} =     Fusion Api Upload Firmware Bundle      localfile=${SPP_Path}
+    Log to Console    Uploadsppdetails ${resp}
+    ${resp}=   Fusion Api Get Firmware Driver    param=?filter="name='${old_SPP_bundle}'"
+    Run Keyword If   ${resp['count']} == 0   Fail    msg=\n No SPP bundle found!!.Please upload the correct SPP bundle
+    ${fw_uri}=   Get From Dictionary  ${resp['members'][0]}    uri
+    Log to Console and logfile    \nFound ${old_SPP_bundle}SPP bundle
+
+    Log to console and logfile    \nValidating the interconnect firmware before LE update
+    :FOR     ${IC}     IN   @{INTERCONNECTS}
+    \     ${resp} =   Fusion Api Get Interconnect    param=?filter="'name' = '${IC}'"
+    \     ${current_ic_fw_version} =  Get From Dictionary  ${resp['members'][0]}    firmwareVersion
+    \    Log to console and logfile    \n FIrmware version of Interconnect ${IC} is :${current_ic_fw_version}
+    \     Run keyword unless    '${current_ic_fw_version}' == '${ic_firmwareVersion_new}'    Fail    "Firmware version mismatch"
+    \     ...   ELSE     Log to console and logfile    \nFirmware version is verified for ${IC}
+
+    Log to console and logfile     \nDowngrading firmware through LI page
+    ${li_uri} = 	Get LI URI   ${LI}
+    Set to dictionary     ${liupdate_body}     sppUri    ${fw_uri}
+    ${response}=    Fusion Api Li Upgrade Firmware    ${liupdate_body}    ${li_uri}
+    Log to console	\n The response is:${response}
+    Run Keyword If  ${response['status_code']} !=202    fail    msg=\nLI Firmware update Failed. \n ErrorCode:${response['errorCode']}\nMessage:${response['message']}
+    ${task} =     Wait For Task        ${response}   30min    1min
+    Run Keyword If  '${task['taskState']}' !='Completed'  or  ${task['status_code']} !=200   fail    msg=\nLI Firmware update Failed. \n ErrorCode:${task['taskErrors'][0][errorCode]}\n :Message ${task['taskErrors'][0][errorCode]}
+    ...         ELSE    Log to console and logfile  \n\nLI FW Upgrade completed successfully !!
+
+    Log to console and logfile   \nValidating the interconnects firmware version after LI update
+    :FOR     ${IC}    IN    @{INTERCONNECTS}
+    \    ${resp} =  Fusion Api Get Interconnect     param=?filter="'name' = '${IC}'"
+    \    ${current_ic_fw_version} =  Get From Dictionary  ${resp['members'][0]}    firmwareVersion 
+    \    Log to console and logfile    \n FIrmware version of Interconnect ${IC} is :${current_ic_fw_version}
+    \    Run keyword unless    '${current_ic_fw_version}' == '${ic_firmwareVersion_old}'	Fail	"Firmware version mismatch"
+    \     ...   ELSE     Log to console and logfile    \nFirmware version is verified for ${IC}
+	
+    Log to console and logfile     \nRemoving the uploaded FW bundle
+    ${resp}=   Fusion Api Remove Firmware Driver     param=?filter="name='${old_SPP_bundle}  
+
+*** Keywords ***
+Suite Setup Tasks
+    Set Log Level      TRACE
+    ${TEST_NAME} =      Set Variable    TEST-SPECIFIC SETUP
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	Log to console and logfile	[TEST-SPECIFIC SETUP]
+    Fusion Api Login Appliance 		${APPLIANCE_IP}		${admin_credentials}
+    Clean OV
+    ${fc_networks} =	Get Variable Value	${fcnets}
+	Run Keyword If	${fc_networks} is not ${null}    Add FC Networks from variable		${fc_networks}
+	${body} =   Build LIG body      ${ligs['lig1']}
+    Log to console and logfile    \n-Creating LIG ${LIG1}
+    ${resp} =   Fusion Api Create LIG   ${body}
+    ${task} =   Wait For Task   ${resp}    60s	2s
+    Add Enclosure Group from variable   ${enc_groups['enc_group1']}
+    Sleep   10s
+    Add Logical Enclosure from variable   ${les['le1']}
+  :FOR     ${IC}   IN   @{INTERCONNECTS}
+    \   ${ic_uri} =    Get IC URI    ${IC}
+    \   Wait Until Keyword Succeeds   10 min    10s    IC reached state    ${ic_uri}    Configured
+    \    Sleep    2min
+     \   ${resp}=    Fusion Api Get Interconnect    param=?filter="'name'=='${IC}'"
+     \  ${state}=     Get From Dictionary     ${resp['members'][0]}   state
+     \  Run Keyword If    '${state}' != 'Configured'      fail      msg="The IC module ${IC} is not in configured state" 
+     \   ...     ELSE   Log to console and logfile    \n The IC module ${IC} is in configured state    
+     
+Clean OV
+    [Documentation]	Cleans the appliance
+	Log to console and logfile	\nCleaning the OV
+	Power off ALL Servers
+	Remove All Server Profiles
+	Remove All Logical Enclosures
+	Remove ALL Enclosure Groups
+	Remove ALL LIGs
+	Remove ALL Ethernet Networks
+	Remove ALL FC Networks
+	Remove ALL FCoE Networks
+	Remove ALL Network Sets
+	Remove ALL Users
+
+Clear Profile Configurations
+    [Documentation]	Cleans Server Profile configurations
+	Log To Console	\nCleaning the Server Profile configurations
+	Power off ALL Servers
+	Remove All Server Profiles	
+
+	
+Suite Teardown Tasks
+	[Documentation]	Returns appliance to a 'clean' state by removing all resources\enclosures
+	Log to console and logfile	[TEARDOWN]
+	Run Keyword If All Tests Passed    Power off ALL Servers
+	Run Keyword If All Tests Passed    Remove All Server Profiles
+	Run Keyword If All Tests Passed    Remove All Logical Enclosures
+	Run Keyword If All Tests Passed    Remove ALL Enclosure Groups
+	Run Keyword If All Tests Passed    Remove ALL LIGs
+	Run Keyword If All Tests Passed    Remove ALL LS
+	Run Keyword If All Tests Passed    Remove ALL LSGs
+	Run Keyword If All Tests Passed    Remove ALL Ethernet Networks
+	Run Keyword If All Tests Passed    Remove ALL FC Networks
+	Run Keyword If All Tests Passed    Remove ALL FCoE Networks
+	Run Keyword If All Tests Passed    Remove ALL Network Sets
+	Run Keyword If All Tests Passed    Remove ALL Users	

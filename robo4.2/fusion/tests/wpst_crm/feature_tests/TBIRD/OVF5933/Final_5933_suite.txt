@@ -1,0 +1,1056 @@
+*** Settings ***
+Documentation       3108----Factory_Reset_Feature
+Variables       data_ab.py
+Variables       data_variables_ha.py
+Library         json
+Library         FusionLibrary
+Library         ServerOperations.py
+Library         RoboGalaxyLibrary
+Library         Collections
+Library         SSHLibrary
+Resource        ../../../../../Resources/api/fusion_api_resource.txt
+
+*** Variables ***
+${APPLIANCE_IP}          15.186.9.136
+${number}    5
+${flag}    Windows
+${Ping_Lost}    Lost
+${ping_file0}    ping_serverip0.txt
+${ping_file1}    ping_serverip1.txt
+${ping_file2}    ping_serverip2.txt
+${eth}    Ethernet
+
+*** Test cases ***
+#######################################Pre-condition#################################################
+Login to Appliance
+    [Documentation]  Login into the Appliance
+    Set Log Level    TRACE
+    ${resp}    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    Run Keyword If  '${resp[0]['status_code']}' != '200'    Fail    ELSE  Log    \n\n Successfully logged into the appliance!! \n\n    console=True
+
+Clean OV
+    [Documentation]    Cleaning up the appliance
+    Log    \n\n Cleaning up the appliance     console=True
+    Power off ALL servers    PressAndHold
+    Remove All Server Profiles
+    Remove All LEs
+    Remove All Enclosure Groups
+    Remove All LIGs
+    Remove All FCoE Networks
+    Remove All Ethernet Networks
+    Remove All FC Networks
+
+Create Ethernet Networks
+    [Documentation]    Create Ethernet Networks
+    [Tags]  Enet     setup
+    ${resp}    Add Ethernet Networks from variable    ${ethernet_networks}
+    ${l}    Get Length    ${resp}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${task} =  Wait For Task2  ${resp[${x}]}    1m   5
+
+Create FCOE Networks
+    [Documentation]     Create FCOE Networks
+    [Tags]  FCOE    setup
+    ${resp}    Add FCoE Networks from variable    ${fcoe_networks}
+    ${l}    Get Length    ${resp}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${task} =  Wait For Task2  ${resp[${x}]}    1m   5
+
+Create FC Networks
+    [Documentation]     Create FC Networks
+    [Tags]  FC    setup
+    ${resp}    Add FC Networks from variable    ${fc_networks}
+    ${l}    Get Length    ${resp}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${task} =  Wait For Task2  ${resp[${x}]}    1m   5
+
+Create Logical Interconnect Groups
+    [Documentation]     Create Logical Interconnect Groups
+    :FOR    ${lig}    IN    @{ligs}
+    \    Add LIG from variable    ${lig}
+
+Create Enclosure Group
+    [Documentation]     Create Enclosure Group
+    ${resp_EG}    Add Enclosure Group from variable    ${enc_group}
+    ${task}=    Wait For Task2  ${resp_EG}    1m   5
+
+Create Logical Enclosure
+    [Documentation]   Create LE
+    Add Logical Enclosure from variable    ${LEbody}
+
+Verify interconnect status are in configured
+    [Documentation]    Verify interconnect status are in configured
+    Log    Verifying if interconnects are configured    console=True
+    ${l}    Get Length    ${Interconnect_dto}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    Verify Interconnect    ${Interconnect_dto[${x}]}    state=Configured
+    Sleep    5min
+    Log    Fetching ICM URI    console=True
+    ${ic_uris}    Create List
+    :FOR    ${icm}    IN    @{Interconnect_name}
+    \    ${uri} =    Get IC URI    ${icm}
+    \    Run Keyword If    '${icm}' == '${Interconnect_name[0]}'    Set Suite Variable    ${ICM3_uri}    ${uri}
+    \    ...    ELSE IF    '${icm}' == '${Interconnect_name[1]}'   Set Suite Variable    ${ICM6_uri}    ${uri}
+    \    ...    ELSE    Set Suite Variable    ${SUB_uri}    ${uri}
+    Log     ${ICM3_uri}    console=True
+    Log     ${ICM6_uri}    console=True
+    Append To List  ${ic_uris}   ${ICM3_uri}
+    Append To List  ${ic_uris}   ${ICM6_uri}
+    Set Suite Variable    ${ICMuri}    ${ic_uris}
+    Log    Verify if ports are linked    console=True
+    Wait Until Keyword Succeeds    10 min    20s    Verify Ports Status    ${ICM_uris}    ${port_name}
+
+Create Server Profile
+   [Documentation]    create server profile
+    Set Log Level    TRACE
+    ${Resp}    Add Server Profiles from variable    ${server_profiles}
+    ${len}    Get Length    ${server_profiles}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    Run Keyword If  '${Resp[${x}]['status_code']}' == '202'    Wait For Task2    ${Resp[${x}]}    20m    1m    ELSE    Fail    Log    failed    console=True
+    \    Power on server    ${server_profiles[${x}]['serverHardwareUri']}
+    \    Log  Server to boot    console=True
+    \    Sleep   10min
+
+Geting server ip's and checking if IP's are pinging
+    [Documentation]    Geting server ip's and checking if IP's are pinging
+    ${IP}    Get Server Ip Windows    ${ILO_List}
+    Set Global Variable    ${serverip_List1_global}    ${IP}
+    ${l} =    Get Length    ${serverip_List1_global}
+    Set Global Variable    ${iplength}    ${l}
+    Log to console    \n pinging started
+    :FOR    ${x}    IN RANGE    0   ${iplength}
+    \    startthread    ${number}    ${serverip_List1_global[${x}]}    ${ping_file${x}}    ${flag}
+    \    Sleep    30
+    \    ${contents}=    OperatingSystem.Get File    ${ping_file${x}}
+    \    ${Lines}=    Get Lines Containing String    ${contents}    ${Ping_Lost}
+    \    Log to Console    \ncontents are ${Lines}
+    \    ${match}   ${ret1}    Should Match Regexp    ${Lines}    Lost\\s+=\\s+\\d+\\s+\\((\\d+%)\\s+loss\\)
+    \    Log to Console     ${ret1}
+    \    Run Keyword If  '${ret1}' != '0%'  Fail    ELSE  Log to console  \n 0 percent packet loss is observed
+    Log to Console     All the IP's are reachable
+
+Get MAC Address of the server & Windows Teaming
+    [Documentation]    Get MAC Address of the server & Windows Teaming
+    ${IP}    Get Server Ip Windows    ${ILO_List}
+    Set Global Variable    ${serverip_List1_global}    ${IP}
+    ${resp} =    Fusion Api Get Server Profiles
+    ${mac_addr_list}=   Create List
+    ${mac} =    Get Profile Details    ${resp}    ${server_profiles[0]['name']}
+    ${mac_length} =    Get Length    ${mac}
+    :FOR    ${x}    IN RANGE    ${mac_length}
+    \   ${mac_address} =    Replace String Using Regexp    ${mac[${x}]}    :    -
+    \   Append To List   ${mac_addr_list}    ${mac_address}
+    Log to Console    \n mac address ${mac_addr_list}
+
+    ${adapter_name_list}=   Create List
+    :FOR    ${x}    IN RANGE    ${mac_length}
+    \   ${replaced_cmd} =   Replace String Using Regexp    ${Powershell_get_mac}    pppppppp      ${mac_addr_list[${x}]}
+    \   Log to console  \n the server details is ${server_details_enc1_bay1}
+    \   Log to console  \n the ip is ${serverip_List1_global[0]}
+    \   ${output}    Get Mac Address from server    ${server_details_enc1_bay1}    ${serverip_List1_global[0]}    ${replaced_cmd}
+    \   ${string}    Convert To String    ${output}
+    \   ${match}    ${port}     Should Match Regexp    ${string}    .*Ethernet\\s+(\\d+).*
+    \   ${adapter_name}    Catenate    ${eth}   ${port}
+    \   Append to List   ${adapter_name_list}   ${adapter_name}
+    Log to console  \nadapter names lsit${adapter_name_list}
+    Create Teaming windows     ${adapter_name_list[0]}    ${adapter_name_list[1]}   ${Powershell_get_mac1}    ${server_details_enc1_bay1}    ${serverip_List1_global[0]}
+    ${IP}    Get Server Ip Windows    ${ILO_List}
+    Create Teaming windows     ${adapter_name_list[2]}    ${adapter_name_list[3]}   ${Powershell_get_mac2}    ${server_details_enc1_bay1}    ${IP[0]}
+    ${IP}    Get Server Ip Windows    ${ILO_List}
+    Create Teaming windows     ${adapter_name_list[4]}    ${adapter_name_list[5]}   ${Powershell_get_mac3}    ${server_details_enc1_bay1}    ${IP[0]}
+    ${IP}    Get Server Ip Windows    ${ILO_List}
+    Create Teaming windows     ${adapter_name_list[6]}    ${adapter_name_list[7]}   ${Powershell_get_mac4}    ${server_details_enc1_bay1}    ${IP[0]}
+
+Verify IP is pinging after teaming
+    [Documentation]    Verify IP is pinging after teaming
+    ${ip_team}    Get Server Ip Windows    ${ILO_List}
+    Set Global Variable    ${Team_ip}    ${ip_team}
+    ${iplength} =    Get Length    ${Team_ip}
+    log to console  \n pinging started
+    :FOR    ${x}    IN RANGE    0   ${iplength}
+    \    startthread    ${number}    ${Team_ip[${x}]}    ${team${x}}    ${flag}
+    \    Sleep    30sec
+    \    ${contents}=    OperatingSystem.Get File    ${team${x}}
+    \    ${Lines}=    Get Lines Containing String    ${contents}    ${Ping_Lost}
+    \    Log to Console    \ncontents are ${Lines}
+    \    ${match}   ${ret1}    Should Match Regexp    ${Lines}    Lost\\s+=\\s+\\d+\\s+\\((\\d+%)\\s+loss\\)
+    \    Log to Console     ${ret1}
+    \    Run Keyword If  '${ret1}' != '0%'  Fail    ELSE  Log to console  \npinging happend with 0loss percentage
+    Log to Console     successfully pinged  ip's
+
+Verify Ethernet traffic
+    [Documentation]    Verifying Traffic
+    PASS EXECUTION IF    '${Module}' == 'Carbon'    Skip  Test case
+    Run Keyword If    '${Module}' == 'Nitro'    Verifying traffic for Ethernet for Nitro    ${ILO_List}
+    ...    ELSE   Run Keyword    Verifying traffic for Ethernet    ${ping_cmd1}    ${server_credentials}    ${pingfile}
+
+Verify fc and fcoe traffic
+    [Documentation]    Verifying Traffic
+    PASS EXECUTION IF    '${Module}' == 'Carbon'    Skip  Test case
+    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}
+
+Verify carbon traffic FC
+    [Documentation]    Verifying Traffic
+    PASS EXECUTION IF    '${Module}' == 'Potash' or '${Module}' == 'Nitro'    Skip  Test case
+    Verifying Traffic for carbon FC    ${ILO_List}    ${server_details} ${ENC1_SERVER_FcoE_cred}    ${diskspd_cmd}
+
+1_a_perform Factory reset in LI for HA IN Potash,Nitro,Carbon 16 and 32
+    [Documentation]   perform Factory reset in LI
+    PASS EXECUTION IF    '${Module1}' == 'AB'    Skip  Test case
+    ${FC_FCOE_server_details}=  Create List
+    ${server_ip}=   Create List
+    ${len}    Get Length    ${ILO_List}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    ${output}    Get IP For All Servers    ${ILO_List[${x}]}    ${server_details[${x}]}
+    \    ${ip}    Get from Dictionary   ${output}   ip
+    \    Append To List    ${server_ip}    ${ip[0]}
+    ${l} =  Get Length  ${LI_dto}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${task}    Patch Interconnect LI    ${LI_dto[${x}]}    op=replace  path=/factoryResetState  value=ReapplyConfiguration
+    Sleep    60s
+    Run Keyword If    '${Module}' == 'Potash'    Run Keyword    Verifying Traffic for fc and fcoe with loss    ${number}    ${server_ip}    ${pingfile}    ${flag}    ${Ping_Lost}
+    ...    ELSE IF  Run Keyword    Verifying Traffic for fc and fcoe with loss    ${number}    ${server_ip}    ${pingfile}    ${flag}    ${Ping_Lost}
+    ...    ELSE    Log  Traffic Failed    Console=True
+    Wait For Task2  ${task}  timeout=600  interval=10
+    Wait Until Keyword Succeeds    20min    20s    IC reached state    ${ICMuri[0]}    Configured
+    Wait Until Keyword Succeeds    20min    20s    IC reached state    ${ICMuri[1]}    Configured
+    Sleep    6min
+
+1_b_perform Factory reset in LI for AB in Potash and Nitro
+    [Documentation]   perform Factory reset in LI
+    PASS EXECUTION IF    '${Module1}' == 'HA'    Skip  Test case
+    ${l} =  Get Length  ${LI_dto}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    ${task}    Patch Interconnect LI    ${LI_dto[${x}]}    op=replace  path=/factoryResetState  value=ReapplyConfiguration
+    \    Run Keyword If    '${Module}' == 'Potash'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet    ${ping_cmd1}    ${server_credentials}    ${pingfile}
+    \    ...    ELSE IF    '${Module}' == 'Nitro'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet for Nitro    ${ILO_List}
+    \    ...    ELSE IF   Run Keyword    Verifying Traffic for carbon FC    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${diskspd_cmd}
+    \    ...    ELSE    Log   Traffic failed to verify    Console=True
+    \    Wait For Task2  ${task}  timeout=600  interval=10
+    \    Wait Until Keyword Succeeds    20min    20s    IC reached state    ${ICMuri[${x}]}    Configured
+    \    Sleep    6min
+
+1_c_Verify traffic after factory reset
+    [Documentation]   Verify traffic after factory reset
+     Run Keyword If    '${Module}' == 'Potash'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet    ${ping_cmd1}    ${server_credentials}    ${pingfile}
+     ...    ELSE IF    '${Module}' == 'Nitro'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet for Nitro    ${ILO_List}
+     ...    ELSE IF    '${Module}' == 'Carbon'    Verifying Traffic for carbon FC    ${ILO_List}    ${server_details}   ${ENC1_SERVER_FcoE_cred}    ${diskspd_cmd}
+     ...    ELSE   Log  Traffic is not passed    Console=True
+
+2_Factory reset master ICM and verify the Interconnect state.
+    [Documentation]   Factory reset master/A-side ICM
+    ${task}    Patch Interconnect    ${ICM_dto[0]}    op=replace  path=/factoryResetState  value=ReapplyConfiguration
+    Run Keyword If    '${Module}' == 'Potash'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet    ${ping_cmd1}    ${server_credentials}    ${pingfile}
+    ...    ELSE IF    '${Module}' == 'Nitro'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet for Nitro    ${ILO_List}
+    ...    ELSE IF    '${Module}' == 'Carbon'    Verifying Traffic for carbon FC    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${diskspd_cmd}
+    ...    ELSE   Log   traffic failed    Console=True
+    Wait For Task2  ${task}  timeout=600  interval=10
+    Wait Until Keyword Succeeds    15min   15s      IC reached state    ${ICM3_uri}  state=Configured
+    Run Keyword If    '${Module}' == 'Potash'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details} ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}  ${diskspd_cmd}    AND    Verifying traffic for Ethernet    ${ping_cmd1}    ${server_credentials}    ${pingfile}
+    ...    ELSE IF    '${Module}' == 'Nitro'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}  ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}  ${diskspd_cmd}    AND    Verifying traffic for Ethernet for Nitro    ${ILO_List}
+    ...    ELSE IF    '${Module}' == 'Carbon'   Verifying Traffic for carbon FC    ${ILO_List}    ${server_details}     ${ENC1_SERVER_FcoE_cred}    ${diskspd_cmd}
+    ...    ELSE   Log   traffic failed    Console=True
+
+3_Factory reset subordinate ICM and verify the Interconnect state.
+    [Documentation]   Factory reset subordinate/B-side ICM
+    Log  ICM powered off ${Module}   console=True
+    ${task}    Patch Interconnect    ${ICM_dto[1]}    op=replace  path=/factoryResetState  value=ReapplyConfiguration
+    Run Keyword If    '${Module}' == 'Potash'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet    ${ping_cmd1}    ${server_credentials}    ${pingfile}
+    ...    ELSE IF    '${Module}' == 'Nitro'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet for Nitro    ${ILO_List}
+    ...    ELSE IF    '${Module}' == 'Carbon'    Verifying Traffic for carbon FC    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${diskspd_cmd}
+    ...    ELSE   Log   traffic failed    Console=True
+    Wait For Task2  ${task}  timeout=600  interval=10
+    Wait Until Keyword Succeeds    15min   15s      IC reached state    ${ICM6_uri}  state=Configured
+    Run Keyword If    '${Module}' == 'Potash'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet    ${ping_cmd1}    ${server_credentials}    ${pingfile}
+    ...    ELSE IF    '${Module}' == 'Nitro'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet for Nitro    ${ILO_List}
+    ...    ELSE IF    '${Module}' == 'Carbon'    Verifying Traffic for carbon FC    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${diskspd_cmd}
+    ...    ELSE   Log   traffic failed    Console=True
+
+4_a_Power off One of the interconnect in LI.Factory reset the same interconnect and verify the error message for Potash,Nitro,Carbon 16 & 32
+    PASS EXECUTION IF    '${Module1}' == 'AB'    Skip  Test case
+    [Documentation]    Power off  the interconnect
+    [Tags]  powerOff
+    Set Log Level    TRACE
+    Log  power off ICM    console=True
+    ${task}    Patch Interconnect    ${ICM_dto[0]}    op=replace  path=/powerState  value=Off
+    Wait For Task2  ${task}  timeout=600  interval=10
+    Wait Until Keyword Succeeds    15min    20s      IC reached state    ${ICM3_uri}    Maintenance
+    Log  ICM powered off    console=True
+    ${body} =  Create Dictionary   op=replace
+    ...                             path=/factoryResetState
+    ...                             value=ReapplyConfiguration
+    ${body} =  Create List  ${body}
+    ${resp} =  fusion api patch interconnect  body=${body}  uri=${ICM6_uri}
+    ${status}  ${task_uri} =  Run Keyword and Ignore Error  Get From Dictionary  ${resp['headers']}  location
+    Return From Keyword If    '${status}'=='FAIL'    ${resp}
+    Log    The task URI is ${task_uri}
+    ${task} =  Fusion Api Get Task  uri=${task_uri}
+    Run Keyword If  '${task['taskErrors'][0]['errorCode']}' != 'INVALID_FACTORY_RESET_SWITCH_POWERED_OFF_IN_LI'  Fail    ELSE  log to console   \n-FActory reset cannot be performed
+    ${task}    Patch Interconnect    ${ICM_dto[0]}    op=replace  path=/powerState  value=On
+    Wait For Task2  ${task}  timeout=600  interval=10
+    Wait Until Keyword Succeeds    20min    20s      IC reached state    ${ICM3_uri}    Configured
+    Log  ICM powered on    console=True
+    Run Keyword If    '${Module}' == 'Potash'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet    ${ping_cmd1}    ${server_credentials}    ${pingfile}
+    ...    ELSE IF    '${Module}' == 'Nitro'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet for Nitro    ${ILO_List}
+    ...    ELSE IF    '${Module}' == 'Carbon'    Verifying Traffic for carbon FC    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${diskspd_cmd}
+    ...    ELSE   Log   traffic failed    Console=True
+
+4_b_Power off One of the interconnect in LI.Factory reset the same interconnect and verify the error message for Potash & Nitro(A+B)
+    PASS EXECUTION IF    '${Module1}' == 'HA'    Skip  Test case
+    [Documentation]    Power off  the interconnect
+    [Tags]  powerOff
+    Set Log Level    TRACE
+    Log  power off ICM    console=True
+    ${task}    Patch Interconnect    ${ICM_dto[0]}    op=replace  path=/powerState  value=Off
+    Wait For Task2  ${task}  timeout=600  interval=10
+    Wait Until Keyword Succeeds    15min    20s      IC reached state    ${ICM3_uri}    Maintenance
+    Log  ICM powered off    console=True
+    ${FC_FCOE_server_details}=  Create List
+    ${server_ip}=   Create List
+    ${len}    Get Length    ${ILO_List}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    ${output}    Get IP For All Servers    ${ILO_List[${x}]}    ${server_details[${x}]}
+    \    ${ip}    Get from Dictionary   ${output}   ip
+    \    Append To List    ${server_ip}    ${ip[0]}
+    ${task}    Patch Interconnect    ${ICM_dto[1]}    op=replace  path=/factoryResetState  value=ReapplyConfiguration
+    Sleep    60s
+    Run Keyword If    '${Module}' == 'Potash'    Run Keyword    Verifying Traffic for fc and fcoe with loss    ${number}    ${server_ip}    ${pingfile}    ${flag}    ${Ping_Lost}
+    ...    ELSE    Run Keyword    Verifying Traffic for fc and fcoe with loss    ${number}    ${server_ip}    ${pingfile}    ${flag}    ${Ping_Lost}
+    Wait For Task2  ${task}  timeout=600  interval=10
+    Wait Until Keyword Succeeds    20min   15s      IC reached state    ${ICM6_uri}  state=Configured
+    ${task}    Patch Interconnect    ${ICM_dto[0]}    op=replace  path=/powerState  value=On
+    Wait For Task2  ${task}  timeout=600  interval=10
+    Wait Until Keyword Succeeds    15min    20s      IC reached state    ${ICM3_uri}    Configured
+    Log  ICM powered on    console=True
+    Run Keyword If    '${Module}' == 'Potash'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet    ${ping_cmd1}    ${server_credentials}    ${pingfile}
+    ...    ELSE IF    '${Module1}' == 'Nitro'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet for Nitro    ${ILO_List}
+    ...    ELSE IF    '${Module}' == 'Carbon'    Verifying Traffic for carbon FC    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${diskspd_cmd}
+    ...    ELSE   Log   traffic failed    Console=True
+
+5_a_Verify if Factory reset operation can be performed for both master ICM and subordinate ICM at the same time for HA in Potash,Nitro,Carbon 16 & 32
+    PASS EXECUTION IF    '${Module1}' == 'AB'    Skip  Test case
+    [Documentation]   Factory reset  for both master/A-side ICM and subordinate/B-side ICM at the same time
+    ${l} =  Get Length  ${ICM_dto}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Patch Interconnect    ${ICM_dto[${x}]}    op=replace  path=/factoryResetState  value=ReapplyConfiguration    timeout=100  interval=10
+    Run Keyword If    '${Module}' == 'Potash'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet    ${ping_cmd1}    ${server_credentials}   ${pingfile}
+    ...    ELSE IF    '${Module}' == 'Nitro'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet for Nitro    ${ILO_List}
+    ...    ELSE IF    '${Module}' == 'Carbon'    Verifying Traffic for carbon FC    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${diskspd_cmd}
+    ...    ELSE   Log   traffic failed    Console=True
+    ${l} =  Get Length  ${ICMuri}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Wait Until Keyword Succeeds    20min    20s      IC reached state    ${ICMuri[${x}]}    Configured
+    Run Keyword If    '${Module}' == 'Potash'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details} ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet    ${ping_cmd1}    ${server_credentials}    ${pingfile}
+    ...    ELSE IF    '${Module}' == 'Nitro'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}  ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet for Nitro    ${ILO_List}
+    ...    ELSE IF    '${Module}' == 'Carbon'    Verifying Traffic for carbon FC    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${diskspd_cmd}
+    ...    ELSE   Log   traffic failed    Console=True
+
+5_b_Verify if Factory reset operation can be performed for both master ICM and subordinate ICM at the same time for A+B in Potash & Nitro
+    PASS EXECUTION IF    '${Module1}' == 'HA'    Skip  Test case
+    [Documentation]   Factory reset  for both master/A-side ICM and subordinate/B-side ICM at the same time
+    ${FC_FCOE_server_details}=  Create List
+    ${server_ip}=   Create List
+    ${len}    Get Length    ${ILO_List}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    ${output}    Get IP For All Servers    ${ILO_List[${x}]}    ${server_details[${x}]}
+    \    ${ip}    Get from Dictionary   ${output}   ip
+    \    Append To List    ${server_ip}    ${ip[0]}
+    ${l} =  Get Length  ${ICM_dto}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Patch Interconnect    ${ICM_dto[${x}]}    op=replace  path=/factoryResetState  value=ReapplyConfiguration    timeout=100  interval=10
+    Sleep    60s
+    Run Keyword If    '${Module}' == 'Potash'    Run Keyword    Verifying Traffic for fc and fcoe with loss    ${number}    ${server_ip}    ${pingfile}    ${flag}    ${Ping_Lost}
+    ...    ELSE IF    Run Keyword    Verifying Traffic for fc and fcoe with loss    ${number}    ${server_ip}    ${pingfile}    ${flag}    ${Ping_Lost}
+    ...    ELSE   Log   traffic failed    Console=True
+    ${l} =  Get Length  ${ICMuri}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Wait Until Keyword Succeeds    20min    20s      IC reached state    ${ICMuri[${x}]}    Configured
+    Sleep    6min
+    Run Keyword If    '${Module}' == 'Potash'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet    ${ping_cmd1}    ${server_credentials}   ${pingfile}
+    ...    ELSE IF    '${Module}' == 'Nitro'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet for Nitro    ${ILO_List}
+    ...    ELSE IF    '${Module}' == 'Carbon'    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}
+    ...    ELSE   Log   traffic failed    Console=True
+
+6_Perform Multiple Factory reset on the same interconnect and verify the ICM state FOR Potash,Nitro,Carbon 16 & 32
+    [Documentation]   Factory reset on the same interconnects
+    :FOR    ${x}    IN RANGE    0   2
+    \    Patch Interconnect    ${ICM1_dto[0]}    op=replace  path=/factoryResetState  value=ReapplyConfiguration    timeout=600  interval=10
+    \    Run Keyword If    '${Module}' == 'Potash'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet    ${ping_cmd1}    ${server_credentials}   ${pingfile}
+    \    ...    ELSE IF    '${Module}' == 'Nitro'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet for Nitro    ${ILO_List}
+         ...    ELSE IF    '${Module}' == 'Carbon'    Verifying Traffic for carbon FC    ${ILO_List}    ${server_details}   ${ENC1_SERVER_FcoE_cred}    ${diskspd_cmd}
+         ...    ELSE   Log   traffic failed    Console=True
+    \    Wait Until Keyword Succeeds     20min    20s      IC reached state    ${ICM3_uri}    state=Configured
+    Run Keyword If    '${Module}' == 'Potash'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet    ${ping_cmd1}    ${server_credentials}   ${pingfile}
+    ...    ELSE IF    '${Module}' == 'Nitro'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet for Nitro    ${ILO_List}
+    ...    ELSE IF    '${Module}' == 'Carbon'    Verifying Traffic for carbon FC    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${diskspd_cmd}
+    ...    ELSE   Log   traffic failed    Console=True
+
+7_ Factory reset Supporting ICM and verify the Error message Only For Potash & Nitro
+    [Documentation]    Factory reset subordinate ICM
+    PASS EXECUTION IF    '${Module}' == 'Carbon'    Skip  Test case
+    ${name} =  Get From Dictionary  ${SUP_dto[0]}  name
+    ${uri} =  Get IC URI  ${name}
+    ${body} =  Create Dictionary   op=replace
+    ...                             path=/factoryResetState
+    ...                             value=ReapplyConfiguration
+    ${body} =  Create List  ${body}
+    ${resp} =  fusion api patch interconnect  body=${body}  uri=${uri}
+    ${status}  ${task_uri} =  Run Keyword and Ignore Error  Get From Dictionary  ${resp['headers']}  location
+    Return From Keyword If    '${status}'=='FAIL'    ${resp}
+    Log    The task URI is ${task_uri}
+    ${task} =  Fusion Api Get Task  uri=${task_uri}
+    Run Keyword If  '${task['taskErrors'][0]['errorCode']}' != 'INTERCONNECT_FACTORY_RESET_NOT_SUPPORTED'  Fail    ELSE  log to console   \n-FActory reset cannot be performed
+    Sleep    5min
+
+8_a_Remove Master ICM. Verify factory reset ICM when the interconnect is in Absent state. For Potash,Nitro,Carbon 16 & 32
+    [Documentation]    Efuse Remove / Insert  Module
+    Get EM IP    ${ENC_1}
+    Get EM Token    ${ENC_1}
+    Efuse ICM    EFuseOn    ${bay_numbers[0]}
+    ${ICM3_uri}    Get IC URI    ${Interconnect_name[0]}
+
+    Wait Until Keyword Succeeds    15min    20s      IC reached state    ${ICM3_uri}    Absent
+    ${body} =  Create Dictionary   op=replace
+    ...                             path=/factoryResetState
+    ...                             value=ReapplyConfiguration
+    ${body} =  Create List  ${body}
+    ${resp} =  fusion api patch interconnect  body=${body}  uri=${ICM3_uri}
+    ${status}  ${task_uri} =  Run Keyword and Ignore Error  Get From Dictionary  ${resp['headers']}  location
+    Return From Keyword If    '${status}'=='FAIL'    ${resp}
+    Log    The task URI is ${task_uri}
+    ${task} =  Fusion Api Get Task  uri=${task_uri}
+    Run Keyword If  '${task['taskErrors'][0]['errorCode']}' != 'INTERCONNECT_FACTORY_RESET_NOT_SUPPORTED'  Fail    ELSE  log to console   \n-factory reset cannot be performed
+
+8_b_Insert ICM after efuse. Verify factory reset ICM when the interconnect. For Potash,Nitro,Carbon 16 & 32
+    [Documentation]    Efuse Remove / Insert  Module
+    Get EM IP    ${ENC_1}
+    Get EM Token    ${ENC_1}
+    Efuse ICM    EFuseOff    ${bay_numbers[0]}
+    ${ICM3_uri}    Get IC URI    ${Interconnect_name[0]}
+    Wait Until Keyword Succeeds    20min    20s      IC reached state    ${ICM3_uri}    Configured
+    Run Keyword If    '${Module}' == 'Potash'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet    ${ping_cmd1}    ${server_credentials}    ${pingfile}
+    ...    ELSE IF    '${Module}' == 'Nitro'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet for Nitro    ${ILO_List}
+     ...    ELSE IF   '${Module}' == 'Carbon'    Verifying Traffic for carbon FC    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${diskspd_cmd}
+     ...    ELSE    Verifying traffic is failed    Console=True
+
+8_c_Remove Master ICM. Verify factory reset ICM when the interconnect is in Absent state for Potash & Nitro
+    [Documentation]    Efuse Remove / Insert  Module
+    PASS EXECUTION IF    '${Module}' == 'Carbon'    Skip  Test case
+    Get EM IP    ${ENC_2}
+    Get EM Token    ${ENC_2}
+    Efuse ICM    EFuseOn    ${bay_numbers[1]}
+    ${ICM6_uri}    Get IC URI    ${Interconnect_name[1]}
+    Wait Until Keyword Succeeds    15min    20s      IC reached state    ${ICM6_uri}    Absent
+    ${body} =  Create Dictionary   op=replace
+    ...                             path=/factoryResetState
+    ...                             value=ReapplyConfiguration
+    ${body} =  Create List  ${body}
+    ${resp} =  fusion api patch interconnect  body=${body}  uri=${ICM6_uri}
+    ${status}  ${task_uri} =  Run Keyword and Ignore Error  Get From Dictionary  ${resp['headers']}  location
+    Return From Keyword If    '${status}'=='FAIL'    ${resp}
+    Log    The task URI is ${task_uri}
+    ${task} =  Fusion Api Get Task  uri=${task_uri}
+    Run Keyword If  '${task['taskErrors'][0]['errorCode']}' != 'INTERCONNECT_FACTORY_RESET_NOT_SUPPORTED'  Fail    ELSE  log to console   \n-factory reset cannot be performed
+
+8_d_Insert Master ICM after efuse. Verify factory reset ICM when the interconnect. For Potash & Nitro
+    [Documentation]    Efuse Remove / Insert  Module
+    PASS EXECUTION IF    '${Module}' == 'Carbon'    Skip  Test case
+    Get EM IP    ${ENC_2}
+    Get EM Token    ${ENC_2}
+    Efuse ICM    EFuseOff    ${bay_numbers[1]}
+    ${ICM3_uri}    Get IC URI    ${Interconnect_name[1]}
+    Wait Until Keyword Succeeds    20min    20s      IC reached state    ${ICM3_uri}    Configured
+    Run Keyword If    '${Module}' == 'Potash'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet    ${ping_cmd1}    ${server_credentials}    ${pingfile}
+    ...    ELSE IF    '${Module}' == 'Nitro'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet for Nitro    ${ILO_List}
+     ...    ELSE IF   '${Module}' == 'Carbon'    Verifying Traffic for carbon FC    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${diskspd_cmd}
+     ...    ELSE    Verifying traffic is failed   Console=True
+
+8_e_Remove/Insert potash Master ICM. Verify factory reset ICM when the interconnect is in Absent state only for carbon
+    [Documentation]    Efuse Remove / Insert  Module
+    PASS EXECUTION IF    '${Module}' == 'Potash' or '${Module}' == 'Nitro'    Skip  Test case
+    Get EM IP    ${ENC_1}
+    Get EM Token    ${ENC_1}
+    Efuse ICM    EFuseOn    ${bay_numbers[1]}
+    ${ICM6_uri}    Get IC URI    ${Interconnect_name[1]}
+    Wait Until Keyword Succeeds    15min    20s      IC reached state    ${ICM6_uri}    Absent
+    ${body} =  Create Dictionary   op=replace
+    ...                             path=/factoryResetState
+    ...                             value=ReapplyConfiguration
+    ${body} =  Create List  ${body}
+    ${resp} =  fusion api patch interconnect  body=${body}  uri=${ICM6_uri}
+    ${status}  ${task_uri} =  Run Keyword and Ignore Error  Get From Dictionary  ${resp['headers']}  location
+    Return From Keyword If    '${status}'=='FAIL'    ${resp}
+    Log    The task URI is ${task_uri}
+    ${task} =  Fusion Api Get Task  uri=${task_uri}
+    Run Keyword If  '${task['taskErrors'][0]['errorCode']}' != 'INTERCONNECT_FACTORY_RESET_NOT_SUPPORTED'  Fail    ELSE  log to console   \n-factory reset cannot be performed
+    Get EM IP    ${ENC_1}
+    Get EM Token    ${ENC_1}
+    Efuse ICM    EFuseOff    ${bay_numbers[1]}
+    ${ICM6_uri}    Get IC URI    ${Interconnect_name[1]}
+    Wait Until Keyword Succeeds    20min    20s      IC reached state    ${ICM6_uri}    Configured
+    Run Keyword If    '${Module}' == 'Potash'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet    ${ping_cmd1}    ${server_credentials}    ${pingfile}
+    ...    ELSE IF    '${Module}' == 'Nitro'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet for Nitro    ${ILO_List}
+     ...    ELSE IF   '${Module}' == 'Carbon'    Verifying Traffic for carbon FC    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${diskspd_cmd}
+     ...    ELSE    verifying traffic is failed   Console=True
+
+9_Perform Factory reset in ICM page. followed by UFG in LI For Potash,Nitro,Carbon 16 & 32
+    [Documentation]    Perform Factory reset and edit LIG
+    ${l} =  Get Length  ${editlig}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${lig_body}    Create List    ${editlig[${x}]}
+    \    ${resp}    Edit LIG    ${lig_body}
+    \    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp[0]}    10min    10    ELSE    Fail    Log    failed    console=True
+    \    ${update_uri} =    Get LI URI    ${LI_Name[${x}]}
+    \    Set Global Variable    ${LI_uri}    ${update_uri}
+    \    Patch Interconnect    ${ICM_dto[${x}]}    op=replace  path=/factoryResetState  value=ReapplyConfiguration
+    \    ${resp1} =  Update Logical Interconnect from Group    ${LI_dto[${x}]}
+    \    Sleep    100s
+    \    Run Keyword If  '${resp1['errorCode']}' != 'CRM_SWITCH_MAINTENANCE_OPERATION_NOT_PERMITTED'  Fail    ELSE  log to console   \n-UFG cannot performed
+    \    Wait Until Keyword Succeeds    15min   15s      IC reached state    ${ICMuri[${x}]}  state=Configured
+    \    Update Logical Interconnect from Group    ${LI_dto[${x}]}    timeout=600    interval=10
+    \    Wait Until Keyword Succeeds    20min   15s      IC reached state    ${ICMuri[${x}]}  state=Configured
+    Run Keyword If    '${Module}' == 'Potash'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}   AND    Verifying traffic for Ethernet    ${ping_cmd1}    ${server_credentials}    ${pingfile}
+     ...    ELSE IF    '${Module}' == 'Nitro'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}   AND    Verifying traffic for Ethernet for Nitro    ${ILO_List}
+    ...    ELSE IF    '${Module}' == 'Carbon'    Verifying Traffic for carbon FC    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${diskspd_cmd}
+    ...    ELSE    verifying traffic is failed    Console=True
+
+10_a_Perform Factory reset in LI page. Edit LIG followed by UFG in LI For Potash,Nitro,Carbon 16 & 32 in HA
+    [Documentation]    Perform Factory reset and edit LIG
+    PASS EXECUTION IF    '${Module1}' == 'AB'    Skip  Test case
+    ${l} =  Get Length  ${editlig}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${lig_body}    Create List    ${ligs[${x}]}
+    \    ${resp}    Edit LIG    ${lig_body}
+    \    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp[0]}    15min    10    ELSE    Fail    Log    failed    console=True
+    \    ${update_uri} =    Get LI URI    ${LI_Name[${x}]}
+    \    Set Global Variable    ${LI_uri}    ${update_uri}
+    \    Patch Interconnect LI   ${LI_dto[${x}]}    op=replace  path=/factoryResetState  value=ReapplyConfiguration
+    \    ${resp1} =  Update Logical Interconnect from Group    ${LI_dto[${x}]}
+    \    Sleep    100s
+    \    Run Keyword If  '${resp1['errorCode']}' != 'CRM_ONGOING_OPERATION_ON_LOGICAL_INTERCONNECT'  Fail    ELSE  log to console   \n-UFG cannot performed
+    \    Wait Until Keyword Succeeds    20min   15s      IC reached state    ${ICMuri[${x}]}  state=Configured
+    \    Update Logical Interconnect from Group    ${LI_dto[${x}]}    timeout=600    interval=10
+    \    Wait Until Keyword Succeeds    20min   15s      IC reached state    ${ICMuri[${x}]}  state=Configured
+    Sleep    2min
+    Run Keyword If    '${Module}' == 'Potash'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}     ${diskspd_cmd}    AND    Verifying traffic for Ethernet    ${ping_cmd1}    ${server_credentials}    ${pingfile}
+    ...    ELSE IF    '${Module}' == 'Nitro'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}     ${diskspd_cmd}    AND    Verifying traffic for Ethernet for Nitro    ${ILO_List}
+    ...    ELSE IF    '${Module}' == 'Carbon'    Verifying Traffic for carbon FC    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${diskspd_cmd}
+    ...    ELSE    verifying traffic is failed   Console=True
+
+10_b_Perform Factory reset in LI page. Edit LIG followed by UFG in LI For Potash,Nitro,Carbon 16 & 32 in AB
+    [Documentation]    Perform Factory reset and edit LIG with uplinkset
+    PASS EXECUTION IF    '${Module1}' == 'HA'    Skip  Test case
+    ${l} =  Get Length  ${editlig}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${lig_body}    Create List    ${ligs[${x}]}
+    \    ${resp}    Edit LIG    ${lig_body}
+    \    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp[0]}    10min    10    ELSE    Fail    Log    failed    console=True
+    \    ${update_uri} =    Get LI URI    ${LI_Name[${x}]}
+    \    Set Global Variable    ${LI_uri}    ${update_uri}
+    \    Patch Interconnect LI   ${LI_dto[${x}]}    op=replace  path=/factoryResetState  value=ReapplyConfiguration
+    \    ${resp1} =  Update Logical Interconnect from Group    ${LI_dto[${x}]}
+    \    Run Keyword If  '${resp1['errorCode']}' != 'CRM_ONGOING_OPERATION_ON_LOGICAL_INTERCONNECT'  Fail    ELSE  log to console   \n-UFG cannot performed
+    \    Wait Until Keyword Succeeds    20min   15s      IC reached state    ${ICMuri[${x}]}  state=Configured
+    \    Update Logical Interconnect from Group    ${LI_dto[${x}]}     timeout=600    interval=10
+    \    Wait Until Keyword Succeeds    20min   15s      IC reached state    ${ICMuri[${x}]}  state=Configured
+    Sleep    3min
+    Run Keyword If    '${Module}' == 'Potash'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}     ${diskspd_cmd}    AND    Verifying traffic for Ethernet    ${ping_cmd1}    ${server_credentials}    ${pingfile}
+    ...    ELSE IF    '${Module}' == 'Nitro'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}     ${diskspd_cmd}    AND    Verifying traffic for Ethernet for Nitro    ${ILO_List}
+    ...    ELSE IF    '${Module}' == 'Carbon'    Verifying Traffic for carbon FC    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${diskspd_cmd}
+    ...    ELSE    verifying traffic is failed   Console=True
+
+11_a_Edit LIG followed by UFG in LI. Perform factory reset in LI page when there is an ongoing operation in LI For Potash,Nitro,Carbon 16 & 32 in HA
+    [Documentation]    UFG in LI Perform factory Reset in LI
+    PASS EXECUTION IF    '${Module1}' == 'AB'    Skip  Test case
+    ${l} =  Get Length  ${editlig}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${lig_body}    Create List    ${editlig[${x}]}
+    \    ${resp}    Edit LIG    ${lig_body}
+    \    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp}    5min    10    ELSE    Fail    Log    failed    console=True
+    \    ${update_uri} =    Get LI URI    ${LI_Name[${x}]}
+    \    Set Global Variable    ${LI_uri}    ${update_uri}
+    \    ${UFG_res}    Perform an LI Update From Group    ${LI_uri}
+    \    ${resp1}=  Patch Interconnect LI    ${LI_dto[${x}]}    op=replace  path=/factoryResetState  value=ReapplyConfiguration    timeout=60  interval=10
+    \    Sleep    100s
+    \    ${task}=    Fusion Api Get Task    uri=${resp1['uri']}
+    \    Run keyword Unless    '${task['taskState']}' == 'Error'    FAIL    Log    Factory reset operation failed    console=True
+    \    Wait Until Keyword Succeeds    15min   15s      IC reached state    ${ICMuri[${x}]}  state=Configured
+    Run Keyword If    '${Module}' == 'Potash'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet    ${ping_cmd1}    ${server_credentials}    ${pingfile}
+    ...    ELSE IF    '${Module}' == 'Nitro'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet for Nitro    ${ILO_List}
+    ...    ELSE IF    '${Module}' == 'Carbon'    Verifying Traffic for carbon FC    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${diskspd_cmd}
+    ...    ELSE    Log   Verifying traffic is failed    Console=True
+
+11_b_Edit LIG followed by UFG in LI. Perform factory reset in LI page when there is an ongoing operation in LI For Potash,Nitro,Carbon 16 & 32 in AB
+    [Documentation]    UFG in LI Perform factory Reset in LI
+    PASS EXECUTION IF    '${Module1}' == 'HA'    Skip  Test case
+    ${l} =  Get Length  ${editlig}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${lig_body}    Create List    ${editlig[${x}]}
+    \    ${resp}    Edit LIG    ${lig_body}
+    \    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp}    5min    10    ELSE    Fail    Log    failed    console=True
+    \    ${update_uri} =    Get LI URI    ${LI_Name[${x}]}
+    \    Set Global Variable    ${LI_uri}    ${update_uri}
+    \    ${UFG_res}    Perform an LI Update From Group    ${LI_uri}
+    \    ${resp1}=  Patch Interconnect LI    ${LI_dto[${x}]}    op=replace  path=/factoryResetState  value=ReapplyConfiguration    timeout=60  interval=10
+    \    Sleep    100s
+    \    ${task}=    Fusion Api Get Task    uri=${resp1['uri']}
+    \    Run keyword Unless    '${task['taskState']}' == 'Error'    FAIL    Log    Factory reset operation failed    console=True
+    \    Wait Until Keyword Succeeds    15min   15s      IC reached state    ${ICMuri[${x}]}  state=Configured
+    Run Keyword If    '${Module}' == 'Potash'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet    ${ping_cmd1}    ${server_credentials}    ${pingfile}
+    ...    ELSE IF    '${Module}' == 'Nitro'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet for Nitro    ${ILO_List}
+    ...    ELSE IF    '${Module}' == 'Carbon'    Verifying Traffic for carbon FC    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${diskspd_cmd}
+    ...    ELSE   Log   Verifying traffic is failed   Console=True
+
+12_Edit LIG followed by UFG in LI. Perform factory reset in ICM page when there is an ongoing operation in LI For Potash,Nitro,Carbon 16 & 32.
+    [Documentation]    Add uplinkset
+    ${l} =  Get Length  ${editlig}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${lig_body}    Create List    ${ligs[${x}]}
+    \    ${resp}    Edit LIG    ${lig_body}
+    \    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp[0]}    10min    10    ELSE    Fail    Log    failed    console=True
+    \    ${update_uri} =    Get LI URI    ${LI_Name[${x}]}
+    \    Set Global Variable    ${LI_uri}    ${update_uri}
+    \    ${UFG_res}    Perform an LI Update From Group    ${LI_uri}
+    \    ${resp1}=  Patch Interconnect    ${ICM_dto[${x}]}    op=replace  path=/factoryResetState  value=ReapplyConfiguration    timeout=60  interval=10
+    \    Sleep    100s
+    \    ${task}=    Fusion Api Get Task    uri=${resp1['uri']}
+    \    Run keyword Unless    '${task['taskState']}' == 'Error'    FAIL    Log    Factory reset operation failed    console=True
+    \    Wait Until Keyword Succeeds    15min   15s      IC reached state    ${ICMuri[${x}]}  state=Configured
+    Run Keyword If    '${Module}' == 'Potash'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet    ${ping_cmd1}    ${server_credentials}    ${pingfile}
+     ...    ELSE IF    '${Module}' == 'Nitro'    Run Keywords    Verifying Traffic for fc and fcoe without loss    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}    ${diskspd_cmd}    AND    Verifying traffic for Ethernet for Nitro    ${ILO_List}
+    ...    ELSE IF    '${Module}' == 'Carbon'    Verifying Traffic for carbon FC    ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${diskspd_cmd}
+    ...    ELSE   Log   Verifying traffic is failed   Console=True
+
+Removing Teaming on server profile1 and deleting the profile
+    [Documentation]    Removing Teaming on server profile1 and deleting the profile
+    ${iplength} =    Get Length    ${Team_ip}
+    :FOR    ${x}    IN RANGE    0   ${iplength}
+    \   Log to console  \n deleting teaming${Team_ip[${x}]}
+    \   Delete Windows Teaming    ${Team_ip[${x}]}    ${server_details}    ${detlete_team_cmd${x}}
+    \   Sleep    120sec
+
+*** Keywords ***
+Patch Interconnect
+    [Documentation]  Patch Interconnect
+    ...              Example:
+    ...                Patch Interconnect  ${dto}  op=replace  path=/factoryResetState  value=ReapplyConfiguration timeout=60  interval=5
+    ...              Data Required:
+    ...                Interconnect DTO
+    [Arguments]  ${dto}  ${op}=replace  ${path}=/factoryResetState  ${value}=/ReapplyConfiguration  ${timeout}=60  ${interval}=5
+    ${name} =  Get From Dictionary  ${dto}  name
+    Log     ${\n}Patching Interconnect ${name} with op=${op} path=${path} and value=${value}
+    ${uri} =  Get IC URI  ${name}
+    ${dict} =  Create Dictionary  op=${op}  path=${path}  value=${value}
+    ${list} =  Create List  ${dict}
+    ${resp} =  fusion api patch interconnect  ${list}  ${uri}
+    ${status}  ${task_uri} =  Run Keyword and Ignore Error  Get From Dictionary  ${resp['headers']}  location
+    Return From Keyword If    '${status}'=='FAIL'    ${resp}
+    Log    The task URI is ${task_uri}
+    ${task} =  Fusion Api Get Task  uri=${task_uri}
+    [Return]    ${task}
+
+Patch Interconnect LI
+    [Documentation]  Patch Interconnect LI
+    ...              Example:
+    ...                Patch Interconnect  ${dto}  op=replace  path=/factoryResetState  value=ReapplyConfiguration timeout=60  interval=5
+    ...              Data Required:
+    ...                Interconnect DTO
+    [Arguments]  ${dto}  ${op}=replace  ${path}=/factoryResetState  ${value}=/ReapplyConfiguration  ${timeout}=60  ${interval}=5
+    ${name} =  Get From Dictionary  ${dto}  name
+    Log     ${\n}Patching Interconnect ${name} with op=${op} path=${path} and value=${value}
+    ${uri} =  Get LI URI  ${name}
+    ${dict} =  Create Dictionary  op=${op}  path=${path}  value=${value}
+    ${list} =  Create List  ${dict}
+    ${resp} =  fusion api patch interconnect  ${list}  ${uri}
+    ${status}  ${task_uri} =  Run Keyword and Ignore Error  Get From Dictionary  ${resp['headers']}  location
+    Return From Keyword If    '${status}'=='FAIL'    ${resp}
+    Log    The task URI is ${task_uri}
+    ${task} =  Fusion Api Get Task  uri=${task_uri}
+    [Return]    ${task}
+
+Verify Ports Status
+    [Documentation]    Verify Ports Status
+    [Arguments]     ${ICM_uris}    ${port_name}
+    ${len}    Get Length    ${ICM_uris}
+    :FOR    ${x}    IN RANGE    0   ${len}
+    \    ${Port_Resp}    Get IC Port    ${ICM_uris[${x}]}    ${port_name[${x}]}
+    \    Run Keyword If    '${Port_Resp['portStatus']}' != 'Linked'    Fail    msg=Port ${port_name} is unlinked
+    \    ...    ELSE    Log    Successfully verified that ${port_name} is Linked    console=True
+
+Get IC Port
+    [Documentation]    Returns the port info of the named port of specified interconnect uri
+    [Arguments]     ${uri}    ${portName}
+    ${return} =    Create List
+    ${resp} =    fusion api get interconnect ports    uri=${uri}
+    ${ports} =    Get From Dictionary    ${resp}    members
+    :FOR    ${port}    IN    @{ports}
+    \    ${return} =    Run Keyword If    '${port['portName']}' == '${portName}'    set variable    ${port}
+    \    Exit for loop if    '${port['portName']}' == '${portName}'
+    [Return]    ${return}
+
+Verify Port Status
+    [Documentation]    Verifying the port status
+    [Arguments]     ${uri}    ${portName}    ${verify}    ${status}
+    ${port_status}    Get IC Port    ${uri}    ${portName}
+    Should be Equal As Strings    ${port_status['${verify}']}    ${status}
+
+Perform an LI Update From Group
+    [Documentation]  Perform an LI Update From Group
+    [Arguments]       ${li}     ${timeout}=20 min    ${interval}=14s
+    ${resp} =       Fusion Api Update from group    ${li}
+    [Return]    ${resp}
+
+Get Server Ip Windows
+    [Documentation]    Gets the valid ip of the server.
+    [Arguments]         ${ilo_details}
+    ${serverip_List}    Create List
+    ${serverip_List1}    Create List
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=20s
+    ${login}    SSHLibrary.Login    ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Read Until    SAC>
+    Sleep    5sec
+    SSHLibrary.Write    i
+    Sleep    5sec
+    ${stdout}    SSHLibrary.Read
+    Log to Console    \nstdout is ${stdout}
+    ${out_string}    Convert To String    ${stdout}
+    ${ip_list}=    Get Regexp Matches    ${out_string}    ${ip_pattern}    1
+    ${gateway_ip}=    Get Regexp Matches    ${out_string}    ${gatewayip_pattern}    1
+    SSHLibrary.Close All Connections
+    [Return]    ${ip_list}    ${gateway_ip}
+
+Get Server Ip Linux
+    [Documentation]    Get Server Ip Linux
+    [Arguments]         ${ilo_details}    ${server_details}
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=20s
+    ${login}    SSHLibrary.Login               ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Read
+    SSHLibrary.Write    ${server_details['username']}
+    Sleep    5sec
+    SSHLibrary.Read
+    SSHLibrary.Write    ${server_details['password']}
+    Sleep    5sec
+    SSHLibrary.Read
+    SSHLibrary.Write    ifconfig | grep inet | grep netmask
+    Sleep    60sec
+    ${stdout1} =  SSHLibrary.Read
+    ${string1}    Convert To String    ${stdout1}
+    Sleep    5sec
+    SSHLibrary.Write    ip route | grep default
+    Sleep    60sec
+    ${stdout2} =  SSHLibrary.Read
+    SSHLibrary.Write    exit
+    ${string2}    Convert To String    ${stdout2}
+    ${ip_list}    Get Regexp Matches    ${string1}    inet\\s+(10.\\d+.\\d+.\\d+).*netmask    1
+    ${gateway}    Get Regexp Matches    ${string2}    default.*\\w+\\s+(10.\\d+.0.\\d+)    1
+    SSHLibrary.Close All Connections
+    [Return]    ${ip_list}    ${gateway}
+
+Get Server IP Esxi
+    [Documentation]    Fetching server IP's for multiple servers that captures IP in separate list for different interconnects
+    [Arguments]     ${ilo_details}    ${server_details}
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=20s
+    ${login}    SSHLibrary.Login               ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Read
+    SSHLibrary.Write    ${server_details['username']}
+    Sleep    5sec
+    SSHLibrary.Read
+    SSHLibrary.Write    ${server_details['password']}
+    Sleep    5sec
+    SSHLibrary.Read
+    Sleep    5sec
+    SSHLibrary.Write    esxcli network ip interface ipv4 get
+    Sleep    60sec
+    ${out1}    SSHLibrary.Read
+    Log    ${out1}    console=True
+    ${out_string1}    Convert To String    ${out1}
+    SSHLibrary.Write    esxcli network ip neighbor list
+    Sleep    60sec
+    ${out2}    SSHLibrary.Read
+    ${out_string2}    Convert To String    ${out2}
+    SSHLibrary.Write    exit
+    ${ip_list}    Get Regexp Matches    ${out_string1}    vmk\\d+\\s+(10.\\d+.\\d+.\\d+)\\s+255.\\d+.*    1
+    ${gateway_list}    Get Regexp Matches    ${out_string2}    (10.\\d+.0.\\d+)\\s+\\d+:\\d+:*    1
+    SSHLibrary.Close All Connections
+    [Return]    ${ip_list}    ${gateway_list}
+
+Get IP For All Servers
+    [Documentation]    Fetching server IP's for multiple servers that captures IP in separate list for different interconnects
+    [Arguments]     ${ilo_details}    ${server_details}
+
+    ${IP}    ${gateway}    Run Keyword If    '${ilo_details['OS']}' == 'esxi'    Get Server IP Esxi    ${ilo_details}    ${server_details}
+    ...    ELSE IF    '${ilo_details['OS']}' == 'windows'    Get Server Ip Windows    ${ilo_details}
+    ...    ELSE IF    '${ilo_details['OS']}' == 'linux'    Get Server Ip Linux    ${ilo_details}    ${server_details}
+    Set to Dictionary   ${server_details}   ip    ${IP}
+    Set to Dictionary   ${server_details}   gateway_ip    ${gateway}
+
+    [Return]    ${server_details}
+
+Verifying traffic loss for Ethernet
+    [Documentation]    Verifying traffic loss for Ethernet
+    [Arguments]    ${ping_cmd}    ${server_credentials}    ${pingfile}
+    ${len}    Get Length    ${ILO_List}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    ${ip}    ${gateway_ip}    Get Server Ip Windows    ${ILO_List[${x}]}
+    \    ${ping_cmd}    Replace String Using Regexp    ${ping_cmd1[0]}    gateway_ip      ${gateway_ip[0]}
+    ${Count}    Get Length    ${IP}
+    :FOR    ${x}    IN RANGE    0   ${Count}
+    \    ${output}    execute_windows_commands    ${IP[${x}]}    ${server_credentials['userName']}    ${server_credentials['password']}    ${ping_cmd}
+    \    Sleep    60
+    \    ${contents}=    OperatingSystem.Get File    ${pingfile}
+    \    Should Contain    ${contents}    Destination host unreachable
+    \    ${Lines}=    Get Lines Containing String    ${contents}    ${Ping_Lost}
+    \    Log    \ncontents are ${Lines}    console=true
+    \    ${match}   ${ret1}    Should Match Regexp    ${Lines}    Lost\\s+=\\s+\\d+\\s+\\((\\d+%)\\s+loss\\)
+    \    Log    ${ret1}    console=true
+    \    Run Keyword If  '${ret1}' != '0%'  Fail    ELSE  Log  \n 0 percent packet loss is observed    console=true
+
+Verifying traffic for Ethernet
+    [Documentation]    Verifying traffic for Ethernet
+    [Arguments]    ${ping_cmd1}    ${server_credentials}    ${pingfile}
+    ${len}    Get Length    ${ILO_List}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    ${ip}    ${gateway_ip}    Get Server Ip Windows    ${ILO_List[${x}]}
+    \    ${ping_cmd}    Replace String Using Regexp    ${ping_cmd1[0]}    gateway_ip      ${gateway_ip[0]}
+    \    Sleep   180s
+    \    ${output}    execute_windows_commands    ${ip[0]}    ${server_credentials['userName']}    ${server_credentials['password']}    ${ping_cmd}
+    \    Sleep    60s
+    \    ${contents}=    OperatingSystem.Get File    ${pingfile}
+    \    Should Not Contain    ${contents}    Destination host unreachable
+    \    ${Lines}=    Get Lines Containing String    ${contents}    ${Ping_Lost}
+    \    Log    \ncontents are ${Lines}    console=true
+    \    ${match}   ${ret1}    Should Match Regexp    ${Lines}    Lost\\s+=\\s+\\d+\\s+\\((\\d+%)\\s+loss\\)
+    \    Log    ${ret1}    console=true
+    \    Run Keyword If  '${ret1}' != '0%'  Fail    ELSE  Log  \n 0 percent packet loss is observed    console=true
+
+Verifying Traffic for carbon FC
+    [Documentation]    Verifying   Traffic
+    [Arguments]     ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${diskspd_cmd}
+    ${FC_FCOE_server_details}=  Create List
+    ${len}    Get Length    ${ILO_List}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    ${output}    Get IP For All Servers    ${ILO_List[${x}]}    ${server_details[${x}]}
+    \    Set to Dictionary   ${server_details[${x}]}   ip    ${output['ip'][0]}
+    Append To List    ${FC_FCOE_server_details}    ${ENC1_SERVER_FcoE_cred}
+    ${len}    Get Length    ${FC_FCOE_server_details}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    Set To Dictionary    ${FC_FCOE_server_details[${x}]}    wcmd    ${diskspd_cmd[${x}]}
+    Set Suite Variable    ${FC_FCOE_server_details}    ${FC_FCOE_server_details}
+    ${return}    execute_traffic    ${FC_FCOE_server_details}
+
+    ${len}    Get Length    ${return}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    Run Keyword If    ${return[${x}]} != 0    fail    Log    FC network Traffic failed    console=True
+    \    ...    ELSE    Log    FC network Traffic is successful    console=True
+
+Verifying Traffic for fc and fcoe with loss
+    [Documentation]    Verifying   Traffic
+    [Arguments]    ${number}    ${server_ip}    ${pingfile}    ${flag}    ${Ping_Lost}
+    ${FC_FCOE_server_details}=  Create List
+    ${len}    Get Length    ${server_ip}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \   startthread    ${number}    ${server_ip[${x}]}    ${pingfile}    ${flag}
+    \   log to console  \n pinging started
+    \   Sleep    60s
+    \   ${contents}    OperatingSystem.Get File    ${pingfile}
+    \   ${Lines}    Get Lines Containing String    ${contents}    ${Ping_Lost}
+    \   Log to Console    \ncontents are ${Lines}
+    \   ${match}   ${ret1}    Should Match Regexp    ${Lines}    Lost\\s+=\\s+\\d+\\s+\\((\\d+%)\\s+loss\\)
+    \   Log to Console     ${ret1}
+    \   Run Keyword If  '${ret1}' == '0%'  Fail   ELSE  Log to console  \npinging happend with 100loss percentage
+    \   Log to Console     IP is not reachable
+
+Verifying Traffic for fc and fcoe without loss
+    [Documentation]    Verifying   Traffic
+    [Arguments]     ${ILO_List}    ${server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}  ${diskspd_cmd}
+    ${FC_FCOE_server_details}=  Create List
+    ${len}    Get Length    ${ILO_List}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    ${output}    Get IP For All Servers    ${ILO_List[${x}]}    ${server_details[${x}]}
+    \    Set to Dictionary   ${server_details[${x}]}   ip    ${output['ip'][0]}
+    Append To List    ${FC_FCOE_server_details}    ${ENC1_SERVER_FcoE_cred}    ${ENC1_SERVER_Fc_ILO_cred}
+    ${len}    Get Length    ${FC_FCOE_server_details}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    Set To Dictionary    ${FC_FCOE_server_details[${x}]}    wcmd    ${diskspd_cmd[${x}]}
+    Set Suite Variable    ${FC_FCOE_server_details}    ${FC_FCOE_server_details}
+    ${return}    execute_traffic    ${FC_FCOE_server_details}
+    Log to Console     Return value is ${return}    console=True
+    ${len}    Get Length    ${return}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    Run Keyword If    ${return[${x}]} != 0    fail    Log    FC network Traffic failed    console=True
+    \    ...    ELSE    Log    FC network Traffic is successful    console=True
+
+Verifying traffic for Ethernet for Nitro
+   [Documentation]    Geting server ip's and checking if IP's are pinging
+    [Arguments]     ${ILO_List}
+    ${len}    Get Length    ${ILO_List}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    ${IP}    ${Gatewayip}    Get Server Ip Windows    ${ILO_List[${x}]}
+    \   Set Global Variable    ${serverip_List1_global}    ${IP}
+    \   ${l} =    Get Length    ${serverip_List1_global}
+    \   Set Global Variable    ${iplength}    ${l}
+    \   Log to console    \n pinging started
+    \   startthread    ${number}    ${serverip_List1_global[0]}    ${ping_file${x}}    ${flag}
+    \   Sleep    30
+    \   ${contents}=    OperatingSystem.Get File    ${ping_file${x}}
+    \   ${Lines}=    Get Lines Containing String    ${contents}    ${Ping_Lost}
+    \   Log to Console    \ncontents are ${Lines}
+    \   ${match}   ${ret1}    Should Match Regexp    ${Lines}    Lost\\s+=\\s+\\d+\\s+\\((\\d+%)\\s+loss\\)
+    \   Log to Console     ${ret1}
+    \   Run Keyword If  '${ret1}' != '0%'  Fail    ELSE  Log to console  \n 0 percent packet loss is observed
+    Log to Console     All the IP's are reachable
+
+Get Profile Details
+    [Documentation]    Get Profile Details
+    [Arguments]        ${resp}    ${profile_name}
+    ${profile_len}    Get Length    ${resp['members']}
+    :FOR    ${x}    IN RANGE   ${profile_len}
+    \   ${y}    Set Variable    ${resp['members'][${x}]['connectionSettings']}
+    \   ${mac_address}    Run Keyword If  '${resp['members'][${x}]['name']}' == '${profile_name}'
+    \   ...    Get Mac address Of Server Profile    ${y['connections']}
+    \   ...    ELSE
+    \   ...    Continue For Loop
+    [return]            ${mac_address}
+
+Get Mac address Of Server Profile
+    [Documentation]    Get Mac address Of Server Profile
+    [Arguments]                  ${connections}
+    ${mac_address}    Create List
+    ${connection_length}    Get Length    ${connections}
+    :FOR    ${x}    IN RANGE    ${connection_length}
+    \   Append To List   ${mac_address}    ${connections[${x}]['mac']}
+    [return]            ${mac_address}
+
+Get Mac Address from server
+    [Documentation]    Get Mac Address from server
+    [Arguments]         ${server_details}    ${IP}    ${Powershell_get_mac}
+    Telnet.Open Connection     ${IP}     prompt=>     timeout=30s
+    Sleep    5sec
+    Telnet.Write    a
+    ${login}    Telnet.Login    ${server_details['username']}    ${server_details['password']}    login_prompt=login:    password_prompt=password:
+    Log      \nLogged in to server    console=True
+    Sleep    30sec
+    ${out}    Telnet.Read
+    Sleep    30sec
+    Telnet.Write    Powershell
+    Sleep    30sec
+    Telnet.Write    ${Powershell_get_mac}
+    Sleep    60sec
+    ${stdout}    Telnet.Read
+    Sleep    60sec
+    Telnet.Close Connection
+    Telnet.Close All Connections
+    [Return]    ${stdout}
+
+Ping Server IP
+    [Documentation]    Pinging Server IP
+    [Arguments]         ${number}    ${serverip_List1_global}    ${ping_file}    ${flag}    ${Ping_Lost}
+    ${l}    Get Length    ${serverip_List1_global}
+    Set Global Variable    ${iplength}    ${l}
+    Log        \n pinging started    console=True
+    :FOR    ${x}    IN RANGE    0   ${iplength}
+    \    startthread    ${number}    ${serverip_List1_global[${x}]}    ${ping_file[${x}]}    ${flag}
+    \    Sleep    30
+    \    ${contents}    OperatingSystem.Get File    ${ping_file[${x}]}
+    \    ${Lines}    Get Lines Containing String    ${contents}    ${Ping_Lost}
+    \    Log    \ncontents are ${Lines}    console=True
+    \    ${match}   ${ret1}    Should Match Regexp    ${Lines}    Lost\\s+=\\s+\\d+\\s+\\((\\d+%)\\s+loss\\)
+    \    Log    ${ret1}    console=True
+    [Return]    ${ret1}
+
+Create Teaming windows
+    [Documentation]    Create Teaming windows
+    [Arguments]         ${adapter_name_1}   ${adapter_name_2}    ${Powershell_get_mac1}    ${server_details}    ${serverip_List1_global[1]}
+    ${tmp}    Remove Whitespace    ${adapter_name_1}
+    ${tmp1}    Remove Whitespace    ${adapter_name_2}
+    ${replaced_cmd1}    Replace String Using Regexp    ${Powershell_get_mac1}    pppp    ${tmp}
+    Log      \nstrafter strip is${tmp}    console=True
+    Log      \nreplaced_cmd1 is${replaced_cmd1}    console=True
+    ${replaced_cmd2}    Replace String Using Regexp    ${replaced_cmd1}    qqq    ${tmp1}
+    Log      \nstr is${replaced_cmd2}    console=True
+    Create Windows Teaming   ${serverip_List1_global[1]}    ${server_details}    ${replaced_cmd2}
+
+Delete Windows Teaming
+    [Documentation]    Delete Windows Teaming
+    [Arguments]         ${team_ip}    ${server_details}    ${detlete_team_cmd}
+    Telnet.Open Connection     ${team_ip}     prompt=>     timeout=20s
+    Log      \nSuccessfully opened connection to the server    console=True
+    Telnet.Write    a
+    ${login}    Telnet.Login    ${server_details['username']}     ${server_details['password']}    login_prompt=login:    password_prompt=password:
+    Log      \nSuccessfully logged into the server    console=True
+    Sleep    10sec
+    Telnet.Write    powershell
+    Sleep    10sec
+    Telnet.Write    ${detlete_team_cmd}
+    Log      \n${detlete_team_cmd}    console=True
+    Sleep    30sec
+    Telnet.Write    y
+    Sleep    30sec
+    ${stdout}    Telnet.Read
+    Log       \nout is ${stdout}    console=True
+    Telnet.Close Connection
+    Telnet.Close All Connections
+    Log        \nteaming deleted    console=True
+
+Get Adapter Name
+    [Documentation]    Get Adapter Name
+    [Arguments]    ${port}    ${server_ip}    ${Powershell_get_mac}    ${windows_server_details}
+    ${resp}    Fusion Api Get Server Profiles
+    ${connectionsSetting}    Get From Dictionary    ${resp['members'][0]}    connectionSettings
+    ${connections}    Get From Dictionary    ${connectionsSetting}    connections
+    ${length}    Get Length    ${connections}
+    :FOR     ${x}   IN RANGE   0   ${length}
+    \    ${portIds}    Get From Dictionary    ${connections[${x}]}    portId
+    \    Run Keyword If    '${portIds}' != '${port}'    Continue For Loop
+    \    ...    ELSE    Run Keywords    Set Global Variable    ${mac}    ${connections[${x}]['mac']}    AND    Exit For Loop
+    ${mac_address}    Replace String Using Regexp    ${mac}    :     -
+    Log    ${mac_address}    console=True
+    ${replaced_cmd}    Replace String Using Regexp    ${Powershell_get_mac}    pppppppp    ${mac_address}
+    ${output}    Execute Powershell Command    ${server_ip}    ${windows_server_details}    ${replaced_cmd}
+    ${string}    Convert To String    ${output}
+    ${match}    ${port}     Should Match Regexp    ${string}    .*Ethernet\\s+(\\d + ).*
+    ${adapter_name}    Catenate    ${eth}   ${port}
+    [Return]    ${adapter_name}
+
+Execute Powershell Command
+    [Documentation]    Execute Powershell Command
+    [Arguments]         ${team_ip}    ${windows_server_details}    ${powershell_cmd}
+    Telnet.Open Connection     ${team_ip}     prompt=>     timeout=20s
+    Sleep    5sec
+    Log    \nSuccessfully opened connection to the server    console=True
+    Telnet.Write    a
+    Sleep    5sec
+    ${login}    Telnet.Login               ${windows_server_details['username']}     ${windows_server_details['password']}    login_prompt=login:    password_prompt=password:
+    Log    \nSuccessfully logged into the server    console=True
+    Sleep    30sec
+    Telnet.Write    \r
+    Telnet.Write    \r
+    Telnet.Write    powershell
+    Sleep    30sec
+    Telnet.Write    \r
+    Telnet.Write    \r
+    Log    \n${powershell_cmd}    console=True
+    Telnet.Write    ${powershell_cmd}
+    Sleep    30sec
+    Telnet.Write    y
+    Sleep    30sec
+    ${stdout}    Telnet.Read
+    Log    \nout is ${stdout}    console=True
+    Telnet.Close Connection
+    Telnet.Close All Connections
+    [Return]    ${stdout}

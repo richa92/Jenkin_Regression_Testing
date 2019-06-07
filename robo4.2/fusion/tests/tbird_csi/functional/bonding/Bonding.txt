@@ -1,0 +1,268 @@
+*** Settings ***
+Documentation     Bonding keywords
+
+Library  	  json
+Library           RoboGalaxyLibrary
+Library		  SSHLibrary
+Library		  Telnet
+Library		  Collections
+Library		  String
+Library           FusionLibrary
+Library           robot.api.logger
+
+*** Keywords ***
+
+Get Network Devices
+	[Arguments]	${MACs}
+
+	@{separate_macs}=	Split String	${MACs}	,
+	@{devices}=	Create List
+	:FOR	${element}	In	@{separate_macs}
+	\	${dev}=	Get Device Name By MAC	${element}
+	\	Append To List	${devices}	${dev}
+	[Return]	@{devices}
+
+Get Device Name By MAC
+	[Arguments]	${MAC}
+
+	SSHLibrary.Write	ip link show | grep -B 1 ${MAC}	
+	${output}=	SSHLibrary.Read	delay=5s
+	@{device}=	Create List
+	@{stuff}=		Split String	${output}
+	:FOR	${element}	In	@{stuff}
+	\	${line}=	Get Lines Matching Pattern	${element}	*eth?:
+	\	${line2}=	Get Lines Matching Pattern	${element}	*en????:
+	\	${line3}=	Get Lines Matching Pattern	${element}	*bond*:
+	\	${line4}=	Get Lines Matching Pattern	${element}	*boot*:
+	\	Run Keyword If	${line.__contains__('eth')}	Append To List	${device}	${line.strip(':').strip()}
+	\	...	ELSE IF	${line2.__contains__('en')}	Append To List	${device}	${line2.strip(':').strip()}
+	\	...	ELSE IF	${line3.__contains__('bond')}	Append To List	${device}	""
+	\	...	ELSE IF	${line4.__contains__('boot')}	Append To List	${device}	${line4.strip(':').strip()}
+	Console	${device[0]}
+	[Return]	${device[0]}
+
+Get Network Devices Windows
+	[Arguments]	${MACs}
+
+	@{separate_macs}=	Split String	${MACs}	,
+	@{devices}=	Create List
+	:FOR	${element}	In	@{separate_macs}
+	\	${element}=	Replace String	${element}	:	-
+	\	${dev}=	Get Device Name By MAC Windows	${element}
+	\	Append To List	${devices}	${dev}
+	[Return]	@{devices}
+
+Get Device Name By MAC Windows
+	[Arguments]	${MAC}
+
+	#Need to run twice due to telnet timing issue.	
+	Telnet.Write	getmac /v /fo csv
+	${output}=	Telnet.Read
+	Telnet.Write	getmac /v /fo csv
+	${output}=	Telnet.Read
+
+	@{devices}=	Create List
+	${output}=	Replace String	${output}	\n	,
+	@{stuff}=		Split String	${output}	,
+
+	${index}=	Evaluate	0
+	${dev}=	Set Variable	0
+	:FOR	${element}	IN	@{stuff}
+	\	${num}=		Evaluate	${index}-2
+	\	${val}=		Get From List	${stuff}	${num}
+	\	Run Keyword If	${element.__contains__('${MAC}')}	Append To List	${devices}	${val}
+	\	${index}=	Evaluate	${index} + 1
+
+	Should Contain	${devices[0]}	Eth
+	${dev}=	Remove String	${devices[0]}	\"
+	[Return]	${dev}
+	
+Create Bond Windows2012
+	[Arguments]	${IP}	${user}	${password}	${bond_name}	${bondIP}	${ARPIP}	${MACS}
+
+	Telnet.Open Connection		${IP}	alias=server
+	Telnet.Login			${user}	${password}	password_prompt=password
+	
+	@{device_list}=		Get Network Devices Windows	${MACs}
+	
+	Telnet.Close Connection
+
+Create Bond SLES11
+	[Arguments]	${IP}	${user}	${password}	${bond_name}	${bondIP}	${ARPIP}	${MACS}
+
+	SSHLibrary.Open Connection		${IP}	alias=server
+	SSHLibrary.Login			${user}	${password}
+
+	@{device_list}=		Get Network Devices	${MACs}
+	
+	Console		Creating bond ${bond_name} with ${device_list}
+	SSHLibrary.Write	rm -f /etc/sysconfig/network-scripts/ifcfg-${bond_name}
+	SSHLibrary.Write	modprobe --first-time bonding
+	SSHLibrary.Write        echo "BONDING_MASTER=\'yes\'" >> /etc/sysconfig/network/ifcfg-${bond_name}
+        SSHLibrary.Write        echo "IPADDR=\'${bondIP}\'" >> /etc/sysconfig/network/ifcfg-${bond_name}
+        SSHLibrary.Write        echo "NETMASK=\'255.255.255.0\'" >> /etc/sysconfig/network/ifcfg-${bond_name}
+        SSHLibrary.Write        echo "STARTMODE=\'onboot\'" >> /etc/sysconfig/network/ifcfg-${bond_name}
+        SSHLibrary.Write        echo "BOOTPROTO=\'static\'" >> /etc/sysconfig/network/ifcfg-${bond_name}
+        SSHLibrary.Write        echo "BONDING_MODULE_OPTS=\'mode=0 arp_interval=100 arp_ip_target=${ARPIP}\'" >> /etc/sysconfig/network/ifcfg-${bond_name}
+
+	:FOR	${dev}	IN	@{device_list}
+	\	SSHLibrary.Write	rm -f /etc/sysconfig/network-scripts/ifcfg-${dev}
+
+	${cnt}=         Set Variable    0
+        :FOR    ${dev}  IN      @{device_list}
+        \       SSHLibrary.Write        echo "BONDING_SLAVE${cnt}=\'${dev}\'" >> /etc/sysconfig/network/ifcfg-${bond_name}
+        \       ${cnt}=		Evaluate        ${cnt} + 1
+
+        :FOR    ${dev}  IN      @{device_list}
+        \       SSHLibrary.Write        echo "STARTMODE=\'hotplug\'" >> /etc/sysconfig/network/ifcfg-${dev}
+        \       SSHLibrary.Write        echo "BOOTPROTO=\'none\'" >> /etc/sysconfig/network/ifcfg-${dev}
+
+	SSHLibrary.Write	bash -c 'service network restart; sleep 30; service network restart' &
+	Console			\nConfigured bonding, sleeping 30 seconds.
+	Sleep			30s
+	SSHLibrary.Close Connection
+
+	${output}=		Run	ping -c 4 ${bondIP}
+	Should Not Contain	${output}	100% packet loss
+	Console			${output}
+
+Create Bond SLES12
+	[Arguments]	${IP}	${user}	${password}	${bond_name}	${bondIP}	${ARPIP}	${MACS}
+
+	SSHLibrary.Open Connection		${IP}	alias=server
+	SSHLibrary.Login			${user}	${password}
+
+	@{device_list}=		Get Network Devices	${MACs}
+	
+	Console		Creating bond ${bond_name} with ${device_list}
+	SSHLibrary.Write	rm -f /etc/sysconfig/network-scripts/ifcfg-${bond_name}
+	SSHLibrary.Write	modprobe --first-time bonding
+	SSHLibrary.Write        echo "BONDING_MASTER=\'yes\'" >> /etc/sysconfig/network/ifcfg-${bond_name}
+        SSHLibrary.Write        echo "IPADDR=\'${bondIP}\'" >> /etc/sysconfig/network/ifcfg-${bond_name}
+        SSHLibrary.Write        echo "NETMASK=\'255.255.255.0\'" >> /etc/sysconfig/network/ifcfg-${bond_name}
+        SSHLibrary.Write        echo "STARTMODE=\'onboot\'" >> /etc/sysconfig/network/ifcfg-${bond_name}
+        SSHLibrary.Write        echo "BOOTPROTO=\'static\'" >> /etc/sysconfig/network/ifcfg-${bond_name}
+        SSHLibrary.Write        echo "BONDING_MODULE_OPTS=\'mode=0 miimon=100\'" >> /etc/sysconfig/network/ifcfg-${bond_name}
+
+	:FOR	${dev}	IN	@{device_list}
+	\	SSHLibrary.Write	rm -f /etc/sysconfig/network-scripts/ifcfg-${dev}
+
+	${cnt}=         Set Variable    0
+        :FOR    ${dev}  IN      @{device_list}
+        \       SSHLibrary.Write        echo "BONDING_SLAVE${cnt}=\'${dev}\'" >> /etc/sysconfig/network/ifcfg-${bond_name}
+        \       ${cnt}=		Evaluate        ${cnt} + 1
+
+        :FOR    ${dev}  IN      @{device_list}
+        \       SSHLibrary.Write        echo "STARTMODE=\'hotplug\'" >> /etc/sysconfig/network/ifcfg-${dev}
+        \       SSHLibrary.Write        echo "BOOTPROTO=\'none\'" >> /etc/sysconfig/network/ifcfg-${dev}
+	
+	SSHLibrary.Write	bash -c 'service network restart; sleep 30; service network restart' &
+	Console			\nConfigured bonding, sleeping 30 seconds.
+	Sleep			30s
+	SSHLibrary.Close Connection
+
+	${output}=		Run	ping -c 4 ${bondIP}
+	Should Not Contain	${output}	100% packet loss
+	Console			${output}
+	
+Create Bond Rhel7
+	[Arguments]	${IP}	${user}	${password}	${bond_name}	${bondIP}	${ARPIP}	${MACS}
+
+	SSHLibrary.Open Connection		${IP}	alias=server
+	SSHLibrary.Login			${user}	${password}
+
+	@{device_list}=		Get Network Devices	${MACs}
+	
+	Console		Creating bond ${bond_name} with ${device_list}
+	SSHLibrary.Write	rm -f /etc/sysconfig/network-scripts/ifcfg-${bond_name}
+	SSHLibrary.Write	modprobe --first-time bonding
+	SSHLibrary.Write	echo "DEVICE=${bond_name}" >> /etc/sysconfig/network-scripts/ifcfg-${bond_name}
+	Sleep 	200ms
+	SSHLibrary.Write	echo "NAME=${bond_name}" >> /etc/sysconfig/network-scripts/ifcfg-${bond_name}
+	Sleep	200ms
+	SSHLibrary.Write	echo "Type=Bond" >> /etc/sysconfig/network-scripts/ifcfg-${bond_name}
+	Sleep 	200ms
+	SSHLibrary.Write	echo "BONDING_MASTER=yes" >> /etc/sysconfig/network-scripts/ifcfg-${bond_name}
+	Sleep 	200ms
+	SSHLibrary.Write	echo "IPADDR=${bondIP}" >> /etc/sysconfig/network-scripts/ifcfg-${bond_name}
+	Sleep 	200ms
+	SSHLibrary.Write	echo "NETMASK=255.255.255.0" >> /etc/sysconfig/network-scripts/ifcfg-${bond_name}
+	Sleep 	200ms
+	SSHLibrary.Write	echo "ONBOOT=yes" >> /etc/sysconfig/network-scripts/ifcfg-${bond_name}
+	Sleep 	200ms
+	SSHLibrary.Write	echo "BOOTPROTO=none" >> /etc/sysconfig/network-scripts/ifcfg-${bond_name}
+	Sleep 	200ms
+	SSHLibrary.Write	echo "USERCTL=no" >> /etc/sysconfig/network-scripts/ifcfg-${bond_name}
+	Sleep 	200ms
+	SSHLibrary.Write	echo "NM_CONTROLLED=no" >> /etc/sysconfig/network-scripts/ifcfg-${bond_name}
+	Sleep 	200ms
+	SSHLibrary.Write	printf '%s' 'BONDING_OPTS="mode=1 miimon=100"' >> /etc/sysconfig/network-scripts/ifcfg-${bond_name}
+	Sleep 	200ms
+	:FOR	${dev}	IN	@{device_list}
+	\	SSHLibrary.Write	rm -f /etc/sysconfig/network-scripts/ifcfg-${dev}
+	
+	:FOR	${dev}	IN	@{device_list}
+	\	SSHLibrary.Write	echo "DEVICE=${dev}" >> /etc/sysconfig/network-scripts/ifcfg-${dev}
+	\	Sleep	200ms
+	\	SSHLibrary.Write	echo "BOOTPROTO=none" >> /etc/sysconfig/network-scripts/ifcfg-${dev}
+	\	Sleep	200ms
+	\	SSHLibrary.Write	echo "ONBOOT=yes" >> /etc/sysconfig/network-scripts/ifcfg-${dev}
+	\	Sleep	200ms
+	\	SSHLibrary.Write	echo "MASTER=${bond_name}" >> /etc/sysconfig/network-scripts/ifcfg-${dev}
+	\	Sleep	200ms
+	\	SSHLibrary.Write	echo "SLAVE=yes" >> /etc/sysconfig/network-scripts/ifcfg-${dev}
+	\	Sleep	200ms
+	\	SSHLibrary.Write	echo "USERCTL=no" >> /etc/sysconfig/network-scripts/ifcfg-${dev}
+	\	Sleep	200ms
+	\	SSHLibrary.Write	echo "NM_CONTROLLED=no" >> /etc/sysconfig/network-scripts/ifcfg-${dev}
+	\	Sleep	200ms
+
+	Sleep			5s
+	SSHLibrary.Write	bash -c 'service network restart; sleep 30; service network restart' &
+	Console			\nConfigured bonding, sleeping 60 seconds.
+	Sleep			60s
+	SSHLibrary.Close Connection
+
+	${output}=		Run	ping -c 4 ${bondIP}
+	Should Not Contain	${output}	100% packet loss
+	Console			${output}
+
+Create Bond Rhel6
+	[Arguments]	${IP}	${user}	${password}	${bond_name}	${bondIP}	${ARPIP}	${MACS}
+
+	SSHLibrary.Open Connection		${IP}	alias=server
+	SSHLibrary.Login			${user}	${password}
+
+	@{device_list}=		Get Network Devices	${MACs}
+
+	SSHLibrary.Write	rm -f /etc/sysconfig/network-scripts/ifcfg-${bond_name}
+	SSHLibrary.Write	modprobe --first-time bonding
+	SSHLibrary.Write	echo "DEVICE=${bond_name}" >> /etc/sysconfig/network-scripts/ifcfg-${bond_name}
+	SSHLibrary.Write	echo "IPADDR=${bondIP}" >> /etc/sysconfig/network-scripts/ifcfg-${bond_name}
+	SSHLibrary.Write	echo "NETMASK=255.255.255.0" >> /etc/sysconfig/network-scripts/ifcfg-${bond_name}
+	SSHLibrary.Write	echo "ONBOOT=yes" >> /etc/sysconfig/network-scripts/ifcfg-${bond_name}
+	SSHLibrary.Write	echo "BOOTPROTO=none" >> /etc/sysconfig/network-scripts/ifcfg-${bond_name}
+	SSHLibrary.Write	echo "USERCTL=no" >> /etc/sysconfig/network-scripts/ifcfg-${bond_name}
+	SSHLibrary.Write	echo "NM_CONTROLLED=no" >> /etc/sysconfig/network-scripts/ifcfg-${bond_name}
+	SSHLibrary.Write	printf '%s' 'BONDING_OPTS="mode=1 arp_interval=100 arp_ip_target=${ARPIP}"' >> /etc/sysconfig/network-scripts/ifcfg-${bond_name}
+
+	:FOR	${dev}	IN	@{device_list}
+	\	SSHLibrary.Write	rm -f /etc/sysconfig/network-scripts/ifcfg-${dev}
+	
+	:FOR	${dev}	IN	@{device_list}
+	\	SSHLibrary.Write	echo "DEVICE=${dev}" >> /etc/sysconfig/network-scripts/ifcfg-${dev}
+	\	SSHLibrary.Write	echo "BOOTPROTO=none" >> /etc/sysconfig/network-scripts/ifcfg-${dev}
+	\	SSHLibrary.Write	echo "ONBOOT=yes" >> /etc/sysconfig/network-scripts/ifcfg-${dev}
+	\	SSHLibrary.Write	echo "MASTER=${bond_name}" >> /etc/sysconfig/network-scripts/ifcfg-${dev}
+	\	SSHLibrary.Write	echo "SLAVE=yes" >> /etc/sysconfig/network-scripts/ifcfg-${dev}
+	\	SSHLibrary.Write	echo "USERCTL=no" >> /etc/sysconfig/network-scripts/ifcfg-${dev}
+	\	SSHLibrary.Write	echo "NM_CONTROLLED=no" >> /etc/sysconfig/network-scripts/ifcfg-${dev}
+
+	SSHLibrary.Write	bash -c 'service network restart; sleep 30; service network restart' &
+	Console			\nConfigured bonding, sleeping 30 seconds.
+	Sleep			30s
+	SSHLibrary.Close Connection
+
+	${output}=		Run	ping -c 4 ${bondIP}
+	Should Not Contain	${output}	100% packet loss
+	Console			${output}

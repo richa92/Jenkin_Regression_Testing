@@ -1,0 +1,1104 @@
+*** Settings ***
+Documentation
+...     Regression test work flow after changing cryptographic mode.
+Resource                        ./../../../../Resources/api/fusion_api_resource.txt
+Variables                       ./data_variables.py
+
+*** Variables ***
+${APPLIANCE_IP}                 192.168.144.142
+${app_ipv6}                      2001:0:0:0:92ba:da32:66b2:169e
+${bay1_icm}                       FVTVP30012, interconnect 1
+${ICM_Prompt}                    root>
+${Bayset}                        1
+
+
+*** Keywords ***
+Read Canmic
+    [Documentation]    Reading CANMIC block
+    [Arguments]     ${ic}   ${blk}
+    ${temp1}=  Split String    ${ic}    ,
+    ${enc_name}=  Get From List    ${temp1}     0
+    ${temp2}=  Get From List    ${temp1}     1
+    ${temp3}=  Split String    ${temp2}
+    ${bayno}=  Get From List    ${temp3}  -1
+    Open Connection And Log In      ${APPLIANCE_IP}
+    ${em_ip}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}"
+    ${xauth}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}" -o t
+    ${out}=  Execute Command    curl -g -x "" -k -i -H "x-auth-token:${xauth}" https://[${em_ip}%bond0]/rest/v1/InterconnectManager/${bayno} -d '{"Action":"ReadCanmicBlocks","List":[${blk}]} ' | grep } | python -m json.tool | grep Data | cut -d "\\"" -f 4 | base64 -d | hexdump -e '/1 "%_Ax) "' -e '/1 "%02X" "\\n"'
+    Close Connection
+    [Return]      ${out}
+
+Edit LIG body for SNMP
+    [Documentation]    Edit LIG for SNMPv3
+    [Arguments]    ${LIG1}    ${snmpusers}    ${trapdestination}
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    ${lig_get}    Fusion Api Get Lig    param=?filter=name=${LIG1}
+    ${lig_snmp}    Get Variable Value    ${lig_get['members'][0]['snmpConfiguration']}
+    Set To Dictionary    ${lig_snmp}    v3Enabled=true
+    Set To Dictionary    ${lig_snmp}    snmpUsers=${snmpusers}
+    Set To Dictionary    ${lig_snmp}    trapDestinations=${trapdestination}
+    [Return]    ${lig_snmp}
+
+Write Canmic
+    [Documentation]    Writing CANMIC Block
+    [Arguments]     ${ic}   ${blk}   ${data}
+    ${temp1}=  Split String    ${ic}    ,
+    ${enc_name}=  Get From List    ${temp1}     0
+    ${temp2}=  Get From List    ${temp1}     1
+    ${temp3}=  Split String    ${temp2}
+    ${bayno}=  Get From List    ${temp3}  -1
+    Open Connection And Log In      ${APPLIANCE_IP}
+    ${em_ip}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}"
+    ${xauth}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}" -o t
+    ${out}=  Execute Command    curl -g -x "" -k -i -H "x-auth-token:${xauth}" -X POST https://[${em_ip}%bond0]/rest/v1/InterconnectManager/${bayno} -d '{ "Action": "WriteCanmicBlocks","List": [ { "Block": ${blk}, "Data" : "${data}", "Format" : "Base64" }]}'
+    ${regex_match}=  Should Match Regexp   ${out}    "Result": "Success"
+
+Get IC
+    [Documentation]    GET on IC
+    [Arguments]                   ${ICM_NAME}
+    ${resp} =   fusion api get interconnect
+    Log           ${resp}
+    ${ics} =     Get From Dictionary     ${resp}    members
+    ${l} =      Get Length  ${ics}
+    :FOR  ${x}  IN RANGE    0     ${l}
+    \    ${ic} =     Get From List   ${ics}    ${x}
+    \    Exit For Loop If     '${ic['name']}' == '${ICM_NAME}'
+    [Return]    ${ic}
+
+Reboot appliance via API
+    [Documentation]     Rebooting Appliance
+    [Arguments]  ${APPLIANCE_IP}    ${admin_credentials}
+    Fusion API Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+    ${resp} =  Fusion Api Appliance Shutdown        REBOOT
+    ${task} =  wait for task2   ${resp}     10min   5   None Expected   Completed
+    sleep  10m
+    Log to console and logfile      -- Waiting for OneView state to change to "STARTING"
+    Wait For Appliance State To Be Expected State    ExpectedState=STARTING
+    Log to console and logfile      -- Waiting for OneView state to change to "OK"
+    Wait For Appliance State To Be Expected State    ExpectedState=OK
+
+Efuse ICM
+    [Documentation]    Efusing ICM
+    [Arguments]     ${ic}   ${action}
+    ${temp1}=  Split String    ${ic}    ,
+    ${enc_name}=  Get From List    ${temp1}     0
+    ${temp2}=  Get From List    ${temp1}     1
+    ${temp3}=  Split String    ${temp2}
+    ${bayno}=  Get From List    ${temp3}  -1
+    Open Connection And Log In      ${APPLIANCE_IP}
+    ${em_ip}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}"
+    ${xauth}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}" -o t
+    ${ret}=  Execute Command    curl -g -x "" -k -i -H "x-auth-token:${xauth}" -X POST https://[${em_ip}%bond0]/rest/v1/InterconnectBays/${bayno} -d '{"Action":"${action}"}'
+    Should Contain    ${ret}    { "Action": "${action}" }
+    ...    msg=EFuse action failed \n${ret}
+
+ICMs in LI
+    [Documentation]    Getting all ICMs in LI
+    [Arguments]     ${LI}
+    ${li_uri}=    Get LI URI    ${LI}
+    Log to Console   \nli_uri:${li_uri}\n
+    ${resp} =     fusion_api_get_li     uri=${li_uri}
+    ${x}=    Get Variable Value  ${resp['interconnects']}
+    ${l} =      Get Length  ${x}
+    ${icm_list} =    Create List
+   :FOR  ${y}  IN RANGE    0     ${l}
+    \    ${ic_uri} =     Get From List   ${x}    ${y}
+    \    ${ic} =  Get IC From URI   ${ic_uri}
+    \    ${ic_name} =     Get from IC    ${ic}    name
+    \    Append To List   ${icm_list}   ${ic_name}
+    Log to Console    \n\nICM Names in ${LI}: ${icm_list}\n
+    [return]    ${icm_list}
+
+Get IC From URI
+    [Documentation]    Getting IC Uri
+    [Arguments]                   ${ic_uri}
+    ${resp} =   fusion api get interconnect
+    Log           ${resp}
+    ${ics} =     Get From Dictionary     ${resp}    members
+    ${l} =      Get Length  ${ics}
+    :FOR  ${x}  IN RANGE    0     ${l}
+    \    ${ic} =     Get From List   ${ics}    ${x}
+    \    Exit For Loop If     '${ic['uri']}' == '${ic_uri}'
+    [Return]    ${ic}
+    Log         ${ic}
+
+Validate ICM State
+    [Documentation]    Checking ICM state if configured
+    [Arguments]     ${STATE}    @{ICMS}
+      ${ICM_STATES} =    Create List
+      :for    ${ICM}    in     @{ICMS}
+      \    ${hfPotash_ic_state} =    Get IC        ${ICM}
+      \    ${hfPotash_ic_state_from_ov} =      Get From IC    ${hfPotash_ic_state}   state
+      \    Append to List    ${ICM_STATES}    ${hfPotash_ic_state_from_ov}
+      \    Log to Console     \n${ICM} State from OneView API : ${hfPotash_ic_state_from_ov}
+      :for    ${ICM_STATE}    in     @{ICM_STATES}
+      \    run keyword if   '${ICM_STATE}'!='${STATE}'    Fatal error    \nOne or more ICM state is not Configured
+
+
+*** Test Cases ***
+Login
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+
+Creating FC networks
+    Add FC Networks from variable     ${fc_networks}
+
+Creating LIG
+    Add LIG from variable       ${lig_carbon}
+    ${lig_edit}=    Get LIG member    ${lig_carbon['name']}
+    ${lig_uri}=  Get LIG URI    ${lig_carbon['name']}
+    ${lig_snmp}=    Edit LIG body for SNMP    ${lig_carbon['name']}    ${lig_carbon_snmp_config['snmpUsers']}    ${lig_carbon_snmp_config['trapDestinations']}
+    Set To Dictionary    ${lig_edit}    eTag=
+    Set To Dictionary    ${lig_edit}    snmpConfiguration=${lig_snmp}
+    ${resp}=    fusion_api_edit_lig    body=${lig_edit}    uri=${lig_uri}
+    Run Keyword If  '${resp['status_code']}' == '202'    Log to console  \nEdited LIG Successfully!!
+    ...    ELSE    FAIL
+    ${task} =    Wait For Task     ${resp}     180 s    10 s
+    ${valDict} =     Create Dictionary    status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response    ${task}    ${valDict}
+
+Creating EG
+    ${responses}=  Add Enclosure Group from variable      ${enc_groups_me}
+    Wait For Task2    ${responses}    timeout=300    interval=15
+
+Creating LE
+    Add Logical Enclosure from variable     ${logical_enclosure_multi}
+
+Add Firmware Bundles
+    Log to console     \nBundle1 - Started uploading
+    ${resp}=    Fusion Api Upload Firmware Bundle    ${upgradeBundleAbsloutePath}
+    Log to console     \nBundle1 - Uploaded successful
+    Log to console     \nBundle1 - Started uploading
+    ${resp}=    Fusion Api Upload Firmware Bundle    ${downgradeBundleAbsloutePath}
+    Log to console     \nBundle1 - Uploaded successful
+    Log to console     \nBundle1 - Started uploading
+    ${resp}=    Fusion Api Upload Firmware Bundle    ${downgradeincompatibleBundleAbsloutePath}
+    Log to console     \nBundle1 - Uploaded successful
+
+Configuring Remote Syslog
+    ${resp}=  fusion_api_configure_remote_syslog    body=${remote_syslog}
+    Wait For Task2    ${resp}    timeout=300    interval=15
+
+Writing CANMIC 190 first time to get root password 
+    ${block} =  Set Variable    190
+    ${data} =  Set Variable    AQ==
+    Write Canmic   ${bay1_icm}    ${block}    ${data}
+
+Reading CANMIC 191 for root password and validating rsyslog IP
+    ${temp1}=  Split String    ${bay1_icm}    ,
+    ${enc_name}=  Get From List    ${temp1}     0
+    ${temp2}=  Get From List    ${temp1}     1
+    ${temp3}=  Split String    ${temp2}
+    ${bayno}=  Get From List    ${temp3}  -1
+    Open Connection And Log In      ${APPLIANCE_IP}
+    ${em_ip}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}"
+    ${xauth}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}" -o t
+    ${out}=  Execute Command    curl -g -x "" -k -i -H "x-auth-token:${xauth}" https://[${em_ip}%bond0]/rest/v1/InterconnectManager/${bayno} -d '{"Action":"ReadCanmicBlocks","List":[191]} ' | grep } | python -m json.tool | grep Data | cut -d "\\"" -f 4 | base64 -d | hexdump -C
+    ${temp}=  Split String    ${out}    |
+    ${passwd}=  Get From List  ${temp}  1
+    Log to console and logfile     \n Password is ${passwd}
+    ${ICM_out} =  Get Interconnect  ${bay1_icm}
+    ${ip_list} =  Get From Dictionary   ${ICM_out}   ipAddressList
+    ${ipv4_dict} =  Get From List  ${ip_list}  0
+    ${ipv4_addr} =  Get From Dictionary   ${ipv4_dict}  ipAddress
+    Log to console and logfile      \n IPv4 address is ${ipv4_addr}
+    Open Connection               ${ipv4_addr}
+    Login                   root        ${passwd}
+    ${output}=   Execute Command    snmpconfig --show snmpv3
+    Log to console and logfile     \n SNMPv3 output ${output}
+    Should Contain   ${output}   SNMPv3 = Enabled
+
+    ${output}=   Execute Command    snmpconfig --show snmpv1
+    Log to console and logfile     \n SNMPv1 output is ${output}
+    Should Contain   ${output}   SNMPv1:Enabled
+
+    ${output}=   Execute Command    ipfilter --show
+    Log to console and logfile     \nIPfilter output is ${output}
+    Should Contain   ${output}   Name: factory_default_ipv4, Type: ipv4, State: active
+    Should Contain   ${output}   Name: factory_default_ipv6, Type: ipv6, State: active
+
+    ${output}=   Execute Command    syslogadmin --show -ip
+    Log to console and logfile     \n Remote syslog IP configured is ${output}
+    ${resp_rsyslog}=  fusion_api_get_remote_syslog_configuration
+    ${rsys_ip}=  Get From Dictionary  ${resp_rsyslog}    remoteSyslogDestination
+    Should Contain  ${output}  ${rsys_ip}
+
+    Close All Connections
+
+Reading ICM CANMIC block 5
+   ${block} =  Set Variable    5
+   ${ret}=  Read Canmic    ${bay1_icm}    ${block}
+   ${str} =  Split String    ${ret}    \n
+   ${l1} =  Get From List  ${str}   0
+   ${l1_dec} =  Convert To Integer   ${l1}   16
+   ${l2} =  Get From List  ${str}   1
+   ${l2_dec} =  Convert To Integer   ${l2}   16
+   ${l3} =  Get From List  ${str}   2
+   ${l3_dec} =  Convert To Integer   ${l3}   16
+   ${l4} =  Get From List  ${str}   3
+   ${l4_dec} =  Convert To Integer   ${l4}   16
+   ${canmic_ipv4} =  Catenate   SEPARATOR=.   ${l1_dec}    ${l2_dec}    ${l3_dec}    ${l4_dec}
+   Log to console and logfile     \n IPv4 address is ${canmic_ipv4}
+   Should Be Equal As Strings    ${canmic_ipv4}   ${APPLIANCE_IP}
+
+Reading CANMIC block 11
+    ${block} =  Set Variable    11
+    ${ret}=  Read Canmic    ${bay1_icm}    ${block}
+    ${str} =  Replace String    ${ret}    \n     ${EMPTY}
+    ${str} =  Replace String    ${str}    *     0
+    ${ipv6_2} =  Convert To Lowercase  ${str}
+    Log to console and logfile      \n IPv6 LLA from CANMIC 11 is ${ipv6_2}
+
+   Open Connection And Log In      ${APPLIANCE_IP}
+   ${out}=  Execute Command    lldpcli show neigh
+   ${temp1} =  Get Regexp Matches   ${out}   "Owner":".+"
+   ${temp2} =  Get From List  ${temp1}  0
+   ${temp3} =  Replace String  ${temp2}  "Owner":"  ${EMPTY}
+   ${temp4} =  Replace String  ${temp3}  "  ${EMPTY}
+   ${ipv6_lla} =  Replace String  ${temp4}  :  ${EMPTY}
+   Log to console and logfile      \nIPv6 LLA taken from appliance CLI is ${ipv6_lla}
+   Should Contain  ${ipv6_2}  ${ipv6_lla}
+
+   Log to console and logfile      \nAppliance IPv6 is ${app_ipv6}
+   ${dhcp_ipv6} =  Replace String  ${app_ipv6}  :  ${EMPTY}
+   Should Contain  ${ipv6_2}  ${dhcp_ipv6}
+
+
+Reading CANMIC Block 19
+   ${block} =  Set Variable    19
+   ${ret}=  Read Canmic    ${bay1_icm}    ${block}
+   ${str} =  Split String    ${ret}    \n
+   ${l2} =  Get From List  ${str}   1
+   ${l2_bin} =  Convert To Binary   ${l2}   base=16     length=8
+   Log to console and logfile     \n ${l2}Binary is ${l2_bin}
+   ${FIPS_bit} =  Get Substring    ${l2_bin}    3    4
+   Log to console and logfile     \n Checking if ICM is in legacy mode
+   Should Be Equal As Integers    ${FIPS_bit}   0
+
+Ping Test in Legacy mode
+    ${temp1}=  Split String    ${bay1_icm}    ,
+    ${enc_name}=  Get From List    ${temp1}     0
+    ${temp2}=  Get From List    ${temp1}     1
+    ${temp3}=  Split String    ${temp2}
+    ${bayno}=  Get From List    ${temp3}  -1
+    Open Connection And Log In      ${APPLIANCE_IP}
+    ${em_ip}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}"
+    ${xauth}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}" -o t
+    ${out}=  Execute Command    curl -g -x "" -k -i -H "x-auth-token:${xauth}" https://[${em_ip}%bond0]/rest/v1/InterconnectManager/${bayno} -d '{"Action":"ReadCanmicBlocks","List":[191]} ' | grep } | python -m json.tool | grep Data | cut -d "\\"" -f 4 | base64 -d | hexdump -C
+    ${temp}=  Split String    ${out}    |
+    ${passwd}=  Get From List  ${temp}  1
+    Log to console and logfile     \n Password is ${passwd}
+    ${ICM_out} =  Get Interconnect  ${bay1_icm}
+    ${ip_list} =  Get From Dictionary   ${ICM_out}   ipAddressList
+    ${ipv4_dict} =  Get From List  ${ip_list}  0
+    ${ipv4_addr} =  Get From Dictionary   ${ipv4_dict}  ipAddress
+    Log to console and logfile      \n ${bay1_icm} IPv4 address is ${ipv4_addr}
+
+    ${output}=  Execute Command   ping -c 4 ${ipv4_addr}
+    ${match}    ${group1}=  Should Match Regexp   ${output}    (\\d+)% packet loss
+    Should Be Equal As Integers  ${group1}   0   msg="Packets lost percent not zero!!!"
+
+    ${ipv6_lla_dict} =  Get From List  ${ip_list}  1
+    ${ipv6_lla_addr} =  Get From Dictionary   ${ipv6_lla_dict}  ipAddress
+    Log to console and logfile      \n ${bay1_icm} IPv6 LLA address is ${ipv6_lla_addr}
+    ${icm_ipv6_lla} =  Catenate  SEPARATOR=%   ${ipv6_lla_addr}    bond0
+    ${output}=  Execute Command   ping6 -c 4 ${icm_ipv6_lla}
+    ${match}    ${group1}=  Should Match Regexp   ${output}    (\\d+)% packet loss
+    Should Be Equal As Integers  ${group1}   0   msg="Packets lost percent not zero!!!"
+
+    ${ipv6_dhcp_dict} =  Get From List  ${ip_list}  2
+    ${ipv6_dhcp_addr} =  Get From Dictionary   ${ipv6_dhcp_dict}  ipAddress
+    Log to console and logfile      \n ${bay1_icm} IPv6 DHCP address is ${ipv6_dhcp_addr}
+    ${output}=  Execute Command   ping6 -c 4 ${ipv6_dhcp_addr}
+    ${match}    ${group1}=  Should Match Regexp   ${output}    (\\d+)% packet loss
+    Should Be Equal As Integers  ${group1}   0   msg="Packets lost percent not zero!!!"
+
+Compatibility report for FIPS mode
+   Log to console and logfile      \n Creating compatibility report for FIPS mode
+   ${targetMode} =  Set Variable    FIPS
+   ${currentMode} =  Set Variable    LEGACY
+   ${response} =  Create Cryptography Mode Compatibility Report    ${currentMode}    ${targetMode}
+
+   Log to console and logfile      \n Getting the generated compatibility report for FIPS mode
+   ${response} =  Get Cryptography Mode Compatibility Report
+   ${incomp_list} =  Create List
+   :FOR  ${mem}  IN  @{response['members']}
+   \    Run Keyword If  '${mem['resourceCategory']}' != 'interconnects'  Continue For Loop
+   \    ${device_name} =  Get From Dictionary    ${mem}    deviceName
+   \    Log to console and logfile      \n\n DEVICE NAME : ${device_name}
+   \    ${device_type} =  Get From Dictionary    ${mem}    deviceType
+   \    Log to console and logfile      DEVICE TYPE : ${mem['deviceType']}
+   \    ${detail} =  Get From Dictionary    ${mem}    nonCompatibilityDetails
+   \    Sort List   ${detail}
+   \    ${detail_dict} =  Get From List    ${detail}    0
+   \    ${reason} =  Get From Dictionary    ${detail_dict}    nonCompatibilityKey
+   \    ${resolution} =  Get From Dictionary    ${detail_dict}    nonCompatibilityAction
+   \    Log to console and logfile      REASON : ${detail_dict['nonCompatibilityKey']}
+   \    Log to console and logfile      RESOLUTION : ${detail_dict['nonCompatibilityAction']}
+   \    Should Contain    ${reason}     Rsyslog functionality is not supported in FIPS mode
+   \    ${detail_dict} =  Get From List    ${detail}    1
+   \    ${reason} =  Get From Dictionary    ${detail_dict}    nonCompatibilityKey
+   \    ${resolution} =  Get From Dictionary    ${detail_dict}    nonCompatibilityAction
+   \    Log to console and logfile      REASON : ${detail_dict['nonCompatibilityKey']}
+   \    Log to console and logfile      RESOLUTION : ${detail_dict['nonCompatibilityAction']}
+   \    Should Contain    ${reason}     Snmp configuration is not supported in FIPS mode
+   \    Append to List    ${incomp_list}    ${device_name}
+   Log to console and logfile    Checking for incompatible ICMS in the list...
+   Log to console and logfile    \n INCOMPATIBLE ICM - CARBON :
+   Log to console and logfile    Is FVTVP30012, interconnect 1 existing in the list?
+   ${resp} =  Get Interconnect    FVTVP30012, interconnect 1
+   ${s_no} =  Get From Dictionary    ${resp}    serialNumber
+   ${icm} =  Catenate   SEPARATOR=:    ${sno}    FVTVP30012, interconnect 1
+   List Should Contain Value     ${incomp_list}     ${icm}
+   Log to console and logfile    Is FVTVP30012, interconnect 4 existing in the list?
+   ${resp} =  Get Interconnect    FVTVP30012, interconnect 4
+   ${s_no} =  Get From Dictionary    ${resp}    serialNumber
+   ${icm} =  Catenate   SEPARATOR=:    ${sno}    FVTVP30012, interconnect 4
+
+Doing SNMP walk in legacy mode
+    Open Connection               192.168.148.49
+    Login                   root        hpvse1
+    Log to console and logfile                \n Executing snmpBulkWalk
+    ${output}=                Execute Command     snmpbulkwalk -v 3 -u snmptestuser1 -a SHA -A password123 -x AES -X password123 -t 30 -l authPriv -c public 192.168.147.19 .1.3.6.1.6.3.15.1.2.2.1.8
+    Log to console and logfile      \nChecking if SNMP user snmptestuser1 exists
+    Should Contain   ${output}  snmptestuser1
+
+Adding Storage Systems,Pool & Volume
+    Add Storage System     ${storage_systems_fc}
+    Sleep    30s
+    Run Keyword And Ignore Error   Edit Storage System    ${storage_systems_fc}
+    Sleep    30s
+    Run Keyword And Ignore Error   Edit Storage System    ${storage_systems_desc_fc}
+    Sleep    30s
+    Verify Resources for List          ${expected_storage_systems_fc}
+    Edit Storage Pool       ${storage_pool_fc}
+    sleep  2m
+    Add Existing Storage Volumes Async     ${storage_volumes_fc}
+
+Adding server profile in legacy mode
+    Log to console and logfile    \nPowering off the server ${\n}${server_profile['serverHardwareUri']}
+    Power off Server    ${server_profile['serverHardwareUri']}
+    ${responses}=  Add Server Profile    ${server_profile}
+    Wait For Task2    ${responses}    timeout=3000    interval=15
+    Power on server     ${server_profile['serverHardwareUri']}
+    Sleep  10m
+#############################
+
+FIPS mode change first time
+    ${mode_name} =  Set Variable   FIPS
+    Change Cryptography Mode    ${mode_name}    ${APPLIANCE_IP}
+    sleep  30m
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+
+Reading CANMIC Block 19 to verify FIPS mode
+   ${block} =  Set Variable    19
+   ${ret}=  Read Canmic    ${bay1_icm}    ${block}
+   ${str} =  Split String    ${ret}    \n
+   ${l2} =  Get From List  ${str}   1
+   ${l2_bin} =  Convert To Binary   ${l2}   base=16     length=8
+   ${FIPS_bit} =  Get Substring    ${l2_bin}    3    4
+   Log to console and logfile     \n Checking if ICM is in FIPS mode
+   Should Be Equal As Integers    ${FIPS_bit}   1
+
+Verifying connectivity to ICM in FIPS mode
+    ${temp1}=  Split String    ${bay1_icm}    ,
+    ${enc_name}=  Get From List    ${temp1}     0
+    ${temp2}=  Get From List    ${temp1}     1
+    ${temp3}=  Split String    ${temp2}
+    ${bayno}=  Get From List    ${temp3}  -1
+    Open Connection And Log In      ${APPLIANCE_IP}
+    ${em_ip}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}"
+    ${xauth}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}" -o t
+    ${out}=  Execute Command    curl -g -x "" -k -i -H "x-auth-token:${xauth}" https://[${em_ip}%bond0]/rest/v1/InterconnectManager/${bayno} -d '{"Action":"ReadCanmicBlocks","List":[191]} ' | grep } | python -m json.tool | grep Data | cut -d "\\"" -f 4 | base64 -d | hexdump -C
+    ${temp}=  Split String    ${out}    |
+    ${passwd}=  Get From List  ${temp}  1
+    Log to console and logfile     \n Password is ${passwd}
+    ${ICM_out} =  Get Interconnect  ${bay1_icm}
+    ${ip_list} =  Get From Dictionary   ${ICM_out}   ipAddressList
+    ${ipv4_dict} =  Get From List  ${ip_list}  0
+    ${ipv4_addr} =  Get From Dictionary   ${ipv4_dict}  ipAddress
+    Log to console and logfile      \n IPv4 address is ${ipv4_addr}
+    Open Connection               ${ipv4_addr}
+    Run Keyword And Expect Error     timeout: timed out   Login     root     ${passwd}
+
+Verifying ipfilter,rsyslog,snmp config in FIPS mode after mode chg
+    ${temp1}=  Split String    ${bay1_icm}    ,
+    ${enc_name}=  Get From List    ${temp1}     0
+    ${temp2}=  Get From List    ${temp1}     1
+    ${temp3}=  Split String    ${temp2}
+    ${bayno}=  Get From List    ${temp3}  -1
+    Open Connection And Log In      ${APPLIANCE_IP}
+    ${em_ip}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}"
+    ${xauth}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}" -o t
+    ${out}=  Execute Command    curl -g -x "" -k -i -H "x-auth-token:${xauth}" https://[${em_ip}%bond0]/rest/v1/InterconnectManager/${bayno} -d '{"Action":"ReadCanmicBlocks","List":[191]} ' | grep } | python -m json.tool | grep Data | cut -d "\\"" -f 4 | base64 -d | hexdump -C
+    ${temp}=  Split String    ${out}    |
+    ${passwd}=  Get From List  ${temp}  1
+    Log to console and logfile     \n ICM Password is ${passwd}
+    ${ICM_out} =  Get Interconnect  ${bay1_icm}
+    ${ip_list} =  Get From Dictionary   ${ICM_out}   ipAddressList
+    ${ipv6_lla_dict} =  Get From List  ${ip_list}  1
+    ${ipv6_lla_addr} =  Get From Dictionary   ${ipv6_lla_dict}  ipAddress
+    Log to console and logfile      \n ${bay1_icm} IPv6 LLA address is ${ipv6_lla_addr}
+    ${icm_ipv6_lla} =  Catenate  SEPARATOR=%   ${ipv6_lla_addr}    bond0
+
+    Write     \r\n
+    Write     ssh -o StrictHostKeyChecking=no root@${icm_ipv6_lla}
+    Sleep  10s
+    Write     ${passwd}
+    Write    ${\n}
+    ${cmdoutput}=    Read
+    Log to console and logfile     \nChecking rsyslog configuration
+    sleep    5s
+    Write    syslogadmin --show -ip
+    sleep    5s
+    ${cmdoutput}=    Read
+    Log to console and logfile     \n ${cmdoutput}
+    Should Contain   ${cmdoutput}   No addresses configured
+    Log to console and logfile     \nChecking SNMP configuration
+    sleep    5s
+    Write    snmpconfig --show snmpv3
+    sleep    5s
+    ${cmdoutput}=    Read
+    Log to console and logfile     \n ${cmdoutput}
+    Should Contain   ${cmdoutput}   SNMPv3 = Disabled
+    sleep    5s
+    Write    snmpconfig --show snmpv1
+    sleep    5s
+    ${cmdoutput}=    Read
+    Log to console and logfile     \n ${cmdoutput}
+    Should Contain   ${cmdoutput}   SNMPv1:Disabled
+    Log to console and logfile     \nChecking IP filters
+    sleep    5s
+    Write    ipfilter --show
+    sleep    5s
+    ${cmdoutput}=    Read
+    Log to console and logfile     \n ${cmdoutput}
+    Should Contain   ${cmdoutput}   Name: oneview_v4, Type: ipv4, State: active
+    Should Contain   ${cmdoutput}   Name: oneview_v6, Type: ipv6, State: active
+    Should Match Regexp   ${cmdoutput}    192\.168\.144\.142\\s+tcp\\s+22
+    Should Match Regexp   ${cmdoutput}    192\.168\.144\.142\\s+udp\\s+123
+    Should Match Regexp   ${cmdoutput}    192\.168\.144\.142\\s+tcp\\s+443
+
+    ${app_ipv6_new} =  Replace String   ${app_ipv6}   :0:0:0   :
+    Should Match Regexp   ${cmdoutput}   ${app_ipv6_new}\\s+tcp\\s+22
+    Should Match Regexp   ${cmdoutput}   ${app_ipv6_new}\\s+tcp\\s+443
+    Should Match Regexp   ${cmdoutput}   ${app_ipv6_new}\\s+udp\\s+123
+
+    ${out}=  Execute Command    lldpcli show neigh
+    ${temp1} =  Get Regexp Matches   ${out}   "Owner":".+"
+    ${temp2} =  Get From List  ${temp1}  0
+    ${temp3} =  Replace String  ${temp2}  "Owner":"  ${EMPTY}
+    ${temp4} =  Replace String  ${temp3}  "  ${EMPTY}
+    ${lla_ipv6} =  Replace String   ${temp4}   :0:0:0   :
+    Should Match Regexp   ${cmdoutput}   ${lla_ipv6}\\s+tcp\\s+22
+    Should Match Regexp   ${cmdoutput}   ${lla_ipv6}\\s+tcp\\s+443
+    Should Match Regexp   ${cmdoutput}   ${lla_ipv6}\\s+udp\\s+123
+
+ Verifying SNMP config in LI in FIPS mode
+    ${resp} =  Fusion Api Get LI
+    ${li_out}=  Get From List  ${resp['members']}  0
+    ${snmp_out}=  Get From Dictionary   ${li_out}  snmpConfiguration
+    ${snmpv3_val}=  Get From Dictionary  ${snmp_out}    v3Enabled
+    Should Be Equal As Strings    ${snmpv3_val}  False
+    ${snmp_val}=  Get From Dictionary  ${snmp_out}    enabled
+    Should Be Equal As Strings   ${snmp_val}  False
+    ${comm_string}=  Get From Dictionary  ${snmp_out}    readCommunity
+    Should Match    ${comm_string}  ${EMPTY}
+
+    ${li_list} =  Get All Logical Interconnect Uris
+    ${li_uri}=  Get From List  ${li_list}  0
+    ${snmp_out} =    Fusion Api Get Li   uri=${li_uri}   param=/snmp-configuration
+    ${snmpv3_val}=  Get From Dictionary  ${snmp_out}    v3Enabled
+    Should Be Equal As Strings    ${snmpv3_val}  False
+    ${snmp_val}=  Get From Dictionary  ${snmp_out}    enabled
+    Should Be Equal As Strings   ${snmp_val}  False
+    ${comm_string}=  Get From Dictionary  ${snmp_out}    readCommunity
+    Should Match    ${comm_string}  ${EMPTY}
+
+ SNMP PUT in FIPS mode
+    ${li_list} =  Get All Logical Interconnect Uris
+    ${li_uri}=  Get From List  ${li_list}  0
+    ${resp} =  fusion_api_update_snmp_configuration  body=${lig_carbon_snmp_config}  uri=${li_uri}
+    ${error_code} =  Get From Dictionary  ${resp}  errorCode
+    Should Be Equal   ${error_code}   CRM_SNMP_CONFIGURATION_NOTSUPPORTED_IN_SECUREMODE
+    ${status_code} =  Get From Dictionary  ${resp}  status_code
+    Should Be Equal As Integers   ${status_code}  400
+
+ Verifying Remote Syslog in FIPS mode
+    ${resp}=  fusion_api_configure_remote_syslog    body=${remote_syslog_fips}
+    Wait For Task2    ${resp}    timeout=300    interval=15
+
+    ${temp1}=  Split String    ${bay1_icm}    ,
+    ${enc_name}=  Get From List    ${temp1}     0
+    ${temp2}=  Get From List    ${temp1}     1
+    ${temp3}=  Split String    ${temp2}
+    ${bayno}=  Get From List    ${temp3}  -1
+    Open Connection And Log In      ${APPLIANCE_IP}
+    ${em_ip}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}"
+    ${xauth}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}" -o t
+    ${out}=  Execute Command    curl -g -x "" -k -i -H "x-auth-token:${xauth}" https://[${em_ip}%bond0]/rest/v1/InterconnectManager/${bayno} -d '{"Action":"ReadCanmicBlocks","List":[191]} ' | grep } | python -m json.tool | grep Data | cut -d "\\"" -f 4 | base64 -d | hexdump -C
+    ${temp}=  Split String    ${out}    |
+    ${passwd}=  Get From List  ${temp}  1
+    Log to console and logfile     \n ICM Password is ${passwd}
+    ${ICM_out} =  Get Interconnect  ${bay1_icm}
+    ${ip_list} =  Get From Dictionary   ${ICM_out}   ipAddressList
+    ${ipv4_dict} =  Get From List  ${ip_list}  0
+    ${ipv4_addr} =  Get From Dictionary   ${ipv4_dict}  ipAddress
+    Log to console and logfile      \n ICM IPv4 address is ${ipv4_addr}
+
+    Write     \r\n
+    Write     ssh -o StrictHostKeyChecking=no root@${ipv4_addr}
+    Sleep  10s
+    Write     ${passwd}
+    Write    ${\n}
+    ${cmdoutput}=    Read
+    Log to console and logfile     \nChecking rsyslog configuration in ICM
+    sleep    5s
+    Write    syslogadmin --show -ip
+    sleep    5s
+    ${cmdoutput}=    Read
+    Log to console and logfile     \n ${cmdoutput}
+    Should Contain   ${cmdoutput}   No addresses configured
+
+Test SSH from another appliance
+    ${ICM_out} =  Get Interconnect  ${bay1_icm}
+    ${ip_list} =  Get From Dictionary   ${ICM_out}   ipAddressList
+    ${ipv4_dict} =  Get From List  ${ip_list}  0
+    ${ipv4_addr} =  Get From Dictionary   ${ipv4_dict}  ipAddress
+    Log to console and logfile      \n ${bay1_icm} IPv4 address is ${ipv4_addr}
+
+    ${remote_app_ip}=  Set Variable  192.168.144.176
+    Open Connection And Log In      ${remote_app_ip}
+    Write     \r\n
+    Write     ssh root@${ipv4_addr}
+    Sleep  5s
+    ${cmdoutput}=    Read
+    Log to console and logfile      \n SSH output is ${cmdoutput}
+    Should Contain   ${cmdoutput}   Connection refused
+
+    ${ipv6_lla_dict} =  Get From List  ${ip_list}  2
+    ${ipv6_lla_addr} =  Get From Dictionary   ${ipv6_lla_dict}  ipAddress
+    Log to console and logfile      \n ${bay1_icm} IPv6 LLA address is ${ipv6_lla_addr}
+    ${icm_ipv6_lla} =  Catenate  SEPARATOR=%   ${ipv6_lla_addr}    bond0
+    Write     ssh root@${icm_ipv6_lla}
+    Sleep  5s
+    ${cmdoutput}=    Read
+    Log to console and logfile      \n SSH output is ${cmdoutput}
+    Should Contain   ${cmdoutput}   Connection refused
+
+Carbon Power Cycle
+    Log to console and logfile      \n Powering Off ${bay1_icm}
+    ${Carbon_IC} =    Create Dictionary    name=${bay1_icm}
+    Patch Interconnect  ${Carbon_IC}  op=replace  path=/powerState  value=Off  timeout=60  interval=5
+    Sleep   3m
+    Log to console and logfile      \n Checking ICM Power State after Power Off
+    ${ic_resp} =     Get IC    ${bay1_icm}
+    ${ic_powerState} =     Get From IC    ${ic_resp}   powerState
+    Should Be Equal  ${ic_powerState}    Off
+    Log to console and logfile      \n Powering On ${bay1_icm}
+    Patch Interconnect  ${Carbon_IC}  op=replace  path=/powerState  value=On  timeout=60  interval=5
+    Sleep  5m
+    Log to console and logfile      \n Checking ICM State after Power On
+    ${Carbon_URI}=  Get IC URI  ${bay1_icm}
+    IC reached state  ${Carbon_URI}  Configured
+
+Reading CANMIC Block 19 to verify FIPS mode after power cycle
+   ${block} =  Set Variable    19
+   ${ret}=  Read Canmic    ${bay1_icm}    ${block}
+   ${str} =  Split String    ${ret}    \n
+   ${l2} =  Get From List  ${str}   1
+   ${l2_bin} =  Convert To Binary   ${l2}   base=16     length=8
+   ${FIPS_bit} =  Get Substring    ${l2_bin}    3    4
+   Log to console and logfile     \n Checking if ICM is in FIPS mode
+   Should Be Equal As Integers    ${FIPS_bit}   1
+
+ICM Efuse On and Off in FIPS mode
+    Log to console and logfile      \n Removing Interconnect ${bay1_icm}
+    Efuse ICM  ${bay1_icm}  EFuseOn
+    Sleep   5m
+    Log to console and logfile      \n Checking ICM state
+    ${ic_resp} =     Get IC    ${bay1_icm}
+    ${ic_State} =      Get From IC    ${ic_resp}   state
+    Should Be Equal  ${ic_State}    Absent
+    Log to console and logfile      \n Inserting Interconnect ${bay1_icm}
+    Efuse ICM  ${bay1_icm}  EFuseOff
+    Sleep  7m
+    Log to console and logfile      \n Checking ICM State after inserting
+    ${Carbon_URI}=  Get IC URI  ${bay1_icm}
+    IC reached state  ${Carbon_URI}  Configured
+
+Reading CANMIC Block 19 to verify FIPS mode after efuse
+   ${block} =  Set Variable    19
+   ${ret}=  Read Canmic    ${bay1_icm}    ${block}
+   ${str} =  Split String    ${ret}    \n
+   ${l2} =  Get From List  ${str}   1
+   ${l2_bin} =  Convert To Binary   ${l2}   base=16     length=8
+   ${FIPS_bit} =  Get Substring    ${l2_bin}    3    4
+   Log to console and logfile     \n Checking if ICM is in FIPS mode
+   Should Be Equal As Integers    ${FIPS_bit}   1
+
+OneView Reboot
+    Reboot appliance via API    ${APPLIANCE_IP}    ${admin_credentials}
+    Sleep  10m
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+    @{ICMS} =    ICMs in LI    ${Carbon_LI['name']}
+    Validate ICM State     Configured    @{ICMS}
+
+Reading CANMIC Block 19 to verify FIPS mode after reboot
+   ${block} =  Set Variable    19
+   ${ret}=  Read Canmic    ${bay1_icm}    ${block}
+   ${str} =  Split String    ${ret}    \n
+   ${l2} =  Get From List  ${str}   1
+   ${l2_bin} =  Convert To Binary   ${l2}   base=16     length=8
+   ${FIPS_bit} =  Get Substring    ${l2_bin}    3    4
+   Log to console and logfile     \n Checking if ICM is in FIPS mode
+   Should Be Equal As Integers    ${FIPS_bit}   1
+
+Deleting SP
+     Log to console and logfile    Powering off the server ${\n}${server_profile['serverHardwareUri']}
+     Power off Server    ${server_profile['serverHardwareUri']}
+     Remove All Server Profiles
+     ${sp_resp} =   Fusion Api Get Server Profiles      param=?filter="'name'=='${server_profile['name']}'"
+     ${count} =  Get From Dictionary  ${sp_resp}  count
+     Should Be Equal As Integers   ${count}   0
+
+Deleting DHCP LE 
+      Remove All LEs
+      ${le_resp}=  Get Logical Enclosure By Name   ${logical_enclosure_multi['name']}
+      ${error_code}=  Get From Dictionary   ${le_resp}   errorCode
+      Should Be Equal   ${error_code}   GENERIC_HTTP_404
+
+Creating EG using external address mode
+    ${responses}=  Add Enclosure Group from variable      ${enc_group_external}
+    Wait For Task2    ${responses}    timeout=300    interval=15
+
+Creating LE using external EG
+    Add Logical Enclosure from variable     ${logical_enclosure_external}
+    Sleep  15m
+
+Reading CANMIC Block 19 to verify FIPS mode after LE creation 
+   ${block} =  Set Variable    19
+   ${ret}=  Read Canmic    ${bay1_icm}    ${block}
+   ${str} =  Split String    ${ret}    \n
+   ${l2} =  Get From List  ${str}   1
+   ${l2_bin} =  Convert To Binary   ${l2}   base=16     length=8
+   ${FIPS_bit} =  Get Substring    ${l2_bin}    3    4
+   Log to console and logfile     \n Checking if ICM is in FIPS mode
+   Should Be Equal As Integers    ${FIPS_bit}   1
+
+Writing CANMIC 190 to get root password after efuse
+    ${block} =  Set Variable    190
+    ${data} =  Set Variable    AQ==
+    Write Canmic   ${bay1_icm}    ${block}    ${data}
+
+Verifying ipfilter,rsyslog,snmp config in FIPS mode using external ip
+    ${temp1}=  Split String    ${bay1_icm}    ,
+    ${enc_name}=  Get From List    ${temp1}     0
+    ${temp2}=  Get From List    ${temp1}     1
+    ${temp3}=  Split String    ${temp2}
+    ${bayno}=  Get From List    ${temp3}  -1
+    Open Connection And Log In      ${APPLIANCE_IP}
+    ${em_ip}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}"
+    ${xauth}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}" -o t
+    ${out}=  Execute Command    curl -g -x "" -k -i -H "x-auth-token:${xauth}" https://[${em_ip}%bond0]/rest/v1/InterconnectManager/${bayno} -d '{"Action":"ReadCanmicBlocks","List":[191]} ' | grep } | python -m json.tool | grep Data | cut -d "\\"" -f 4 | base64 -d | hexdump -C
+    ${temp}=  Split String    ${out}    |
+    ${passwd}=  Get From List  ${temp}  1
+    Log to console and logfile     \n ICM Password is ${passwd}
+    ${ICM_out} =  Get Interconnect  ${bay1_icm}
+    ${ip_list} =  Get From Dictionary   ${ICM_out}   ipAddressList
+    ${ipv6_lla_dict} =  Get From List  ${ip_list}  2
+    ${ipv6_lla_addr} =  Get From Dictionary   ${ipv6_lla_dict}  ipAddress
+    Log to console and logfile      \n ${bay1_icm} IPv6 LLA address is ${ipv6_lla_addr}
+    ${icm_ipv6_lla} =  Catenate  SEPARATOR=%   ${ipv6_lla_addr}    bond0
+
+    Write     \r\n
+    Write     ssh -o StrictHostKeyChecking=no root@${icm_ipv6_lla}
+    Sleep  10s
+    Write     ${passwd}
+    Write    ${\n}
+    ${cmdoutput}=    Read
+    Log to console and logfile     \nChecking rsyslog configuration
+    sleep    5s
+    Write    syslogadmin --show -ip
+    sleep    5s
+    ${cmdoutput}=    Read
+    Log to console and logfile     \n ${cmdoutput}
+    Should Contain   ${cmdoutput}   No addresses configured
+    Log to console and logfile     \nChecking SNMP configuration
+    sleep    5s
+    Write    snmpconfig --show snmpv3
+    sleep    5s
+    ${cmdoutput}=    Read
+    Log to console and logfile     \n ${cmdoutput}
+    Should Contain   ${cmdoutput}   SNMPv3 = Disabled
+    sleep    5s
+    Write    snmpconfig --show snmpv1
+    sleep    5s
+    ${cmdoutput}=    Read
+    Log to console and logfile     \n ${cmdoutput}
+    Should Contain   ${cmdoutput}   SNMPv1:Disabled
+    Log to console and logfile     \nChecking IP filters
+    sleep    5s
+    Write    ipfilter --show
+    sleep    5s
+    ${cmdoutput}=    Read
+    Log to console and logfile     \n ${cmdoutput}
+    Should Contain   ${cmdoutput}   Name: oneview_v4, Type: ipv4, State: active
+    Should Contain   ${cmdoutput}   Name: oneview_v6, Type: ipv6, State: active
+    Should Match Regexp   ${cmdoutput}    192\.168\.144\.142\\s+tcp\\s+22
+    Should Match Regexp   ${cmdoutput}    192\.168\.144\.142\\s+udp\\s+123
+    Should Match Regexp   ${cmdoutput}    192\.168\.144\.142\\s+tcp\\s+443
+
+    ${app_ipv6_new} =  Replace String   ${app_ipv6}   :0:0:0   :
+    Should Match Regexp   ${cmdoutput}   ${app_ipv6_new}\\s+tcp\\s+22
+    Should Match Regexp   ${cmdoutput}   ${app_ipv6_new}\\s+tcp\\s+443
+    Should Match Regexp   ${cmdoutput}   ${app_ipv6_new}\\s+udp\\s+123
+
+    ${out}=  Execute Command    lldpcli show neigh
+    ${temp1} =  Get Regexp Matches   ${out}   "Owner":".+"
+    ${temp2} =  Get From List  ${temp1}  0
+    ${temp3} =  Replace String  ${temp2}  "Owner":"  ${EMPTY}
+    ${temp4} =  Replace String  ${temp3}  "  ${EMPTY}
+    ${lla_ipv6} =  Replace String   ${temp4}   :0:0:0   :
+    Should Match Regexp   ${cmdoutput}   ${lla_ipv6}\\s+tcp\\s+22
+    Should Match Regexp   ${cmdoutput}   ${lla_ipv6}\\s+tcp\\s+443
+    Should Match Regexp   ${cmdoutput}   ${lla_ipv6}\\s+udp\\s+123
+
+Deleting manage externally LE
+    Remove All LEs
+    ${le_resp}=  Get Logical Enclosure By Name   ${logical_enclosure_external['name']}
+    ${error_code}=  Get From Dictionary   ${le_resp}   errorCode
+    Should Be Equal   ${error_code}   GENERIC_HTTP_404
+
+Creating LE using DHCP
+    Add Logical Enclosure from variable     ${logical_enclosure_multi}
+
+Adding server profile in FIPS mode
+    Log to console and logfile    \nPowering off the server ${\n}${server_profile['serverHardwareUri']}
+    Power off Server    ${server_profile['serverHardwareUri']}
+    ${responses}=  Add Server Profile    ${server_profile}
+    Wait For Task2    ${responses}    timeout=3000    interval=15
+    Power on server     ${server_profile['serverHardwareUri']}
+    Sleep  5m
+
+LI Firmware Upgrade
+    Log to console and logfile    \n LI for update: ${Carbon_LI['name']}
+    ${li_uri} =     Get LI URI       ${Carbon_LI['name']}
+    Log to console and logfile   "Performing LI Firmware Upgrade"
+    ${resp1} =    Fusion Api Li Upgrade Firmware      body=${LI_upgrade}    uri=${li_uri}
+    ${task} =       Wait For Task       ${resp1}    7200s    10s
+    ${valDict} =    Create Dictionary    status_code=${200}
+    ...                                  taskState=Completed
+    Validate Response   ${task}     ${valDict}
+    Log to Console    \n LI Firmware Upgrade complete
+    Sleep    5m
+
+ LI Firmware Downgrade
+    Log to console and logfile    \n LI for update: ${Carbon_LI['name']}
+    ${li_uri} =     Get LI URI       ${Carbon_LI['name']}
+    Log to console and logfile   "Performing LI Firmware DOwngrade"
+    ${resp1} =    Fusion Api Li Upgrade Firmware      body=${LI_downgrade}    uri=${li_uri}
+    ${task} =       Wait For Task       ${resp1}    7200s    10s
+    ${valDict} =    Create Dictionary    status_code=${200}
+    ...                                  taskState=Completed
+    Validate Response   ${task}     ${valDict}
+    Log to Console    \n LI Firmware Downgrade complete
+    Sleep    5m
+
+LI Firmware Downgrade Incompatible
+    Log to console and logfile    \n LI for update: ${Carbon_LI['name']}
+    ${li_uri} =     Get LI URI       ${Carbon_LI['name']}
+    Log to console and logfile   "Performing LI Firmware Downgrade Incompatible"
+    ${resp1} =    Fusion Api Li Upgrade Firmware      body=${LI_downgrade_incompatible}    uri=${li_uri}
+    ${task} =       Wait For Task       ${resp1}    7200s    10s
+    ${task_err_temp} =  Get From Dictionary    ${task}    taskErrors
+    ${task_err} =  Get From List  ${task_err_temp}  0
+    ${task_detail} =  Get From Dictionary   ${task_err}   details
+    Should Contain  ${task_detail}   Unable to update firmware for logical interconnect ${Carbon_LI['name']}
+    Should Contain  ${task_detail}   Downgrading of firmware below the minimum required version is not allowed for the following interconnects
+    ${task_action_tmp} =  Get From Dictionary   ${task_err}   recommendedActions
+    ${task_action_1} =  Get From List  ${task_action_tmp}  0
+    Should Contain   ${task_action_1}   Retry the firmware downgrade using an SPP which contains a firmware version that is equal to or greater than the minimum firmware version required by all capabilities listed in the task errors.
+    ${task_action_2} =  Get From List  ${task_action_tmp}  1
+    Should Contain   ${task_action_2}   FIPS support requires minimum firmware version: 4.00.07
+
+
+#############################################
+LEGACY mode change from FIPS
+    ${mode_name} =  Set Variable   LEGACY
+    Change Cryptography Mode    ${mode_name}    ${APPLIANCE_IP}
+    sleep  30m
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+
+Reading CANMIC Block 19 to verify LEGACY mode
+   ${block} =  Set Variable    19
+   ${ret}=  Read Canmic    ${bay1_icm}    ${block}
+   ${str} =  Split String    ${ret}    \n
+   ${l2} =  Get From List  ${str}   1
+   ${l2_bin} =  Convert To Binary   ${l2}   base=16     length=8
+   ${FIPS_bit} =  Get Substring    ${l2_bin}    3    4
+   Log to console and logfile     \n Checking if ICM is in LEGACY mode
+   Should Be Equal As Integers    ${FIPS_bit}   0
+
+Reading CANMIC 191 for root password and validating rsyslog IP,snmp,ipfilter
+    ${temp1}=  Split String    ${bay1_icm}    ,
+    ${enc_name}=  Get From List    ${temp1}     0
+    ${temp2}=  Get From List    ${temp1}     1
+    ${temp3}=  Split String    ${temp2}
+    ${bayno}=  Get From List    ${temp3}  -1
+    Open Connection And Log In      ${APPLIANCE_IP}
+    ${em_ip}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}"
+    ${xauth}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}" -o t
+    ${out}=  Execute Command    curl -g -x "" -k -i -H "x-auth-token:${xauth}" https://[${em_ip}%bond0]/rest/v1/InterconnectManager/${bayno} -d '{"Action":"ReadCanmicBlocks","List":[191]} ' | grep } | python -m json.tool | grep Data | cut -d "\\"" -f 4 | base64 -d | hexdump -C
+    ${temp}=  Split String    ${out}    |
+    ${passwd}=  Get From List  ${temp}  1
+    Log to console and logfile     \n Password is ${passwd}
+    ${ICM_out} =  Get Interconnect  ${bay1_icm}
+    ${ip_list} =  Get From Dictionary   ${ICM_out}   ipAddressList
+    ${ipv4_dict} =  Get From List  ${ip_list}  0
+    ${ipv4_addr} =  Get From Dictionary   ${ipv4_dict}  ipAddress
+    Log to console and logfile      \n IPv4 address is ${ipv4_addr}
+    Open Connection               ${ipv4_addr}
+    Login                   root        ${passwd}
+    ${output}=   Execute Command    snmpconfig --show snmpv3
+    Log to console and logfile     \n SNMPv3 output ${output}
+    Should Contain   ${output}   SNMPv3 = Enabled
+
+    ${output}=   Execute Command    snmpconfig --show snmpv1
+    Log to console and logfile     \n SNMPv1 output is ${output}
+    Should Contain   ${output}   SNMPv1:Enabled
+
+    ${output}=   Execute Command    ipfilter --show
+    Log to console and logfile     \nIPfilter output is ${output}
+    Should Contain   ${output}   Name: factory_default_ipv4, Type: ipv4, State: active
+    Should Contain   ${output}   Name: factory_default_ipv6, Type: ipv6, State: active
+
+    ${output}=   Execute Command    syslogadmin --show -ip
+    Log to console and logfile     \n Remote syslog IP configured is ${output}
+    ${resp_rsyslog}=  fusion_api_get_remote_syslog_configuration
+    ${rsys_ip}=  Get From Dictionary  ${resp_rsyslog}    remoteSyslogDestination
+    Should Contain  ${output}  ${rsys_ip}
+
+Verifying SNMP config in LI in legacy mode
+    ${resp} =  Fusion Api Get LI
+    ${li_out}=  Get From List  ${resp['members']}  0
+    ${snmp_out}=  Get From Dictionary   ${li_out}  snmpConfiguration
+    ${snmpv3_val}=  Get From Dictionary  ${snmp_out}    v3Enabled
+    Should Be Equal As Strings    ${snmpv3_val}  True
+    ${snmp_val}=  Get From Dictionary  ${snmp_out}    enabled
+    Should Be Equal As Strings   ${snmp_val}  True
+    ${comm_string}=  Get From Dictionary  ${snmp_out}    readCommunity
+    Should Match    ${comm_string}  public
+
+    ${li_list} =  Get All Logical Interconnect Uris
+    ${li_uri}=  Get From List  ${li_list}  0
+    ${snmp_out} =    Fusion Api Get Li   uri=${li_uri}   param=/snmp-configuration
+    ${snmpv3_val}=  Get From Dictionary  ${snmp_out}    v3Enabled
+    Should Be Equal As Strings    ${snmpv3_val}  True
+    ${snmp_val}=  Get From Dictionary  ${snmp_out}    enabled
+    Should Be Equal As Strings   ${snmp_val}  True
+    ${comm_string}=  Get From Dictionary  ${snmp_out}    readCommunity
+    Should Match    ${comm_string}  public
+
+Doing SNMP walk in legacy mode after mode change
+    Open Connection               192.168.148.49
+    Login                   root        hpvse1
+    Log to console and logfile                \n Executing snmpBulkWalk
+    ${output}=                Execute Command     snmpbulkwalk -v 3 -u snmptestuser1 -a SHA -A password123 -x AES -X password123 -t 30 -l authPriv -c public 192.168.147.19 .1.3.6.1.6.3.15.1.2.2.1.8
+    Log to console and logfile      \nChecking if SNMP user snmptestuser1 exists
+    Should Contain   ${output}  snmptestuser1
+
+LIG Edit to add new snmp user
+    ${resp_lig}=  Get LIG member  ${lig_carbon['name']}
+    ${snmp_cfg}=  Get From Dictionary   ${resp_lig}   snmpConfiguration
+    Append to List   ${snmp_cfg['snmpUsers']}   ${snmp_user2}
+    Remove From Dictionary   ${resp_lig}   snmpConfiguration
+    Set to Dictionary   ${resp_lig}  snmpConfiguration  ${snmp_cfg}
+    ${lig_uri} =    Get LIG Uri     ${lig_carbon['name']}
+    ${resp} =   Fusion Api Edit LIG     body=${resp_lig}    uri=${lig_uri}
+    Wait For Task2    ${resp}    timeout=300    interval=15
+
+DO LE UFG
+     Update Logical Enclosure from Group   ${logical_enclosure_multi}
+
+Doing SNMP walk using snmptestuser2
+    Open Connection               192.168.148.49
+    Login                   root        hpvse1
+    Log to console and logfile                \n Executing snmpBulkWalk
+    ${output}=                Execute Command     snmpbulkwalk -v 3 -u snmptestuser2 -a SHA -A password123 -x AES -X password123 -t 30 -l authPriv -c public 192.168.147.19 .1.3.6.1.6.3.15.1.2.2.1.8
+    Log to console and logfile      \nChecking if SNMP user snmptestuser2 exists
+    Should Contain   ${output}  snmptestuser2
+
+FIPS mode change second time
+    ${mode_name} =  Set Variable   FIPS
+    Change Cryptography Mode    ${mode_name}    ${APPLIANCE_IP}
+    sleep  30m
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+
+#####################################################################################
+Compatibility report for CNSA mode
+   Log to console and logfile      \n Creating compatibility report for FIPS mode
+   ${targetMode} =  Set Variable    CNSA
+   ${currentMode} =  Set Variable    FIPS
+   ${response} =  Update Cryptography Mode Compatibility Report   ${currentMode}    ${targetMode}
+
+   Log to console and logfile      \n Getting the generated compatibility report for CNSA mode
+   ${response} =  Get Cryptography Mode Compatibility Report
+   ${incomp_list} =  Create List
+   :FOR  ${mem}  IN  @{response['members']}
+   \    Run Keyword If  '${mem['resourceCategory']}' != 'interconnects'  Continue For Loop
+   \    ${device_name} =  Get From Dictionary    ${mem}    deviceName
+   \    Log to console and logfile      \n\n DEVICE NAME : ${device_name}
+   \    ${device_type} =  Get From Dictionary    ${mem}    deviceType
+   \    Log to console and logfile      DEVICE TYPE : ${mem['deviceType']}
+   \    ${detail} =  Get From Dictionary    ${mem}    nonCompatibilityDetails
+   \    ${detail_dict} =  Get From List    ${detail}    0
+   \    ${reason} =  Get From Dictionary    ${detail_dict}    nonCompatibilityKey
+   \    ${resolution} =  Get From Dictionary    ${detail_dict}    nonCompatibilityAction
+   \    Log to console and logfile      REASON : ${detail_dict['nonCompatibilityKey']}
+   \    Log to console and logfile      RESOLUTION : ${detail_dict['nonCompatibilityAction']}
+   \    Should Match Regexp    ${reason}     Oneview cannot manage .+ in CNSA mode
+   \    Should Match Regexp    ${resolution}     Remove the interconnect or choose a less strict cryptography mode
+
+CNSA mode change
+    ${mode_name} =  Set Variable   CNSA
+    Change Cryptography Mode    ${mode_name}    ${APPLIANCE_IP}
+    sleep  30m
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+
+
+Unmanaged Carbon Alert
+    ${resp} =  Get Alert by Param    param=?filter="alertState EQ 'Active'"&filter="healthCategory EQ 'logical-interconnect'"&filter="associatedResource.resourceName EQ 'LE-LIG_Carbon-1'"&filter="alertTypeID EQ 'crm.securitymode'"
+    ${desc} =  Get from Dictionary    ${resp}    description
+    Log to console and logfile      \n DESCRIPTION : ${desc}
+    Should Be Equal As Strings    ${desc}    The type of one or more interconnects which are part of logical interconnect is not compatible with CNSA cryptography mode.
+    ${action} =  Get from Dictionary    ${resp}    correctiveAction
+    Log to console and logfile      \n ACTION : ${action}
+
+    ${resp} =  Get Alert by Param    param=?filter="alertState EQ 'Active'"&filter="healthCategory EQ 'interconnect'"&filter="associatedResource.resourceName EQ 'FVTVP30012, interconnect 1'"
+    ${desc} =  Get from Dictionary    ${resp}    description
+    Log to console and logfile      \n DESCRIPTION : ${desc}
+    Should Be Equal As Strings    ${desc}   The switch type is not compatible with CNSA security mode.
+    ${action} =  Get from Dictionary    ${resp}    correctiveAction
+    Log to console and logfile      \n ACTION : ${action}
+    Should Be Equal As Strings    ${action}    Remove the switch from configuration.
+
+    ${resp} =  Get Alert by Param    param=?filter="alertState EQ 'Active'"&filter="healthCategory EQ 'interconnect'"&filter="associatedResource.resourceName EQ 'FVTVP30012, interconnect 4'"
+    ${desc} =  Get from Dictionary    ${resp}    description
+    Log to console and logfile      \n DESCRIPTION : ${desc}
+    Should Be Equal As Strings    ${desc}   The switch type is not compatible with CNSA security mode.
+    ${action} =  Get from Dictionary    ${resp}    correctiveAction
+    Log to console and logfile      \n ACTION : ${action}
+    Should Be Equal As Strings    ${action}    Remove the switch from configuration.
+
+
+############################################################################################################
+LEGACY mode change from CNSA
+    ${mode_name} =  Set Variable   LEGACY
+    Change Cryptography Mode    ${mode_name}    ${APPLIANCE_IP}
+    sleep  30m
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+
+ICM Efuse On and Off in legacy mode and doing mode change
+    Log to console and logfile      \n Removing Interconnect ${bay1_icm}
+    Efuse ICM  ${bay1_icm}  EFuseOn
+    Sleep   5m
+    Log to console and logfile      \n Checking ICM state
+    ${ic_resp} =     Get IC    ${bay1_icm}
+    ${ic_State} =      Get From IC    ${ic_resp}   state
+    Should Be Equal  ${ic_State}    Absent
+
+    ${mode_name} =  Set Variable   FIPS
+    Change Cryptography Mode    ${mode_name}    ${APPLIANCE_IP}
+    sleep  30m
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+
+    Log to console and logfile      \n Inserting Interconnect ${bay1_icm}
+    Efuse ICM  ${bay1_icm}  EFuseOff
+    Sleep  7m
+    Log to console and logfile      \n Checking ICM State after inserting
+    ${Carbon_URI}=  Get IC URI  ${bay1_icm}
+    IC reached state  ${Carbon_URI}  Configured
+
+Reading CANMIC Block 19 to verify FIPS mode after efuse on and off
+   ${block} =  Set Variable    19
+   ${ret}=  Read Canmic    ${bay1_icm}    ${block}
+   ${str} =  Split String    ${ret}    \n
+   ${l2} =  Get From List  ${str}   1
+   ${l2_bin} =  Convert To Binary   ${l2}   base=16     length=8
+   ${FIPS_bit} =  Get Substring    ${l2_bin}    3    4
+   Log to console and logfile     \n Checking if ICM is in FIPS mode
+   Should Be Equal As Integers    ${FIPS_bit}   1
+
+Verifying ipfilter,rsyslog,snmp config in FIPS mode after efuse and mode change
+    ${temp1}=  Split String    ${bay1_icm}    ,
+    ${enc_name}=  Get From List    ${temp1}     0
+    ${temp2}=  Get From List    ${temp1}     1
+    ${temp3}=  Split String    ${temp2}
+    ${bayno}=  Get From List    ${temp3}  -1
+    Open Connection And Log In      ${APPLIANCE_IP}
+    ${em_ip}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}"
+    ${xauth}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}" -o t
+    ${out}=  Execute Command    curl -g -x "" -k -i -H "x-auth-token:${xauth}" https://[${em_ip}%bond0]/rest/v1/InterconnectManager/${bayno} -d '{"Action":"ReadCanmicBlocks","List":[191]} ' | grep } | python -m json.tool | grep Data | cut -d "\\"" -f 4 | base64 -d | hexdump -C
+    ${temp}=  Split String    ${out}    |
+    ${passwd}=  Get From List  ${temp}  1
+    Log to console and logfile     \n ICM Password is ${passwd}
+    ${ICM_out} =  Get Interconnect  ${bay1_icm}
+    ${ip_list} =  Get From Dictionary   ${ICM_out}   ipAddressList
+    ${ipv6_lla_dict} =  Get From List  ${ip_list}  2
+    ${ipv6_lla_addr} =  Get From Dictionary   ${ipv6_lla_dict}  ipAddress
+    Log to console and logfile      \n ${bay1_icm} IPv6 LLA address is ${ipv6_lla_addr}
+    ${icm_ipv6_lla} =  Catenate  SEPARATOR=%   ${ipv6_lla_addr}    bond0
+
+    Write     \r\n
+    Write     ssh -o StrictHostKeyChecking=no root@${icm_ipv6_lla}
+    Sleep  10s
+    Write     ${passwd}
+    Write    ${\n}
+    ${cmdoutput}=    Read
+    Log to console and logfile     \nChecking rsyslog configuration
+    sleep    5s
+    Write    syslogadmin --show -ip
+    sleep    5s
+    ${cmdoutput}=    Read
+    Log to console and logfile     \n ${cmdoutput}
+    Should Contain   ${cmdoutput}   No addresses configured
+    Log to console and logfile     \nChecking SNMP configuration
+    sleep    5s
+    Write    snmpconfig --show snmpv3
+    sleep    5s
+    ${cmdoutput}=    Read
+    Log to console and logfile     \n ${cmdoutput}
+    Should Contain   ${cmdoutput}   SNMPv3 = Disabled
+    sleep    5s
+    Write    snmpconfig --show snmpv1
+    sleep    5s
+    ${cmdoutput}=    Read
+    Log to console and logfile     \n ${cmdoutput}
+    Should Contain   ${cmdoutput}   SNMPv1:Disabled
+    Log to console and logfile     \nChecking IP filters
+    sleep    5s
+    Write    ipfilter --show
+    sleep    5s
+    ${cmdoutput}=    Read
+    Log to console and logfile     \n ${cmdoutput}
+    Should Contain   ${cmdoutput}   Name: oneview_v4, Type: ipv4, State: active
+    Should Contain   ${cmdoutput}   Name: oneview_v6, Type: ipv6, State: active
+    Should Match Regexp   ${cmdoutput}    192\.168\.144\.142\\s+tcp\\s+22
+    Should Match Regexp   ${cmdoutput}    192\.168\.144\.142\\s+udp\\s+123
+    Should Match Regexp   ${cmdoutput}    192\.168\.144\.142\\s+tcp\\s+443
+
+    ${app_ipv6_new} =  Replace String   ${app_ipv6}   :0:0:0   :
+    Should Match Regexp   ${cmdoutput}   ${app_ipv6_new}\\s+tcp\\s+22
+    Should Match Regexp   ${cmdoutput}   ${app_ipv6_new}\\s+tcp\\s+443
+    Should Match Regexp   ${cmdoutput}   ${app_ipv6_new}\\s+udp\\s+123
+
+    ${out}=  Execute Command    lldpcli show neigh
+    ${temp1} =  Get Regexp Matches   ${out}   "Owner":".+"
+    ${temp2} =  Get From List  ${temp1}  0
+    ${temp3} =  Replace String  ${temp2}  "Owner":"  ${EMPTY}
+    ${temp4} =  Replace String  ${temp3}  "  ${EMPTY}
+    ${lla_ipv6} =  Replace String   ${temp4}   :0:0:0   :
+    Should Match Regexp   ${cmdoutput}   ${lla_ipv6}\\s+tcp\\s+22
+    Should Match Regexp   ${cmdoutput}   ${lla_ipv6}\\s+tcp\\s+443
+    Should Match Regexp   ${cmdoutput}   ${lla_ipv6}\\s+udp\\s+123

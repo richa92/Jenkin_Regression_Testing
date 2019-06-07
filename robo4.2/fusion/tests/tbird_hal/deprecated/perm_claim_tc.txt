@@ -1,0 +1,110 @@
+*** Settings ***
+Documentation     Test PERM API User Story US31952 and US27610
+...    = Usage =
+...    | pybot | -L DEBUG | perm_claim.txt |
+...    = Variables =
+...    | FUSION IP | Required; IP address of the FusionVM to use |
+...    | EM IP | Required; IP address of the EM to use |
+...    = Preconditions =
+...       None
+
+Library           RoboGalaxyLibrary
+Library           FusionLibrary
+Library           MgmtFWLibrary
+Library           SSHLibrary                   # SSH Library
+Library           OperatingSystem
+Library           Collections
+Library           String
+Variables         ../resources/variables.py    ${ENCLOSURE}
+Resource          ../resources/em_cli.txt      # EM Factory Reset
+Resource          ../resources/perm_api.txt    # Fusion PERM extensions
+Resource          ../resources/fusion_cli.txt  # DVT fusion API extensions
+Resource          ../resources/fusion_api.txt  # DVT fusion API extensions
+Resource          ../resources/hal_webapp.txt  # DVT HAL webapp extensions
+Resource          ../resources/defaults.txt    # DVT default variables
+Suite Setup       Login to Fusion Via REST
+Suite Teardown    Logout of Fusion Via REST
+
+*** Variables ***
+${force}=    ${False}    # Set to TRUE if you want to force an unclaim before each test case starts if EM is already claimed
+
+*** Keywords ***
+
+Unclaim EM But Keep EM Credentials File
+    [Documentation]    Force an unclaim action through the EM but keep EM Credentials file in Fusion
+
+    Run Keyword If        ${DCS}    Login to Fusion Via SSH    \
+    ...    Restart DCS    \
+    ...    Logout of Fusion Via SSH
+    Run Keyword Unless    ${DCS}    EM Factory Reset With IPv4
+
+Claim EM Via RIS
+    [Documentation]    Use EM RIS interface to claim an EM with a specific IP address
+    [Arguments]    ${IP}
+    Login to Fusion via SSH
+    ${Buffer}=    Execute Command    curl -k -X PATCH -H "Content-Type:application/json" -d '{"Oem":{"Hp":{"Password":"Administrator", "ClaimInformation":{"IpAddress":"${IP}"}}}}' https://${EM_IP}${FUSION_NIC_SUFFIX}/rest/v1/AccountService
+    Log    ${Buffer}
+    Logout of Fusion via SSH
+
+
+*** Test Cases ***
+Unhappy Path Claim EM With Bad EM Factory Password
+    [Documentation]    Unhappy path: attempt to claim an EM with LLDP which contain invalid EM Password.  Validate
+    ...    that the claim operation fails.
+    [Tags]    HW
+
+    # Make sure EM is not already claimed
+    ${status}    ${rtn}=    Run Keyword And Ignore Error    Verify Unclaimed EM
+    Run Keyword If    '${status}'=='FAIL'
+    ...    Run Keyword If    '${force}'=='${False}'    Fail    msg = Enclosure claimed when not expected
+    Run Keyword If    '${status}'=='FAIL'
+    ...    Run Keyword If    '${force}'=='${True}'    Unclaim EM   # Unclaim upon force set
+
+    # Create LLDP Credentials
+    Create HAL LLDP Credentials    {"credentials":[{"id":"0000000010","ipAddr":"${EM_IPV4}","user":"Administrator","fpw":"I_AM_A_BAD_PASSWORD"}]}
+
+    # Attempt Claim of Enclosure Manager
+    ${Response}=    Perm Api Perform Claim    ${FUSION_IP}    ${FUSION_IPV6}
+    Log    ${Response}
+    Dictionary Should Not Contain Key    ${Response}    errorCode    Perm FTS returned error--See Response
+
+    # Validate that the EM did not get claimed
+    Verify Unclaimed EM
+
+Unhappy Path Claim EM Already Claimed
+    [Documentation]    Unhappy path: attempt to claim an EM which is already claimed by another IP.  Expect
+    ...    that the claim operation fails since the EM is already claimed by another IP address.
+    [Tags]    HW    DCS
+
+    # Make sure EM is not already claimed
+    ${status}    ${rtn}=    Run Keyword And Ignore Error    Verify Unclaimed EM
+    Run Keyword If    '${status}'=='FAIL'
+    ...    Run Keyword If    '${force}'=='${False}'    Fail    msg=Enclosure claimed when not expected
+    Run Keyword If    '${status}'=='FAIL'
+    ...    Run Keyword If    '${force}'=='${True}'    Unclaim EM   # Unclaim upon force set
+
+    # Create LLDP credentials file only for HW
+    Run Keyword If    '${DCS}'=='${False}'    Create HAL LLDP Credentials
+
+    # Claim EM Through EM RIS with different IP
+    Claim EM Via RIS    1.1.1.1
+
+    # Validate that the claim succeeds
+    ${ip}=    Get Fusion IP Claim Through EM RIS
+    Should Be Equal    ${ip}    1.1.1.1    msg=Setup of EM claim via other IP (1.1.1.1) failed
+
+    # Attempt Claim Enclosure Manager
+    ${FUSION_IP_CLAIM}=    Set Variable If    '${DCS}'=='${False}'    ${FUSION_IPV6}    ${FUSION_IP}
+    Log    ${FUSION_IP_CLAIM}
+    ${Response}=    Perm Api Perform Claim    ${FUSION_IP}    ${FUSION_IP_CLAIM}
+    Log    ${Response}
+    Dictionary Should Not Contain Key    ${Response}    errorCode    Perm FTS returned error--See Response
+
+    # Validate that the EM did not get claimed
+    Verify Unclaimed EM
+
+Happy Path Claim EM
+    [Documentation]    Happy Path:  PERM Claim EM
+    [Tags]    HW    DCS
+    PERM Api Claim EM    ${force}
+    Unclaim EM   # Unclaim EM to clean up after test

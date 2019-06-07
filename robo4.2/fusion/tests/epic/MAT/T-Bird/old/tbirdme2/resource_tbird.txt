@@ -1,0 +1,110 @@
+*** Settings ***
+Library                         FusionLibrary
+Library                         RoboGalaxyLibrary
+Library                         OperatingSystem
+Library                         BuiltIn
+Library                         Collections
+Library                         XML
+Library                         String
+Library                         json
+Library                         Dialogs
+Library                         SSHLibrary
+#Variables                       variables_tbird.py    ${ENCLOSURE}
+
+Resource                        ../../../../Resources/api/fusion_api_resource.txt
+
+*** Variables ***
+${X-API-VERSION}                300
+${one}                          1
+${two}                          2
+${three}                        3
+${DATA}                         data_variables.py
+${VERBOSE}                      False
+${VERIFY}                       True
+${spp}                          E:\\RG\\fusion\\tests\\epic\\MAT\\Add-Spp.ps1
+${dhcp}                         E:\\RG\\fusion\\tests\\epic\\MAT\\Get-DHCPAddress.ps1
+${del_spp}                      E:\\RG\\fusion\\tests\\epic\\MAT\\Remove-Spp.ps1
+${OUTPUT FILE}                  NONE
+${LOG FILE}                     E:\\RG\\fusion\\tests\\epic\\MAT\\tbirdme2\\logs
+${REPORT FILE}                  E:\\RG\\fusion\\tests\\epic\\MAT\\tbirdme2\\logs
+
+*** Keywords ***
+MAT Suite Setup
+    [Arguments]     ${credentials}
+    Set Log Level   TRACE
+    #Appliance is pingable   ${APPLIANCE_IP}
+    #Check if Appliance is reachable
+    ${Output}=    Run    ping -n 1 ${APPLIANCE_IP}
+    Log to console and logfile    ${Output}
+    Should Contain    ${Output}    TTL=
+    Fusion Api Login Appliance  ${appliance_ip}     ${credentials}
+
+MAT Suite Teardown
+    Fusion Api Logout Appliance
+
+Upload SPP to Fusion
+    [Arguments]     ${host}     ${user}     ${password}     ${spppath}
+    ${Output}=   Run and return RC and output    powershell.exe -ExecutionPolicy Unrestricted -file ${spp} ${host} ${user} ${password} ${spppath}
+
+Delete SPP From Fusion
+    [Arguments]     ${host}     ${user}     ${password}     ${spp}
+    ${Output}=   Run and return RC and output    powershell.exe -ExecutionPolicy Unrestricted ${del_spp} ${host} ${user} ${password} ${spp}
+
+Get Ethernet Connections IPs from Server Profiles and Ping
+    [Arguments]     ${profile}
+    :FOR    ${connection}  IN  @{profile['connections']}
+    \   Run Keyword Unless  '${connection['functionType']}' == 'Ethernet'     Continue For Loop
+    \   ${uri} =    Get From Dictionary     ${connection}  networkUri
+    \   ${net} =    Fusion Api Get Ethernet Networks    ${uri}
+    \   ${vlan} =    Get From Dictionary     ${net}  vlanId
+    \   ${dhcp_detail} =   Get DHCP Server     ${vlan}
+    \   Run Keyword If  ${dhcp_detail} == []   Continue For Loop
+    \   ${mac} =    Get From Dictionary     ${connection}  mac
+    \   ${ip} =     Get IP From DHCP    ${mac}  ${dhcp_detail[0]}  ${dhcp_detail[1]}   ${dhcp_detail[2]}    ${dhcp_detail[3]}
+    \   ${RC}   ${output} =     Run and return RC and Output    ping ${ip}
+    \   Run Keyword and Continue on Failure     Should be equal     ${RC}   ${0}     Host ${ip} unreachable. Reason:\n${output}
+
+Get DHCP Server
+    [Arguments]     ${vlan}
+    ${dhcp_details} =   Create List
+    :FOR    ${dhcpserver}   IN  @{dhcpservers}
+    \   Run Keyword Unless  '${dhcpserver['vlanid']}' == '${vlan}'      Continue For Loop
+    \   ${dhcpserver_ip} =  Get From Dictionary     ${dhcpserver}   ip
+    \   Append To List  ${dhcp_details}     ${dhcpserver_ip}
+    \   ${dhcpserver_scope} =  Get From Dictionary     ${dhcpserver}   scope
+    \   Append To List  ${dhcp_details}     ${dhcpserver_scope}
+    \   ${dhcpserver_user} =  Get From Dictionary     ${dhcpserver}   username
+    \   Append To List  ${dhcp_details}     ${dhcpserver_user}
+    \   ${dhcpserver_password} =  Get From Dictionary     ${dhcpserver}   password
+    \   Append To List  ${dhcp_details}     ${dhcpserver_password}
+    [Return]    ${dhcp_details}
+
+Get IP From DHCP
+    [Arguments]     ${mac}  ${dhcp_ip}  ${dhcp_scope}   ${dhcp_user}    ${dhcp_password}
+    ${Output}=   Run    powershell.exe -ExecutionPolicy Unrestricted -file ${dhcp} ${mac} ${dhcp_ip} ${dhcp_scope} ${dhcp_user} ${dhcp_password}
+    [Return]    ${Output}
+
+Verify TBird Resource
+    [Documentation]  Verify Resource
+    ...              **kwargs are used to add key value pair to the expected DTO
+    ...              Example:
+    ...                Verify Resource  ${expected_dto}
+    ...                Verify Resource  ${expected_dto}  Status=OK
+    ...              Data Required:
+    ...                Expected Resource DTO
+    [Arguments]  ${expected_dto}  &{kwargs}
+
+    ${status}  ${name} =  Run Keyword and Ignore Error  Get From Dictionary  ${expected_dto}  name
+    Return from keyword if    '${status}'=='FAIL'    ${expected_dto} doesn't contain the key $name
+    ${status}  ${type} =  Run Keyword and Ignore Error  Get From Dictionary  ${expected_dto}  type
+    Return from keyword if    '${status}'=='FAIL'    ${expected_dto} doesn't contain the key $type
+    Log to console and logfile  ${\n}Verifying ${type} ${name}
+    ${new_expected_dto} =  Add Key Value to DTO  ${expected_dto}  &{kwargs}
+    ${dto} =  Get Resource  ${type}:${name}
+    log to console  the dto is ${dto}
+    log to console  the expected is ${expected_dto}
+    ${validate_status} =  Fusion api validate response follow  ${new_expected_dto}  ${dto}  wordy=${False}
+    ${dict} =  create dictionary
+    set to dictionary   ${dict}  status=${validate_status}
+    set to dictionary   ${dict}  name=${name}
+    Return From Keyword    ${dict}

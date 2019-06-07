@@ -1,0 +1,158 @@
+*** Settings ***
+Documentation     Deploy latest Fusion OVA and perform 1st time setup
+...    = USAGE =
+...    | pybot | -v FUSION_NAME:MikeB-HPOneView | Deploy_Fusion.txt |
+...    = Variables =
+...    | FUSION_NAME | Required. VMware name for  the Fusion VM. |
+...    | FUSION_DEPOT | (optional) URL specifying location of the OVA file |
+
+Library    String
+Library    Collections
+Library    robot.api.logger
+Library    RoboGalaxyLibrary
+Library    FusionLibrary
+Library    OperatingSystem
+
+*** Variables ***
+${vSphere_IP}          16.125.64.36
+${vSphere_Username}    wpst-comet
+${vSphere_Password}    comet1
+${OVFtool}             \\Progra~1\\VMware\\VMware~2\\ovftool.exe    #for 64-bit ovftool
+#${OVFtool}            \\Progra~2\\VMware\\VMware~1\\ovftool.exe    #for 32-bit ovftool
+${Target_Locator}      vi://${vSphere_Username}:${vSphere_Password}@${vSphere_IP}/WPST/host/wpst-cluster
+${Fusion_Depot}        http://pyramid.vse.rdlabs.hpecorp.net/fusionOVF/Fusion1.10/DCS/PASSED/
+
+${Fusion_Name}         Noname-HPOneView
+${Fusion_URL}          unknown
+${Fusion_Password}     hpvse123
+
+*** Test Cases ***
+Get Latest Fusion DCS PASS Build URL
+    ${OVA}=    Get LatestBuild Name        ${Fusion_Depot}    ''    ova
+    Set Suite Variable    ${Deploy_URL}    ${Fusion_Depot}${OVA}
+    Console    \nDeploying from: ${Deploy_URL}
+    Log    ${Deploy_URL}
+
+Check OVFtool
+    ${RC}    ${Output}=    Run and Return Rc and Output    dir ${OVFtool}
+    Run Keyword Unless    '${RC}' == '0'    Fatal Error
+    ...    msg=Could not find ovftool.exe. Is it installed? (See \\\\eml.usa.hp.com\\emgmt\\Tools\\WMARE)
+
+Redeploy Fusion
+    Console    \nDeploying VM: ${Fusion_Name}
+    ${Command}=    Catenate    ${OVFtool}
+    ...    --skipManifestCheck
+    ...    --noSSLVerify
+    ...    --acceptAllEulas
+    ...    --machineOutput
+    ...    --powerOn
+    ...    --ipProtocol=IPv4
+    ...    --powerOffTarget
+    ...    --overwrite
+    ...    --name="${Fusion_Name}"
+    ...    --datastore="OneView"
+    ...    --network="hpcorpnet"
+    ...    --diskMode=thin 
+    ...    --vmFolder="UI_Automation"
+    ...    ${Deploy_URL}
+    ...    ${Target_Locator}    
+    Log    ${Command}
+    ${RC}    ${Output}=    Run and Return Rc and Output    ${Command}
+    Run Keyword Unless    '${RC}' == '0'    Fatal Error    msg=Could not deploy new VM ${Output}
+
+Get Fusion IP Address
+    Connect To VI Server    ${vSphere_IP}    ${vSphere_Username}    ${vSphere_Password}
+    Wait Until Keyword Succeeds    10 min    60 sec    Get VM IPv4 Addresses    ${Fusion_Name}
+    @{IPs}=    Get VM IPv4 Addresses    ${Fusion_Name}
+    ${Count}=    Get Length    ${IPs}
+    Run Keyword If    ${Count} == 0    Fatal Error    msg=No IP address returned from vSphere
+    ${IP}=     Get From List    ${IPs}     0
+    Should Match RegExp    ${IP}    16\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}
+    ...    msg=No valid IP address returned from vSphere
+    Set Suite Variable    ${Fusion_IP}     ${IP}
+    Set Suite Variable    ${Fusion_URL}    https://${Fusion_IP}
+    Set Environment Variable    FUSION_URL    ${Fusion_Url}
+    Set Environment Variable    FUSION_IP    ${Fusion_IP}
+    Console    \nYour FusionVM URL is: ${Fusion_URL}
+
+Wait for VM Startup
+    # It'going to take 15 to 20 minutes for Fusion to be login-able. A good time for a nap.
+    Sleep    15 minutes    Waiting for startup to complete
+    Open Browser    ${Fusion_URL}    firefox
+    Sleep    15 seconds
+    Capture Page Screenshot
+    Wait Until Keyword Succeeds    30 min    60 sec    Page Should not contain    Starting
+    Capture Page Screenshot
+    Close Browser
+    
+Open Browser To Login Page After Startup
+    Open Browser    ${Fusion_URL}/#/login    firefox
+    # Click 'Continue to this website' link allowing test case to continue (for IE only).
+    # Run Keyword If  "${BROWSER}" == "IE"   Go To  javascript:document.getElementById('overridelink').click()
+    sleep    5
+    Capture Page Screenshot
+
+EULA Agreement
+    Wait Until Element Is Visible    id=hp-eula-agree-button
+    ...                              timeout=120
+    ...                              error=Not at EULA page 
+    Click Button    id=hp-eula-agree-button
+    sleep    5
+    Click Button    id=hp-eula-ok-button
+    sleep    5
+    Capture Page Screenshot
+
+First Time Login
+    Wait Until Element Is Visible    id=hp-login-user
+    ...                              timeout=300
+    ...                              error=Not at Login page
+    Input Text    hp-login-user    Administrator
+    Input Text    hp-login-password    admin
+    Click Button    hp-login-button
+    sleep    5
+    Capture Page Screenshot
+
+Assign Administrator Password
+    Wait Until Element Is Visible    id=hp-initial-password-new1
+    ...                              timeout=300
+    ...                              error=Not at InitialPassword page 
+    Input Text    id=hp-initial-password-new1    ${Fusion_Password}
+    Input Text    id=hp-initial-password-new2    ${Fusion_Password}
+    Click Button    id=hp-initial-password-button-element
+    sleep    5
+    Capture Page Screenshot
+
+Assign DHCP Networking
+    Wait Until Element Is Visible    id=cic-network-hostname
+    ...                              timeout=300
+    ...                              error=Not at Initial-network page
+    Input Text    id=cic-network-hostname    ${Fusion_Name}.vse.rdlabs.hpecorp.net
+    Sleep    5
+    Click Element    id=cic-fs-network-title
+    Sleep    5    
+    Click Button    id=cic-network-ipv4-dhcp
+    Sleep    5
+    Click Button    id=cic-network-ok
+    Sleep    5
+    Capture Page Screenshot
+    Wait Until Page Contains    Applying network settings.    timeout=300
+    
+Wait for Fusion Ready
+    Wait Until Keyword Succeeds    30 min    30 sec    Page Should not contain    Applying network settings.
+    Wait Until Element Is Visible    id=hp-main-menu-control
+    ...                              timeout=300
+    ...                              error=Not at Dashboard page (cant find main-menu)
+    ${Location}=    Get Location
+    ${Page}=    Fetch From Right    ${Location}    ${Fusion_URL}
+    Pass Execution If    '${Page}'=='/#/dashboard'    msg=Found dashboard
+    Pass Execution If    '${Page}'=='/#/activities'    msg=Found activities
+    Pass Execution If    '${Page}'=='/#/settings/show/overview'    msg=Found Overview
+    Capture Page Screenshot
+    Fail    msg=Failed to apply network settings
+
+Cleanup
+    Close Browser
+
+Write Fusion Properties
+    Run    echo FUSION_URL=${Fusion_URL} > C:\\Jenkins\\Fusion.properties
+    Run    echo FUSION_NAME=${Fusion_Name} >> C:\\Jenkins\\Fusion.properties

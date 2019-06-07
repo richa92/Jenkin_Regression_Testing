@@ -1,0 +1,145 @@
+*** Settings ***
+Documentation     Test suite to validate Midplane related events on OneView and FLM
+...               It covers testing of:
+...               MidplaneFault
+...               MidplaneFruContentFault
+...               MidplaneFruManufacturedForInvalidFault
+...				  This file has tests for FLM 1.01 and 2.00 support
+...               = GENERIC USAGE =
+...               | pybot | -v ENC_SERIAL_NO:[enclosure serial #] | -v APPLIANCE_IP:<ipv4> | -v CIM_Linux_IP:<ipv4> |-v GIT_REPO_ROOT: | midplane_fru_event.txt |
+...               = Variables =
+...               | GIT_REPO_ROOT | Required: Repo root path if NOT defined in environment variable this is mgmtfw root location|
+...               | ENC_SERIAL_NO | Optional: If omitted, will use the 1st enclosure detected in OV |
+...               | APPLIANCE_IP | Required: OneView IPv4 address |
+...               | CIM_Linux_IP | Required:CI Manager ipv4 under test |
+...               Make sure you have Customized FRU files with same serial number as the Good FRU
+Suite Setup       Configure Events Test Environment
+#Suite Teardown    Run Keywords    Restore Good Midplane FRU    AND    Logout of EM RIS    AND    Logout of Fusion Via REST
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Library           RoboGalaxyLibrary
+Library           MgmtFWLibrary
+Library           json
+
+*** Test cases ***
+
+TC 01: Verify MidplaneFruContentFault event
+    [Documentation]    This test will verify fault injection to Midplane device MidplaneFruContentFault
+    [Tags]    MP    FLM1.01    FRU    Automated
+    Run Keywords    Restore Good Midplane FRU    AND    Logout of EM RIS    AND    Logout of Fusion Via REST
+    Login to Fusion Via REST
+    Login to EM via RIS
+    Log    message=Flashing customized FRU on Midplane to induce alert event in diags audit log    console=True
+    ${last_fusion_event_id}=    get last fusion event ID
+    Flash Midplane Fru    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\${Midplane_frucontent_fault}
+    Login to Fusion Via REST
+    Login to EM via RIS
+    ${ip}=    Get Diags Active EM IPv6 LL Address
+    ${ping_response_code}=    Ping EM    ${ip}
+    ${active_bay}=    Get Diags EmClusterStatus Active Node
+    Log to Console    Reboot EM
+    RIS EM Reboot    ${active_bay}
+    Sleep    ${EM_Reboot_Time}
+    Sleep    600
+    Login to EM via RIS
+    ${encl_status}=    Get Enclosure Health
+    Should Be Equal    ${encl_status}    ${HEALTH_CRITICAL}
+    #Verifying fault event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log Last 50 Midplane
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_Midplane_FruInvalid}    ${Chassis_Device}    1    1200
+    Verify Fusion Event Sent By EM    ${EL_Midplane_FruInvalid}    ${last_fusion_event_id}
+    Log    message=Flashing good FRU for midplane device    console=True
+    Flash Midplane Fru    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\Fru_Files\\${CAT}\\Good_Fru\\MIDPLANE\\${Midplane_Bay_No}\\fru.bin
+    Login to Fusion Via REST
+    Login to EM via RIS
+    ${ip}=    Get Diags Active EM IPv6 LL Address
+    ${ping_response_code}=    Ping EM    ${ip}
+    ${active_bay}=    Get Diags EmClusterStatus Active Node
+    Log to Console    Reboot EM
+    RIS EM Reboot    ${active_bay}
+    Sleep    ${EM_Reboot_Time}
+    Sleep    600
+    Login to EM via RIS
+
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Flash Midplane Fru    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\Fru_Files\\${CAT}\\Good_Fru\\MIDPLANE\\${Midplane_Bay_No}\\fru.bin
+    ...    AND    Login to Fusion Via REST
+    ...    ANd    Login to EM via RIS
+    ...    AND    RIS EM Reboot    ${active_bay}
+    ...    AND    Sleep    ${EM_REBOOT_TIME}
+    ...    AND    Sleep    600
+    ...    AND    Login to EM via RIS
+
+TC 2: Verify MidplaneFruManufactureForInvalidFault Event
+    [Documentation]    This test will verify fault injection to Midplane device MidplaneFruManufactureForInvalidFault
+    [Tags]    MP    FLM1.01    FRU    Automated
+    ${last_fusion_event_id}=    get last fusion event ID
+    #Flash Midplane Fru with FOO
+    Flash Midplane Fru    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\${midplanefru_foo}
+    Login to Fusion Via REST
+    Login to EM via RIS
+    ${ip}=    Get Diags Active EM IPv6 LL Address
+    ${ping_response_code}=    Ping EM    ${ip}
+    ${active_bay}=    Get Diags EmClusterStatus Active Node
+    Log to Console    Reboot EM
+    RIS EM Reboot    ${active_bay}
+    Sleep    ${EM_Reboot_Time}
+    Sleep    900
+    Login to Fusion Via REST
+    Login to EM via RIS
+    ${ManufacturedFor}=    Get ManufacturedFor From Midplane FRU
+    Should Be Equal As Strings    ${ManufacturedFor}    Foo
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log Last 50 Midplane
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_Midplane_FruMismatch}    ${Chassis_Device}    1    1500
+    Verify Fusion Event Sent By EM    ${EL_Midplane_FruMismatch}    ${last_fusion_event_id}
+    #Flash Midplane Fru with HPE
+    Flash Midplane Fru    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\Fru_Files\\${CAT}\\Good_Fru\\MIDPLANE\\${Midplane_Bay_No}\\fru.bin
+    Login to Fusion Via REST
+    Login to EM via RIS
+    ${ip}=    Get Diags Active EM IPv6 LL Address
+    ${ping_response_code}=    Ping EM    ${ip}
+    ${active_bay}=    Get Diags EmClusterStatus Active Node
+    Log to Console    Reboot EM
+    RIS EM Reboot    ${active_bay}
+    Sleep    ${EM_Reboot_Time}
+    Sleep    600
+    Login to EM via RIS
+    ${ManufacturedFor}=    Get ManufacturedFor From Midplane FRU
+    Should Be Equal As Strings    ${ManufacturedFor}    HPE
+
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Flash Midplane Fru    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\Fru_Files\\${CAT}\\Good_Fru\\MIDPLANE\\${Midplane_Bay_No}\\fru.bin
+    ...    AND    Login to Fusion Via REST
+    ...    AND    Login to EM via RIS
+    ...    AND    RIS EM Reboot    ${active_bay}
+    ...    AND    Sleep    ${EM_REBOOT_TIME}
+    ...    AND    Sleep    600
+    ...    AND    Login to EM via RIS
+
+TC 03: Verify MidplaneFault
+    [Documentation]    This test will validate ManufacturedFor field in Midplane is Invalid for MidplaneFault
+    [Tags]    MP    FLM1.01    Automated
+    Log    message=Sending fault for midplane device and verify failed status/alert event in diags audit log    console=True
+    Login to Fusion Via REST
+    ${last_fusion_event_id}=    get last fusion event ID
+    ${status}=    Set EM RIS FRU Faults    ${MP_Device}    True
+    Should Be Equal As Strings    ${status}    <Response [200]>
+    Sleep    ${EM_Mgmt_Start_Wait}    #Wait time for mgmt to restart after injecting Midplane Fru fault
+    ${encl_status}=    Get Enclosure Health
+    Should Be Equal    ${encl_status}    ${HEALTH_CRITICAL}
+    #Verifying fault event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log Last 50 Midplane
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_Midplane_FruFault}    Chassis    1    650
+    Verify Fusion Event Sent By EM    ${EL_Midplane_FruFault}    ${last_fusion_event_id}
+    Log    message=Sending fault off for midplane device    console=True
+    ${status}=    Set EM RIS FRU Faults    ${MP_Device}    False
+    Should Be Equal As Strings    ${status}    <Response [200]>
+    Sleep    ${EM_Mgmt_Start_Wait}    #Wait time for mgmt to restart after injecting Midplane Fru fault
+    Login to EM via RIS
+    Wait for Enclosure Health OK
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Set EM RIS FRU Faults    ${MP_Device}    False
+    ...    AND    Sleep    ${EM_Mgmt_Start_Wait}    AND    Login to EM via RIS    AND    Sleep    1200

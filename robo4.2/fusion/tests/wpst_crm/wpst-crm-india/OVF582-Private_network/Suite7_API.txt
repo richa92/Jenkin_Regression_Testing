@@ -1,0 +1,499 @@
+*** Settings ***
+Documentation     OVF582-TBird/Hafnium:Add Private Network Support.
+Library         Sdumpfunctions
+Library         OperatingSystem
+Library         FusionLibrary
+Library         RoboGalaxyLibrary
+Library         Telnet
+Library         SSHLibrary
+Library         data_variables
+Variables       data_variables.py
+Resource        ../../../resource/fusion_api_all_resource_files.txt
+# Suite Setup    Cleanup For Suite
+# Suite Teardown    Cleanup For Suite
+
+*** Test Cases ***
+Initial Setup
+    [Documentation]    Pre-requsite to test Untagged and Tunnel related test cases
+    # Login to Appliance
+    Set Log Level    TRACE
+    ${Login_resp}    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    Run keyword unless  ${Login_resp[0]['status_code']}== 200   Fail    "Unable to Login"
+
+    # Create Untagged and Tunnel network
+    :For    ${Enet}    IN    @{Untag_Tun}
+    \    ${Enet1_resp}    Fusion Api Create Ethernet Network    ${Enet}
+    \    ${task} =   Wait For Task   ${Enet1_resp}     240s    2s
+    \    Run keyword unless    ${Enet1_resp['status_code']}== 202  Fail    "Unable to Create network"
+    # Create LIG
+    ${body} =   Build LIG body      ${LIGS_TB['ligsup_Untag'][0]}
+    ${lig_resp}    Fusion Api Create LIG    ${body}
+    ${task} =   Wait For Task    ${lig_resp}    400s    2s
+    Log to Console  \n-LIG  created successfully
+
+    # Create Enclosure Group
+    ${eg_resp}    Add Enclosure Group from variable    ${Enc_group}
+    Run Keyword If    '${eg_resp['status_code']}' != '201'    Fail    ELSE    log to console   \n-EG created successfully
+
+    # Create Logical Enclosure
+    ${le_resp}    Add Logical Enclosure from variable    ${Logical_Enclosure[0]}
+    Run Keyword If    '${le_resp['status_code']}' != '200'    Fail    ELSE    log to console   \n-LE created successfully
+
+OVF582_API_TC_112:Verify the traffic flow between the servers when the private network is disabled with Untagged network
+    [Documentation]    Verification of the traffic flow between the servers with Untagged networks and when the private network is disabled mode
+
+    # Create Server profiles
+    ${Server_resp1}    Add Server Profiles from variable    ${server_profile_Untag_1}
+    Log to console    \n-${server_profile_Untag_1[0]['name']} is created successfully.
+    ${Server_resp2}    Add Server Profiles from variable    ${server_profile_Untag_2}
+    Log to console    \n-${server_profile_Untag_2[0]['name']} is created successfully.
+
+    # Power on both servers
+    Power on server    ${server_profile_Untag_1[0]['serverHardwareUri']}
+    Log to console and logfile    \n-Server ${server_profile_Untag_1[0]['serverHardwareUri']} is powered on Successfully
+
+    Power on server    ${server_profile_Untag_2[0]['serverHardwareUri']}
+    Log to console and logfile    \n-Server ${server_profile_Untag_2[0]['serverHardwareUri']} is powered on Successfully
+    Log to console and logfile    \n-Waiting 10 mins for server to boot....
+
+    Sleep    5min
+
+    # Get the server IP
+    ${ip}    Create List
+    :For    ${x}    INRANGE    0    2
+    \    ${ip_list}    Get Valid Server IP list    ${ilo${x+1}_details}    ${server${x+1}_details}    ${up_interface}    ${down_interface}    ${get_interface}
+    \    ${temp}    Convert To String    ${ip_list[0]}
+    \    Append to list    ${ip}    ${temp}
+    Log to console and logfile    Final list-${ip}
+
+    # Verify the traffic pass between the servers
+    Ping should be success    ${iLo1_details}    ${iLo2_details}    ${server1_details}    ${server2_details}    ${ip}
+
+OVF582_API_TC_113:Verify the traffic flow between the servers when the private network is enabled with Untagged network
+    [Documentation]    Verification of the traffic flow between the servers with Untagged networks and when the private network is enabled mode
+
+    # Enabling the private network
+    :For    ${x}    INRANGE    0    2
+    \    ${Enet_resp}    Fusion Api Get Ethernet Networks    param=?filter="'name'=='${Untag_Tun[${x}]['name']}'"
+    \    ${Enet_uri}    Get Variable Value    ${Enet_resp['members'][0]['uri']}
+    \    ${Enet_CT}    Get Variable value    ${Enet_resp['members'][0]['connectionTemplateUri']}
+    \    ${Enet}    Copy Dictionary    ${Untag_Tun[${x}]}
+    \    Set To Dictionary    ${Enet}    privateNetwork    ${pnet_true}
+    \    Set To Dictionary    ${Enet}    connectionTemplateUri    ${Enet_CT}
+    \    ${Enet_1_edit}    Fusion Api Edit Ethernet Network    body=${Enet}    uri=${Enet_uri}
+    \    ${task} =   Wait For Task   ${Enet_1_edit}     240s    2s
+    \    Run Keyword If    '${Enet_1_edit['status_code']}' != '202'    Fail    ELSE    Log to console and logfile    \n-Network Edited Successfully
+    Sleep    50
+    # Verify the interconnect state is configured or not
+    ${Validate_state_IC}    Get IC and Verify state    ${IC_Configured}
+
+    # Get server IP
+    ${ip}    Create List
+    :For    ${x}    INRANGE    0    2
+    \    ${ip_list}    Get Valid Server IP list    ${ilo${x+1}_details}    ${server${x+1}_details}    ${up_interface}    ${down_interface}    ${get_interface}
+    \    ${temp}    Convert To String    ${ip_list[0]}
+    \    Append to list    ${ip}    ${temp}
+    Log to console and logfile    Final list-${ip}
+
+    # Verify the traffic pass between the servers
+    Ping should fail    ${iLo1_details}    ${iLo2_details}    ${server1_details}    ${server2_details}    ${ip}
+
+OVF582_API_TC_115:Verify the traffic flow between the servers when the private network is enabled with Tunnel network
+    [Documentation]    Verification of the traffic flow between the servers with Tunnel networks and when the private network is enabled mode
+    # power off the servers
+    Power off server    ${server_profile_Untag_1[0]['serverHardwareUri']}
+    Power off server    ${server_profile_Untag_2[0]['serverHardwareUri']}
+
+    # Delete the server profiles with the untagged network
+    ${del_pro1}    Fusion Api Delete Server Profile    param=?filter="'name'=='${server_profile_Untag_1[0]['name']}'"
+    ${task} =   Wait For Task    ${del_pro1}    400s    2s
+    ${del_pro2}    Fusion Api Delete Server Profile    param=?filter="'name'=='${server_profile_Untag_2[0]['name']}'"
+    ${task} =   Wait For Task    ${del_pro2}    400s    2s
+
+    # Edit LIG and perform UFG for tunnel networks
+    ${body} =   Build LIG body      ${LIGS_TB['ligsup_Tun'][0]}
+    ${lig} =         Get LIG Member      ${LIG1}
+    ${lig_uri} =    Get LIG Uri         ${LIG1}
+    ${resp} =     Fusion Api Edit LIG    body=${body}        uri=${lig_uri}
+    Log to console and logfile    ${resp}
+    ${task} =    Wait For Task     ${resp}     120s
+    ${valDict} =     Create Dictionary    status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response    ${task}    ${valDict}
+    ${li_uri} =     Get LI URI   ${LE}-${LIG_1}
+    Perform an LI Update From Group    ${li_uri}
+
+    # Create the servers with Tunnel network
+    ${Server_resp1}    Add Server Profiles from variable    ${server_profile_Tunnel_1}
+    Log to console    \n-${server_profile_Tunnel_1[0]['name']} is created successfully.
+    ${Server_resp2}    Add Server Profiles from variable    ${server_profile_Tunnel_2}
+    Log to console    \n-${server_profile_Tunnel_2[0]['name']} is created successfully.
+
+    # Power On the servers
+    Power on server    ${server_profile_Tunnel_1[0]['serverHardwareUri']}
+    Log to console and logfile    \n-Server ${server_profile_Tunnel_1[0]['serverHardwareUri']} is powered on Successfully
+
+    Power on server    ${server_profile_Tunnel_2[0]['serverHardwareUri']}
+    Log to console and logfile    \n-Server ${server_profile_Tunnel_2[0]['serverHardwareUri']} is powered on Successfully
+    Log to console and logfile    \n-Waiting 10 mins for server to boot...
+
+    Sleep    10min
+
+    # Get server IP
+    ${ip}    Create List
+    :For    ${x}    INRANGE    0    2
+    \    ${ip_list}    Get Valid Server IP list    ${ilo${x+1}_details}    ${server${x+1}_details}    ${up_interface}    ${down_interface}    ${get_interface}
+    \    ${temp}    Convert To String    ${ip_list[0]}
+    \    Append to list    ${ip}    ${temp}
+    Log to console and logfile    Final list-${ip}
+
+    # Verify the traffic pass between the servers
+    Ping should fail    ${iLo1_details}    ${iLo2_details}    ${server1_details}    ${server2_details}    ${ip}
+
+OVF582_API_TC_114:Verify the traffic flow between the servers when the private network is disabled with Tunnel networks
+    [Documentation]    Verification of the traffic flow between the servers with Tunnel networks and when the private network is disabled mode
+    # Disable the private network
+    :For    ${x}    INRANGE    0    2
+    \    ${Enet_resp}    Fusion Api Get Ethernet Networks    param=?filter="'name'=='${Untag_Tun[${x}]['name']}'"
+    \    ${Enet_uri}    Get Variable Value    ${Enet_resp['members'][0]['uri']}
+    \    ${Enet_CT}    Get Variable value    ${Enet_resp['members'][0]['connectionTemplateUri']}
+    \    ${Enet}    Copy Dictionary    ${Untag_Tun[${x}]}
+    \    Set To Dictionary    ${Enet}    privateNetwork    ${pnet_false}
+    \    Set To Dictionary    ${Enet}    connectionTemplateUri    ${Enet_CT}
+    \    ${Enet_1_edit}    Fusion Api Edit Ethernet Network    body=${Enet}    uri=${Enet_uri}
+    \    ${task} =   Wait For Task   ${Enet_1_edit}     240s    2s
+    \    Run Keyword If    '${Enet_1_edit['status_code']}' != '202'    Fail    ELSE    Log to console and logfile    \n-Network Edited Successfully
+    Sleep    50
+
+    # Verify the interconnect is configured or not
+    ${Validate_state_IC}    Get IC and Verify state    ${IC_Configured}
+
+    # Get the server IP
+    ${ip}    Create List
+    :For    ${x}    INRANGE    0    2
+    \    ${ip_list}    Get Valid Server IP list    ${ilo${x+1}_details}    ${server${x+1}_details}    ${up_interface}    ${down_interface}    ${get_interface}
+    \    ${temp}    Convert To String    ${ip_list[0]}
+    \    Append to list    ${ip}    ${temp}
+    Log to console and logfile    Final list-${ip}
+
+    # Verify the traffic pass between the servers
+    Ping should be success    ${iLo1_details}    ${iLo2_details}    ${server1_details}    ${server2_details}    ${ip}
+
+*** Keywords ***
+Login to OneView via REST
+    [Documentation]     Login to the appliance with the credentials
+    [Tags]  add   POSITIVE
+    Set Log Level    TRACE
+    ${resp}     Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+
+Perform an LI Update From Group
+    [Documentation]    Perform an LI Update From Group
+    ...             Example:
+    ...             Perform an LI Update From Group    ${li}    ${interval}
+    [Arguments]       ${li}=${LE}-${LIG1}     ${timeout}=20 min    ${interval}=15s
+    ${resp} =       Fusion Api Update from group    ${li}
+    ${task} =       Wait For Task       ${resp}     ${timeout}        ${interval}
+    ${valDict} =    Create Dictionary   status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response    ${task}    ${valDict}
+
+Ping should be success
+    [Documentation]    Verify the traffic pass between two linux servers are allowed
+    [Arguments]        ${iLo1_details}    ${iLo2_details}    ${server1_details}    ${server2_details}    ${ips}
+    Log to console and logfile    \n*** Verifying the connectivity between the servers ***
+    ${out} =    Login to linux server via iLo    ${iLo1_details}    ${server1_details}    ${ips[1]}
+    Should Contain    ${out}    ttl=
+    Should Contain    ${out}    0% packet loss
+
+    ${out} =    Login to linux server via iLo    ${iLo2_details}    ${server2_details}    ${ips[0]}
+    Should Contain    ${out}    ttl=
+    Should Contain    ${out}    0% packet loss
+
+Ping should fail
+    [Documentation]    Verify the traffic pass between two windows servers are blocked
+    [Arguments]    ${iLo1_details}    ${iLo2_details}    ${server1_details}    ${server2_details}    ${ips}
+    Log to console and logfile    \n*** Verifying the connectivity between the servers ***
+    ${out} =    Login to linux server via iLo    ${iLo1_details}    ${server1_details}    ${ips[1]}
+    Should Not Contain    ${out}    ttl=
+
+    ${out} =    Login to linux server via iLo    ${iLo2_details}    ${server2_details}    ${ips[0]}
+    Should Not Contain    ${out}    ttl=
+
+Verify Interconnect State
+    [Documentation]    Verify the interconnect state
+    [Arguments]        ${interconnectname_1}        ${POWER_STATE}
+    Log to Console    Verify interconnect
+    ${ic} =    Get IC    ${interconnectname_1}
+    ${State} =    Get From IC        ${ic}    state
+    Log to Console and logfile    ${State}
+    Log to console and logfile    Interconnect state is ${interconnectname_1}:${State}
+    Should Be Equal As Strings    ${State}    ${POWER_STATE}
+
+Get IC
+    [Documentation]    Get the required interconnect response body
+    [Arguments]        ${ICM_NAME}
+    ${resp} =   fusion api get interconnect
+    Log        ${resp}
+    ${ics} =     Get From Dictionary     ${resp}    members
+    ${l} =     Get Length    ${ics}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \   ${ic} =     Get From List   ${ics}    ${x}
+    \     Exit For Loop If     '${ic['name']}' == '${ICM_NAME}'
+    [Return]    ${ic}
+
+Get from IC
+    [Documentation]    Get the required element from the interconnect
+    [Arguments]     ${ic}   ${element}
+    ${return} =     Get From Dictionary     ${ic}   ${element}
+    [Return]    ${return}
+
+Get Server IP Linux
+    [Documentation]    Gets the valid ip of the linux server
+    [Arguments]         ${linux_ilo_details}    ${linux_server_details}
+    SSHLibrary.Open Connection     ${linux_ilo_details['ilo_ip']}     prompt=>     timeout=20s
+    ${login}    SSHLibrary.Login               ${linux_ilo_details['username']}     ${linux_ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    20sec
+    SSHLibrary.Read
+    Sleep    5sec
+    SSHLibrary.Write     ${linux_server_details['username']}
+    Sleep    10sec
+    SSHLibrary.Write     ${linux_server_details['password']}
+    Sleep    10sec
+    SSHLibrary.Read
+    SSHLibrary.Write     ip addr
+    Sleep    10sec
+    ${stdout}    SSHLibrary.Read
+    SSHLibrary.Close All Connections
+    [Return]    ${stdout}
+
+Login to linux server via iLo
+    [Documentation]    Ping server via iLo
+    [Arguments]         ${ilo_details}    ${server_details}    ${ip}
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=45s
+    ${login}    SSHLibrary.Login    ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Write    ${server_details['username']}
+    Sleep    10sec
+    SSHLibrary.Write    ${server_details['password']}
+    Sleep    5sec
+    SSHLibrary.Read Until    ~]#
+    SSHLibrary.write    ping -c 120 ${ip}
+    Sleep    240sec
+    ${cmd_out}    SSHLibrary.Read
+    Log to console and logfile    ${cmd_out}
+    SSHLibrary.Close All Connections
+    [Return]    ${cmd_out}
+
+Get IP and Adapter
+    [Documentation]    Get the server ip and the adapters in the server
+    [Arguments]         ${ip_adapter}
+    ${ret}    Get Regexp Matches    ${ip_adapter}    inet (\\d+.\\d+.\\d+.\\d+)\\/\\d+\\s+brd.*(\\w+)
+    ${match} =    Create List
+    ${length1} =    Get Length  ${ret}
+    :FOR    ${x}    IN RANGE    0   ${length1}
+    \    Append To List   ${match}    ${ret[${x}]}
+    ${length} =     Get Length  ${match}
+    ${Ip_List} =    Create List
+    ${Adapter_name} =    Create List
+    :FOR    ${x}    IN RANGE    0   ${length}
+    \    ${Ret}    ${match1}    ${match2}    Should Match Regexp    ${match[${x}]}    inet (\\d+.\\d+.\\d+.\\d+)\\/\\d+\\s+brd.*(\\w+)
+    \    Log to console   values ${match[${x}]}
+    \    Append To List   ${Ip_List}    ${match1}
+    \    ${Adapter_list}    Fetch From Right        ${Ret}      global
+    \    ${temp}    Remove Whitespace    ${Adapter_list}
+    \    Append To List   ${Adapter_name}    ${temp}
+
+    Log to console  final list ${Ip_List}
+    Log to console   final list2 ${Adapter_name}
+    [Return]    ${Ip_List}    ${Adapter_name}
+
+Get Server IP
+    [Documentation]    Get the all the ip inside the server
+    [Arguments]         ${server_ip}
+    ${ret}    Get Regexp Matches    ${server_ip}    inet (\\d+.\\d+.\\d+.\\d+)\\/\\d+\\s+brd.*(\\w+)
+    ${match} =    Create List
+    ${length1} =    Get Length  ${ret}
+    :FOR    ${x}    IN RANGE    0   ${length1}
+    \    Append To List   ${match}    ${ret[${x}]}
+    ${length} =     Get Length  ${match}
+    ${Ip_List} =    Create List
+    ${Adapter_name} =    Create List
+    :FOR    ${x}    IN RANGE    0   ${length}
+    \    ${Ret}    ${match1}    Should Match Regexp    ${match[${x}]}    inet (\\d+.\\d+.\\d+.\\d+)\\/\\d
+    \    Log to console   values ${match[${x}]}
+    \    Append To List   ${Ip_List}    ${match1}
+    Log to console  final list ${Ip_List}
+    [Return]    ${Ip_List}
+
+Get Valid Server IP list
+    [Documentation]    Get the only the valid ip of the one or more servers
+    [Arguments]    ${ilo_details}    ${server_details}    ${up_interface}    ${down_interface}    ${get_interface}
+    ${Adapter_list}    Get Valid Interface List    ${ilo_details}    ${server_details}    ${up_interface}    ${down_interface}
+    ${ifconfig_output_list}    Create List
+    ${Len_of_adapter}    Get Length    ${Adapter_list}
+    :For    ${x}    INRANGE    0    ${Len_of_adapter}
+    \    ${ifconfig_name}    Replace String Using Regexp    ${get_interface}    interface-name    ${Adapter_list[${x}]}
+    \    ${Ip_output}    Get Valid Server IP    ${ilo_details}    ${server_details}    ${ifconfig_name}
+    \    Log to console and logfile    ${Ip_output}
+    \    Append to list    ${ifconfig_output_list}    ${Ip_output}
+    ${temp_list}    Convert To String    ${ifconfig_output_list}
+
+    ${ret}    Get Regexp Matches    ${temp_list}    inet (\\d+.\\d+.\\d+.\\d+)\\s+netmask
+    ${match} =    Create List
+    ${length1} =    Get Length  ${ret}
+    :FOR    ${x}    IN RANGE    0   ${length1}
+    \    Append To List   ${match}    ${ret[${x}]}
+    ${length} =     Get Length  ${match}
+    ${Ip_List} =    Create List
+    :FOR    ${x}    IN RANGE    0   ${length}
+    \    ${Ret}    ${match1}    Should Match Regexp    ${match[${x}]}    inet (\\d+.\\d+.\\d+.\\d+)\\s+netmask
+    \    Log to console   values ${match[${x}]}
+    \    Append To List   ${Ip_List}    ${match1}
+    Log to console and logfile    ${Ip_List}
+    [Return]    ${Ip_List}
+
+Get Valid Interface List
+    [Documentation]    Get the all the interface of the server and return only the required server
+    [Arguments]    ${ilo_details}    ${server_details}    ${up_interface}    ${down_interface}
+    ${ip_adapter}    Get Server IP Linux    ${ilo_details}    ${server_details}
+    ${ret}    Get Regexp Matches    ${ip_adapter}    \\d+:\\s+(.*):\\s+<BROADCAST
+    ${ret_1}    Get Regexp Matches    ${ip_adapter}    \\d+:\\s+(.*):\\s+<NO-CARRIER
+    ${Interface_list} =    Create List
+    ${length} =     Get Length  ${ret}
+    :FOR    ${x}    IN RANGE    0   ${length}
+    \    Append To List   ${Interface_list}    ${ret[${x}]}
+    ${length} =     Get Length    ${Interface_list}
+    ${Adapter_name} =    Create List
+    :FOR    ${x}    IN RANGE    0   ${length}
+    \    ${ret}    ${match}    Should Match Regexp    ${Interface_list[${x}]}    \\d+:\\s+(.*):\\s+<BROADCAST
+    \    Log to console   values ${match}
+    \    Append To List   ${Adapter_name}    ${match}
+    Remove Values From List    ${Adapter_name}    virbr0-nic
+
+    ${Len_of_adapter}    Get Length    ${Adapter_name}
+    ${Adapter_list}    Create list
+    :FOR    ${x}    INRANGE    0    ${Len_of_adapter}
+    \    ${temp}    Convert To String    ${Adapter_name[${x}]}
+    \    Append to list    ${Adapter_list}    ${temp}
+    Log to console and logfile    ${Adapter_list}
+
+    ${Len_of_adapter_list}    Get Length    ${Adapter_list}
+    :FOR    ${x}    INRANGE    0    ${Len_of_adapter_list}
+    \    ${ifup_adapter}    Replace String Using Regexp   ${up_interface}    interface-name    ${Adapter_list[${x}]}
+    \    Up the Interface    ${ilo_details}    ${server_details}    ${ifup_adapter}
+
+    ${Non_Interface_list} =    Create List
+    ${length} =     Get Length  ${ret_1}
+    :FOR    ${x}    IN RANGE    0   ${length}
+    \    Append To List   ${Non_Interface_list}    ${ret_1[${x}]}
+
+    ${length} =     Get Length    ${Non_Interface_list}
+    ${Non_Adapter_name} =    Create List
+    :FOR    ${x}    IN RANGE    0   ${length}
+    \    ${ret}    ${match}    Should Match Regexp    ${Non_Interface_list[${x}]}    \\d+:\\s+(.*):\\s+<NO-CARRIER
+    \    Log to console   values ${match}
+    \    Append To List   ${Non_Adapter_name}    ${match}
+    Remove Values From List    ${Non_Adapter_name}    virbr0
+
+    ${Len_of_non_adapter}    Get Length    ${Non_Adapter_name}
+    ${Non_Adapter_list}    Create list
+    :FOR    ${x}    INRANGE    0    ${Len_of_adapter}
+    \    ${temp}    Convert To String    ${Non_Adapter_name[${x}]}
+    \    Append to list    ${Non_Adapter_list}    ${temp}
+    Log to console and logfile    ${Non_Adapter_list}
+
+    ${Len_of_non_adapter_list}    Get Length    ${Non_Adapter_list}
+    :FOR    ${x}    INRANGE    0    ${Len_of_non_adapter_list}
+    \    ${ifdown_adapter}    Replace String Using Regexp   ${down_interface}    interface-name    ${Non_Adapter_list[${x}]}
+    \    Down the Interface    ${ilo_details}    ${server_details}    ${ifdown_adapter}
+
+    [Return]    ${Adapter_list}
+
+Get Valid Server IP
+    [Documentation]    Get the only the valid ip of the server
+    [Arguments]         ${ilo_details}    ${server_details}    ${ifconfig_adapter_name}
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=20s
+    ${login}    SSHLibrary.Login    ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Write    ${server_details['username']}
+    Sleep    10sec
+    SSHLibrary.Write    ${server_details['password']}
+    Sleep    10sec
+    SSHLibrary.Read Until    ~]#
+    SSHLibrary.write    ${ifconfig_adapter_name}
+    Sleep    10sec
+    ${cmd_out}    SSHLibrary.Read
+    SSHLibrary.Close All Connections
+    [Return]    ${cmd_out}
+
+Down the Interface
+    [Documentation]    Disconnect the interface/off the interface inside server
+    [Arguments]         ${ilo_details}    ${server_details}    ${ifdown_adapter}
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=20s
+    ${login}    SSHLibrary.Login    ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Write    ${server_details['username']}
+    Sleep    10sec
+    SSHLibrary.Write    ${server_details['password']}
+    Sleep    10sec
+    SSHLibrary.Read Until    ~]#
+    SSHLibrary.write    ${ifdown_adapter}
+    Sleep    10sec
+    SSHLibrary.Close All Connections
+
+Up the Interface
+    [Documentation]    Up the interface/connect the interface inside server
+    [Arguments]         ${ilo_details}    ${server_details}    ${ifup_adapter}
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=20s
+    ${login}    SSHLibrary.Login    ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Write    ${server_details['username']}
+    Sleep    10sec
+    SSHLibrary.Write    ${server_details['password']}
+    Sleep    10sec
+    SSHLibrary.Read Until    ~]#
+    SSHLibrary.write    ${ifup_adapter}
+    Sleep    10sec
+    SSHLibrary.Close All Connections
+
+Get IC and Verify state
+    [Documentation]    Get the IC state and Verify is that Configured
+    [Arguments]    ${IC_Configured}
+    ${IC_output}    Fusion Api Get Interconnect
+    ${Num_IC}    Get Variable Value    ${IC_output['count']}
+    :For    ${x}    INRANGE    0    ${Num_IC}
+    \    Wait Until Keyword Succeeds    650s   35 s    Verify Interconnect State    ${IC_output['members'][${x}]['name']}    ${IC_Configured}
+    Sleep    50
+
+Cleanup For Suite
+    [Documentation]    Returns appliance to a 'clean' state by removing all resources\enclosures
+    Log to console and logfile  [Cleanup]
+    Login to OneView via REST
+    Power off ALL Servers
+    Remove All Server Profiles
+    Remove All Logical Enclosures
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove All Network Sets
+    Remove ALL Ethernet Networks
+    Remove ALL FC Networks

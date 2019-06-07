@@ -1,0 +1,133 @@
+*** Settings ***
+Documentation     Compare ICM FRU output from the Webapp & RIS call to a foundation of truth.
+...    = USAGE =
+...    | pybot | -v FUSION_IP:Stephen-HPOneView.rsn.hp.com | icm_fru_read.txt |
+...    | pybot | -v FUSION_IP:Stephen-HPOneView.rsn.hp.com | -v EM_IP:16.114.179.116 | icm_fru_read.txt |
+...    = Variables =
+...    | FUSION_IP | Required. IP address or hostname of the Fusion 2.0 appliance. |
+...    | EM_IP | Optional. IP address or hostname of the Enclosure Manager to which the enclosure belongs.  Default value is for DCS. |
+
+Variables         ../resources/variables.py    ${ENCLOSURE}    # Variables file
+
+Library		  json
+Library           RoboGalaxyLibrary                    # DVTs Robot Framework extensions
+Library           FusionLibrary                        # DVTs Robot Framework extensions
+Library           OperatingSystem                      # For opening files
+Resource          ../resources/defaults.txt            # Comet-DVT default variables
+Resource          ../resources/fusion_api.txt          # Comet-DVT Fusion API extensions
+Resource          ../resources/fusion_cli.txt          # Comet-DVT Fusion CLI extensions
+Resource          ../resources/hal_webapp.txt          # Comet-DVT HAL Webapp extensions
+Resource          ../resources/system_info.txt   # Comet-DVT fusion API extensions
+
+Force Tags        HAL  DCS  HW
+
+*** Variables ***
+${ModelFile}		../data/HpICMPotashFru.1.0.0.json
+${EMPTYBAY}		11
+
+*** Test Cases ***
+
+Find ICM Bays
+    [Documentation]      Discovers all ICM bays in a system so we can test their contents
+    ${ICMBayURL}=        Set Variable If   ${DCS} == True    /rest/v1/Chassis/1/InterconnectBays     /rest/v1/InterconnectBays
+    ${Filled}   ${Unfilled}=   Find Filled Bays    ${ICMBayURL}
+    ${Filled}	      	 Create List    1
+    ${NoFilled}=    	 Get Length    ${Filled}
+    Run Keyword If       ${NoFilled} < 1
+    ...			 Fatal Error          No ICMs found, exiting...
+    ${EMPTYBAY}=  Run Keyword If       ${NoFilled} < 4
+    ...			 Select Random ELement From List    ${Unfilled}
+    ${Bay Number}=       Select Random ELement From List    ${Filled}
+    ${Bay Number}=       Convert To Integer   ${Bay Number}
+    Set Suite Variable   ${Bay Number}
+    Set Suite Variable   ${EMPTYBAY}
+
+Test ICM Contents
+    [Documentation]         Compares the FRU data from RIS with that from the Webapp.
+    ${ParamDict}            Create Dictionary    BayNumber    ${Bay Number}
+    ${WebappResponse}       HAL API Perform POST Action       ${FUSION_IP}    IcmFruRead    ${ParamDict}
+    ${CallStatus}           Find Errors In HAPI Response      ICM Bay ${Bay Number}    ${WebappResponse}    performAction    IcmFruRead    ${ParamDict}
+    ${WebappResponse}       Get From Dictionary    	      ${WebappResponse}    OperationResult
+    ${HALFRU}=      	    Get From Dictionary    	      ${WebAppResponse}    Parsed
+    ${Preamble}=            Get From Dictionary		      ${HALFRU}    	   Preamble
+    ${Model}=		    Get From Dictionary		      ${Preamble}		Model
+    ${ModelFile}=   Run Keyword If	    "${Model}" == "HP Virtual Connect 40Gb F8 Interconnect"
+    ...     OperatingSystem.Get File	    ../data/HpICMPotshFru.1.0.0_nontaa.json
+    ...   ELSE IF	    "${Model}" == "HP FlexFabric 10GbE Expansion Module"
+    ...     OperatingSystem.Get File	    ../data/HpICM_CL10Fru.1.0.4.json
+    ...   ELSE
+    ...     Fatal Error	    msg=No Potash or Chloride10 ICMs found
+    ${Schema}		    loads			    ${ModelFile}
+    ${ExpectFRU}=           Set Variable    	   	    ${Schema}
+    ${ExpPreamble}=         Get From Dictionary		    ${ExpectFRU}	 Preamble
+
+    # Remove fields which are not verified
+    Remove From Dictionary  ${ExpPreamble}		    FactoryTimeStamp     LastModified
+    Remove From Dictionary  ${Preamble}			    FactoryTimeStamp     LastModified
+
+    # Compare
+    ${Count}   ${Diffs}=    Diff JSON Structures            ${ExpPreamble}	 ${Preamble}
+    Log	       		    ${Diffs}
+    Run Keyword If    	    ${Count} > 0
+    ...	   Log       	    HAL ICM FRU Preamble does not match Spec FRU: Issue AMXX    level=WARN
+
+    Remove From Dictionary  ${ExpectFRU}    		    Preamble
+    Remove From Dictionary  ${HALFRU}    		    Preamble
+
+    # Compare Dictionaries
+    ${Count}   ${Diffs}=    Diff JSON Structures            ${ExpectFRU}	 ${HALFRU}
+    Log	       		    ${Diffs}
+    Run Keyword If    	    ${Count} > 0
+    ...	   Log       	    HAL ICM FRU does not match Spec FRU: Issue AMXX      level=WARN
+
+    Set Suite Variable	    ${HALFRU}
+    Set Suite Variable	    ${Preamble}
+
+Verify ICM HAL FRU with EM RIS
+    [Documentation]    	    Compares the FRU data from RIS with that from the Webapp.
+
+    # Fetch the RIS response and the Webapp response
+    ${RISResponse}=    	    HAL API Get Resource	    ${FUSION_IP}   ${EM_IP}    /rest/v1/InterconnectFru/${bay number}
+    ${RISResponse}=    	    Get Resource From Response      ${RISResponse}
+    ${RISResponse}=    	    Get From Dictionary		    ${RISResponse}	 Parsed
+    ${ExpPreamble}=         Get From Dictionary		    ${RISResponse}	 Preamble
+    Remove From Dictionary  ${ExpPreamble}		    FactoryTimeStamp     LastModified
+    
+    # Make sure RIS response & Webapp response are identical
+    ${Count}   ${Diffs}=    Diff JSON Structures            ${ExpPreamble}	 ${Preamble}
+    Run Keyword If    	    ${Count} > 0
+    ...	   Log       	    HAL ICM FRU Preamble does not match RIS FRU: Issue AMXX    level=WARN
+
+    Remove From Dictionary  ${RISResponse}    		    Preamble
+
+    # Make sure RIS response & Webapp response are identical
+    ${Count}   ${Diffs}=    Diff JSON Structures            ${RISResponse}	 ${HALFRU}
+    Run Keyword If    	    ${Count} > 0
+    ...	   Log       	    HAL ICM FRU does not match RIS FRU: Issue AMXX	 level=WARN
+
+Test Higher ICM Bays
+    [Documentation]    Tests for the absence of nonexistent ICM bays
+    Test Invalid ICM Bay Contents    ${EMPTYBAY}
+
+Test Negative ICM Bays
+    [Documentation]    Tests for the absence of nonexistent ICM bays
+    ${Invalids}=         Create List   ${-1}    ${0}   ${7}
+    : For    ${Bay Number}    In       ${Invalids}
+    \    Test Invalid ICM Bay Contents    ${Bay Number}
+
+*** Keywords ***
+
+Test Invalid ICM Bay Contents
+    [Arguments]	    ${Bay}
+    ${ParamDict}    Create Dictionary    BayNumber    ${BAY}
+    ${Response}     HAL API Perform POST Action    ${FUSION_IP}    IcmManagerUrlRead    ${ParamDict}
+    ${CallStatus}   Find Errors In HAPI Response    ICM Manager ${Bay Number}    ${Response}    performAction    IcmManagerUrlRead    ${ParamDict}
+    Run Keyword And Expect Error    *
+    ...    Fail On Any Errors In HAPI Response    ${CallStatus}
+
+Diff JSON Structures
+    [Arguments]		${A}	${B}
+    ${Diffs}=	  	    Evaluate         		    datadiff.diff(${A},${B}).stringify()	datadiff
+    ${DiffLines}=	    Get Lines Matching RegExp	    ${Diffs}	.*[+-]u'.*
+    ${Diff}=		    Get Line Count    		    ${DiffLines}
+    [return]		    ${Diff}       		    ${DiffLines}    

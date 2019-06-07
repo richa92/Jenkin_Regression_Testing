@@ -1,0 +1,508 @@
+*** Settings ***
+Documentation       Plexxi
+Library             RoboGalaxyLibrary
+Library             FusionLibrary
+Library             SSHLibrary
+Variables           data_variables.py
+Resource            ../../../../../Resources/api/fusion_api_resource.txt
+Resource			../../TBIRD/FVT/Resources/fvt_resource.txt
+Library				../../TBIRD/FVT/fvt_api.py
+Suite Setup			Login User
+
+***Variables***
+${minVlan}	400
+${maxVlan}	450
+${rns_start} 	430
+
+*** Keywords ***
+Login User
+    [Documentation]     Login Administrator To OneView
+    Set Log Level    Trace
+    Fusion Api Login Appliance    ${appliance_ip}    ${admin_credentials}
+	[Return]
+
+Wait For Task To Complete 
+    [Documentation]    ait For Task To Complete
+	[Arguments]	${task}	${timeout}=10m	${interval}=1s
+	Should Be Equal As Integers	${task['status_code']}	202
+	${task} =	Wait For Task	${task}	${timeout}	${interval}
+	Should Match Regexp	${task['taskState']}	Completed|Warning
+	[Return]	${task}
+
+Create Bulk Ethernet Networks
+	[Documentation]	Create All Networks To Be used
+	Set To Dictionary	${networks}	vlanIdRange	${minVlan}-${maxVlan}
+	${task} =	Fusion Api Create Ethernet Bulk Networks	${networks}
+	${task} =	Wait For Task To Complete	${task}	120m	5s
+	[Return]
+
+Create Networks List
+	[Documentation]	Create A Networks List
+	[Arguments]	${start}
+	${netlist} =	Create List
+	:FOR	${i}	IN RANGE	0	5
+	\	Append To List	${netlist}	net_${start}
+	\	${start} =	Evaluate	${start} + 1
+	[Return]	${netlist}
+	
+Create Network Sets
+	[Documentation]	Create Regular Network Sets
+	${ns_dto} =	Create Dictionary	type=network-setV5
+	...								networkSetType=Regular
+	:FOR	${i}	IN RANGE	1	5
+	\	Set To Dictionary	${ns_dto}	name	RNS_${i}
+	\	${list} =	Create Networks List	${rns_start}	
+	\	Set To Dictionary	${ns_dto}	networkUris	${list}
+	\	Create Network Set	${ns_dto}	timeout=5m	interval=1s
+	\	${resp} =	Fvt Api Get Network Set By Name	RNS_${i}
+	\	Should Be Equal As Strings	${resp['name']}	RNS_${i}
+	\	${rns_start} =	Evaluate	${rns_start} + 5
+	[Return]
+
+Add Server Profile Connections
+    [Documentation]    Add Server Profile Connections 
+	[Arguments]	${connections}
+	:For	${connection}	IN	@{connections}
+	\	${net} =	Get Variable Value	${connection['networkUri']}
+	\	Continue For Loop If	$net == None
+	\	${network} =	Fvt Api Get Ethernet Network By Name	${net}
+	\	${network} =	Run Keyword If	$network == None	Fvt Api Get Network Set By Name	${net}	ELSE	Set Variable	${network}
+	\	Set To Dictionary	${connection}	networkUri	${network['uri']}
+	[Return]
+	
+Add Server Profile Template
+    [Documentation]    Add Server Profile Template 
+	[Arguments]	${spt}
+	${resp} =	Fvt Api Get Server Hardware Type By Name	${spt['serverHardwareTypeUri']}
+	Set to Dictionary	${spt}	serverHardwareTypeUri	${resp['uri']}
+	${connections} =	Get Variable Value	${spt['connectionSettings']['connections']}
+	Run Keyword If	${connections} != None	Add Server Profile Connections	${connections}
+	${task} =	Fusion Api Create Server Profile Template	${spt}
+	${task} =	Wait For Task To Complete	${task}
+	${resp} =	Fvt Api Get Server Profile Template By Name	${spt['name']}
+	Should Not Be Equal As Strings	${resp}	None
+	[Return]
+
+Add Server Profile From Template
+    [Documentation]    Add Server Profile ${profile} From Template ${profile['serverProfileTemplateUri']}
+	[Arguments]	${profile}	${spt}
+	Set To Dictionary	${profile}	serverHardwareTypeUri	${spt['serverHardwareTypeUri']}	
+	Set To Dictionary	${profile}	connectionSettings	${spt['connectionSettings']}
+	Remove From Dictionary	${profile['connectionSettings']}	manageConnections
+	Remove From Dictionary	${profile['connectionSettings']}	complianceControl
+	FVT Add Server Profile	${profile}	timeout=20m	interval=1s	sleep=2m
+	${resp} =	Fvt Api Get Server Profile By Name	${profile['name']}
+	Should Not Be Equal As Strings	${resp}	None
+	[Return]
+	
+Add/Replace Network/Network Set In Profile Connections With Server Powered On
+	[Documentation]	Add Or Replace Network Or Network Set In Profile Connections With Server Powered On
+	[Arguments]	${profile}	${connection}	${network}
+	${resp}	Fvt Api Get Server Hardware By Name	${profile['serverHardwareUri']}
+	Should Be Equal As Strings	${resp['powerState']}	On
+	${resp} =	Fvt Api Get Server Profile By Name	${profile['name']}
+	:For	${con}	IN	@{resp['connectionSettings']['connections']}
+	\	Continue For Loop If	'${con['name']}' != '${connection['name']}'	
+	\	${index} =	Get Index From List	${resp['connectionSettings']['connections']}	${con}
+	\	Exit For Loop
+	${net} =	Fvt Api Get Ethernet Network By Name	${network}
+	${net} =	Run Keyword If	$net == None	Fvt Api Get Network Set By Name	${network}	ELSE	Set Variable	${net}
+	Set To Dictionary	${resp['connectionSettings']['connections'][${index}]}	networkUri	${net['uri']}	
+	${task} =	Fusion Api Edit Server Profile	body=${resp}	uri=${resp['uri']}
+	${task} =	Wait For Task To Complete	${task}
+	[Return]
+
+Power Server 
+    [Documentation]    Perform Power Operation On Server
+	[Arguments]	${server}	${state}=Off	${action}=PressAndHold
+	${resp}	Fvt Api Get Server Hardware By Name	${server}
+	${payload} =	Create Dictionary	powerState=${state}	powerControl=${action}	
+	${resp}	Fusion Api Edit Server Hardware Power State	uri=${resp['uri']}	body=${payload}
+	Should Be Equal As Integers	${resp['status_code']}	202
+	${task} =	Wait For Task	${resp} 	5m	1
+	${resp}	Fvt Api Get Server Hardware By Name	${server}
+	Should Be Equal As Strings	${resp['powerState']}	${state}
+	[Return]
+	
+Get Server Ip Address
+    [Documentation]    Gets the valid IP addresses of the server.
+	[Arguments]	${ilo}
+    SSHLibrary.Open Connection     ${ilo}	prompt=>     timeout=20s
+    SSHLibrary.Login    Administrator     hpvse123
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    SSHLibrary.Read Until    SAC>
+    SSHLibrary.Write    i
+    Sleep    2sec
+    ${stdout}    SSHLibrary.Read	
+    ${ip_str}=    Get Regexp Matches    ${stdout}    Ip=10\\.\\d+\\.\\d+\\.\\d+
+    SSHLibrary.Close All Connections
+	${ip} =	Get Substring	${ip_str[0]}	3
+    [Return]    ${ip}
+	
+Execute command in the Plexxi Switch
+    [Documentation]    Execute command in the Plexxi Switch and return the output
+    [Arguments]    ${ip}    ${command}
+    SSHLibrary.Open Connection     ${ip}
+	SSHLibrary.Login    ${plexxi_credentials['userName']}    ${plexxi_credentials['password']}
+    ${output}    SSHLibrary.Read Until    ${switch_login_prompt}
+    Should contain    ${output}    :~$
+    SSHLibrary.Write    ${sudo_command}
+    ${output}    SSHLibrary.Read Until    ${sudo_login_prompt}
+    Should contain    ${output}    ${sudo_password_prompt}
+    SSHLibrary.Write    ${sudo_password}
+    ${output}    SSHLibrary.Read Until    ${plexxi_switch_prompt}
+    Should contain    ${output}    >
+    SSHLibrary.Write    ${command}
+    ${output}    SSHLibrary.Read Until    ${plexxi_switch_prompt}
+    SSHLibrary.Close all connections
+    [Return]    ${output}
+
+Clean Up Resources
+	[Documentation]   Clean Up All Resources Created	
+	${resp} =	Fusion Api Get Server Profiles
+	:For	${sp}	IN	@{resp['members']}
+	\	${task} =	Fusion Api Delete Server Profile	uri=${sp['uri']}	param=?force=true
+	\	${task} =	Wait For Task To Complete	${task}
+	\	${resp} =	Fvt Api Get Server Profile By Name	${sp['name']}
+	\	Run keyword if	$resp != None	Fail	"Profile ${sp['name']} did not get deleted"	
+	${resp} =	Fusion Api Get Server Profile Templates
+	:For	${spt}	IN	@{resp['members']}
+	\	${task} =	Fusion Api Delete Server Profile Template	uri=${spt['uri']}
+	\	${task} =	Wait For Task To Complete	${task}
+	\	${resp} =	Fvt Api Get Server Profile Template By Name	${spt['name']}
+	\	Run keyword if	$resp != None	Fail	"Profile template ${spt['name']} did not get deleted"	
+	[Return]
+	
+***Test cases****
+Create Networks And Network Sets
+    [Documentation]    \n Create Networks And Network Sets
+	Pass Execution	\n Skip Create Networks And Network Sets
+	Create Bulk Ethernet Networks
+ 	Create Network Sets
+	Pass Execution	\n Finished Create Networks And Network Sets
+
+Integrate OneView To Plexxi Connect 
+    [Documentation]    \n Integrate OneView To Plexxi Connect
+	Pass Execution	\n Skip Integrate OneView To Plexxi Connect
+    Plexxi Api Login   ${plexxi_connect_host}   ${plexxi_credentials['userName']}   ${plexxi_credentials['password']}
+	${task} =   Plexxi Api Add OneView Configuration   ${oneview_config}    
+	Should Be Equal As Integers	${task['status_code']}	200
+    Sleep    3min
+    ${resp}=    Fvt Api Get Fabric By Name    ${Fabric_name}
+    Should Be Equal As Strings     ${resp['state']}	Unmanaged
+	Pass Execution	\n Finished Integrate OneView To Plexxi Connect
+
+Add DL Servers To Oneview 
+    [Documentation]    \n Add DL Servers To Oneview
+	Pass Execution	\n Skip Add DL Servers To Oneview
+	:For	${server}	IN	@{DL_Servers}
+    \	Set To Dictionary    ${DL_Body}    hostname	${server['IP']}
+    \	${task}    Fusion Api Add Server Hardware    ${DL_Body}
+	\   ${task} =	Wait For Task To Complete	${task}    5m    1s
+	\	${resp} =	Fvt Api Get Server Hardware By Name	${server['name']}
+	\	Should Not Be Equal As Strings	${resp}	None
+	Pass Execution	\n Finished Add DL Servers To Oneview
+	
+Claim The Fabric In OneView
+    [Documentation]  \n Claim The Fabric In OneView  
+	Pass Execution	\n Skip Claim the fabric In OneView
+    ${resp}=   Fvt Api Get Fabric By Name    ${Fabric_name}
+    ${task}=    Fusion Api Patch fabric	uri=${resp['uri']}	body=${Fabric_claim}
+    ${task} =	Wait For Task To Complete    ${task}
+    Sleep   1m
+    ${resp}=   Fvt Api Get Fabric By Name    ${Fabric_name}
+	Should Be Equal As Strings	${resp['state']}	Configured
+ 	:For	${sw}	IN	@{plexxi_switches}
+	\	${resp} =	Fvt Api Get Switch By Name	${sw['name']}
+	\	Should Be Equal As Strings	${resp['state']}	Configured
+	Pass Execution	\n Finished Claim the fabric In OneView
+
+Create Logical Switch Group
+    [Documentation]    \n Create Logical Switch Group '${plexxi_lsg['name']}'
+	Pass Execution	\n Skip Create Logical Switch
+	${swmap} = 	Get From Dictionary	   ${plexxi_lsg['switchMapTemplate']}    switchMapEntryTemplates
+    :FOR    ${sw}   IN  @{swmap}
+    \	${swuri} =   Get From Dictionary   ${sw}   permittedSwitchTypeUri
+ 	\	${resp} =   Fvt Api Get Switch Type By Name	${swuri}
+    \	Set to dictionary   ${sw}  permittedSwitchTypeUri   ${resp['uri']}
+	${task} =	Fusion Api Create LSG  	${plexxi_lsg}
+	${task} =	Wait For Task To Complete	${task}
+	${resp} =    Fvt Api Get Logical Switch Group By Name      ${plexxi_lsg['name']}
+	Should Not Be Equal As Strings	${resp}	None
+	Pass Execution	\n Finished Create Logical Switch
+
+Create Logical Switches
+    [Documentation]    \n Create Logical Switches
+	Pass Execution	\n Skip Create Logical Switches
+    ${lsg} =	Fvt Api Get Logical Switch Group By Name   ${plexxi_lsg['name']}
+    :FOR    ${ls}   IN	@{logical_switches}
+	\	Set to dictionary   ${ls}	type	logical-switchV5 
+	\	Set to dictionary   ${ls}	managementLevel	BASIC_MANAGED 
+    \	Set to dictionary   ${ls}	logicalSwitchGroupUri	${lsg['uri']}
+	\	${swUris} =	Fvt Api Get Switch Uris	${ls['switchUris']}
+    \	Set to dictionary	${ls}	switchUris	${swUris}
+	\	${body} =	Create Dictionary	logicalSwitch=${ls}
+	\	${task} =	Fusion Api Create LS	${body}
+	\	${task} =	Wait For Task To Complete	${task}    5m   2s
+	\	${resp} =	Fvt Api Get Logical Switch By Name	${ls['name']}
+	\	Should Not Be Equal As Strings	${resp}	None
+	Pass Execution	\n Finished Create Logical Switch
+
+OVF7257_Add Server Profile With Assigned Connections
+    [Documentation]    \n Create Server Profile With Assigned Connections
+	#Pass Execution	\n Skip Create Server Profile With Assigned Connections
+	Sleep	2m
+	${profile} =	FVT Copy Dictionary	${Profile_assigned_connections}	
+	FVT Add Server Profile	${profile}	timeout=20m	interval=1s	param=?force=true
+	${resp} =	Fvt Api Get Server Profile By Name	${profile['name']}
+	Should Not Be Equal	$resp	None
+	Sleep	2m
+	${output} =	Execute command in the Plexxi Switch	${plexxi_switches[0]['ip']}	show vlan group
+	Should Contain	${output}	${profile['connectionSettings']['connections'][0]['networkUri']}
+	Pass Execution	\n Finished Create Server Profile With No Connections
+
+OVF_7257_Add Connection To Assigned Profile After Server Powered On
+    [Documentation]    \n Add Connection To Assigned Profile After Server Powered On
+	#Pass Execution	\n Skip Add Connections To Profile With Server Powered On
+	Sleep	1m
+	${connection} =	FVT Copy Dictionary	${add_connection}	
+	${resp}	Fvt Api Get Server Hardware By Name	${Profile_assigned_connections['serverHardwareUri']}
+	Run Keyword If	'${resp['powerState']}' != 'On'	Power Server	${Profile_assigned_connections['serverHardwareUri']}	On	MomentaryPress
+	${resp} =	Fvt Api Get Server Profile By Name	${Profile_assigned_connections['name']}
+	${network} =	Fvt Api Get Ethernet Network By Name	${connection['networkUri']}
+	${network} =	Run Keyword If	$network == None	Fvt Api Get Network Set By Name	${connection['networkUri']}	ELSE	Set Variable	${network}
+	Set To Dictionary	${connection}	networkUri	${network['uri']}
+	Append To List	${resp['connectionSettings']['connections']}	${connection}
+	${task} =	Fusion Api Edit Server Profile	body=${resp}	uri=${resp['uri']}
+	${task} =	Wait For Task To Complete	${task}
+	Sleep	2m
+	${output} =	Execute command in the Plexxi Switch	${plexxi_switches[1]['ip']}	show vlan group
+	Should Contain	${output}	${add_connection['networkUri']}
+	Pass Execution	\n Finished Add Connections To Profile After Server Powered On
+	
+OVF7257_Delete Connection From Assigned Profile After Server Powered On
+    [Documentation]    \n Delete A Ethernet Connections From Assigned Profile After Server Powered On
+	#Pass Execution	\n Skip Delete Connection From Assigned Profile After Server Powered On
+	${profile} =	FVT Copy Dictionary	${Profile_assigned_connections}	
+	${resp}	Fvt Api Get Server Hardware By Name	${profile['serverHardwareUri']}
+	Run Keyword If	'${resp['powerState']}' != 'On'	Power Server	${profile['serverHardwareUri']}	On	MomentaryPress
+	${resp} =	Fvt Api Get Server Profile By Name	${profile['name']}
+	${index} =	Get Index From List	${resp['connectionSettings']['connections']}	${conn2}
+	Remove From List	${resp['connectionSettings']['connections']}	${index}
+	${task} =	Fusion Api Edit Server Profile	body=${resp}	uri=${resp['uri']}
+	${task} =	Wait For Task To Complete	${task}
+	Sleep	5s
+	${output} =	Execute command in the Plexxi Switch	${plexxi_switches[1]['ip']}	show vlan group
+	Should Not Contain	${output}	${add_connection['networkUri']}
+	${task} =	Fusion Api Delete Server Profile	name=${profile['name']}	param=?force=true
+	${task} =	Wait For Task To Complete	${task}
+	Pass Execution	\n Finished Delete Connection From Assigned Profile After Server Powered On
+
+OVF7257_Add Server Profile Template With Assigned Connections
+    [Documentation]    \n Add Server Profile Template With Assigned Connections
+	#Pass Execution	\n Skip Add Server Profile Template With Assigned Connections
+	${spt} =	FVT Copy Dictionary	${SPT_assigned_connections}	
+	Add Server Profile Template	${spt}
+	Pass Execution	\n Finished Add Server Profile Template With No Connections
+	
+OVF7257_Add Server Profile With Assigned Connections From Template
+    [Documentation]    \n Add Server Profile From Template ${SPT_assigned_connections['name']}
+	#Pass Execution	\n Skip Add Server Profile From Template
+	Sleep	1m
+	${profile} =	FVT Copy Dictionary	${ProfileTemp_assigned_connections}	
+	Add Server Profile From Template	${profile}	${SPT_assigned_connections}	
+	Sleep	2m
+	${output} =	Execute command in the Plexxi Switch	${plexxi_switches[2]['ip']}	show vlan 401
+	Should Contain	${output}	401
+	Pass Execution	\n Finished Add Server Profile From Template
+
+OVF7257_Add Connections To Assigned Server Profile Template
+    [Documentation]    \n Add Ethernet Connection To Assigned Server Profile Template
+	#Pass Execution	\n Skip Add Ethernet Connection To Assigned Server Profile Template 
+	Sleep	1m
+	${conn} =	FVT Copy Dictionary	${add_connection}	
+	${resp} =	Fvt Api Get Server Profile Template By Name	${SPT_assigned_connections['name']}
+	${network} =	Fvt Api Get Ethernet Network By Name	${conn['networkUri']}
+	${network} =	Run Keyword If	${network} == None	Fvt Api Get Network Set By Name	${conn['networkUri']}
+					...	ELSE	Set Variable	${network}
+	Set To Dictionary	${conn}	networkUri	${network['uri']}
+	Append To List	${resp['connectionSettings']['connections']}	${conn}
+	${task} =	Fusion Api Edit Server Profile Template	body=${resp}	uri=${resp['uri']}
+	${task} =	Wait For Task To Complete	${task}
+	Pass Execution	\n Finished Add Ethernet Connection To Assigned Server Profile Template
+	
+OVF7257_Update Assigned Connections Server Profile From Template
+    [Documentation]    \n Update Server Profile From Template
+	Sleep	1m
+	#Pass Execution	\n Skip Update Server Profile From Template
+	${resp} =	Fvt Api Get Server Profile By Name	${ProfileTemp_assigned_connections['name']}
+	Should Be Equal As Strings	${resp['templateCompliance']}	NonCompliant
+	${resp}	Fvt Api Get Server Hardware By Name	${ProfileTemp_assigned_connections['serverHardwareUri']}
+	Run Keyword If	'${resp['powerState']}' != 'Off'	Power Server	${ProfileTemp_assigned_connections['serverHardwareUri']}	Off	PressAndHold
+	${task} =	Patch Server Profile	${ProfileTemp_assigned_connections}
+	${task} =	Wait For Task To Complete	${task}
+	${resp} =	Fvt Api Get Server Profile By Name	${ProfileTemp_assigned_connections['name']}
+	Should Be Equal As Strings	${resp['templateCompliance']}	Compliant
+	Sleep	30s
+	${output} =	Execute command in the Plexxi Switch	${plexxi_switches[3]['ip']}	show vlan group
+	Should Contain	${output}	${add_connection['networkUri']}
+	Pass Execution	\n Finished Update Server Profile From Template
+	
+OVF7257_Delete Profiles and Profile Template
+	#Pass Execution	\n Skip Delete Profiles and Profile Template
+	Clean Up Resources
+	Pass Execution	\n Finished Delete Profiles and Profile Template
+
+OVF7258_Add Server Profile Template With MLAG
+    [Documentation]    \n Add Server Profile Template With MLAG
+	#Pass Execution	\n Skip Add Server Profile Template With MLAG
+	${spt} =	FVT Copy Dictionary	${SPT_mlags}	
+	Add Server Profile Template	${spt}
+	Pass Execution	\n Finished Add Server Profile Template With MLAG
+
+OVF7258_Remove MLAG From Server Profile Template
+    [Documentation]    \n Remove M LAG From Server Profile Template 
+	#Pass Execution	\n Skip Remove MLAG From Server Profile Template 
+	${resp} =	Fvt Api Get Server Profile Template By Name	${SPT_mlags['name']}
+	:For	${connection}	IN	@{resp['connectionSettings']['connections']}
+	\	Remove From Dictionary	${connection}	lagName
+	${task} =	Fusion Api Edit Server Profile Template	body=${resp}	uri=${resp['uri']}
+	${task} =	Wait For Task To Complete	${task}
+	${task} =	Fusion Api Delete Server Profile Template	name=${SPT_mlags['name']}
+	${task} =	Wait For Task To Complete	${task}
+	Pass Execution	\n Finished  Remove MLAG From Server Profile Template
+
+OVF7258_Add Unassigned Server Profile With MLAG
+    [Documentation]    \n Add Unassigned Server Profile With MLAG
+	#Pass Execution	\n Skip Add Unassigned Server Profile With MLAG
+	Sleep	1m
+	${profile} =	FVT Copy Dictionary	${Profile_mlags_unassigned}	
+	fvt-keywords.Add Server Profile	${profile}	timeout=20m	interval=1s  
+	${resp} =	Fvt Api Get Server Profile By Name	${profile['name']}
+	Should Not Be Equal As Strings	${resp}	None
+	Pass Execution	\n Finished Add Unassigned Server Profile With MLAG
+
+OVF7258_Remove MLAG From Unassigned Server Profile
+    [Documentation]    \n Remove MLAG From Unassigned Server Profile 
+	#Pass Execution	\n Skip Remove MLAG From Server Profile 
+	Sleep	1m
+	${resp} =	Fvt Api Get Server Profile By Name	${Profile_mlags_unassigned['name']}
+	:For	${connection}	IN	@{resp['connectionSettings']['connections']}
+	\	Remove From Dictionary	${connection}	lagName
+	${task} =	Fusion Api Edit Server Profile	body=${resp}	uri=${resp['uri']}	
+	${task} =	Wait For Task To Complete	${task}
+	${task} =	Fusion Api Delete Server Profile	name=${resp['name']}	param=?force=true
+	${task} =	Wait For Task To Complete	${task}
+	Pass Execution	\n Finished  Remove MLAG From Unassigned Server Profile
+
+OVF7258_Add Assigned Server Profile With MLAG
+    [Documentation]    \n Add Assigned Server Profile With MLAG
+	#Pass Execution	\n Skip Add Assigned Server Profile With MLAG
+	Sleep	1m
+	${profile} =	FVT Copy Dictionary	${Profile_mlags_assigned}	
+	FVT Add Server Profile	${profile}	timeout=20m	interval=1s  
+	${resp} =	Fvt Api Get Server Profile By Name	${profile['name']}
+	Should Not Be Equal As Strings	${resp}	None
+	Sleep	2m
+	${output} =	Execute command in the Plexxi Switch	${plexxi_switches[2]['ip']}	show lag
+	Should Contain	${output}	lag1
+	${output} =	Execute command in the Plexxi Switch	${plexxi_switches[3]['ip']}	show lag
+	Should Contain	${output}	lag1
+	Pass Execution	\n Finished Add Assigned Server Profile With MLAG
+
+OVF7258_Remove MLAG From Assigned Server Profile After Server Powered On 
+    [Documentation]	\n Remove MLAG From Assigned Server Profile After Server Powered On
+	#Pass Execution	\n Skip Remove MLAG From Assigned Server Profile With Server Powered On
+	Sleep	1m
+	${resp}	Fvt Api Get Server Hardware By Name	${Profile_mlags_assigned['serverHardwareUri']}
+	Run Keyword If	'${resp['powerState']}' != 'On'	Power Server	${Profile_mlags_assigned['serverHardwareUri']}	On	MomentaryPress
+	${resp} =	Fvt Api Get Server Profile By Name	${Profile_mlags_assigned['name']}
+	${connections} =	Copy List	${resp['connectionSettings']['connections']}
+	:For	${connection}	IN	@{connections}
+	\	Remove From Dictionary	${connection}	lagName
+	${task} =	Fusion Api Edit Server Profile	body=${resp}	uri=${resp['uri']}	
+	${task} =	Wait For Task To Complete	${task}
+	${output} =	Execute command in the Plexxi Switch	${plexxi_switches[2]['ip']}	show lag
+	Should Not Contain	${output}	lag1
+	${output} =	Execute command in the Plexxi Switch	${plexxi_switches[3]['ip']}	show lag
+	Should Not Contain	${output}	lag1
+	Pass Execution	\n Finished Remove MLAG From Assigned Server Profile After Server Powered On
+
+OVF7258_Restore MLAG From Assigned Server Profile After Server Powered On 
+    [Documentation]	\n Restore MLAG From Assigned Server Profile After Server Powered On
+	#Pass Execution	\n Skip Restore MLAG From Assigned Server Profile With Server Powered On
+	Sleep	1m
+	${resp}	Fvt Api Get Server Hardware By Name	${Profile_mlags_assigned['serverHardwareUri']}
+	Run Keyword If	'${resp['powerState']}' != 'On'	Power Server	${Profile_mlags_assigned['serverHardwareUri']}	On	MomentaryPress
+	${resp} =	Fvt Api Get Server Profile By Name	${Profile_mlags_assigned['name']}	
+	${connections} =	Copy List	${resp['connectionSettings']['connections']}
+	:For	${connection}	IN	@{connections}
+	\	Set To Dictionary	${connection}	lagName	LAG1
+	${task} =	Fusion Api Edit Server Profile	body=${resp}	uri=${resp['uri']}	
+	${task} =	Wait For Task To Complete	${task}
+	${output} =	Execute command in the Plexxi Switch	${plexxi_switches[2]['ip']}	show lag
+	Should Contain	${output}	lag1
+	${output} =	Execute command in the Plexxi Switch	${plexxi_switches[3]['ip']}	show lag
+	Should Contain	${output}	lag1
+	Pass Execution	\n Finished Remove MLAG From Assigned Server Profile After Server Powered On
+
+OVF7258_Remove MLAG From Assigned Server Profile After Server Powered Off 
+    [Documentation]    \n Remove MLAG From Assigned Server Profile After Server Powered Off
+	#Pass Execution	\n Skip Remove MLAG From Assigned Server Profile With Server Powered Off
+	Sleep	1m
+	${resp}	Fvt Api Get Server Hardware By Name	${Profile_mlags_assigned['serverHardwareUri']}
+	Run Keyword If	'${resp['powerState']}' != 'Off'	Power Server	${Profile_mlags_assigned['serverHardwareUri']}	Off	PressAndHold
+	${resp} =	Fvt Api Get Server Profile By Name	${Profile_mlags_assigned['name']}
+	:For	${connection}	IN	@{resp['connectionSettings']['connections']}
+	\	Remove From Dictionary	${connection}	lagName
+	Sleep	30s
+	${task} =	Fusion Api Edit Server Profile	body=${resp}	uri=${resp['uri']}	
+	${task} =	Wait For Task To Complete	${task}
+	sleep	1m
+	${output} =	Execute command in the Plexxi Switch	${plexxi_switches[2]['ip']}	show lag
+	Should Not Contain	${output}	lag1
+	${output} =	Execute command in the Plexxi Switch	${plexxi_switches[3]['ip']}	show lag
+	Should Not Contain	${output}	lag1
+	Pass Execution	\n Finished Remove MLAG From Assigned Server Profile After Server Powered Off
+
+OVF7258_Delete Profiles and Profile Template
+	#Pass Execution	\n Skip Delete Profiles and Profile Template
+	Clean Up Resources
+	Pass Execution	\n Finished Delete Profiles and Profile Template
+	
+Remove Logical Switch And Logical Switch Group
+    [Documentation]   \n Remove Logical Switch And Logical Switch Group
+	Pass Execution	\n Skip Remove Plexxi Connect From OneView
+	:For	${ls}	IN	@{logical_switches}
+	\	${lsw} =	Fvt Api Get Logical Switch By Name	${ls['name']}
+	\	${task} =	Fusion Api Delete LS	uri=${lsw['uri']}
+	\	${task} =	Wait For Task To Complete	${task}
+	\	${ls} =    Fvt Api Get Logical Switch By Name      ${ls['name']}
+	\	Run Keyword If	$ls != None	Fail	Cannot delete logical switch ${ls['name']}
+	${task} =	Fusion Api Delete LSG	name=${plexxi_lsg['name']}
+	${task} =	Wait For Task To Complete	${task}
+	${lsg} =    Fvt Api Get Logical Switch Group By Name      ${plexxi_lsg['name']}
+	Run Keyword If	$lsg != None	Fail	"Cannot delete logical switch group ${plexxi_lsg['name']}"
+	Pass Execution	\n Finished Remove Logical Switch And Logical Switch Group
+	
+Remove OneView From Plexxi Connect
+    [Documentation]   \n Remove OneView from Plexxi Connect
+	Pass Execution	\n Skip Remove OneView From Plexxi Connect
+    Plexxi Api Login   ${plexxi_connect_host}   ${plexxi_credentials['userName']}   ${plexxi_credentials['password']}
+	${resp}=   Plexxi Api Get OneView Configuration
+    :FOR   ${ov}   IN   @{resp['result']}
+    \   Run Keyword If   '${ov['host']}' == '${appliance_ip}'   Plexxi Api Delete OneView Configuration   ${ov['uuid']}
+	Pass Execution	\n Finished Remove OneView From Plexxi Connect
+
+Remove Plexxi Connect From OneView	
+    [Documentation]   \n Remove Plexxi Connect From OneView
+	Pass Execution	\n Skip Remove Plexxi Connect From OneView
+	${task} =	Fusion Api Delete Fabric	name=${Fabric_name}
+	${task} =	Wait For Task To Complete	${task}
+	${fabric} =    Fvt Api Get Fabric By Name      ${Fabric_name}
+	Run Keyword If	$fabric != None	Fail	"Cannot delete fabric ${Fabric_name}"
+	Pass Execution	\n Finished Remove Plexxi Connect From OneView
+	

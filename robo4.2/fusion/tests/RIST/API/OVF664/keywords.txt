@@ -1,0 +1,174 @@
+*** Settings ***
+Library             RoboGalaxyLibrary
+Library             FusionLibrary
+Library             OperatingSystem
+Library             BuiltIn
+Library             Collections
+Library             XML
+Library             SSHLibrary
+Library             String
+Library             robot.libraries.String
+Library             Dialogs
+Resource            ../../../../Resources/api/fusion_api_resource.txt
+Resource            ../global_variables.robot
+Variables           ./Regression_Data.py
+
+*** Keywords ***
+Run SSH CMD2
+    [Documentation]    Run SSH CMD2
+    [Arguments]    ${ssh_server_ip}    ${host_ip}    ${ssh_cred}    ${cmd}
+    ${result}=    Run Ssh Cmd  ${ssh_server_ip}  root  hpvse1  sshpass -p ${ssh_cred['password']} ssh ${ssh_cred['username']}@${host_ip} ${cmd}
+    [Return]  ${result}
+
+Get client files for internal ca signed rabbitmq client cert
+    [Documentation]    Get internal CA signed rabbitmq client cert and its key and internal root CA from OV
+    [Arguments]    ${CA_chain_signed_appliance_cert}
+    ${rabbitmq_client_cert} =  Fusion Api Get Rabbitmq Client Certificate    param=/keypair/default
+    Should Be Equal    '${rabbitmq_client_cert['status_code']}'    '200'    msg=Internal CA signed rabbitmq client cert is not existed
+    Create File    ${CURDIR}/client.pem    ${rabbitmq_client_cert['base64SSLCertData']}
+    Create File    ${CURDIR}/key.pem    ${rabbitmq_client_cert['base64SSLKeyData']}
+    ${internal_root_CA} =  Fusion Api Get Ca Certificate    param=Infrastructure Management Certificate Authority-internalroot
+    Should Be Equal    '${internal_root_CA['status_code']}'    '200'    msg=Fail to retrieve internal root CA cert
+    ${retrieve_appliance_cert} =  Fusion Api Get Appliance Certificate
+    Create File    ${CURDIR}/caroot.pem    ${internal_root_CA['certificateDetails']['base64Data']}
+    Run Keyword If    '${retrieve_appliance_cert['commonName']}' != '${retrieve_appliance_cert['issuer']}'   Append To File    ${CURDIR}/caroot.pem    \n${CA_chain_signed_appliance_cert}
+    [Return]    ${True}
+
+Create Self Signed Web Server Certificate Body
+    [Documentation]    Create /rest/certs/server body
+    [Arguments]    ${basic_body}
+    ${web_server_cert} =  Fusion Api Get Appliance Certificate
+    ${body} =  Set To Dictionary    ${basic_body}    commonName    ${web_server_cert['commonName']}    alternativeName    ${web_server_cert['alternativeName']}
+    [Return]    ${body}
+
+Get Certs generated In Linux
+    [Documentation]    Issue the csr by external CA to get appliance certificate, and then get appliance cert and its CA certs , self signed leaf cert and releated CRL file from remote server
+    [Arguments]    ${csr}
+    Open Connection    ${remote_server_IP}
+    Login    ${ssh_cred['username']}    ${ssh_cred['password']}
+    Execute Command    ${linux_commands['part1']}
+    Execute Command    echo "${csr}" > ${linux_commands['part2']}
+    Execute Command    ${linux_commands['part3']}
+    ${root_ca} =  Execute Command    ${linux_commands['part4']}
+    ${intermediate_ca} =  Execute Command    ${linux_commands['part5']}
+    ${appliance_cert} =  Execute Command    ${linux_commands['part6']}
+    ${ca_chian} =  Execute Command    ${linux_commands['part7']}
+    [Return]    ${root_ca}    ${intermediate_ca}    ${appliance_cert}    ${ca_chian}
+
+Clean EVN In Linux
+    [Documentation]    Clear the files generated in Linux server
+    [Arguments]    ${remote_server_IP}    ${ssh_cred}
+    Open Connection    ${remote_server_IP}
+    Login    ${ssh_cred['username']}    ${ssh_cred['password']}
+    Execute Command    ${linux_commands['part8']}
+    Close Connection
+    [Return]    ${True}
+
+Get Client Files For External Ca Signed Rabbitmq Client Cert
+    [Documentation]    When using the external ca signed rabbitmq client cert , get its related cert files , including the correct external ca signed rabbitmq client cert
+    ...                and its key , root ca cert , correct intermediate ca cachain , incorrect intermediate ca cachain and the incorrect external
+    ...                ca signed rabbitmq client certificate
+    Open Connection    ${remote_server_IP}
+    Login    ${ssh_cred['username']}    ${ssh_cred['password']}
+    ${correct_rabbitmq_client_cert} =  Execute Command    ${linux_commands['part9']}
+    ${rabbitmq_client_cert_key} =  Execute Command    ${linux_commands['part10']}
+    ${root_ca} =  Execute Command    ${linux_commands['part11']}
+    ${correct_chain_without_root_ca} =  Execute Command    ${linux_commands['part12']}
+    ${incorrect_chain_without_root_ca} =  Execute Command    ${linux_commands['part13']}
+    ${incorrect_rabbitmq_client_cert} =  Execute Command    ${linux_commands['part14']}
+    SSHLibrary.Get File    ${linux_commands['part15']}    ${CURDIR}/revoke_rabbitmqclientcert.crl
+    [Return]    ${correct_rabbitmq_client_cert}    ${rabbitmq_client_cert_key}    ${root_ca}    ${correct_chain_without_root_ca}    ${incorrect_chain_without_root_ca}    ${incorrect_rabbitmq_client_cert}
+
+Change Client Files For External Ca Signed Rabbitmq Client Cert
+    [Documentation]    Change the files for external ca signed rabbitmq client cert in the client side
+    [Arguments]    ${rabbitmq_client_cert}    ${rabbitmq_client_cert_key}    ${ca_for_rabbitmq_server}    ${external_cachain_without_rootca_for_rabbitmq_client}
+    Remove Files    ${CURDIR}/client.pem    ${CURDIR}/key.pem    ${CURDIR}/caroot.pem
+    Create File    ${CURDIR}/client.pem    ${rabbitmq_client_cert}
+    Create File    ${CURDIR}/key.pem    ${rabbitmq_client_cert_key}
+    Create File    ${CURDIR}/caroot.pem    ${ca_for_rabbitmq_server}
+    Append To File    ${CURDIR}/caroot.pem    \n${external_cachain_without_rootca_for_rabbitmq_client}
+    [Return]    ${True}
+
+Update Certificate Validation Configuration
+    [Documentation]    Update certificate validation configuration and wait for appliance rebooting
+    [Arguments]    ${certValidationConfig}
+    Log    \nUpdating OneView certificate validation configuration    console=Yes
+    ${resp} =  Fusion api update certificate validation configuration    ${certValidationConfig}
+    Return from keyword if  ${resp['status_code']}!=202    ${None}
+    Log    Wating for OneView state to change to be STARTING    console=Yes
+    Wait For Appliance State To Be Expected State    ExpectedState=STARTING
+    Log    Wating for OneView state to change to be OK    console=Yes
+    Wait For Appliance State To Be Expected State    ExpectedState=OK
+    [Return]    ${True}
+
+Handle Running Process
+    [Documentation]    Terminate the current running process and check whether the process log is generated, then remove it
+    [Arguments]    ${process_aliasname}
+    Log    \n-Check whether the current process is running    console=yes
+    ${resp} =  Run Keyword And Return Status    robot.libraries.Process.Process Should Be Running    ${process_aliasname}
+    Should Be True    ${resp}    msg=Cannot connect to rabbtimq server with correct client files
+
+    Log    \n-Stop the running process    console=yes
+    ${resp} =  Run Keyword And Return Status    robot.libraries.Process.Terminate Process    ${process_aliasname}
+    Should Be True    ${resp}    msg=Fail to stop current running process
+
+    Log    \n-Check whether the log file generated    console=yes
+    ${stdout}=   OperatingSystem.Get File    ${CURDIR}/log.txt
+    Should Not Be Empty    ${stdout}    msg=Fail to get SCMB notifications from OV
+    Remove File    ${CURDIR}/log.txt
+    [Return]    ${True}
+
+Get Rabbitmq Certs And Internal Root CA
+    [Documentation]    Get rabbitmq client cert , rabbitmq server cert and internal root CA cert from OV
+    [Arguments]    ${rabbitmq_client_cert_param}    ${internal_root_ca_param}
+     ${resp} =  Fusion Api Get Rabbitmq Client Certificate    param=${rabbitmq_client_cert_param}
+    Should Be Equal    '${resp['status_code']}'    '200'    msg=Fail to retrieve internal root ca signed rabbitmq client cert
+    ${current_rabbitmq_client_cert} =  Set Variable    ${resp['base64SSLCertData']}
+    Log    ${current_rabbitmq_client_cert}
+    ${current_rabbitmq_client_cert_key} =  Set Variable    ${resp['base64SSLKeyData']}
+    Log    ${current_rabbitmq_client_cert_key}
+    ${current_rabbitmq_server_cert} =  Run SSH CMD2    ${remote_server_IP}    ${APPLIANCE_IP}    ${ssh_cred}    ${cmd}
+    Log    ${current_rabbitmq_server_cert}
+    ${resp} =  Fusion Api Get Ca Certificate    param=${internal_root_ca_param}
+    Should Be Equal    '${resp['status_code']}'    '200'    msg=Fail to retrieve internal root ca cert
+    ${current_internal_rootca_cert} =  Set Variable    ${resp['certificateDetails']['base64Data']}
+    Log    ${current_internal_rootca_cert}
+    [Return]    ${current_rabbitmq_client_cert}    ${current_rabbitmq_client_cert_key}    ${current_internal_rootca_cert}    ${current_rabbitmq_server_cert}
+
+Check Changed Rabbitmq Certs
+    [Documentation]    Check whether the internal ca signed rabbitmq client cert and its key , internal root ca signed rabbitmq server cert
+    ...                and internal root CA cert are changed
+    [Arguments]    ${new_rabbitmq_certs}    ${old_rabbitmq_certs}    ${index_limitation}
+    :For    ${index}    IN Range    0    ${index_limitation}
+    \    Should Not Be Equal    ${new_rabbitmq_certs[${index}]}    ${old_rabbitmq_certs[${index}]}    msg=${errorMessages_for_changed_rabbitmq_certs[${index}]}
+    [Return]    ${True}
+
+Add Plenty Certs To OV
+    [Documentation]    Add at least 308 CA certs and leaf certs to OV before test
+    [Arguments]    ${remote_server_IP}    ${ssh_cred}    ${caNumber}    ${leafNumber}
+    :For    ${number}    In Range    1    ${caNumber}
+    \    ${ca_cert} =  Run SSH CMD    ${remote_server_IP}    ${ssh_cred['username']}    ${ssh_cred['password']}    cat ${destination_path2}/curlscripts_ca/testca${number}/testca.crt
+    \    Set to Dictionary    ${ca_cert_body['members'][0]['certificateDetails']}    base64Data    ${ca_cert}
+    \    Set to Dictionary    ${ca_cert_body['members'][0]['certificateDetails']}    aliasName    shqa_testca${number}
+    \    ${add_cacert} =  Fusion Api Import External Ca Certificates    ${ca_cert_body}
+    \    Wait For Task2    ${add_cacert}    300    5
+
+    :For    ${number}    In Range    1    ${leafNumber}
+    \    ${leaf_cert} =  Run SSH CMD    ${remote_server_IP}    ${ssh_cred['username']}    ${ssh_cred['password']}    cat ${destination_path2}/curlscripts_leaf_selfsigned/test_leaf${number}/leaf_cert.crt
+    \    Set to Dictionary    ${leaf_cert_body['certificateDetails'][0]}    base64Data    ${leaf_cert}
+    \    Set to Dictionary    ${leaf_cert_body['certificateDetails'][0]}    aliasName    shqa_test_leaf${number}
+    \    ${add_leafcert} =  Fusion Api Import Server Certificate    ${leaf_cert_body}
+    \    Wait For Task2    ${add_leafcert}    300    5
+    [Return]    ${True}
+
+Remove Plenty Certs From OV
+    [Documentation]    Remove Plenty Certs From OV
+    [Arguments]    ${caNumber}    ${leafNumber}
+    :For    ${number}    In Range    1    ${caNumber}
+    \    ${remove_cacert} =  Fusion Api Remove External Ca Certificates    shqa_testca${number}
+    \    Wait For Task2    ${remove_cacert}    300    5
+
+    :For    ${number}    In Range    1    ${leafNumber}
+    \    ${remove_leafcert} =  Fusion Api Delete Server Certificate    shqa_test_leaf${number}
+    \    Wait For Task2    ${remove_leafcert}    300    5
+    [Return]    ${True}

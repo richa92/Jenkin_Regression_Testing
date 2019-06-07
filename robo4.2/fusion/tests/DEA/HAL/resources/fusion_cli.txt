@@ -1,0 +1,252 @@
+*** Settings ***
+Documentation   Fusion CLI          keywords
+...             = Usage =
+...             | Resource | ../resources/fusion_cli.txt |
+#
+# Keywords:
+#
+#   - Login to Fusion CLI
+#   - Enter CLI Console View
+#   - Execute CLI Command
+#   - Execute Bare CLI Command
+#   - Connect Interconnect Command
+#   - Disconnect Interconnect Command
+#   - Quit CLI View
+#   - Logout of Fusion CLI
+#   - CLI One-liner
+#   - Get available commands from Question Mark
+#   - Parse Question Mark output
+#
+Library         Collections
+Library         String
+Library         SSHLibrary
+Library         RoboGalaxyLibrary   # DVTs Robot Framework extensions
+Library         FusionLibrary       # DVTs Robot Framework extensions
+
+
+*** Variables ***
+${CLI_USERNAME}         Administrator
+${CLI_PASSWORD}		hpvse123
+${CLI_PROMPT}          	view>
+${CLI_TIMEOUT}      	300
+${CLI_CONSOLE_PROMPT}   console-view>
+${CLI_MAIN_PROMPT}      main-view>
+${CMD_DELAY}		3
+${ICM_CONNECT_WAIT}	10
+${BACKSPACE}      	\u0008
+${COMMAND END}    	<enter>
+${READ DELAY}     	0.5
+
+*** Keywords ***
+# -----------------------------------------------------------------------------
+#   FUSION CLI INTERFACE KEYWORDS
+# -----------------------------------------------------------------------------
+Login to Fusion CLI
+    [Documentation]      Connect to Fusion CLI via SSH
+    ...  		 Example:\n| Login to Fusion CLI | 10.0.12.106 | Administrator | hpvse123 |
+    [Arguments]          ${IP}=${FUSION IP}           ${USERNAME}=${CLI_USERNAME}
+    ...                  ${PASSWORD}=${CLI_PASSWORD}  ${PROMPT}=${CLI_MAIN_PROMPT}
+    ...                  ${TIMEOUT}=${CLI_TIMEOUT}    ${ALIAS}=Fusion_CLI
+    Log Many             ${IP}                        ${USERNAME}     ${PASSWORD}     ${PROMPT}   ${TIMEOUT}
+    Set Default Configuration
+    ...                  prompt=${PROMPT}             timeout=${TIMEOUT}
+    ${Id}=             	 Open Connection              ${IP}           alias=${ALIAS}
+    ${Output}=     	 Login                        ${USERNAME}     ${PASSWORD}
+    [Return]       	 ${Id}
+
+Enter CLI Console View
+    [Documentation]      Enters CLI View. Expects connection at CLI prompt
+    ...		         Example:\n| Enter CLI Command View |
+    ...                          \n| Enter CLI Command View | console-view | console-view> |
+    [Arguments]          ${VIEW}=console-view    ${PROMPT}=console-view>
+    ${Output}=           Execute CLI Command     ${VIEW}    ${PROMPT}
+    Set Suite Variable   ${CLI_PROMPT}	      	 ${PROMPT}
+    [Return]             ${Output}
+
+Quit CLI View
+    [Documentation]      Quit from a CLI view
+    [Arguments]          ${PROMPT}=main-view>
+    Write          	 quit
+    ${output}=     	 Read Until      ${PROMPT}
+    Set Suite Variable   ${CLI_PROMPT}	 ${PROMPT}
+    [Return]             ${Output}
+
+Execute CLI Command
+    [Documentation]     Executes given command on the Fusion SSH shell
+    ...                 Example:\n| Execute CLI Command | show enclosure list |
+    [Arguments]         ${Command}       ${PROMPT}=${CLI PROMPT}
+    SSHLibrary.Write    ${Command}
+    Sleep		${CMD_DELAY}
+    ${Output}=          Read until RegExp  ${PROMPT}
+    [Return]            ${Output}
+
+Execute Bare CLI Command
+    [Documentation]     Executes given command on the Fusion SSH shell
+    ...			Example:\n| Execute CLI Command | show enclosure list |
+    [Arguments]         ${Command}      ${PROMPT}=${CLI PROMPT}
+    SSHLibrary.Write Bare               ${Command}
+    Sleep    	        ${READ DELAY}
+    ${Output}=          Read until      ${PROMPT}
+    Read
+    
+    # Backspace the command from the shell
+    ${size}=            Get Length    ${Command}
+    Repeat Keyword      ${size} times    SSHLibrary.Write Bare    ${BACKSPACE}
+    SSHLibrary.Write    ${EMPTY}
+    Read
+    [Return]            ${Output}
+	
+Connect Interconnect Command
+    [Documentation]     Executes "Connect ..." CLI command from console view and returns buffer as an list.
+    [Arguments]    	${enclosure}          ${bay}    ${force}=${space}
+    ${output}      	Execute CLI Command   connect interconnect ${enclosure} ${bay} 1 ${force}    by a period \\(.\\)\\)
+    Write Bare    	\n
+    Sleep    		${ICM_CONNECT_WAIT}
+    Write Bare    	\n
+    Sleep    		${ICM_CONNECT_WAIT}
+    ${output}=    	Read Until RegExp      (Password:)|(<HP>)|(<OneView>)
+    ${output}=		Split String From Right		${output}
+    ${password}=	Evaluate	       "Password" in "${output}"
+    Run Keyword If	${password}
+    ...	  Write		netoppwd
+    Run Keyword If	${password}
+    ...	  Read Until	<OneView>
+
+Disconnect Interconnect Command
+    [Documentation]     Executes "Connect ..." CLI command from console view and returns buffer as an list.
+    ${CTRL_UNDERSCORE}  Convert To String     \x1f
+    ${output}      	Execute CLI Command   ${CTRL_UNDERSCORE}.    ${CLI_CONSOLE_PROMPT}
+
+Logout of Fusion CLI
+    [Documentation]      Exits the current SSH session
+    ...			 Example:\n| Logout Of Fusion CLI |
+    Close Connection
+    
+CLI One-liner
+    [Documentation]     Run Fusion CLI command in one line and return the command output
+    [Arguments]        	${command}
+    Login to Fusion Via SSH
+	
+    # Take care of authenticity issue when asked for entering yes or no
+    Write               ${command}
+    ${response}         Read Until Regexp      (yes|password)
+    ${line}            	Get Line               ${response.strip()}               -1
+    ${tmp}             	Get Substring          ${line.strip()}       -3
+    Run Keyword If     	'${tmp}'=='yes'        Write    yes
+    Run Keyword If     	'${tmp}'=='yes'        Read Until     password:
+    Write   	       	${CLI_PASSWORD}
+    Sleep   		3		       For login to complete
+	
+    # Return to Fusion Bash shell
+    ${output}           Read Until	       ${FUSION_PROMPT}
+    Logout Of Fusion Via SSH
+    Log                 ${output}
+    [Return]            ${output}
+
+
+# -----------------------------------------------------------------------------
+#   PARSE CLI OUTPUT
+# -----------------------------------------------------------------------------
+
+Parse Device List Output
+    [Documentation]     Parses a given buffer list to return a dictionary containing device information by
+    ...                 bay number.
+    [Arguments]         ${Buffer}
+
+    # Example buffer:
+    # 1: Enclosure   Bay Console Indices Model            Serial Number
+    # 2:  ---------- --- --------------- ---------------- -------------
+    # 3:  XRN0000109 1   1               Synergy 480 Gen9 1Z10100003
+    # 4:  XRN0000109 2   1               Synergy 480 Gen9 1Z10100003
+    # 5:  XRN0000109 3   [empty]
+    # 6:  XRN0000109 4   [empty]
+    # 7:  XRN0000109 5   1               Synergy 480 Gen9 1Z10100003
+    # 8:  XRN0000109 6   1               Synergy 480 Gen9 1Z10100003
+    # 9:  XRN0000109 7   [empty]
+    # 10: XRN0000109 8   [empty]
+    # 11: XRN0000109 9   [empty]
+    # 12: XRN0000109 10  [empty]
+    # 13: XRN0000109 11  [empty]
+    # 14: XRN0000109 12  [empty]
+    # 15: [K[?1l>console-view>
+
+    # console-view> show interconnect list
+    # Enclosure  Bay Console Model                                 Serial Number
+    # ---------- --- --------------- ----------------------------- ------------
+    # XRN0000109 1      1    Natasha SAS 12Gb Switch               1Z10100003
+    # XRN0000109 2      1    HP FlexFabric 40GbE Expansion Module  1Z10100003
+    # XRN0000109 3      1    HP FlexFabric 40/40Gb Module    	   1Z10100003
+    # XRN0000109 4      1    Natasha SAS 12Gb Switch         	   1Z10100003
+    # console-view>
+
+    # Returns list of dictionary structure with Device Bay information
+    # [ {"Enc" => "00HPMA070", "Bay" => "1", Consoles => "2", Model => "", SerialNumber => "1Z10100003" },
+    #   {"Enc" => "00HPMA101", "Bay" => "4", Consoles => "1", Model => "", SerialNumber => "1Y11100003" },
+    # ]
+
+    ${Device Info}=     Create List
+    ${Lines}=  Run Keyword If	${DCS}
+    ...    Get Lines Matching RegExp 	 ${Buffer}    ^\\w+\\s+\\d+\\s+\\[none\\]+\\s+\\w.*
+    ...	   ELSE
+    ...    Get Lines Matching RegExp 	 ${Buffer}    ^\\w+\\s+\\d+\\s+\\d+\\s+\\w.*
+    @{Lines}=   Split To Lines   ${Lines}
+    :FOR        ${line}            IN	@{Lines}
+    \           # Parse data from buffer
+    \		${match}  ${Enc}   ${Bay}   ${Console}  ${ModelSerNum}=  Run Keyword If   ${DCS}
+    \		...   Should Match RegExp    ${line}    ^(\\w+)\\s+(\\d+)\\s+(\\[none\\])\\s+(.*)
+    \		...   ELSE
+    \		...   Should Match RegExp    ${line}    ^(\\w+)\\s+(\\d+)\\s+(\\d+)\\s+(.*)
+    \		${Model}  ${Serial Number}=   Split String From Right   ${ModelSerNum}   max_split=1
+    \		${ICMInfo}=  Create Dictionary  Enc  ${Enc}  Bay  ${Bay}   Consoles  ${Console}   Model  ${Model}  SerialNumber  ${SerialNumber}
+    \	        Append to List  ${Device Info}  ${ICMinfo}
+
+    [Return]    ${Device Info}
+
+Get available commands from Question Mark
+    SSHLibrary.Write Bare    ?
+    ${buffer}    Read Until       ${CLI_PROMPT}
+
+    ${question output}=     Parse Question Mark output    ${buffer}
+    ${commands}=    Get Dictionary Keys    ${question output}
+
+    [Return]    ${commands}
+
+Parse Question Mark output
+    [Documentation]     Workaround for #AM79.
+    ...                 Parses subcommand arguments and help descriptions (if available) in a given buffer and returns
+    ...                 output in a dictionary format.
+    ...                 ${output} = { "connect": "Open a text console sessions",
+    ...                               "exit": "Exit the command line interpreter"
+    ...                             }
+    [Arguments]         ${buffer}
+    ${buffer}=          Replace String          ${buffer}   \r                  ${EMPTY}
+    ${buffer}=          Split String            ${buffer}   \n
+    
+    Remove From List    ${buffer}               -1          # Remove the console prompt line.
+    
+    ${size}=    Get Length    ${buffer}
+    Run Keyword If    ${size} > 0
+    ...    Remove From List    ${buffer}               0           # Remove the first line with '?' if arguments are available.
+    
+    ${args}=            Create dictionary
+    :FOR                ${line}                 IN          @{buffer}
+    \                   # Parse out command and description (if displayed) and store for later use.
+    \                   ${has description}=     Run Keyword and Return Status   Should Contain          ${line.strip()}
+    \                   ...                     ${SPACE}
+    \                   ${arg}                  ${desc}=    Run Keyword If      ${has description}      Split String
+    \                   ...                     ${line.strip()}
+    \                   ...                     ${SPACE}
+    \                   ...                     max_split=1
+    \                   ...                     ELSE        Set Variable        ${line.strip()}         ${empty}
+    \                   Continue For Loop If    '${arg}'=='${EMPTY}'
+    \                   # Workaround for line wrapping in ' connect blade <enclosure-name> <bay-number> ?' command
+    \                   ${Contains Quotation}=    Run keyword and return Status    Should Contain    ${arg}    "
+    \                   Continue For Loop If    ${Contains Quotation}
+    \                   Set To Dictionary       ${args}     ${arg}              ${desc.strip()}
+
+    # Remove <enter> from args list
+    Remove from Dictionary      ${args}     ${COMMAND END}
+
+    ${NicelyFormattedJsonString}    dumps   ${args}     indent=${4}     sort_keys=${True}
+    Log         ${NicelyFormattedJsonString}
+    [Return]    ${args}

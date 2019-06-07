@@ -1,0 +1,259 @@
+*** Settings ***
+Library             RoboGalaxyLibrary
+Library             FusionLibrary
+Library             OperatingSystem
+Library             BuiltIn
+Library             Collections
+Library             XML
+Library             SSHLibrary
+Library             String
+Library             Dialogs
+
+*** Keywords ***
+Add Ethernet Networks from variable
+	[Documentation]	Adds Ethernet networks to an appliance from a variable which contains a list of dicts with the entire payload
+	...             Supports specifying <Maximum Bandwidth> and <Preferred Bandwidth> than letting them be the default values,
+	...                 via adding an attribute 'bandwidth' in your data file like below example:
+	...                 Example:
+    ...	                    ethernet_networks = [
+    ...                         {'name': 'dev100',
+    ...                          'type': 'ethernet-networkV300',
+    ...                          'vlanId': 100,
+    ...                          'purpose': 'General',
+    ...                          'smartLink': True,
+    ...                          'privateNetwork': False,
+    ...                          'connectionTemplateUri': None,
+    ...                          'ethernetNetworkType': 'Tagged',
+    ...                          'bandwidth': {'maximumBandwidth': 20000, 'typicalBandwidth': 1800},
+    ...                          'initialScopeUris': ['Scope:Test', 'Scope:Production']
+    ...                         },
+    ...                         {'name': 'dev101-management', ...other required attributes without <'bandwidth': {'maximumBandwidth': xxx, 'typicalBandwidth': xxx}>},
+    ...                     ]
+    ...             Note: make sure you're using RF 2.9.2 or newer, since a newly added keyword 'Pop From Dictionary' in RF 2.9.2 is used for this implementation.
+
+    [Arguments]    ${networks}
+    Log     Adding ETHERNET NETWORKS   console=yes
+    ${resps} =  Create List
+    :FOR    ${net}    IN    @{networks}
+    #       Note: keyword 'Pop From Dictionary' is new in RobotFramework 2.9.2,
+    #             see http://robotframework.org/robotframework/latest/libraries/Collections.html#Pop%20From%20Dictionary
+    \       ${bandwidth} =      Pop From Dictionary  ${net}     bandwidth       default=${None}
+    \       ${initialScopeUris}=  Pop From Dictionary  ${net}  initialScopeUris  default=${None}
+    \       ${scopeUris}=       Run Keyword If    ${initialScopeUris} != ${None}
+    \       ...                 Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    \       Run Keyword If      ${initialScopeUris} != ${None}
+    \       ...                 Set To Dictionary    ${net}  initialScopeUris  ${scopeUris}
+    \       ${resp} =           Fusion Api Create Ethernet Network    body=${net}
+    \       ${ctUri} =          Run Keyword If      ${bandwidth} != ${None}
+    \       ...                 Get connectionTemplateUri    ${net['name']}    ethernet
+    \       ${ct} =             Run keyword if      ${bandwidth} != ${None}
+    \       ...                 Fusion Api Get Connection Templates     ${ctUri}
+    \       Run keyword if      ${bandwidth} != ${None}
+    \       ...                 Remove From Dictionary      ${ct}   headers  status   category   created   status_code   state   modified   description
+    \       Run keyword if      ${bandwidth} != ${None}
+    \       ...                 Set To Dictionary	        ${ct}    bandwidth    ${bandwidth}
+    \       ${respUpdate} =     Run keyword if      ${bandwidth} != ${None}
+    \       ...                 Fusion Api Update Connection Template   ${ct}   ${ctUri}
+    \       Append To List     ${resps}    ${resp}
+
+    [Return]   ${resps}
+
+
+Add Ethernet Networks from variable async
+    [Documentation]    Adds Ethernet networks to an appliance from a variable which contains a list of dicts with the
+    ...  entire payload.  Also supports created and validating networks asyncronously.  Does not validate by default
+    [Arguments]     ${networks}    ${VERIFY}=${FALSE}  ${expected_networks}=@empty  ${status_code}=202
+    ${tasks} =  Create Dictionary
+    ${actualNetworks} =  create list
+    Log   Adding ETHERNET NETWORKS    console=yes
+    :FOR    ${net}  IN  @{networks}
+    #       -First, if $VERIFY, check if ${net} already exists.  Skip if it does
+    \       ${resp} =   Run Keyword If    ${VERIFY}    Get Resource    ETH:${net['name']}
+    \       Run Keyword If    ${VERIFY}  Run Keyword If    ${resp['status_code']}==200
+            ...     Log   Network ${net['name']} exists
+            ...     WARN
+    \       Run Keyword If    ${VERIFY}  Continue For Loop If  ${resp['status_code']}==200
+    #       -Add the network
+    \       Log  Adding network ${net['name']}
+    \       ${initialScopeUris}=  Pop From Dictionary  ${net}  initialScopeUris  default=${None}
+    \       ${scopeUris}=       Run Keyword If    ${initialScopeUris} != ${None}
+    \       ...                 Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    \       Run Keyword If      ${initialScopeUris} != ${None}
+    \       ...                 Set To Dictionary    ${net}  initialScopeUris  ${scopeUris}
+    \       ${resp} =  Fusion Api Create Ethernet Network   body=${net}
+    #       -If !$VERIFY, then go to the next network
+    \       continue for loop if  ${VERIFY}==${FALSE}
+    #       -Check the response code to ensure the network was created as expected
+    \       Run Keyword If  '${resp['status_code']}'!='${status_code}'
+            ...   Run Keyword And Continue On Failure   Fail     Adding Ethernet Network ${net['name']} Failed
+    \       continue for loop if  '${resp['status_code']}'!= '${status_code}'
+    \       ${dict} =  create dictionary
+    \       set to dictionary   ${dict}  resp=${resp}
+    \       set to dictionary   ${dict}  name=${net['name']}
+    \       append to list  ${actualNetworks}  ${dict}
+    # If !{VERIFY}, then we're done
+    Return From Keyword If  ${VERIFY}==${FALSE}
+    Run Keyword If  ${VERIFY}  Log    ${tasks}  TRACE
+    # Iterate through the list of responses build in the last for loop
+    :FOR    ${net}  IN  @{actualNetworks}
+    #       -Wait for the network creation task to finish
+    \       Wait For Task2  ${net['resp']}
+    #       -Grab the correct network from the expected network listed that was passed in
+    \       ${expItem} =  Fusion Api Get Dict From List  ${expected_networks}  name  ${net['name']}
+    #       -If the network isn't in the list to validate, skip it
+    \       CONTINUE FOR LOOP IF  ${expItem}=={}
+    #       -Get the network resource and do the comparison
+    \       ${actItem} =  Get Resource    ETH:${net['name']}
+    \       ${result} =  fusion api validate response follow   ${expItem}  ${actItem}  #wordy=${TRUE}
+    \       Run keyword and continue on failure  should be equal  ${result}  ${TRUE}
+
+Create Bulk Ethernet Networks
+    [Documentation]     Creates Ethernet networks in bulk with the given VLAN ID range. The VLAN ID range is specified as a combination of values or ranges.
+    [Arguments]     ${networks}     ${timeout}=500  ${interval}=5
+    ${response} =   Create List
+    :FOR    ${net}  IN  @{networks}
+    \       ${initialScopeUris}=  Pop From Dictionary  ${net}  initialScopeUris  default=${None}
+    \       ${scopeUris}=       Run Keyword If    ${initialScopeUris} != ${None}
+    \       ...                 Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    \       Run Keyword If      ${initialScopeUris} != ${None}
+    \       ...                 Set To Dictionary    ${net}  initialScopeUris  ${scopeUris}
+    \       ${resp} =   Fusion Api Create Ethernet Bulk Networks    ${net}
+    \       Append to List  ${response}     ${resp}
+    Run Keyword If  ${response} is not ${null}  Run Keyword for List    ${response}     Wait For Task2  timeout=${timeout}    interval=${interval}
+
+Create Ethernet range
+    [Documentation]   Create ethernet range
+    [Arguments]     ${range}
+    Set Log Level      TRACE
+    Log  	Adding ETHERNET NETWORK RANGES   console=True
+    ${body} =  Copy Dictionary     ${range}
+    Remove From Dictionary  ${body} prefix  suffix  start   end
+
+    :FOR    ${x}    IN RANGE    ${range['start']}   ${range['end']}+1
+    \  Set To Dictionary    ${body}   name  ${range['prefix']}${x}${range['suffix']}
+    \  Set To Dictionary   ${body}     vlanId      ${x}
+    \   ${resp} =    Fusion Api Create Ethernet Network    body=${body}
+
+Get Ethernet URI
+    [Documentation]   Get ethernet uri by name
+    [Arguments]     ${net}
+    ${resp} =   Fusion Api Get Ethernet Networks        param=?filter="'name'=='${net}'"
+    Return From Keyword If  ${resp['count']}==0  /rest/network_uri_${net}_not_found
+    ${uri} =    Get From Dictionary     ${resp['members'][0]}   uri
+    [Return]    ${uri}
+
+Get Ethernet URIs
+    [Documentation]   returns a list of uris for a given list of ethernet network names
+    [Arguments]       ${netlist}
+    ${urilist} =      Uris.get   ETH    ${netlist}
+    [Return]    ${urilist}
+
+Remove All Ethernet Networks
+    [Documentation]	Querys the appliance for all Ethernet networks and then removes them
+    Log    Removing ETHERNET NETWORKS   console=True
+    ${networks} =   Fusion Api Get Ethernet Networks
+    :FOR    ${net}     IN  @{networks['members']}
+    \   ${resp} =   Fusion Api Delete Ethernet Network      uri=${net['uri']}
+    \    ${task} =   Wait For Task     ${resp}    240s  2s
+
+Remove All Ethernet Networks Async
+    [Documentation]   Querys the appliance for all Ethernet networks and then removes them asyncronously.  As it iterates
+    ...  through the list of networks, it creates a dictionary for each network containing the network name, task uri,
+    ...  and resource uri.  It then adds these to a list, deleteResources, and uses this list to perform the
+    ...  asyncronous task checking and optional validation that the resource uri returns a 404
+    [Arguments]  ${VERIFY}=${FALSE}  ${RETURN_CODE}=404
+    ${deleteNets} =  Create List
+    ${response} =  Create List
+    Log      Removing ETHERNET NETWORKS     console=True
+    ${networks} =   Fusion Api Get Ethernet Networks
+    ${count}=   Convert To String  ${networks['count']}
+    Run Keyword If  '${count}'=='0'   Log   Ethernet Network doesn't exists   WARN
+    :FOR    ${net}  IN  @{networks['members']}
+    \       ${resp} =   Fusion Api Delete Ethernet Network      uri=${net['uri']}
+    \       Log  ${resp}  TRACE
+    \       Log  Deleting network ${net['name']}
+    \       ${deleteInfo} =  Create Dictionary
+    \       Set To Dictionary  ${deleteInfo}  name=${net['name']}
+    \       Set To Dictionary  ${deleteInfo}  uri=${net['uri']}
+    \       Set To Dictionary  ${deleteInfo}  resp=${resp}
+    \       Append To List  ${response}  ${resp}
+    \       Continue For Loop If     ${VERIFY}==${FALSE}
+    \       Append To List  ${deleteNets}  ${deleteInfo}
+
+    Wait For Task2  ${response}
+
+    Return From Keyword If    ${VERIFY}==${FALSE}
+    :FOR    ${deleteNet}  IN  @{deleteNets}
+    \       ${resp} =  Fusion Api Get Resource  ${deleteNet['uri']}
+    \       Run Keyword If  ${resp['status_code']}!=${RETURN_CODE}  Run Keyword And Continue On Failure  FAIL  msg=Ethernet Network ${deleteNet['name']} is not Deleted
+
+Get All Ethernet Networks Uris
+    [Documentation]   Get Resources Uris list and return it
+    ${resp} =    Fusion Api Get Ethernet Networks
+    ${memb_list} =    Get From Dictionary     ${resp}     members
+    ${uri_list} =     Create List
+    :FOR    ${memb}    IN    @{memb_list}
+    \       ${uri} =     Get From Dictionary    ${memb}    uri
+    \       Append To List     ${uri_list}    ${uri}
+    [Return]  ${uri_list}
+
+Update Ethernet Network
+    [Documentation]  Update eth network information
+    [Arguments]     ${name}  ${body}
+    Log     Updating eth network    console=yes
+    ${body} =    Copy Dictionary    ${body}
+    ${eth_resp}=    Fusion Api Get Ethernet Networks    param=?filter="'name'=='${name}'"
+    ${uri}=   Set Variable    ${eth_resp['members'][0]["uri"]}
+    ${connTempUri}=    Set Variable    ${eth_resp['members'][0]["connectionTemplateUri"]}
+    # Process connectionTemplateUri
+    ${connectionTemplateUri}=  Pop From Dictionary  ${body}  connectionTemplateUri  default=${None}
+    ${connectionuri}=   Run Keyword If      '${connectionTemplateUri}' == '${None}'
+    ...                 Get connectionTemplateUri    ${name}  type=ethernet
+    run keyword if      '${connectionuri}' != '${None}'
+    ...                 Set To Dictionary    ${body}  connectionTemplateUri  ${connectionuri}
+    ...                 ELSE
+    ...                 Set To Dictionary    ${body}  connectionTemplateUri  ${connTempUri}
+    Set To Dictionary    ${body}  uri  ${uri}
+    ${resps} =  Fusion Api Edit Ethernet Network   body=${body}   uri=${uri}
+    [Return]   ${resps}
+
+Check Network With VLAN ID Exists
+    [Documentation]    Checks if an Ethernet Network with the given VLAN ID exists in OV appliance. Returns the status and the name of the newtork if it exists.
+    [Arguments]    ${vlanid}
+    ${nw_exists}=    Set Variable    FALSE
+    ${nw_name}=    Set Variable    None
+    ${nw_list}=    Create List
+    ${resp} =     Fusion Api Get Ethernet Networks    param=?filter="vlanId eq ${vlanid}"
+    Return From Keyword If    '${resp['count']}'=='0'     ${nw_exists}    ${nw_list}
+    :FOR    ${nw}    IN    @{resp['members']}
+    \    ${nw_name}=    Get From Dictionary    ${nw}    name
+    \    ${nw_exists}=    Set Variable    TRUE
+    \    Append To List    ${nw_list}    ${nw_name}
+    [Return]    ${nw_exists}    ${nw_list}
+
+Remove Ethernet Networks Async
+    [Documentation]   It is intended to remove only networks which are provided by user as input
+    ...  Queries the appliance for specified Ethernet networks provided as input argument then removes only them asyncronously.  As it iterates
+    ...  through the list of specified networks, it creates a dictionary for each network containing the network name, task uri,
+    ...  and resource uri.  It then adds these to a list, deleteResources, and uses this list to perform the
+    ...  asyncronous task checking and optional validation that the resource uri returns a 404.
+    [Arguments]  ${networks}   ${VERIFY}=${FALSE}  ${RETURN_CODE}=404
+    ${deleteNets} =  Create List
+    ${response} =  Create List
+    Log      Removing ETHERNET NETWORKS     console=True
+    :FOR    ${net}  IN  @{networks}
+    \       ${neturi}=   Get Ethernet URI    ${net['name']}
+    \       ${resp} =   Fusion Api Delete Ethernet Network      uri=${neturi}
+    \       Log  ${resp}  TRACE
+    \       Log  Deleting network ${net['name']}
+    \       ${deleteInfo} =  Create Dictionary
+    \       Set To Dictionary  ${deleteInfo}  name=${net['name']}
+    \       Set To Dictionary  ${deleteInfo}  uri=${neturi}
+    \       Set To Dictionary  ${deleteInfo}  resp=${resp}
+    \       Append To List  ${deleteNets}  ${deleteInfo}
+    \       Append To List  ${response}  ${resp}
+    Run Keyword If  ${response} is not ${null}   Wait For Task2  ${response}
+    :FOR    ${deleteNet}  IN  @{deleteNets}
+    \       Continue For Loop If   ${VERIFY}==${FALSE}
+    \       ${resp} =  Fusion Api Get Resource  ${deleteNet['uri']}
+    \       Run Keyword If  ${resp['status_code']}!=${RETURN_CODE}  Run Keyword And Continue On Failure  FAIL  msg=Ethernet Network ${deleteNet['name']} is not Deleted

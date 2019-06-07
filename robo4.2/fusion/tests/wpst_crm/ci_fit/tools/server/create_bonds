@@ -1,0 +1,201 @@
+#!/bin/bash
+#
+# Copyright 2011 Hewlett-Packard Development Company, L.P.
+#
+# Permission to use, copy, modify, and distribute this software and its
+# documentation under the terms of the GNU General Public License is hereby
+# granted. No representations are made about the suitability of this software
+# for any purpose. It is provided "as is" without express or implied warranty.
+# See the GNU General Public License for more details.
+#
+# Author: Bobby Suber - 7/31/2011 
+# 
+# Description:
+# This script will create bonds on the server.  Before it attempt to create the bond
+# it checks for the following the following states and errors out if one exists.
+#
+#  1. ifcfg*bak files exist in /etc/sysconfig/network-scripts 
+#  2. The kernel has enumerated a device as *rename
+#  3. The kernel has enumerated a device as dev*
+#
+#  The user will need to resolve these conditions before the bonds can be created. 
+
+ret=0
+ifcfg_mv=0
+drivers=(be2net bnx2x bnx2 tg3 mlx4_en igb e1000 e1000e netxen_nic nx_nic)
+
+ls /etc/sysconfig/network-scripts/* | grep "bak" &>/dev/null
+ret=$?
+if [ $ret -eq 0 ]; then
+	echo "WARNING: ifcfg*bak file found. Please resolve before continuing." 
+	exit
+fi
+
+ifconfig -a | grep "dev" &>/dev/null
+ret=$?
+if [ $ret -eq 0 ]; then
+	echo "WARNING: The kernel enumerated a network device as dev. Please resolve before continuing." 
+	exit
+fi
+
+ifconfig -a | grep "rename" &>/dev/null
+ret=$?
+if [ $ret -eq 0 ]; then
+	echo "WARNING: The kernel enumerated a network device as rename. Please resolve before continuing." 
+	exit
+fi
+
+ls ifcfg &>/dev/null
+ret=$?
+if [ $ret -ne 0 ]; then
+	echo "WARNING: The directory ifcfg cannot be found.  Please resolve before continuing." 
+	exit
+fi
+
+lsmod | grep bonding &>/dev/null
+ret=$?
+if [ $ret -ne 0 ]; then
+	echo "Loading bonding driver." 
+	modprobe bonding
+fi
+
+ls /etc/sysconfig/network-scripts/ | grep "bond" &>/dev/null
+ret=$?
+if [ $ret -eq 0 ]; then
+	TMP_DIR=$(mktemp -d ifcfg.XXXXXXXXXX)
+	echo "Found bond configuration files. Moving ifcfg files to $TMP_DIR"
+	mv /etc/sysconfig/network-scripts/ifcfg-b* $TMP_DIR
+	ifcfg=(`ls /etc/sysconfig/network-scripts/ | grep ifcfg-eth`)
+	for iface in ${ifcfg[@]}
+	do
+		mv /etc/sysconfig/network-scripts/$iface $TMP_DIR
+		touch /etc/sysconfig/network-scripts/$iface
+		dev=(`cat $TMP_DIR/$iface | grep "DEVICE" | awk 'BEGIN{FS="="} {print $NF}'`)
+		echo "DEVICE=$dev" >> /etc/sysconfig/network-scripts/$iface
+	done
+fi
+
+cat /etc/rc.local | grep "add_vlans"
+ret=$?
+if [ $ret -eq 0 ]; then
+	sed /add_vlans/d /etc/rc.local > rc.local_tmp
+	rm -f /etc/rc.d/rc.local
+	mv rc.local_tmp /etc/rc.d/rc.local
+	chmod +x /etc/rc.d/rc.local
+fi
+
+cat /etc/rc.local | grep "add_bonds"
+ret=$?
+if [ $ret -eq 0 ]; then
+	sed /add_bonds/d /etc/rc.local > rc.local_tmp
+	rm -f /etc/rc.d/rc.local
+	mv rc.local_tmp /etc/rc.d/rc.local
+	chmod +x /etc/rc.d/rc.local
+fi
+
+if [ -f bond_ipaddr.conf ]; then
+	TMP_FILE=$(mktemp bond_ipaddr.config.XXXXXXX)
+	mv bond_ipaddr.conf $TMP_FILE
+fi
+
+cat /etc/modprobe.conf | grep "alias eth"
+ret=$?
+if [ $ret -eq 0 ]; then
+	sed /"alias eth"/d /etc/modprobe.conf > modprobe.conf_tmp
+	mv /etc/modprobe.conf /etc/modprobe.conf_bkp	
+	mv modprobe.conf_tmp /etc/modprobe.conf
+fi
+
+for driver in ${drivers[@]} 
+do
+	modprobe -r $driver
+done
+
+/etc/init.d/network restart
+
+for driver in ${drivers[@]} 
+do
+	modprobe $driver
+done
+
+ipaddr="0.0.0.0"
+bondidx=0
+bond_flag=0
+vlans=(`ls ifcfg | awk 'BEGIN{FS="."} {print $NF}' | sort | uniq`)
+for vlan  in ${vlans[@]}
+do 
+	ifcfgs=(`ls ifcfg | grep "ifcfg\-[a-z]*[0-9]*\.$vlan$"`) 
+
+	# Check the ifcfg-ethx files and bind them to the bonding interface if required 
+	for ifcfg in ${ifcfgs[@]}
+	do
+		ifcfg_untagged=(`echo $ifcfg | awk 'BEGIN{FS="."} {print $NR}'`)
+	 	cat /etc/sysconfig/network-scripts/$ifcfg_untagged | grep "MASTER" &>/dev/null	
+		ret=$?
+		if [ $ret -ne 0 ]; then
+			echo "MASTER=bond$bondidx" >> /etc/sysconfig/network-scripts/$ifcfg_untagged
+			echo "BOOTPROTO=none" >> /etc/sysconfig/network-scripts/$ifcfg_untagged	
+			echo "ONBOOT=yes" >> /etc/sysconfig/network-scripts/$ifcfg_untagged
+			echo "SLAVE=yes" >> /etc/sysconfig/network-scripts/$ifcfg_untagged
+			echo "USERCTL=no" >> /etc/sysconfig/network-scripts/$ifcfg_untagged
+			echo "TYPE=Ethernet" >> /etc/sysconfig/network-scripts/$ifcfg_untagged
+			bond_flag=1
+
+			# Create the bond interface if it has not already been created
+			if [ ! -f /etc/sysconfig/network-scripts/ifcfg-bond$bondidx ]; then
+				touch /etc/sysconfig/network-scripts/ifcfg-bond$bondidx
+				echo "DEVICE=bond$bondidx" >> /etc/sysconfig/network-scripts/ifcfg-bond$bondidx
+				echo 'BONDING_OPTS="mode=1 miimon=500"' >> /etc/sysconfig/network-scripts/ifcfg-bond$bondidx
+				echo "BOOTPROTO=none" >> /etc/sysconfig/network-scripts/ifcfg-bond$bondidx
+				echo "ONBOOT=yes" >> /etc/sysconfig/network-scripts/ifcfg-bond$bondidx
+				echo "USERCTL=no" >> /etc/sysconfig/network-scripts/ifcfg-bond$bondidx
+				echo "TYPE=BOND" >> /etc/sysconfig/network-scripts/ifcfg-bond$bondidx
+				cat /etc/modprobe.conf | grep "alias bond$bondidx bonding" &>/dev/null
+				ret=$?
+				if [ $ret -ne 0 ]; then
+					echo "alias bond$bondidx bonding" >> /etc/modprobe.conf
+				fi
+			fi
+		fi
+
+		# Save the IP address of the first interface found so that it can later be assigned
+		# to the bonded VLAN interface
+		if [ "$ifcfg" == "${ifcfgs[0]}" ]; then
+			ipaddr=(`cat ifcfg/${ifcfgs[0]} | grep "IPADDR" | awk 'BEGIN{FS="="} {print $NF}'`)
+			bond=(`cat /etc/sysconfig/network-scripts/$ifcfg_untagged | grep "MASTER" | awk 'BEGIN{FS="="} {print $NF}'`)
+			echo "ifcfg-$bond.$vlan $ipaddr" >> bond_ipaddr.conf
+		fi
+	done
+
+	if [ $bond_flag -eq 1 ]; then
+		let bondidx=bondidx+1	
+		bond_flag=0
+	fi
+done
+
+/etc/init.d/network restart
+
+# Read the bond_ipaddr.conf file and apply the vlans
+bondIpaddr=(`cat bond_ipaddr.conf | awk 'BEGIN{FS="="} {print $NF}'`)
+for bip in ${bondIpaddr[@]} 
+do 
+	bondIfcfg=(`cat bond_ipaddr.conf | grep $bip | awk 'BEGIN{FS="="} {print $NR}'`)
+	vlan=(`echo $bondIfcfg | awk 'BEGIN{FS="."} {print $NF}'`)	
+	bond=(`echo $bondIfcfg | awk 'BEGIN{FS="-"} {print $NF}' | awk 'BEGIN{FS="."} {print $NR}'`)
+	vconfig add $bond $vlan 
+	ifconfig $bond.$vlan $bip up 
+done
+
+cat /etc/rc.local | grep "add_bonds"
+ret=$?
+if [ $ret -eq 1 ]; then
+	echo "/root/add_bonds /root/bond_ipaddr.conf &" >> /etc/rc.local
+fi
+
+/etc/init.d/network restart
+echo "Bonds created!!!"
+
+
+
+
+

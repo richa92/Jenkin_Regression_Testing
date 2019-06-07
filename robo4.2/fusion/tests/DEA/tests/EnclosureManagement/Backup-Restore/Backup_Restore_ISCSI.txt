@@ -1,0 +1,142 @@
+*** Settings ***
+Documentation     Test suite to test the backup and restore functionality
+...               pybot -L Trace -v APPLIANCE_IP:<APP_IPv4-IPv6> -v Server_Bay:<server bay> -v iLo_Adapter_Dir:<NetworkAdapters/BaseNetworkAdapters ilo4/ilo5> -v iLo_Adapter_Slot:<adapter slot number>   Backup_Restore_ISCSI.txt
+             
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/data_variables.py
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/smoke_data_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/petest_resource.txt
+Resource          ${GIT_REPO_ROOT}/fusion/Resources/api/settings/backups.txt
+Resource          ${GIT_REPO_ROOT}/fusion/Resources/api/settings/restores.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Library           RoboGalaxyLibrary
+Library           FusionLibrary
+Library           MgmtFWLibrary
+Library           Selenium2Library
+Library           Collections
+Suite Setup       Run Keywords    Login to Fusion Via REST    AND    Clean UP Environment   
+Suite Teardown    Run Keywords    Clean UP Environment    AND    Logout of Fusion Via REST
+
+*** Test Cases ***
+
+TC 01: Create a profile that has remote storage attachment (iSCSI). Create backup and Restore and validate the Profile settings.
+    [Documentation]    Create a profile that has remote storage attachment (iSCSI). Create backup and Restore and validate the Profile settings.
+    [Tags]    Backup-Restore    ISCSI    Automated 
+    Setup Ethernet Appliance
+    ${bay_list} =  Create List    ${Server_Bay}
+    ${connections} =  Set Variable    ${enet_connection_1ICM_4pf}
+    Create Server Profile with Connections Bootmode and BootOrder  ${bay_list}  ${server_profiles_eth[0]}  ${connections}  ${UEFI_bootmode}  ${Gen9_boot_HardDisk}
+    Power ON Server Blade Bay    ${Server_Bay}
+    Wait for Server to Power on    ${Server_Bay}
+    Sleep    600
+    ${ilo_ip}=    Get Server iLO IP    ${Server_Bay}
+    ${status}=    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    ${adapter_info}=    iLO RIS Get Object    /redfish/v1/Systems/1/${iLO_Adapter_Dir}/${iLO_Adapter_Slot}
+    ${physical_ports}=    Get From Dictionary    ${adapter_info}    PhysicalPorts
+    ${port_dict} =    Get From List    ${physical_ports}    1
+    ${ipv4_addresses}=    Get From Dictionary    ${port_dict}    IPv4Addresses
+    ${ipv4_addresses_dict}=    Get From List    ${ipv4_addresses}    0
+    ${os_ip}=    Get From Dictionary    ${ipv4_addresses_dict}    Address
+   
+    ${ping_status}=    Run And Return RC    ping ${os_ip} -n 1
+    ${ping_response}=    Run Keyword If    ${ping_status}==0    Set Variable    True
+    Should be True    ${ping_response}    msg=Unable to ping the server OS IP
+    ${pre_ENC_COUNT} =    Fusion Api Get Enclosures
+    ${pre_LE_COUNT} =    Fusion Api Get Logical Enclosure
+    ${pre_HW_COUNT} =    Fusion Api Get Server Hardware
+    ${pre_EG_COUNT} =    Fusion Api Get Enclosure Groups
+    ${pre_SP_COUNT} =    Fusion Api Get Server Profiles
+    ${pre_LIG_COUNT} =    Fusion Api Get LIG
+    ${pre_IC_COUNT} =    Fusion Api Get Interconnect
+    ${pre_ETH_COUNT} =    Fusion Api Get Ethernet Networks
+    ${pre_FCOE_COUNT} =    Fusion Api Get FCoE Networks
+#   Get server details before backup
+    ${pre_backup_server_details}=  Get server Information    ${Server_Bay}
+#    Get server details post restore
+    ${pre_backup_profile_details}=    Fusion Api Get Server Profiles     ${pre_backup_server_details['serverProfileUri']}
+#   Create a backup    
+    Create Backup
+    ${Backup_file1}=  Build OV Back up File Name
+    ${backup_uri}=    Get Backup URI
+    Download Backup    ${backup_uri}    ${Backup_file1}
+    ${bay_list}=  BuiltIn.Create List  ${Server_Bay}
+    ${last_eventID}=    Get Last Fusion Event Id
+    Delete Server Profile   ${bay_list}
+    Upload Backup    ${Backup_file1}
+#   Upload the backup file    
+    ${backup_uri}=    Get Backup URI
+    Initiate Restore    ${backup_uri}
+    Wait Until Keyword Succeeds    90m    30s    OneView Restore Complete
+    Sleep    300
+    Run Keywords    Login to Fusion Via REST
+    ${resp}=   Fusion Api Get Server Profiles
+    ${profile_list}=  Get From Dictionary  ${resp}  members
+    ${status}=    Validate alertID in fusion events    ${last_eventID}    ${Server_Virtual_MACfault_AlertID}
+    ${server_state}=    Run Keyword If    '${status}'=='PASS'
+    ...    Run Keywords    Power OFF Server Blade Bay    ${Server_Bay}
+    ...    AND    Sleep    120
+    ...    AND    Unassign Profiles From Servers    ${profile_list}
+    ...    AND    Assign Profiles To Servers    ${profile_list}
+    ...    AND    Power ON Server Blade Bay    ${Server_Bay}
+    ...    AND    Sleep   600
+#   Get server details post restore
+    ${post_backup_server_details}=  Get server Information    ${Server_Bay}
+#   Get server details post restore
+    ${post_backup_profile_details}=    Fusion Api Get Server Profiles     ${post_backup_server_details['serverProfileUri']}
+#   post backup device counts
+    ${post_ENC_COUNT} =    Fusion Api Get Enclosures
+    ${post_LE_COUNT} =    Fusion Api Get Logical Enclosure
+    ${post_HW_COUNT} =    Fusion Api Get Server Hardware
+    ${post_EG_COUNT} =    Fusion Api Get Enclosure Groups
+    ${post_SP_COUNT} =    Fusion Api Get Server Profiles
+    ${post_LIG_COUNT} =    Fusion Api Get LIG
+    ${post_IC_COUNT} =    Fusion Api Get Interconnect
+    ${post_ETH_COUNT} =    Fusion Api Get Ethernet Networks
+    ${post_FCOE_COUNT} =    Fusion Api Get FCoE Networks
+#   Compare the pre and post counts
+    Should be Equal    ${pre_ENC_COUNT['count']}  ${post_ENC_COUNT['count']}
+    Should be Equal    ${pre_LE_COUNT['count']}  ${post_LE_COUNT['count']}
+    Should be Equal    ${pre_HW_COUNT['count']}  ${post_HW_COUNT['count']}
+    Should be Equal    ${pre_EG_COUNT['count']}  ${post_EG_COUNT['count']}
+    Should be Equal    ${pre_SP_COUNT['count']}  ${post_SP_COUNT['count']}
+    Should be Equal    ${pre_LIG_COUNT['count']}  ${post_LIG_COUNT['count']}
+    Should be Equal    ${pre_IC_COUNT['count']}  ${post_IC_COUNT['count']}
+    Should be Equal    ${pre_FCOE_COUNT['count']}  ${post_FCOE_COUNT['count']}
+#   Compare EG details before and after restore    
+    Should be Equal    ${pre_EG_COUNT['members'][0]['interconnectBayMappingCount']}  ${post_EG_COUNT['members'][0]['interconnectBayMappingCount']}
+    Should be Equal    ${pre_EG_COUNT['members'][0]['interconnectBayMappings']}  ${post_EG_COUNT['members'][0]['interconnectBayMappings']}
+    Should be Equal    ${pre_EG_COUNT['members'][0]['interconnectBayMappingCount']}  ${post_EG_COUNT['members'][0]['interconnectBayMappingCount']}
+    Should be Equal    ${pre_EG_COUNT['members'][0]['status']}  ${post_EG_COUNT['members'][0]['status']}
+#   Compare LIG details before and after restore    
+    Should be Equal    ${pre_LIG_COUNT['members'][0]['redundancyType']}  ${post_LIG_COUNT['members'][0]['redundancyType']}
+    Should be Equal    ${pre_LIG_COUNT['members'][0]['ethernetSettings']['interconnectType']}  ${post_LIG_COUNT['members'][0]['ethernetSettings']['interconnectType']}
+#   Compare LE details before and after restore
+    Should be Equal    ${pre_LE_COUNT['members'][0]['firmware']}  ${post_LE_COUNT['members'][0]['firmware']}
+    Should be Equal    ${pre_LE_COUNT['members'][0]['ipAddressingMode']}  ${post_LE_COUNT['members'][0]['ipAddressingMode']}
+    Should be Equal    ${pre_LE_COUNT['members'][0]['powerMode']}  ${post_LE_COUNT['members'][0]['powerMode']}
+    Should be Equal    ${pre_LE_COUNT['members'][0]['status']}  ${post_LE_COUNT['members'][0]['status']}    
+#   Compare the server details before and after restore
+    Should be Equal    ${pre_backup_server_details['model']}  ${post_backup_server_details['model']}
+    Should be Equal    ${pre_backup_server_details['mpHostInfo']}  ${post_backup_server_details['mpHostInfo']}
+    Should be Equal    ${pre_backup_server_details['mpState']}  ${post_backup_server_details['mpState']}
+    Should be Equal    ${pre_backup_server_details['name']}  ${post_backup_server_details['name']}
+    Should be Equal    ${pre_backup_server_details['position']}  ${post_backup_server_details['position']}
+    Should be Equal    ${pre_backup_server_details['powerState']}  ${post_backup_server_details['powerState']}
+    Should be Equal    ${pre_backup_server_details['remoteSupportUri']}  ${post_backup_server_details['remoteSupportUri']}
+    Should be Equal    ${pre_backup_server_details['serverHardwareTypeUri']}  ${post_backup_server_details['serverHardwareTypeUri']}
+    Should be Equal    ${pre_backup_server_details['state']}  ${post_backup_server_details['state']}
+#   Compare the server profile details before and after restore
+    Should be Equal    ${pre_backup_profile_details['boot']}  ${post_backup_profile_details['boot']}
+    Should be Equal    ${pre_backup_profile_details['bootMode']}  ${post_backup_profile_details['bootMode']}
+    Should be Equal    ${pre_backup_profile_details['connectionSettings']['connections']}  ${post_backup_profile_details['connectionSettings']['connections']}
+    Should be Equal    ${pre_backup_profile_details['state']}  ${post_backup_profile_details['state']}
+    Should be Equal    ${pre_backup_profile_details['status']}  ${post_backup_profile_details['status']}
+    Should be Equal    ${pre_backup_profile_details['serialNumber']}  ${post_backup_profile_details['serialNumber']}
+    Should be Equal    ${pre_backup_profile_details['enclosureBay']}  ${post_backup_profile_details['enclosureBay']}
+    ${ilo_ip}=    Get Server iLO IP    ${Server_Bay}
+    ${status}=    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    ${ping_status}=    Run And Return RC    ping ${os_ip} -n 1
+    ${ping_response}=    Run Keyword If    ${ping_status}==0    Set Variable    True
+
+    [Teardown]    Run Keyword If Test Failed    Run Keyword   Delete Server Profile  ${bay_list}

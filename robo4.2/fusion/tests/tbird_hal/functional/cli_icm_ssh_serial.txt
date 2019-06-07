@@ -1,0 +1,182 @@
+*** Settings ***
+Documentation   Tests Non-Interactive (ssh) serial Potash ICM connection (US35824)
+...             Requires a Claimed and Added enclosure.
+...             = Usage =
+...             | pybot | -L DEBUG | -v FUSION_IP:<IP> | -v ENCLOSURE:<name> | -v POTASH_SLOT:<slot> | cli_ssh_icm_serial.txt |
+...             = Variables =
+...             | FUSION IP     | Required; IP address of the FusionVM to use |
+...             | ENCLOSURE     | Required; Enclosure name to run on (tesla, ...) |
+...             = Preconditions =
+...             Enclosure Claimed and Added so the Fusion CLI is accessable
+
+Library           RoboGalaxyLibrary            # DVTs Robot Framework extensions
+Library           FusionLibrary                # DVTs Fusion extensions
+Library           robot.api.logger
+Variables         ../resources/variables.py   ${ENCLOSURE}    # Variables file
+Resource          ../resources/system_info.txt                # Comet-DVT System Info extensions
+Resource          ../resources/fusion_cli.txt                 # Comet-DVT fusion CLI extensions
+Resource          ../resources/defaults.txt   # Comet-DVT default variables
+Force Tags          CLI    HW
+Suite Setup         Make Multiple Connections
+Suite Teardown      Multi Logout
+
+*** Variables ***
+${FUSION_TIMEOUT}      60
+${SWITCH_TIMEOUT}      60
+${CLI_TIMEOUT}         120
+${POTASH_SLOT}         1
+${ICM_CONNECT_WAIT}    15
+${LOOP_RANGE}          3
+
+*** Test Cases ***
+
+#ssh -t -o StrictHostKeyChecking=no  Administrator@tesla-cim1 "console-view; connect interconnect EM1FFFF101 1   1 force"
+Connect and Disconnect With Force using one session
+    : FOR    ${INDEX}    IN RANGE    1    ${LOOP_RANGE}
+    \    Console    \n "${INDEX} connect interconnect ${ENC_SERIAL_NUMBER} ${POTASH_SLOT} 1 force;"
+    \        ${response}        Execute SSH Connect Interconnect Command        ${FUSION_USERNAME}@${FUSION_IP}    "console-view;connect interconnect ${ENC_SERIAL_NUMBER} ${POTASH_SLOT} 1 force;"
+    \    Should Contain    ${Response}    System image version:
+    Log    ${FUSION_TIMEOUT}
+    Log    ${SWITCH_TIMEOUT}
+    Log    ${CLI_TIMEOUT}
+
+Connect and Disconnect No Force using one session
+    : FOR    ${INDEX}    IN RANGE    1    ${LOOP_RANGE}
+    \    Console    \n "${INDEX} connect interconnect ${ENC_SERIAL_NUMBER} ${POTASH_SLOT} 1 ;"
+    \        ${response}        Execute SSH Connect Interconnect Command        ${FUSION_USERNAME}@${FUSION_IP}    "console-view;connect interconnect ${ENC_SERIAL_NUMBER} ${POTASH_SLOT} 1 force;"
+    \    Should Contain    ${Response}    System image version:
+
+Connect and Disconnect Without Force using different sessions
+     : FOR    ${INDEX}    IN RANGE    1    ${LOOP_RANGE}
+     \    Switch Connection     ${Session1}
+     \    Console    \n "${INDEX} connect interconnect ${ENC_SERIAL_NUMBER} ${POTASH_SLOT} 1 ;"
+     \        ${response}        Execute SSH Connect Interconnect Command        ${FUSION_USERNAME}@${FUSION_IP}    "console-view;connect interconnect ${ENC_SERIAL_NUMBER} ${POTASH_SLOT} 1 ;"
+     \    Should Contain    ${Response}    System image version:
+     \    Switch Connection     ${Session2}
+     \    Console    \n "${INDEX} connect interconnect ${ENC_SERIAL_NUMBER} ${POTASH_SLOT} 1 ;"
+     \        ${response}        Execute SSH Connect Interconnect Command        ${FUSION_USERNAME}@${FUSION_IP}    "console-view;connect interconnect ${ENC_SERIAL_NUMBER} ${POTASH_SLOT} 1 ;"
+     \    Should Contain    ${Response}    System image version:
+
+
+Second connection without FORCE should not disconnect first session
+    : FOR    ${INDEX}    IN RANGE    1    ${LOOP_RANGE}
+    \     # First connection
+    \    Switch Connection     ${Session1}
+    \    ${response}        SSH Connect Interconnect Command    ${FUSION_USERNAME}@${FUSION_IP}    "console-view;connect interconnect ${ENC_SERIAL_NUMBER} ${POTASH_SLOT} 1;"
+    \    Log    ${response}
+
+         # Second connection without FORCE
+    \    Switch Connection     ${Session2}
+    \    ${output}    Run keyword and expect error    *
+         ...     SSH Connect Interconnect Command    ${FUSION_USERNAME}@${FUSION_IP}    "console-view;connect interconnect ${ENC_SERIAL_NUMBER} ${POTASH_SLOT} 1;"
+    \    Log    ${output}
+
+         # Should not disconnect first session
+    \    Switch Connection     ${Session1}
+    \    ${output}      SSHLibrary.Read
+    \    Should not Contain    ${output}    Connection to the interconnect was terminated
+    \    Log    ${output}
+
+    \    #Second connection with FORCE should disconnect first session
+    \    Switch Connection     ${Session2}
+    \    ${output}        SSH Connect Interconnect Command    ${FUSION_USERNAME}@${FUSION_IP}    "console-view;connect interconnect ${ENC_SERIAL_NUMBER} ${POTASH_SLOT} 1 force;"
+    \    Log    ${output}
+
+         # Should disconnect first session
+    \    Switch Connection     ${Session1}
+    \    ${output}      SSHLibrary.Read Until    Connection to the interconnect was terminated
+    \    Log    ${output}
+    \    Should Contain    ${output}    Connection to the interconnect was terminated
+
+Negative Test: Empty Bays
+    @{EMPTY_ICM_BAYS}=    Create List    5    6    2    3
+    : FOR    ${BAY}    IN    @{EMPTY_ICM_BAYS}
+    \    Console    \n "connect interconnect ${ENC_SERIAL_NUMBER} ${BAY} 1 force;"
+    \    ${response}        Run Keyword and expect Error    *    Execute SSH Connect Interconnect Command    ${FUSION_USERNAME}@${FUSION_IP}    "console-view;connect interconnect ${ENC_SERIAL_NUMBER} ${BAY} 1 force;"
+    \    Should Contain    ${response}    Bay ${BAY} is empty
+
+Negative Test: Invalid Bays
+    @{INVALID_ICM_BAYS}=    Create List    12    23   423    0
+    : FOR    ${BAY}    IN    @{INVALID_ICM_BAYS}
+    \    Console    \n "${BAY}  connect interconnect ${ENC_SERIAL_NUMBER} ${BAY} 1 force;"
+    \    ${response}        Run Keyword and expect Error    *    Execute SSH Connect Interconnect Command    ${FUSION_USERNAME}@${FUSION_IP}    "console-view;connect interconnect ${ENC_SERIAL_NUMBER} ${BAY} 1 force;"
+    \    Should Contain    ${response}    Bay number specified is not valid.
+
+Negative Test: Invalid Bay Input
+    @{INVALID_BAYS_INPUT}=    Create List    -12    a23    1a    1_42
+    : FOR    ${BAY}    IN    @{INVALID_BAYS_INPUT}
+    \    Console    \n "${BAY} connect interconnect ${ENC_SERIAL_NUMBER} ${BAY} 1 force;"
+    \    ${response}        Run Keyword and expect Error    *    Execute SSH Connect Interconnect Command    ${FUSION_USERNAME}@${FUSION_IP}    "console-view;connect interconnect ${ENC_SERIAL_NUMBER} ${BAY} 1 force;"
+    \    Should Contain    ${response}    The input is not a valid command.
+
+
+
+*** Keywords ***
+SSH Connect Interconnect Command
+    [Documentation]    Connect Interconnect Serial from the ciMgr administrator linux command line.
+    [Arguments]    ${login}    ${command}
+    # First log to ciMgr as root
+    #Login to Fusion Via SSH
+    # Then issue the connect interconnect command
+    SSHLibrary.Write          ssh -o StrictHostKeyChecking=no -t ${login} ${command}
+    # Take care of authenticity issue when asked for entering yes or no
+    ${response}      Read Until Regexp      (yes|password)
+    ${line}            Get Line          ${response.strip()}               -1
+    ${tmp}             Get Substring         ${line.strip()}       -3
+    Run Keyword If     '${tmp}'=='yes'          SSHLibrary.Write    yes
+    Run Keyword If     '${tmp}'=='yes'          SSHLibrary.Read Until     password:
+    SSHLibrary.Write   ${CLI_PASSWORD}
+    Sleep   ${ICM_CONNECT_WAIT}    For login to complete
+    ${output}      SSHLibrary.Read Until    by a period (.))
+    Log    ${output}
+    ${output}      SSHLibrary.Read
+    # After entering the password, hit return a couple of times for prompt to appear
+    SSHLibrary.Write Bare    \n
+    ${output}      SSHLibrary.Read
+    SSHLibrary.Write Bare    \n
+    ${output}      SSHLibrary.Read Until    <HP>
+
+
+Execute SSH Connect Interconnect Command
+    [Documentation]     Executes "Connect ..." CLI command via SSH  and returns buffer as an list.
+    [Arguments]    ${login}    ${command}
+   SSH Connect Interconnect Command    ${login}     ${command}
+    #Enter system and eq mode on the ICM to retrieve the version info
+    ${output}      SSHLibrary.Write      screen-length disable
+    ${output}      SSHLibrary.Read
+    ${output}      SSHLibrary.Write      sy
+    ${output}      SSHLibrary.Read
+    ${output}      SSHLibrary.Write      en
+    ${output}      SSHLibrary.Read
+    ${output}      SSHLibrary.Write      diagnosis
+    ${output}      SSHLibrary.Read
+    ${output}      SSHLibrary.Write      display version
+    ${Response}    SSHLibrary.Read Until       Plus+6JS+4CXP
+    #${Response}    SSHLibrary.Read Until       \[HP-equipment\]
+    # Nicely exit this connection
+    ${output}      SSHLibrary.Write      quit
+    ${output}      SSHLibrary.Read
+    ${output}      SSHLibrary.Write      quit
+    ${output}      SSHLibrary.Read
+    ${CONTROL_UNDERSCORE}    Convert To String    \x1f
+    ${output}      SSHLibrary.Write      ${CONTROL_UNDERSCORE}.
+    # Return to Fusion Bash shell
+    ${output}      SSHLibrary.Read Until      ${FUSION_PROMPT}
+    #Logout Of Fusion Via SSH
+    Log            ${output}
+    [Return]       ${Response}
+
+Make Multiple Connections
+    ${Session1}=        Login to Fusion Via SSH
+    Set Suite Variable    ${Session1}
+    ${Session2}=        Login to Fusion Via SSH
+    Set Suite Variable    ${Session2}
+    Switch Connection     ${Session1}
+
+Multi Logout
+    Close All Connections
+
+
+
+
+

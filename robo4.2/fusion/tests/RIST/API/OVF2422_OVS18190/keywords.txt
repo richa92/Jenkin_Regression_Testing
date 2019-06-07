@@ -1,0 +1,112 @@
+*** Settings ***
+Library            RoboGalaxyLibrary
+Library            FusionLibrary
+Library            OperatingSystem
+Library            BuiltIn
+Library            String
+Library            robot.libraries.String
+Library            Dialogs
+Library            SSHLibrary
+Library            Collections
+Resource           ../global_variables.robot
+Resource           ./../../../../Resources/api/fusion_api_resource.txt
+Variables          ${DATA_FILE}
+
+*** Keywords ***
+Create self signed web server certificate body
+    [Documentation]    Create /rest/certs/server body
+    [Arguments]    ${basic_body}
+    ${web_server_cert} =  Fusion Api Get Appliance Certificate
+    ${body} =  set to dictionary    ${basic_body}    commonName    ${web_server_cert['commonName']}    alternativeName    ${web_server_cert['alternativeName']}
+    [Return]    ${body}
+
+Update Certificate Validation Configuration
+    [Documentation]    Update certificate validation configuration and wait for appliance rebooting
+    [Arguments]    ${certValidationConfig}
+    Log    \nUpdating OneView certificate validation configuration    console=Yes
+    ${resp} =  Fusion api update certificate validation configuration    ${certValidationConfig}
+    Return from keyword if  ${resp['status_code']}!=202    ${None}
+    Log    Wating for OneView state to change to be STARTING    console=Yes
+    Wait For Appliance State To Be Expected State    ExpectedState=STARTING
+    Log    Wating for OneView state to change to be OK    console=Yes
+    Wait For Appliance State To Be Expected State    ExpectedState=OK
+    [Return]    ${True}
+
+Check certificate validation configuration as expected
+    [Documentation]    Check the current certificate validation configuration is set as expected
+    [Arguments]    ${expected_configuration}
+    ${current_validation_configurator} =  fusion api get certificate validation configuration
+    Remove From Dictionary    ${current_validation_configurator}    created    eTag    modified    category    uri    headers    status_code
+    Should Be Equal    ${current_validation_configurator}    ${expected_configuration}    msg=The current certificate validation configuration is not set as expected
+
+Check alert
+    [Documentation]    Check whether the alert is existed , it should be only one if the alert exsited
+    [Arguments]    ${alert_details}    ${resolution}
+    Fusion Api Get Certificate Status
+    ${alerts} =  Fusion Api Get Alerts    ${alert_uri}
+    ${resp}=   Get From Dictionary    ${alerts}    members
+    ${alert_list} =  Create List
+    :For    ${item}    IN    @{resp}
+    \    Run Keyword If    '${item['description']}' == '${alert_details}'    Append To List    ${alert_list}    ${alert_details}
+    \    Run Keyword If    '${item['description']}' == '${alert_details}'    Should Be Equal    '${item['correctiveAction']}'    '${resolution}'    msg=Show error resolution details
+    ${alert_count} =  Count Values In List    ${alert_list}    ${alert_details}
+    Should Be Equal As Integers    ${alert_count}    1
+
+Create appliance signing request
+    [Documentation]    Create appliance signing request and get related task uri
+    [Arguments]    ${CSRInfo}
+    Log    Getting the current appliance certificate commonName    console=Yes
+    ${resp} =  Fusion Api Get Appliance Certificate
+    ${commonName} =  Get From Dictionary    ${resp}    commonName
+    Set to Dictionary    ${CSRinfo}    commonName    ${commonName}
+    Set to Dictionary    ${CSRinfo}    alternativeName    ${commonName}
+    log    ${CSRinfo}
+    ${resp} =  Fusion Api Generate Certificate Signing Request      ${CSRinfo}
+    log    ${resp}
+    ${csr} =  Get From Dictionary    ${resp}    base64Data
+    ${headers} =  Get From Dictionary    ${resp}    headers
+    ${task_uri} =  Get From Dictionary    ${headers}    Location
+    [Return]    ${csr}    ${task_uri}
+
+Server alert with aliasname
+    [Documentation]    Create web server alert / rabbitmq server alert based on aliasname
+    [Arguments]    ${webcert_aliasname}    ${alert_part}
+    ${webcert_alert} =  Set Variable    ${server_alerts['part1']}${webcert_aliasname}${alert_part}
+    ${rabbitmqservercert_alert} =  Set Variable    ${server_alerts['part2']}${webcert_aliasname}${alert_part}
+    [Return]    ${webcert_alert}    ${rabbitmqservercert_alert}
+
+Generate Appliance Certificate by CSR
+    [Documentation]    Issue the csr by external CA to get appliance certificate
+    [Arguments]    ${appliance_commonname}    ${csr}    ${IssuerIP}    ${ssh_credentials}
+    Open Connection    ${IssuerIP}
+    Login    ${ssh_credentials['username']}    ${ssh_credentials['password']}
+    Execute command    ${generate_appliance_cert_commands['part1']} ${appliance_commonname}
+    Execute command    echo "${csr}" > ${generate_appliance_cert_commands['part2']}
+    Execute command    ${generate_appliance_cert_commands['part3']}
+    Execute command    echo "${csr}" > ${generate_appliance_cert_commands['part9']}
+    Execute command    ${generate_appliance_cert_commands['part11']}
+    ${root_ca} =  Execute Command    ${generate_appliance_cert_commands['part4']}
+    ${intermediate_ca} =  Execute Command    ${generate_appliance_cert_commands['part5']}
+    ${appliance_cert} =  Execute command    ${generate_appliance_cert_commands['part6']}
+    ${CA_sign_cert} =  Execute command    ${generate_appliance_cert_commands['part10']}
+    ${root_CA} =  Execute Command    ${generate_appliance_cert_commands['part12']}
+    ${intermediate_CA} =  Execute Command    ${generate_appliance_cert_commands['part13']}
+    SSHLibrary.Get File    ${generate_appliance_cert_commands['part7']}    ${CURDIR}/appliance_cert.crl
+    SSHLibrary.Get File    ${generate_appliance_cert_commands['part14']}    ${CURDIR}/rootcrl_cert.crl
+    [Return]    ${root_ca}    ${intermediate_ca}    ${appliance_cert}    ${CA_sign_cert}
+
+Manually trigger the status API
+    [Documentation]    To manually trigger the status API execute the command
+    [Arguments]    ${APPLIANCE_IP}    ${ssh_credentials}
+    Open Connection    ${APPLIANCE_IP}
+    Login    ${ssh_credentials['username']}    ${ssh_credentials['password']}
+    Execute command    ${generate_appliance_cert_commands['part15']}
+    Close connection
+
+Clean EVN in Linux
+    [Documentation]    Clear the existed files in Linux server
+    [Arguments]    ${IssuerIP}    ${ssh_credentials}
+    Open Connection    ${IssuerIP}
+    Login    ${ssh_credentials['username']}    ${ssh_credentials['password']}
+    Execute command    ${generate_appliance_cert_commands['part8']}
+    Close connection

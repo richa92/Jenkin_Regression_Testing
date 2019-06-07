@@ -1,0 +1,333 @@
+*** Settings ***
+Documentation   OVF5609
+Variables       datavariables_BA51.py
+#Variables       datavariables_AZ51.py
+Library         json
+Library         FusionLibrary
+Library         RoboGalaxyLibrary
+Library         Collections
+Library         SSHLibrary
+Library         String
+Resource            ../../../../../Resources/api/fusion_api_resource.txt
+Resource           OVF5609_keywords.txt
+Library         Telnet
+Library         background_ping.py
+Library          ../FVT/fvt_api.py
+
+*** Variables ***
+${stats}    statistics
+
+*** Test Cases ***
+
+Login to Appliance
+    [Documentation]    Login to Appliance
+    [Tags]  add   POSITIVE
+    Set Log Level    TRACE
+    ${resp}    Fusion Api Login Appliance    ${APPLIANCE_IP}        ${appliance_credentials}
+    Run Keyword If    ${resp[0]['status_code']} != 200    FAIL
+    ...    ELSE    Log    Successfully logged in to the appliance    console=True
+
+    Clean OV
+
+Create ethernet network
+    [Documentation]    Create ethernet Networks
+    Add Ethernet Networks from variable    ${ethernet_networks}
+
+Create Fabric Attach and Direct Attach FC network
+    [Documentation]    Create FA FC Networks
+    Log    Creating FC networks    console=True
+    Add FC Networks from variable    ${fc_netowrks}
+
+Creating LIG
+    [Documentation]    Creating LIG through rest calls
+    [Tags]  LIG    setup
+
+    Log  Creating LIG ${ligs[0]}    console=True
+    Add LIG from variable    ${ligs[0]}
+
+Creating EG
+    [Documentation]    Creating EG through rest calls
+    [Tags]  EG    setup
+
+    Log    Creating EG    console=True
+    Add Enclosure Group from variable    ${enc_group['EG']}
+
+Creating LE
+    [Documentation]    Creating LE through rest calls
+    [Tags]  LE    setup
+    Add Logical Enclosure from variable    ${LE}
+
+Verify Interconnects are in configured state after adding LE
+    [Documentation]    verifying interconnects are in configured state
+
+    :FOR    ${x}    IN    @{Interconnect_dto}
+    \    Verify Interconnect    ${x}    state=Configured
+
+    Log    Fetching ICM URI    console=True
+    :FOR    ${icm}    IN    @{Interconnect_name}
+    \    ${uri} =    Get IC URI    ${icm}
+    \    Run Keyword If    '${icm}' == '${Interconnect_name[0]}'    Set Suite Variable    ${ICM3_uri}    ${uri}
+    \    ...    ELSE IF    '${icm}' == '${Interconnect_name[1]}'   Set Suite Variable    ${ICM6_uri}    ${uri}
+    Log    Verifing if ports are linked in ICM3    console=True
+    :FOR    ${uplink}    IN    @{uplink_ports_ICM3}
+    \    Wait Until Keyword Succeeds    15 min    20s    Verify Port    ${ICM3_uri}    ${uplink}    status=OK    portStatus=Linked
+
+    Log    Verifing if ports are linked in ICM6    console=True
+    :FOR    ${uplink}    IN    @{uplink_ports_ICM6}
+    \    Wait Until Keyword Succeeds    15 min    20s    Verify Port    ${ICM6_uri}    ${uplink}    status=OK    portStatus=Linked
+
+Creating Server Profile
+    [Documentation]  Creating Server profile through rest calls
+    [Tags]  ServerProfile    setup
+
+    Power off all servers    PressAndHold
+    ${resp}    Add Server Profiles from variable    ${server_profiles}
+    ${l}    Get Length    ${resp}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Run Keyword If  '${resp[${x}]['status_code']}' == '202'    Wait For Task2    ${resp[${x}]}    20m    1m    ELSE    Fail    Log    failed    console=True
+    Run Keyword for List    ${servers}    Power on Server
+    Sleep    10min
+
+Getting IP of server
+    [Documentation]     Getting Ip of server and pass traffic after restore
+    [Tags] Getting ip and pass traffic after restore
+
+    ${ip_list1}    ${ip_list2}    Get IP In a List    ${ilo_details}
+    Set Suite Variable    ${ip_list1}    ${ip_list1}
+    Set Suite Variable    ${ip_list2}    ${ip_list2}
+
+TC_1_API_Pass continuous traffic and Verify FC FA and DA Port statistics
+    [Documentation]     Pass continuous traffic and Verify FC FA and DA Port statistics
+    [Tags]    Basic
+
+    execute Traffic In Servers    ${ilo_details}    ${ip_list1}    ${server_details}    ${kill_diskspd}    ${diskspd_cmd_3600}
+    Sleep    60sec
+
+    : FOR    ${x}    IN RANGE    0    5
+    \    Counter Value Validation    ${IC1_ports}    ${Interconnect_name[0]}    ${counters}    ${FC_counters}    ${Packet_Interval}    ${ICM3_uri}
+
+#######################Happy Path - Verify FC port statistics by passing traffic for FC network with different packet size
+################################
+
+TC_2_API_Verify FC statistics for different packet size
+    [Tags]    HappyPath
+    [Documentation]    Happy path verification for different packet size
+
+    ${len}     Get Length    ${diskspd_cmd1}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    execute_traffic    ${ip_list1[0]}    ${server_details[0]['username']}    ${server_details[0]['password']}    ${kill_diskspd}
+    \    Sleep    60sec
+    \    execute_traffic    ${ip_list1[1]}    ${server_details[1]['username']}    ${server_details[1]['password']}    ${kill_diskspd}
+    \    Sleep    60sec
+    \    execute_traffic    ${ip_list1[0]}    ${server_details[0]['username']}    ${server_details[0]['password']}    ${diskspd_cmd1[${x}]}
+    \    execute_traffic    ${ip_list1[1]}    ${server_details[1]['username']}    ${server_details[1]['password']}    ${diskspd_cmd2[${x}]}
+    \    Counter Value Validation    ${IC1_ports}    ${Interconnect_name[0]}    ${counters}    ${FC_counters}    ${Packet_Interval}    ${ICM3_uri}
+
+##################################Clear port counters################################################################
+TC_3_API_Clear Port Counter and verify statistics after passing traffic
+    [Tags]    ClearCounter
+    [Documentation]    Clear Port Counter and verify statistics after passing traffic
+
+    ${len}    Get Length    ${ilo_details}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \     execute_traffic    ${ip_list1[0]}    ${server_details[${x}]['username']}    ${server_details[${x}]['password']}    ${kill_diskspd}
+    Clear Port Counters    ${Interconnect_name[0]}
+
+    ${counter_values1}    Validating FC Counter Values    ${Interconnect_name[0]}    ${stats}    ${IC1_ports[0]}    ${counters}    ${FC_counters}
+    : FOR    ${x}    IN    @{counter_values1}
+    \    Run Keyword If    ${x} <= 5000    Log    Successfully cleared FA port counter values    console=True
+
+    ${counter_values2}    Validating FC Counter Values    ${Interconnect_name[0]}    ${stats}    ${IC1_ports[1]}    ${counters}    ${FC_counters}
+    : FOR    ${x}    IN    @{counter_values2}
+    \    Run Keyword If    ${x} <= 5000    Log    Successfully cleared DA port counter values    console=True
+
+TC_3_1_Execute traffic and verify if counter values are increased
+    [Tags]    ClearCounter
+    [Documentation]    Clear Port Counter and verify statistics after passing traffic
+
+    execute Traffic In Servers    ${ilo_details}    ${ip_list1}    ${server_details}    ${kill_diskspd}    ${diskspd_cmd}
+    Sleep    60sec
+
+    Counter Value Validation    ${IC1_ports}    ${Interconnect_name[0]}    ${counters}    ${FC_counters}    ${Packet_Interval}    ${ICM3_uri}
+
+##################################################### Test Case 5 - Backup & Restore & Verify S-channel statistics #######################################################
+TC_4_1_Create Backup
+    [Documentation]    Create Backup
+    [Tags]    CreateBackup
+
+    Log    Creating the backup in OV    console=True
+
+    # Create Backup
+    Create Backup
+
+    :FOR    ${net}  IN  @{Delete_Network}
+    \       ${resp} =   Fusion Api Delete FC Network        name=${net}
+    \       ${task} =   Wait For Task   ${resp}     240s    2s
+
+    Wait Until Keyword Succeeds    10 min    20s      IC reached state    ${ICM3_uri}    Configured
+    Wait Until Keyword Succeeds    10 min    20s      IC reached state    ${ICM6_uri}    Configured
+
+    Wait Until Keyword Succeeds    5 min    20s    Verify Server Profiles Status    ${server_profile_names}    Critical
+
+TC_4_2_Restore from Backup
+    [Documentation]    Restore from Backup
+    [Tags]    Restore
+
+    Log    Restoring from the backup in the appliance    console=True
+    Restore From Backup
+    Sleep    2min
+    ${resp}    Fusion Api Login Appliance    ${APPLIANCE_IP}        ${appliance_credentials}
+
+TC_4_3_Verifying if restored properly
+    [Documentation]    Verifying the sampling interval value is reflected properly in LIG & LI
+    [Tags] AfterRestore
+
+    Wait Until Keyword Succeeds    5 min    20s      IC reached state    ${ICM3_uri}    Configured
+    Wait Until Keyword Succeeds    5 min    20s      IC reached state    ${ICM6_uri}    Configured
+
+    :FOR    ${net}  IN  @{Delete_Network}
+    \    ${resp}    Fvt Api Get FC Network By Name    ${net}
+    \    Should Be Equal As Strings    ${resp['name']}    ${net}
+
+    Wait Until Keyword Succeeds    5 min    20s    Verify Server Profiles Status    ${server_profile_names}    OK
+
+TC_4_4 verifying statistics after restore from backup
+    [Documentation]    Poering on servers after restore
+    [Tags] powering on
+
+    Execute Traffic In Servers    ${ilo_details}    ${ip_list2}    ${server_details}    ${kill_diskspd}    ${diskspd_cmd}
+    Sleep    ${Wait_for_Traffic}
+
+    Counter Value Validation    ${IC1_ports}    ${Interconnect_name[0]}    ${counters}    ${FC_counters}    ${Packet_Interval}    ${ICM3_uri}
+
+
+#####Edit uplinkset and change different port speed and verify FC statistics#####
+TC_5_1_Edit FA uplinkset and change port speed from Auto to 2Gb and verify FC statistics
+    [Documentation]    Edit LIG to change ports speed
+    [Tags]    PortSpeed4Gb
+
+
+    execute Traffic In Servers    ${ilo_details}    ${ip_list1}    ${server_details}    ${kill_diskspd}    ${diskspd_cmd}
+    Sleep    60sec
+    Counter Value Validation    ${IC1_ports}    ${Interconnect_name[0]}    ${counters}    ${FC_counters}    ${Packet_Interval}    ${ICM3_uri}
+
+TC_5_2_Change Port speed from Auto to 2Gb
+    [Documentation]    Edit LIG to change ports speed
+    [Tags]    PortSpeed4Gb
+
+    Log    Edit LI uplinkset FA uplinks from Auto to 2Gb    console=True
+
+    ${len}    Get Length    ${Uplink_speed_2G}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    ${resp}    Edit uplinkset    ${US_name[${x}]}    ${li_uplinksets['${Uplink_speed_2G[${x}]}']}    ${LI}
+    \    ${task} =    Wait For Task    ${resp}    15min    15s
+    \    Should Be Equal As Strings    ${task['taskState']}    Completed
+    Wait Until Keyword Succeeds     10 min   10s      Verify Port    ${ICM3_uri}    ${IC1_ports[0]}    status=OK    portStatus=Linked    opSpeed=Speed2G
+    Wait Until Keyword Succeeds     10 min   10s      Verify Port    ${ICM3_uri}    ${IC2_ports[0]}    status=OK    portStatus=Linked    opSpeed=Speed2G
+
+TC_5_3_Verify counter value after changing speed to 2Gb
+    [Documentation]    Edit LIG to change ports speed
+    [Tags]    PortSpeed4Gb
+
+
+    execute Traffic In Servers    ${ilo_details}    ${ip_list1}    ${server_details}    ${kill_diskspd}    ${diskspd_cmd}
+    Sleep    ${Wait_for_Traffic}
+
+    Counter Value Validation    ${IC1_ports}    ${Interconnect_name[0]}    ${counters}    ${FC_counters}    ${Packet_Interval}    ${ICM3_uri}
+
+
+#####Edit uplinkset and change different port speed and verify FC statistics#####
+TC_6_Edit uplinkset and change port speed from 2Gb to 4Gb for FA and Auto to 4Gb for DA and verify FC statistics
+    [Documentation]    Edit LIG to change ports speed
+    [Tags]    PortSpeed4Gb
+
+
+    execute Traffic In Servers    ${ilo_details}    ${ip_list1}    ${server_details}    ${kill_diskspd}    ${diskspd_cmd}
+    Sleep    ${Wait_for_Traffic}
+    Counter Value Validation    ${IC1_ports}    ${Interconnect_name[0]}    ${counters}    ${FC_counters}    ${Packet_Interval}    ${ICM3_uri}
+
+TC_6_1_Change FA DA port speed to 4Gb
+    [Documentation]    Change FA DA port speed to 4Gb
+    [Tags]    PortSpeed4Gb
+
+    ${len}    Get Length    ${Uplink_speed_4G}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    ${resp}    Edit uplinkset    ${US_name[${x}]}    ${li_uplinksets['${Uplink_speed_4G[${x}]}']}    ${LI}
+    \    ${task} =    Wait For Task    ${resp}    5min    15s
+    \    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+    :FOR    ${uplink}    IN    @{IC1_ports}
+    \    Wait Until Keyword Succeeds     10 min   10s     Verify Port    ${ICM3_uri}    ${uplink}    status=OK    portStatus=Linked    opSpeed=Speed4G
+
+    :FOR    ${uplink}    IN    @{IC2_ports}
+    \    Wait Until Keyword Succeeds     10 min   10s     Verify Port    ${ICM6_uri}    ${uplink}    status=OK    portStatus=Linked    opSpeed=Speed4G
+
+TC_6_2_Verify counter values after changing port speed
+    [Documentation]    Verify counter values after changing port speed
+    [Tags]    PortSpeed4Gb
+
+
+    execute Traffic In Servers    ${ilo_details}    ${ip_list1}    ${server_details}    ${kill_diskspd}    ${diskspd_cmd}
+    Sleep    ${Wait_for_Traffic}
+
+    Counter Value Validation    ${IC1_ports}    ${Interconnect_name[0]}    ${counters}    ${FC_counters}    ${Packet_Interval}    ${ICM3_uri}
+
+TC_7_Edit uplinkset and change port speed from 4Gb to 8Gb and verify FC statistics
+    [Documentation]    Edit uplinkset and change port speed from 4Gb to 8Gb and verify FC statistics
+    [Tags]    PortSpeed8Gb
+
+
+    execute Traffic In Servers    ${ilo_details}    ${ip_list1}    ${server_details}    ${kill_diskspd}    ${diskspd_cmd}
+    Sleep    ${Wait_for_Traffic}
+    Counter Value Validation    ${IC1_ports}    ${Interconnect_name[0]}    ${counters}    ${FC_counters}    ${Packet_Interval}    ${ICM3_uri}
+
+TC_7_1_Change DA FA port speed to 8Gb
+    [Documentation]    Change DA FA port speed to 8Gb
+    [Tags]    PortSpeed8Gb
+
+    ${len}    Get Length    ${Uplink_speed_8G}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    ${resp}    Edit uplinkset    ${US_name[${x}]}    ${li_uplinksets['${Uplink_speed_8G[${x}]}']}    ${LI}
+    \    ${task} =    Wait For Task    ${resp}    5min    15s
+    \    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+    Log to Console     ${\n}Verify uplink portStatus and updated operational speed
+    :FOR    ${uplink}    IN    @{IC1_ports}
+    \    Wait Until Keyword Succeeds     10 min   10s     Verify Port    ${ICM3_uri}    ${uplink}    status=OK    portStatus=Linked    opSpeed=Speed8G
+
+
+    :FOR    ${uplink}    IN    @{IC2_ports}
+    \    Wait Until Keyword Succeeds     10 min   10s     Verify Port    ${ICM6_uri}    ${uplink}    status=OK    portStatus=Linked    opSpeed=Speed8G
+
+TC_7_2_Validate counter values after changing port speed
+    [Documentation]    Validate counter values after changing port speed
+    [Tags]    PortSpeed8Gb
+
+
+    execute Traffic In Servers    ${ilo_details}    ${ip_list1}    ${server_details}    ${kill_diskspd}    ${diskspd_cmd}
+    Sleep    ${Wait_for_Traffic}
+
+    Counter Value Validation    ${IC1_ports}    ${Interconnect_name[0]}    ${counters}    ${FC_counters}    ${Packet_Interval}   ${ICM3_uri}
+
+TC_8_Edit uplinkset and change port speed back to Auto and verify FC statistics
+    [Documentation]    Edit uplinkset and change port speed back to Auto and verify FC statistics
+    [Tags]    PortSpeedAuto
+
+
+    execute Traffic In Servers    ${ilo_details}    ${ip_list1}    ${server_details}    ${kill_diskspd}    ${diskspd_cmd}
+    Sleep    ${Wait_for_Traffic}
+    Log    Changing back to Auto    console=True
+
+    Update Logical Interconnect from Group    ${LI_dto}
+    Wait Until Keyword Succeeds    5 min    20s      IC reached state    ${ICM3_uri}    Configured
+    Wait Until Keyword Succeeds    5 min    20s      IC reached state    ${ICM6_uri}    Configured
+
+    Log to Console     ${\n}Verify uplink portStatus and updated operational speed
+    :FOR    ${uplink}    IN    @{IC1_ports}
+    \    Wait Until Keyword Succeeds     10 min   10s     Verify Port    ${ICM3_uri}    ${uplink}    status=OK    portStatus=Linked    opSpeed=Speed8G
+
+
+    :FOR    ${uplink}    IN    @{IC2_ports}
+    \    Wait Until Keyword Succeeds     10 min   10s     Verify Port    ${ICM6_uri}    ${uplink}    status=OK    portStatus=Linked    opSpeed=Speed8G
+
+    Counter Value Validation    ${IC1_ports}    ${Interconnect_name[0]}    ${counters}    ${FC_counters}    ${Packet_Interval}    ${ICM3_uri}

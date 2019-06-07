@@ -1,0 +1,224 @@
+*** Settings ***
+Documentation          This set of test cases is to test/verify Fabric Manager Alerts
+Variables              data_variables3.py
+Resource               ../../../../Resources/api/fusion_api_resource.txt
+Library                Collections
+# APIC Libraries and Resources
+Library                APICOperations.py
+Library                json
+Resource               ACI-Resources.txt
+Resource               ../../../../Resources/api/networking/fabric_manager.txt
+
+Test Setup             Fabric Manager Test Setup    ${fabric_manager_create['name']}    ${fm_variables['FM_Tenant_name']}
+Suite Setup            Run Keywords    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}   AND    Get ACI APIC session    ${APIC_URL}  ${APIC_USERNAME}  ${APIC_PASSWORD}
+Suite Teardown         Fusion Api Logout Appliance
+
+*** Variables ***
+${APPLIANCE_IP}                  192.168.144.199
+
+*** Test Cases ***
+Cleanup
+    [Tags]    Cleanup
+    [Setup]    Set Suite Variable    ${WFT2_CONTINUE_ON_ERROR}    TRUE
+    # Remove All OV Resources
+    Delete Fabric Manager    ${fabric_manager_create['name']}
+    Delete Fabric Manager    ${fabric_manager_add_tenant['name']}
+    Delete Fabric Manager APIC Server Certificate From OV     ${fabric_manager_create['name']}
+    Delete Fabric Manager APIC Server Certificate From OV     ${fabric_manager_add_tenant['name']}
+    # Remove All APIC Resources
+    Delete Tenant in APIC    ${tenants_details}
+    # Reset vPC Policies
+    Edit PCorvPC PolicyGroup with CDP Policy     ${fm_variables['vPC_Name']}    CDP_Disable_Automation
+    Edit PCorvPC PolicyGroup with lldp Policy    ${fm_variables['vPC_Name']}    LLDP_Enable_Automation
+    Edit PCorvPC PolicyGroup with lacp Policy    ${fm_variables['vPC_Name']}    LACP_Active_Automation
+    # Delete all FM Alerts
+    Delete All Fabric Manager Alerts
+
+Setup
+    [Tags]    Setup
+    [Setup]
+    # Add Fabric Manager
+    Add Fabric Manager    ${fabric_manager_create}
+    ${resp1}=    Fusion API Get Fabric Manager    param=?filter="'name'=='${fabric_manager_create['name']}'"
+    Run Keyword If     '${resp1['count']}'=='0'
+    ...    FAIL   msg=Fabric Manager ${fabric_manager_create['name']} Not Created
+
+TC01-a Create New Tenant In APIC
+    [Setup]
+    [Tags]    APIC    Create-Tenant    TC01
+    Create Tenant in APIC    ${tenants_details}
+    Sleep  10Sec
+
+TC01-b Add the New Tenant to FM
+    [Setup]
+    [Tags]    FM    Add-Tenant    TC01
+    ${fm_uri}=    Get Fabric Manager URI    ${fabric_manager_create['name']}
+    ${payload}=    Create Fabric Manager Edit Payload    ${fabric_manager_add_tenant}
+    # Edit FM to add the newly created tenant to FM
+    ${resp} =    Fusion Api Edit Fabric Manager    ${payload}    ${fm_uri}
+    Wait For Task2    ${resp}
+    # Verify tenant added to FM
+    ${tenant_exists}=   Check Tenant Exists in Fabric Manager    ${fm_uri}    ${fm_variables['FM_Tenant_name']}
+    Run Keyword If    '${tenant_exists}'!='True'
+    ...    FAIL    msg=Tenant ${fm_variables['FM_Tenant_name']} not added to Fabric Manager.
+    ...    ELSE    Log to Console and Logfile    Tenant ${fm_variables['FM_Tenant_name']} added to Fabric Manager Successfully.
+
+TC02 Delete Tenant in APIC
+    [Setup]
+    [Tags]    APIC    Delete-Tenant    TC02
+    Delete Tenant in APIC    ${tenants_details}
+    Sleep    10Sec
+
+TC02-b Verify Tenant Automatically Removed From Fabric Manager
+    [Setup]
+    [Tags]    FM    Verify-Tenant-Remove    TC02
+    ${fm_uri}=    Get Fabric Manager URI    ${fabric_manager_create['name']}
+    ${tenant_exists}=   Check Tenant Exists in Fabric Manager    ${fm_uri}    ${fm_variables['FM_Tenant_name']}
+    Run Keyword If    '${tenant_exists}'!='False'
+    ...    FAIL    msg=Tenant ${fm_variables['FM_Tenant_name']} not removed from Fabric Manager.
+    ...    ELSE    Log to Console and Logfile    Tenant ${fm_variables['FM_Tenant_name']} Automatically removed from Fabric Manager.
+
+TC02-c Verify Alert
+    [Setup]
+    [Tags]    FM    VerifyAlert-Tenant-Remove    TC02
+    ${fm_uri}=    Get Fabric Manager URI    ${fabric_manager_create['name']}
+    ${status}=    Check Fabric Manager Alerts Exists    ${fm_uri}    FM_Tenant_Auto_Delete    alertState=Cleared
+    Run Keyword If     '${status}'=='True'    Log To Console and Logfile    ALERT Exists
+    ...    ELSE    FAIL    msg=ALERT DOES NOT EXIST / NOT CLEARED
+
+TC03-a Add Tenant Missing Application Profile
+    [Setup]
+    [Tags]    APIC    Create-Tenant-Without-AppProfile    TC03
+    Create Tenant in APIC    ${tenants_details}
+
+TC03-b Add Created Tenant into Fabric Manager
+    [Setup]
+    [Tags]    APIC    AddFM-Tenant-Without-AppProfile    TC03
+    ${fm_uri}=    Get Fabric Manager URI    ${fabric_manager_create['name']}
+    ${payload}=    Create Fabric Manager Edit Payload    ${fabric_manager_add_tenant}
+    # Edit FM to add the newly created tenant to FM
+    ${resp} =    Fusion Api Edit Fabric Manager    ${payload}    ${fm_uri}
+    Wait For Task2    ${resp}
+    # Verify tenant added to FM
+    ${tenant_exists}=   Check Tenant Exists in Fabric Manager    ${fm_uri}    ${fm_variables['FM_Tenant_name']}
+    Run Keyword If    '${tenant_exists}'!='True'
+    ...    FAIL    msg=Tenant ${fm_variables['FM_Tenant_name']} not added to Fabric Manager.
+    ...    ELSE    Log to Console and Logfile    Tenant ${fm_variables['FM_Tenant_name']} added to Fabric Manager Successfully
+
+TC03-c Verify Alert for Tenant Missing Application Profile
+    [Tags]    APIC    VerifyAlert-Tenant-Without-AppProfile    TC03
+    ${status}=    Check Fabric Manager Alerts Exists    ${fm_uri}    FM_Tenant_Missing_AP    alertState=Cleared
+    Run Keyword If     '${status}'=='True'    Log To Console and Logfile    ALERT Exists
+    ...    ELSE    FAIL    msg=ALERT DOES NOT EXIST / NOT CLEARED
+
+TC04-a Add Tenant with Application Profile Missing EPG
+    [Tags]    APIC    Create-AP-Tenant    TC04
+    #Create Tenant in APIC    ${tenants_details}
+    Create Application Profile in APIC    ${tenants_details}
+    Sleep  10Sec
+
+TC04-b Verify Alert for Application Profile Missing EPG
+    [Tags]    FM    VerifyAlert-AP-Tenant    TC04
+    ${status}=    Check Fabric Manager Alerts Exists    ${fm_uri}    FM_Tenant_AP_Missing_EPG    alertState=Cleared
+    Run Keyword If     '${status}'=='True'    Log To Console and Logfile    ALERT Exists
+    ...    ELSE    FAIL    msg=ALERT DOES NOT EXIST / NOT CLEARED
+
+TC05-a Add Tenant with Application Profile with EPG
+    [Tags]    APIC    Create-EPG-Tenant-AP    TC05
+    Create EPG in APIC with domain attachment   ${tenants_details}    ${fm_variables['VmmDomain_Name']}
+    Sleep  10Sec
+
+TC05-b Verify Alert Tenant with Application Profile with EPG
+    [Tags]    FM    VerifyAlert-Create-EPG-Tenant-AP    TC05
+    ${status}=    Check Fabric Manager Alerts Exists    ${fm_uri}    FM_Tenant_AP_EPG_Missing_Interfaces    alertState=Cleared
+    Run Keyword If     '${status}'=='True'    Log To Console and Logfile    ALERT Exists
+    ...    ELSE    FAIL    msg=ALERT DOES NOT EXIST / NOT CLEARED
+
+TC06-a Create CDP Mismatch
+    [Tags]    APIC    CDP    TC06
+    Attach staticBinding interface virtual portchannel to EPG with existing policy group    ${fm_variables['FM_Tenant_name']}  Auto_Appl_Profile_TestSet2  Auto_EPG_TestSet2
+    Sleep  10Sec
+    Edit PCorvPC PolicyGroup with CDP Policy     ${fm_variables['vPC_Name']}     CDP_Enable_Automation
+    Sleep  10Sec
+
+TC06-a Verify CDP Mismatch Alert in FM
+    [Tags]   FM    Verify-CDP    TC06
+    ${status}=    Check Fabric Manager Alerts Exists    ${fm_uri}    FM_CDP_Inconsistency    alertState=Cleared
+    Run Keyword If     '${status}'=='True'    Log To Console and Logfile    ALERT Exists
+    ...    ELSE    FAIL    msg=ALERT DOES NOT EXIST / NOT CLEARED
+
+TC07-a Create LLDP Mismatch
+    [Tags]    APIC    LLDP    TC07
+    Edit PCorvPC PolicyGroup with lldp Policy  ${fm_variables['vPC_Name']}  LLDP_Disable_Automation
+    Sleep  10Sec
+
+TC07-b Verify LLDP Mismatch Alert in FM
+    [Tags]   FM    Verify-LLDP    TC07
+    ${status}=    Check Fabric Manager Alerts Exists    ${fm_uri}    FM_LLDP_Inconsistency    alertState=Cleared
+    Run Keyword If     '${status}'=='True'    Log To Console and Logfile    ALERT Exists
+    ...    ELSE    FAIL    msg=ALERT DOES NOT EXIST / NOT CLEARED
+
+TC08-a Create LACP Mismatch
+    [Tags]    APIC    LACP    TC08
+    Edit PCorvPC PolicyGroup with lacp Policy  ${fm_variables['vPC_Name']}  LACP_Passive_Automation
+    Sleep    10Sec
+
+TC08-b Verify LACP Mismatch Alert in FM
+    [Tags]   FM    Verify-LACP    TC08
+    ${status}=    Check Fabric Manager Alerts Exists    ${fm_uri}    FM_LACP_Inconsistency    alertState=Cleared
+    Run Keyword If     '${status}'=='True'    Log To Console and Logfile    ALERT Exists
+    ...    ELSE    FAIL    msg=ALERT DOES NOT EXIST / NOT CLEARED
+
+TC09-a Create Microsegment EPG
+    [Tags]    APIC    MicroSegment-EPG    TC09
+    Create MicroSegment EPG  ${fm_variables['FM_Tenant_name']}  ${fm_variables['ApplicationProfile_Name']}  ${fm_variables['MicroSegmentedEPG_Name']}
+    Sleep     10Sec
+
+TC09-b Verify Microsegment EPG Alert
+    [Tags]    FM    VerifyAlert-MicroSegment-EPG    TC09
+    ${status}=    Check Fabric Manager Alerts Exists    ${fm_uri}    FM_MicroSegmenetedEPG_Inconsistency    alertState=Cleared
+    Run Keyword If     '${status}'=='True'    Log To Console and Logfile    ALERT Exists
+    ...    ELSE    FAIL    msg=ALERT DOES NOT EXIST / NOT CLEARED
+
+TC10-a Create Intra EPG Isolation in APIC
+    [Tags]    APIC    IntraEPG-Isolation    TC10
+    Create IntraEPGIsolation EPG  ${fm_variables['FM_Tenant_name']}  ${fm_variables['ApplicationProfile_Name']}  ${fm_variables['IntraEPGIsolation_Name']}
+    Sleep     10Sec
+
+TC10-b Verify Intra EPG Isolation Alert
+    [Tags]    FM    VerifyAlert-IntraEPG-Isolation    TC10
+    ${status}=    Check Fabric Manager Alerts Exists    ${fm_uri}    FM_MicroSegmenetedEPG_Inconsistency    alertState=Cleared
+    Run Keyword If     '${status}'=='True'    Log To Console and Logfile    ALERT Exists
+    ...    ELSE    FAIL    msg=ALERT DOES NOT EXIST / NOT CLEARED
+
+TC12-a Adding EPG to Tenant and attach VMM Domain with no VLAN Pool
+    [Tags]    APIC    EPG-VMMDomain-No-VLANPool    TC12
+    Adding EPG to Tenant and attach VMM Domain with or without VLAN Pool and range  ${fm_variables['EPG_Name']}  Automation_No_VlanPool
+    Sleep     10Sec
+
+TC12-b Verify EPG to Tenant and attach VMM Domain with no VLAN Pool Alert
+    [Tags]   FM    VerifyAlert-EPG-VMMDomain-No-VLANPool    TC12
+    ${status}=    Check Fabric Manager Alerts Exists    ${fm_uri}    FM_VMMDomain_NoVLAN_Pool    alertState=Cleared
+    Run Keyword If     '${status}'=='True'    Log To Console and Logfile    ALERT Exists
+    ...    ELSE    FAIL    msg=ALERT DOES NOT EXIST / NOT CLEARED
+
+TC13-a Adding EPG to Tenant and attach VMM Domain with VLAN Pool with No VlanRange
+    [Tags]    APIC    EPG-VMMDomain-With-VLANPool    TC13
+    Adding EPG to Tenant and attach VMM Domain with or without VLAN Pool and range  ${fm_variables['EPG_Name']}  Automation_No_VlanRange
+    Sleep     10Sec
+
+TC13-b Verify EPG to Tenant and attach VMM Domain with VLAN Pool with No VlanRange Alert
+    [Tags]    FM    VerifyAlert-EPG-VMMDomain-With-VLANPool    TC13
+    ${status}=    Check Fabric Manager Alerts Exists    ${fm_uri}    FM_VMMDomain_NoVLAN_Range    alertState=Cleared
+    Run Keyword If     '${status}'=='True'    Log To Console and Logfile    ALERT Exists
+    ...    ELSE    FAIL    msg=ALERT DOES NOT EXIST / NOT CLEARED
+
+***Keywords***
+
+Fabric Manager Test Setup
+    [Documentation]  Gets the FM and Tenant URIs from the given names and sets them as Suite Variables.
+    [Arguments]    ${fm_name}    ${tenant_name}
+    ${fm_uri}=    Get Fabric Manager URI    ${fm_name}
+    ${fm_tenant_uri}=    Get Fabric Manager Tenant URI    ${fm_uri}    ${tenant_name}
+    Set Suite Variable    ${fm_uri}
+    Set Suite Variable    ${fm_tenant_uri}

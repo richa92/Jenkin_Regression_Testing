@@ -1,0 +1,146 @@
+*** Settings ***
+Documentation    OVF3322_Keywords
+Library              FusionLibrary
+Library              RoboGalaxyLibrary
+Library              Collections
+Library              BuiltIn
+
+*** Variables ***
+${APPLIANCE_IP}     ${None}
+
+*** Keywords ***
+Suite Setup Tasks
+    [Documentation]    Suite Setup Tasks
+    ${Login_response}    Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+    Run keyword unless    ${Login_response[0]['status_code']}== 200    Fail    "Unable to Login Appliance"
+    Power off ALL servers    PressAndHold
+    Remove All Server Profiles
+    Remove All LEs
+    Remove All Enclosure Groups
+    Remove All LIGs
+    Remove All FCoE Networks
+    Remove All Ethernet Networks
+    Remove All FC Networks
+
+Create FCoE ranges
+    [Documentation]    Creates a range of FCoE networks based on range data provided
+    [Arguments]    ${range}
+    Set Log Level    TRACE
+    Log      Adding FCOE NETWORK RANGES   console=True
+    :FOR    ${x}    IN RANGE    ${range['start']}    ${range['end']}+1
+    \    ${body}    Create Dictionary    name=${range['prefix']}${x}${range['suffix']}    vlanId=${x}     type=fcoe-networkV4
+    \    ${resp}    Fusion Api Create Fcoe Network    body=${body}
+    [Return]    ${resp}
+
+Delete fcoe range
+    [Documentation]    Deletes a range of FcoE networks based on range data provided
+    [Arguments]    ${range}
+    :FOR    ${x}    IN RANGE    ${range['start']}   ${range['end']}+1
+    \    ${resp}    Fusion Api Delete Fcoe Network    name=${range['prefix']}${x}${range['suffix']}
+    [Return]    ${resp}
+
+Get ESXI LUN Count
+    [Documentation]    Gets the available lun counts from the server
+    [Arguments]     ${server_BFS}    ${cmd}
+    ${output}    discover_lun_esxi    ${server_BFS}    ${cmd}
+    ${lun}    Create List
+    ${y}    Set Variable    0
+    ${l}    Get Length    ${output}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Should Not Contain    ${output[${x}]}    error
+    \    ${y}    Evaluate    ${y} + 1
+    [Return]    ${y}
+
+Get IC Port
+    [Documentation]    Returns the port info of the named port of specified interconnect uri
+    [Arguments]     ${uri}    ${portName}
+
+    ${return} =    Create List
+    ${resp} =    fusion api get interconnect ports    uri=${uri}
+    ${ports} =    Get From Dictionary    ${resp}    members
+    :FOR    ${port}    IN    @{ports}
+    \    ${return} =    Run Keyword If    '${port['portName']}' == '${portName}'    set variable    ${port}
+    \    Exit for loop if    '${port['portName']}' == '${portName}'
+    [Return]    ${return}
+
+Verify Alerts
+    [Documentation]    Verify Alerts
+    [Arguments]     ${alertState}    ${alertTypeID}    ${alert_message}
+    ${Alert_msg}    Create List
+    ${resp}    Fusion Api Get Alerts   /rest/alerts?filter="alertState EQ '${alertState}'"
+    ${mem_resp}    Get From Dictionary    ${resp}    members
+    ${len}    Get Length    ${mem_resp}
+    :FOR   ${x}    IN RANGE    0    ${len}
+    \   Run Keyword If  '${mem_resp[${x}]['alertTypeID']}' !='${alertTypeID}'    Continue For Loop
+    \   ${desc}    Get From Dictionary    ${mem_resp[${x}]}    description
+    \   Append To List    ${Alert_msg}    ${desc}
+
+    ${len}    Get Length    ${Alert_msg}
+    :FOR   ${x}    IN RANGE    0    ${len}
+    \    Should Contain    ${Alert_msg[${x}]}    ${alert_message}
+    Log    \n Successfully verified alert messages    console=True
+
+Get Server Ip Windows
+    [Documentation]    Gets the valid ip of the server
+    [Arguments]         ${ilo_details}
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=20s
+    ${login}    SSHLibrary.Login               ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Read Until    SAC>
+    Sleep    5sec
+    SSHLibrary.Write    i
+    Sleep    5sec
+    ${stdout}    SSHLibrary.Read
+    ${cmd_output}=    Get Regexp Matches    ${stdout}    Ip=172\\.\\d+\\.\\d+\\.\\d+
+    ${ip_list_new}    Create List
+    ${len}    Get Length    ${cmd_output}
+    :FOR    ${x}    IN RANGE    ${len}
+    \    ${ip_lists}    Remove String    ${cmd_output[${x}]}    Ip=
+    \    Append To List   ${ip_list_new}    ${ip_lists}
+    Log    \n IP's are is ${ip_list_new}    console=True
+    SSHLibrary.Close All Connections
+    [Return]    ${ip_list_new}
+
+Get Interconnect StackingDomainRole
+    [Documentation]    Get Interconnect StackingDomainRole
+    [Arguments]     ${ic_name}    ${expected_role}
+    ${resp} =   Get Interconnect    ${ic_name}
+    ${Role}    Get From Dictionary    ${resp}    stackingDomainRole
+    Should Be Equal As Strings    ${Role}    ${expected_role}
+    [Return]    ${Role}
+
+Execute Traffic And Validate Windows LUN
+    [Documentation]    Execute Traffic And Validate Windows LUN
+    [Arguments]     ${ilo_details}    ${server_credentials}    ${lun_count_total}
+    ${l}    Get Length    ${ilo_details}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${serverIp}    Get Server Ip Windows    ${ilo_details[${x}]}
+    \    Wait For Appliance To Become Pingable    ${serverIp[0]}
+
+    \    ${output}    execute_windows_commands    ${serverIp[0]}    ${server_credentials[${x}]['userName']}    ${server_credentials[${x}]['password']}    ${diskspd_cmd[0]}
+    \    Run Keyword If  ${output} == 0    Log    \n Successfully passed the traffic    console=True    ELSE    Fail    Log    Unable to pass traffic    console=True
+
+    \    ${lun_count}    validate_windows_lun_count    ${serverIp[0]}    ${server_credentials[${x}]['userName']}    ${server_credentials[${x}]['password']}
+    \    Run Keyword If    ${lun_count}== ${lun_count_total[${x}]}    Log    \n Expected LUN disks are available in local server   console=True    ELSE    Fail    Log    LUN's are not available    console=True
+
+Verify Ports Status
+    [Documentation]    Verify Ports Status
+    [Arguments]     ${ICM_uris}    ${port_name}
+    ${len}    Get Length    ${ICM_uris}
+    :FOR    ${x}    IN RANGE    0   ${len}
+    \    ${Port_Resp}    Get IC Port    ${ICM_uris[${x}]}    ${port_name[${x}]}
+    \    Run Keyword If    '${Port_Resp['portStatus']}' != 'Linked'    Fail    msg=Port ${port_name} is unlinked
+    \    ...    ELSE    Log    Successfully verified that ${port_name} is Linked    console=True
+
+Validate Windows BFS Disk Size
+    [Documentation]    Verify Windows BFS Disk Size
+    [Arguments]     ${ilo_details}    ${server_credentials}
+    ${serverIp}    Get Server Ip Windows    ${ilo_details}
+    ${size}    validate_windows_BFS    ${serverIp[0]}    ${server_credentials['userName']}    ${server_credentials['password']}
+    ${disk_size}    Split String    ${size}    .
+    Run Keyword If  ${disk_size[0]} <= 100    Log    Successfully booted up with WIn OS BFS    console=True    ELSE    Fail    Log    Windows OS BFS lost connections    console=True
+

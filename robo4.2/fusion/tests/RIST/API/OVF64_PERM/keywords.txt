@@ -1,0 +1,263 @@
+*** Settings ***
+Library              FusionLibrary
+Library              RoboGalaxyLibrary
+Library              OperatingSystem
+Library              BuiltIn
+Library              Collections
+Library              robot.api.logger
+Library           	 SSHLibrary
+Library           	 String
+Variables            ./Regression_Data.py
+Variables             ../Fusion_Env_Setup/data_variables.py
+Resource             ../Fusion_Env_Setup/keywords.txt
+Resource    ./../../../../Resources/api/fusion_api_resource.txt
+
+
+*** Keywords ***
+Get Security Compatibility Report
+    [Documentation]         Get target security mode's compatibility report
+    ...                     targetMode:FIPS/CNSA
+    [Arguments]	            ${targetMode}
+    Log To Console    Get the compatiblity report for mode: ${targetMode}
+    ${resp} =    Fusion Api Get Security Compatibility Report
+    ${resp_delete} =    Run Keyword If    '${resp['status_code']}' == '200'    Fusion Api Delete Security Compatibility Report
+    Run Keyword If    '${resp['status_code']}' == '200'    Wait For Task2    ${resp_delete}
+    ${create_report}    Create Dictionary  targetMode=${target_mode}
+    ${resp} =    Fusion Api Create Security Compatibility Report    ${create_report}
+    Wait For Task2    ${resp}  timeout=300  interval=5
+    ${resp} =    Fusion Api Get Security Compatibility Report
+    [Return]    ${resp}
+
+Check Non-compliant Item In Compatibility Report
+    [Documentation]         /n  Check Non-compliant Item In Compatibility Report
+    ...                     item= wpst32 | Power Delivery Devices | All Storage Devices
+    ...                     if item= Tbird13, then get the enclosure name firstly
+    [Arguments]	            ${item}    ${report_response}    ${expected_info}
+    Log To Console    \n Check Compatibility Report: ${item} Is Not Compliant
+    ${verified} =    set variable    False
+    ${resp} =  get length    ${item}
+    ${settings} =  Run Keyword If    ${resp} == 7    Set Variable    ${TBirdEnvSetup.${Team_Name}}
+    ${item} =  Run Keyword If    ${resp} == 7    Set Variable    ${settings.${item}.enc_names[0]}
+    ${report_members}=    Get From Dictionary    ${report_response}    members
+     :FOR    ${member}    IN    @{report_members}
+    \       ${deviceName} =      Get From Dictionary  ${member}  deviceName
+    \       ${nonCompatibilityDetails} =      Get From Dictionary  ${member}  nonCompatibilityDetails
+    \       Run Keyword And Return if    '${deviceName}'=='${item}'    Should Be Equal As Strings    ${nonCompatibilityDetails}    ${expected_info}
+    \       Run Keyword And Return If    '${deviceName}'=='${item}'    Set Variable  ${verified}  True
+    Run Keyword If    '${verified}'!='True'    Fail    The ${item} not found and verified
+
+Check Compliant Item In Compatibility Report
+    [Documentation]        /n  Check compliant Item In Compatibility Report, related device name should not exist
+    ...                     item= wpst32 | Power Delivery Devices | All Storage Devices
+    ...                     if item= Tbird13, then get the enclosure name firstly
+    [Arguments]	            ${item}    ${report_response}
+    Log To Console    \nCheck Compatibility Report: ${item} Is Compliant
+    ${resp} =  get length    ${item}
+    ${settings} =  Run Keyword If    ${resp} == 7    Set Variable    ${TBirdEnvSetup.${Team_Name}}
+    ${item} =  Run Keyword If    ${resp} == 7    Set Variable    ${settings.${item}.enc_names[0]}
+    ${report_members}=    Get From Dictionary    ${report_response}    members
+     :FOR    ${member}    IN    @{report_members}
+    \       ${deviceName} =      Get From Dictionary  ${member}  deviceName
+    \       Run Keyword And Return if    '${deviceName}'=='${item}'    Fail    ${item} Is Not Compliant
+
+Switch Security Mode To
+    [Documentation]    /n  Switch Security Mode To LEGACY/FIPS/CNSA
+    [Arguments]  ${target_mode}
+    ${current_mode_resp}=    Fusion Api Get Current Security Mode
+    ${modename}=    Get From Dictionary  ${current_mode_resp}  modeName
+    Run Keyword And Return if  '${target_mode}'=='${modename}'    Log To Console  ${\n}******Current Mode Is Already ${modename}, Ignore Mode Switch.******
+    ${target_mode_body}    Create Dictionary  modeName=${target_mode}
+    Log To Console  ${\n}******Switching Mode To ${target_mode}******
+    ${response}=    Fusion Api Change Security Mode  ${target_mode_body}
+    Wait For Appliance State To Be Expected State    ExpectedState=STARTING
+    Wait For Appliance State To Be Expected State    ExpectedState=OK
+
+Check If Current Security Mode Meets Target Mode
+    [Documentation]    /n  Check current Security Mode Meets Target Mode: LEGACY/FIPS/CNSA
+    [Arguments]  ${target_mode}
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    ${current_mode_resp}=    Fusion Api Get Current Security Mode
+    ${modename}=    Get From Dictionary  ${current_mode_resp}  modeName
+    Run Keyword And Return if  '${target_mode}'=='${modename}'    Log To Console  ${\n}******Current Mode Is Target Mode ${target_mode}.******
+
+Enclosures Status Should Be Critical
+    [Documentation]  /n  Check status of Enclosure
+    ...              Fail test where status is other than Critical
+    [Arguments]    ${act_on_failure}=Fail
+    [Tags]    ENC-HEALTH
+    ${verified} =    set variable    False
+    ${encs} =     Fusion Api Get Enclosures
+    # Make sure we get (more than zero) enclosures listed
+    ${count}       Get From Dictionary    ${encs}    count
+    Run Keyword If  '${count}'=='0'    Fail    msg=No enclosures found
+    :FOR  ${enc}  IN  @{encs['members']}
+    \  Run Keyword If  '${enc['status']}' == 'Critical'  Log  ${enc['name']}, Status ${enc['status']}
+    \  Run Keyword And Return If    '${enc['status']}' == 'Critical'    Set Variable  ${verified}  True
+    Run Keyword If    '${verified}'!='True'    Fail    The enclisure is not in critial status
+
+Delete Enclosure LE
+    [Documentation]  /n  Delete Enclosure LE
+    ${resp} =    Fusion Api Get Logical Enclosure
+    Run Keyword And Return if  '${resp['count']}'=='0'    Log To Console  ${\n}******There is no existing LE.******
+    Power off ALL servers           PressAndHold
+    Remove All Server Profiles
+    ${members} =    Get From Dictionary    ${resp}    members
+    ${uri} =    Get From Dictionary    ${members[0]}    uri
+    ${resp} =    Fusion Api Delete Logical Enclosure    uri=${uri}
+    Wait For Task2    ${resp}  timeout=600  interval=5
+
+Set and Check FLM firmware Version
+    [Documentation]  /n  Update firmware to set FLM firmware Version, return directly if the current FLM version meets the expected FLM version
+    ...    Currently just consider FLM 2.00.00, 2.02.00
+    [Arguments]    ${Ring}  ${expected_version}
+    ${settings} =    Set Variable    ${TBirdEnvSetup.${Team_Name}}
+    log    ${\n}******enclosure is ${settings.${Ring}.enc_names[0]}******   console=Yes
+    ${fwversion} =    Get Enclosure Firmware Version    ${settings.${Ring}.enc_names[0]}
+    Run Keyword And Return If  '${fwversion}' == '${expected_version}'    Log To Console  ${\n}******Current FLM version ${fwversion} meets the expeced FLM version.******
+    Run Keyword If  '${expected_version}' == '2.02.00'    Update Logical Enclosure Firmware    ${le_name}    ${FirmwareVersion202}    ${forceInstallFirmware}
+    ...    ${firmwareUpdateOn}    ${logicalInterconnectUpdateMode}    ${updateFirmwareOnUnmanagedInterconnect}    ${alidateIfLIFirmwareUpdateIsNonDisruptive}
+    Run Keyword If  '${expected_version}' == '2.00.00'    Update Logical Enclosure Firmware    ${le_name}    ${FirmwareVersion200}    ${forceInstallFirmware}
+    ...    ${firmwareUpdateOn}    ${logicalInterconnectUpdateMode}    ${updateFirmwareOnUnmanagedInterconnect}    ${alidateIfLIFirmwareUpdateIsNonDisruptive}
+    log    Check if the firmware version updated successfuly   console=Yes
+    ${fwversion} =    Get Enclosure Firmware Version    ${settings.${Ring}.enc_names[0]}
+    Should Be Equal as Strings    ${fwversion}    ${expected_version}
+
+
+TBird Enclosures are configured
+    [Documentation]    Make sure TBird enclosures are configured
+    [Arguments]    ${Ring}    ${expected_state}=Configured
+    ${settings} =    Set Variable    ${TBirdEnvSetup.${Team_Name}}
+    ${state} =    Get Enclosure State    ${settings.${Ring}.enc_names[0]}
+    Run Keyword And Return If  '${state}' == '${expected_state}'    Log To Console  ${\n}******The enclosure is already configured******
+    Setup Env For TBird    ${Ring}    Add_LE=true    Add_User=false
+    ${state} =    Get Enclosure State    ${settings.${Ring}.enc_names[0]}
+    Should Be Equal as Strings    ${state}    ${expected_state}
+
+Get Enclosure State
+    [Documentation]    Get enclosure state
+    ...              Example: Get Enclosure State  ${name}
+    [Arguments]        ${name}
+    ${enclosure} =     Get Enclosure   ${name}
+    ${state} =    Get From Dictionary    ${enclosure}    state
+    [Return]    ${state}
+
+Get Enclosure UUID
+    [Documentation]    Get enclosure UUID
+    ...              Example: Get Enclosure UUID  ${name}
+    [Arguments]        ${name}
+    ${enclosure} =     Get Enclosure   ${name}
+    ${uuid} =    Get From Dictionary    ${enclosure}    uuid
+    [Return]    ${uuid}
+
+Generate FLM CA Cert URL
+    [Documentation]     FLM CA Cert API(post/get/put) required URL
+    ...              /rest/enclosures/{id}/https/certificaterequest
+    ${settings} =    Set Variable    ${TBirdEnvSetup.${Team_Name}}
+    ${id} =     Get Enclosure UUID   ${settings.${Ring}.enc_names[0]}
+    ${url} =  set variable    /rest/enclosures/${id}/https/certificaterequest
+    [Return]    ${url}
+
+Get EM Floater IP Address
+    [Documentation]    /n  Gets the EM Floater IP Address from LLDP data on the CIM
+    Log    \n Gets the EM Floater IP Address from LLDP data on the CIM    console=Yes
+    ${Buffer}=     Run SSH CMD2  ${APPLIANCE_IP}  root  hpvse1  lldpcli show neighbors | grep MgmtIP
+    ${SplitString}=    Split String    ${Buffer}
+    ${ip}=    Get From List    ${SplitString}    1
+    [Return]    ${ip}
+
+Install CA Signed Certificate on FLM
+    [Documentation]    /n  Install CA Signed Certificate on FLM
+    [Arguments]    ${IssuerIP}    ${ssh_credentials}    ${signature_algorithm}
+    Log    Install CA Signed Certificate on FLM    console=Yes
+    ${url} =  Generate FLM CA Cert URL
+    Log    Creates a Certificate Signing Request (CSR) for an enclosure    console=Yes
+    ${resp} =  Fusion Api Import Server Hardware Type For Enclosure    ${enclosure_csr}    ${url}
+    Wait For Task2    ${resp}    timeout=300  interval=5
+    Log    Returns an enclosure's CSR that was generated by POST to same URI    console=Yes
+    ${resp} =  Fusion Api Get Enclosures    ${url}
+    ${csr} =  Get From Dictionary    ${resp}    base64Data
+    Log    Issue the csr by external CA to get FLM CA certificate and Server certificate   console=Yes
+    ${ca}  ${server} =  Issue Enclosure Certificate by CSR    ${csr}    ${IssuerIP}    ${ssh_credentials}    ${signature_algorithm}
+    Log    Upload the CA to OneView truststore   console=Yes
+    ${members} =    Get From Dictionary    ${add_flm_rootcacert}    members
+    ${certificateDetails} =    Get From Dictionary    ${members[0]}   certificateDetails
+    Set To Dictionary    ${certificateDetails}    base64Data    ${ca}
+    ${resp} =    Fusion Api Import External CA Certificates    ${add_flm_rootcacert}
+    Wait For Task2    ${resp}
+    Log    Install the CA signed cert on FLM by Fusion Api Refresh Enclosure   console=Yes
+    Set To Dictionary    ${enclosure_put}    base64Data    ${server}
+    ${resp} =    Fusion Api Refresh Enclosure     ${enclosure_put}    uri=${url}
+    Wait For Task2    ${resp}
+    Clean EVN in Linux    ${IssuerIP}    ${ssh_credentials}
+
+Verify CA Signed Certificate on FLM
+    [Documentation]    /n  Verify CA is installed correctly and FLM is in normal status after CA is installed
+    ...              ${mode} is is LEGACY/FIPS/CNSA, means the FLM is LEGACY/FIPS/CNSA compliant
+    [Arguments]    ${mode}
+    Log    Verify CA is installed correctly and FLM is in normal status after CA is installed    console=Yes
+    ${flm_ipv6} =  Get EM Floater IP Address
+    ${resp} =  Fusion Api Get Remote Certificate    ${flm_ipv6}
+    Log    Verify the cert is CA assigned and trusted    console=Yes
+    ${certificateStatus} =  Get From Dictionary    ${resp}    certificateStatus
+    ${chainStatus} =  Get From Dictionary    ${certificateStatus}    chainStatus
+    ${selfsigned} =  Get From Dictionary    ${certificateStatus}    selfsigned
+    ${trusted} =  Get From Dictionary    ${certificateStatus}    trusted
+    Should Be Equal As Strings    ${chainStatus}    VALID
+    Should Be Equal As Strings    ${selfsigned}    False
+    Should Be Equal As Strings    ${trusted}    True
+    Log    Verify the cert is installed correctly    console=Yes
+    ${certificateDetails} =  Get From Dictionary    ${resp}    certificateDetails
+    ${signatureAlgorithm} =  Get From Dictionary    ${certificateDetails[0]}    signatureAlgorithm
+    ${state} =  Get From Dictionary    ${certificateDetails[0]}    state
+    ${status} =  Get From Dictionary    ${certificateDetails[0]}    status
+    Run Keyword If    '${mode}'=='LEGACY'    Should Contain    ${signatureAlgorithm}    SHA1
+    Run Keyword If    '${mode}'=='FIPS'    Should Contain    ${signatureAlgorithm}    SHA256
+    Run Keyword If    '${mode}'=='CNSA'    Should Contain    ${signatureAlgorithm}    SHA384
+    Should Be Equal As Strings    ${state}    OK
+    Should Be Equal As Strings    ${status}    OK
+
+Issue Enclosure Certificate by CSR
+    [Documentation]    /n  Issue the csr by external CA to get FLM CA certificate and Server certificate
+    [Arguments]    ${csr}   ${IssuerIP}    ${ssh_credentials}    ${signature_algorithm}
+    Log    Save csr to csr.req file on CA server    console=Yes
+    Run ssh cmd  ${IssuerIP}  ${ssh_credentials['userName']}  ${ssh_credentials['password']}  echo "${csr}" > ${cert_tool_path}/csr.req
+    Log    \nGenerate Certificate chain used to issue certificate
+    Run ssh cmd  ${IssuerIP}  ${ssh_credentials['userName']}  ${ssh_credentials['password']}  ${cert_tool_path}/script_signflmcsr.sh ${signature_algorithm}
+    Log    \nGet CA certificate and leaf cert for FLM
+    ${ca} =  Run ssh cmd  ${IssuerIP}  ${ssh_credentials['userName']}  ${ssh_credentials['password']}  cat ${cert_tool_path}/signed_certificate/ca.cer
+    ${server} =  Run ssh cmd  ${IssuerIP}  ${ssh_credentials['userName']}  ${ssh_credentials['password']}  cat ${cert_tool_path}/signed_certificate/server.cer
+    [Return]    ${ca}   ${server}
+
+Clean EVN in Linux
+    [Documentation]    /n  Clear the temp files in cert_tool in Linux server
+    [Arguments]    ${IssuerIP}    ${ssh_credentials}
+    Run ssh cmd  ${IssuerIP}  ${ssh_credentials['userName']}  ${ssh_credentials['password']}    ${cert_tool_path}/clean.sh
+
+Run SSH CMD2
+    [Documentation]    /n  This Keyword is run ssh commands over jump SSH server -- 15.114.112.61 / root / hpvse1. and return the output to RG
+    ...                  In order to run ssh commands on a CNSA mode appliance, jump server(CentOS7.3) is needed.
+    ...                  On the jump server, sshpass RPM package is required to be installed, this is a tool for ssh command without input username/password manually
+    ...                  If you find jump server is unavailable, contact chongs@hpe.com. Or build SSH server By yourself.
+    ...                  4 arguments is same as Run SSH Cmd. Timeout is 10 seconds.
+    [Arguments]    ${host_ip}  ${username}  ${password}  ${cmd}
+    ${result}=    Run Ssh Cmd  15.114.112.61  root  hpvse1  sshpass -p ${password} ssh -o ServerAliveInterval=10 ${username}@${host_ip} ${cmd}
+    [Return]    ${result}
+
+FLM Compliancevalidator
+    [Documentation]    /n  Validate FLM is FIPS/CNSA compliant
+    [Arguments]    ${security_mode}
+    ${flm_ipv6} =  Get EM Floater IP Address
+    Set To Dictionary    ${compliancevalidator}    host     ${flm_ipv6}
+    Set To Dictionary    ${compliancevalidator}    securityMode     ${security_mode}
+    ${resp} =  Fusion Api Compliance Validator    ${compliancevalidator}
+    ${compliant} =  Get From Dictionary    ${resp}    compliant
+    Should Be Equal As Strings      ${compliant}    True
+
+Enclosure Refresh
+    [Documentation]    /n  Refresh Enclosure
+    Log    \nRefresh enclosure   console=True
+    ${settings} =  Set Variable    ${TBirdEnvSetup.${Team_Name}}
+    ${enc_name} =  Set Variable    ${settings.${Ring}.enc_names[0]}
+    ${enc_resp}=    Get Enclosure    ${enc_name}
+    ${resp}=    Refresh Enclosure    ${enc_resp}
+    Wait For Task2    ${resp}    10m    5

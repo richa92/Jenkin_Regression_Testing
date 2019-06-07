@@ -1,0 +1,172 @@
+*** Settings ***
+Documentation    blade_reset.txt - Blade Reset test
+...    = USAGE =
+...    | pybot | -v ENCLOSURE:<name> | blade_reset.txt |
+...    = Variables =
+...    | ENCLOSURE | Required; Enclosure to use |
+*** Settings ***
+Library           json
+Library           robot.api.logger
+Variables         ../resources/variables.py    ${ENCLOSURE}
+Resource          ../resources/defaults.txt
+Resource          ../resources/fusion_ssh.txt
+Resource          ../resources/em_api.txt
+Resource          ../resources/enclosure_info.txt
+Resource          ../resources/fusion_cli.txt
+Force Tags        HW
+Suite Setup       Suite Setup
+#Suite Teardown    Suite Teardown
+
+*** Variables ***
+${EFuse_Sleep}    180
+
+*** Test Case ***
+Blade Reset
+    # Get the URI of an existing Server Hardware
+    ${Response}    Fusion Api Get Server Hardware
+    ${Members}     Get From Dictionary    ${Response}    members
+    :FOR    ${Member}    IN    @{Members}
+    \    Continue For Loop If    ${bayNumber}!=${Member['position']}
+    \    ${Uri}    Get From Dictionary    ${Member}    uri
+    \    Exit For Loop
+    Variable Should Exist    ${Uri}    msg=Bay ${bayNumber} not found in Server Hardware
+
+    # Initiate a 'Reset operation' on the Server Hardware
+    #PATCH https://{appl}/rest/server-hardware/12345678
+    # JSON: { "op": "replace", "path": "/resetState", "value": "PendingIloReset" }
+    ${Body0}    Create Dictionary    op=replace
+    ...                              path=/mpState
+    ...                              value=Reset
+    ${Body}     Create List    ${Body0}
+    ${Response}    Fusion Api Patch Server Hardware    ${Body}    ${Uri}
+    Should Match Regexp    '${Response['status_code']}'    (200|202)
+    ...    Patch API failed ${Response['status_code']}
+
+    # Wait for the 'Reset' task completion.
+    Sleep   ${EFuse_Sleep}
+    ${Response}    Fusion API Wait For Task To Complete      ${Response['location']}
+    Should Be Equal    ${Response['status_code']}    ${200}
+    ...    Patch API failed in wait ${Response['status_code']}
+
+
+Blade Reset Activity Alert Validation
+    ${Alert_list}    ${Last_AlertID}    Fusion Api Get Activity Alerts    Starting_AlertID=${${Last_AlertId}}
+
+    # We should see two of these alerts
+    ${Expected_Alerts}    Create List    server-hardware.mp.ILOUnreachable
+    ...                                  server-hardware.mp.ILOUnreachable
+
+    :FOR    ${Alert}    IN    @{Alert_List}
+    \    Remove Values From List    ${Expected_Alerts}    ${Alert['alertTypeID']}
+    Should Be Empty    ${Expected_Alerts}    Event(s) not found: ${Expected_Alerts}
+
+
+Blade Reset Device Status Validation
+    ${DeviceInfo}    Fusion Api Get Device    BayNumber=${bayNumber}
+
+    # Verify Blade state and status are as expected
+    Should Be Equal    ${DeviceInfo['devicePresence']}    Present
+
+
+*** Keywords ***
+Suite Setup
+    Login to Fusion via REST
+    Login to Fusion via SSH
+
+    # Get EM Session ID
+    ${EM_IP}    ${EMSessionID}=    EM Api Create Session
+    Set Suite Variable    ${Header}    "X-Auth-Token":"${EMSessionID}"
+
+    # Select a random Blade Bay
+    ${bayNumber}    Select Random Present Enclosure deviceBays
+    Set Suite Variable    ${bayNumber}
+
+    # Find Last Audit Event IDs
+    Run Keyword and Ignore Error    Fusion Api Get Activity Alerts
+    Console    Last Alert found: ${Last_AlertID}
+
+Suite Teardown
+    Logout of Fusion via REST
+    Logout of Fusion via SSH
+
+###############################################################################
+
+EM RIS Blade Reset
+    [Arguments]    ${Action}    ${BayNumber}
+    ${Data}      Set Variable    {"Action":"${Action}"}
+    ${Output}    Execute SSH Command
+    ...    curl -ikX POST -H ${Header} --data-ascii '${data}' https://${EM_IP}%${fusion_nic}/rest/v1/BladeManager/${BayNumber}
+
+    Should Contain    ${Output}    { "Action": "${Action}" }
+    ...    msg=Reset action failed \n${Output}
+
+###############################################################################
+
+Fusion Api Get Activity Alerts
+    [Documentation]    Fetch recent Fusion Activity Alerts
+    ...    (Assumes a Fusion REST Api connection is open and logged in).
+    ...    Returns a list of Alerts.
+    [Arguments]    ${Starting_AlertID}=1    ${Resource_Filter}=.*
+    ${Alert_List}    Create List
+
+
+    # Get the entire list of Alerts
+    log    Getting Fusion Alerts    console=True
+    ${Response}    Fusion Api Get Alerts    /rest/alerts?sort=created:descending
+
+    ${Count}    Get From Dictionary    ${Response}    count
+    Run Keyword if            '${Count}'=='0'    Console    \nNo alert events found
+    Return From Keyword If    '${Count}'=='0'    msg=No alert events found
+
+    ${Members}    Get From Dictionary    ${Response}    members
+    :FOR    ${Index}    IN RANGE    0    ${Count}
+    \    ${Alert}    Get From List    ${Members}    ${Index}
+    \    ${uri}    Get From Dictionary    ${Alert}    uri
+    \    ${id}     Fetch From Right    ${uri}    /
+
+    \    # Special case - We just want to find the last/highest Activity ID
+    \    Run Keyword If    ${Starting_AlertID}==1
+    \    ...    Set Suite Variable     ${Last_AlertID}    ${id}
+    \    Return From Keyword If    ${Starting_AlertID}==1    ${Alert_List}    ${id}
+
+    \    # Select only the most recent events - skip any after that
+    \    Return From Keyword If    ${Starting_AlertID}>=${id}    ${Alert_List}      ${Last_AlertID}
+
+    \    # Remember the last Alert ID encountered
+    \    Run Keyword If    ${id}>${Last_AlertID}
+    \    ...    Set Suite Variable    ${Last_AlertID}    ${id}
+
+    \    # Filter out any unrelated alerts
+    \    ${alertTypeID}    Get From Dictionary    ${Alert}    alertTypeID
+    \    ${Found}    Run Keyword And Return Status
+    \    ...    Should Match Regexp    ${alertTypeID}    ${Resource_Filter}
+    \    Run Keyword If    '${Found}'=='False'    Continue For Loop
+    \    Log    ${AlertTypeID}    console=true
+
+    \    # Include this alert into the 'List of Activity Events'
+    \    Append to List    ${Alert_List}    ${Alert}
+
+    Should Not Be Empty    ${Alert_List}    No Activity Events Found
+    [Return]    ${Alert_List}    ${Last_AlertID}
+
+
+Fusion Api Get Device
+    [Documentation]    Get a specific device from the enclosure information
+    [Arguments]    ${DeviceType}=deviceBays    ${BayNumber}=1
+    ${Response}    Fusion Api Get Enclosures
+    ${Status}      Get From Dictionary    ${Response}    status_code
+    Should be Equal     ${Status}    ${200}    msg=Get Enclosures failed ${Response}
+
+    # Make sure we get (more than zero) enclosures listed
+    ${Count}       Get From Dictionary    ${Response}    count
+    Run Keyword If    '${Count}'=='0'    Fatal Error    msg=No enclosures found
+
+    # Fetch a pointer to the first enclosure - Member0
+    ${Members}     Get From Dictionary    ${Response}    members
+    ${Member0}     Get From List          ${Members}      0
+
+    # Extract selected device bay information
+    ${DeviceBays}        Get From Dictionary    ${Member0}      ${DeviceType}
+    ${BayIndex}     Evaluate    ${BayNumber}-1
+    ${DeviceInfo}    Get From List    ${DeviceBays}    ${BayIndex}
+    [Return]    ${DeviceInfo}

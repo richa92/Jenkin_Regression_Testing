@@ -1,0 +1,137 @@
+*** Settings ***
+Documentation		Provides keywords for deploying C700 Fusion VM appliance
+
+Variables 		    ./data_variables.py
+Library             String
+Library             Collections
+Library             robot.api.logger
+Library             SSHLibrary
+
+*** Keywords ***
+Translate Pass Status
+    [Arguments]         ${Pass_Build}
+    Run Keyword If      '${Pass_Build}'=='true'     Set Suite Variable      ${Non_Passed}   False
+    Run Keyword If      '${Pass_Build}'=='false'    Set Suite Variable      ${Non_Passed}   True
+
+Generate Unique Identifier
+    [Arguments]             ${identifier}
+    ${random number}=       Generate Random String      4                       0123456789
+    ${identifier_length}=   Get Length                  ${identifier}
+    Run Keyword If          ${identifier_length}==0     Return From Keyword     ${random number}
+    ...                     ELSE                        Return From Keyword     ${identifier}-${random number}
+
+Deploy C7000 Appliance
+    [Arguments]     ${Appliance_Deployment}=${C7000EnvSetup.${Team_Name}.Common.Appliance_Deployment}
+    ...             ${Fusion_Version}=${Fusion_Version}
+    ...             ${OVA_Type}=${OVA_Type}
+    ...             ${Pass_Build}=${Pass_Build}
+    ...             ${Build_Number_Filter}=${Build_Number_Filter}
+    ${Fusion_Version}=      Get Variable Value          ${Fusion_Version}           NONE
+    Run Keyword If          '${Fusion_Version}'=='NONE'
+    ...                     Set Suite Variable
+    ...                     ${Fusion_Version}
+    ...                     ${C7000EnvSetup.${Team_Name}.Common.Appliance_Deployment['Fusion_Version']}
+
+    ${OVA_Type}=            Get Variable Value          ${OVA_Type}                 NONE
+    Run Keyword If          '${OVA_Type}'=='NONE'
+    ...                     Set Suite Variable
+    ...                     ${OVA_Type}
+    ...                     ${C7000EnvSetup.${Team_Name}.Common.Appliance_Deployment['OVA_Type']}
+
+    ${Pass_Build}=          Get Variable Value           ${Pass_Build}          NONE
+    Run Keyword If          '${Pass_Build}'=='NONE'
+    ...                     Set Suite Variable
+    ...                     ${Pass_Build}
+    ...                     ${C7000EnvSetup.${Team_Name}.Common.Appliance_Deployment['Pass_Build']}
+
+    ${Build_Number_Filter}=
+    ...                     Get Variable Value           ${Build_Number_Filter}          NONE
+    Run Keyword If          '${Build_Number_Filter}'=='NONE'
+    ...                     Set Suite Variable
+    ...                     ${Build_Number_Filter}
+    ...                     ${C7000EnvSetup.${Team_Name}.Common.Appliance_Deployment['Build_Number_Filter']}
+
+    ${FTS}=                 Get Variable Value           ${FTS}                 NONE
+    Run Keyword If          '${FTS}'=='NONE'
+    ...                     Set Suite Variable
+    ...                     ${FTS}
+    ...                     ${C7000EnvSetup.${Team_Name}.Common.Appliance_Deployment['FTS']}
+
+    ${Schematic}=            Get Variable Value      ${Schematic}               NONE
+    Run Keyword If          '${Schematic}'=='NONE'
+    ...                     Set Suite Variable
+    ...                     ${Schematic}
+    ...                     ${C7000EnvSetup.${Team_Name}.Common.Appliance_Deployment['Schematic']}
+
+    Set Suite Variable      ${Fusion_Depot}         ${C7000EnvSetup.${Team_Name}.Common.Appliance_Deployment['Fusion_Depot']}
+    Set Suite Variable      ${Image_Name}           ${C7000EnvSetup.${Team_Name}.Common.Appliance_Deployment['Image_Name']}
+    Set Suite Variable      ${Image_Ext}            ova
+    Set Suite Variable      ${OVFtool}              ${C7000EnvSetup.${Team_Name}.Common.Appliance_Deployment['OVFtool']}
+    Set Suite Variable      ${DATASTORE}            ${C7000EnvSetup.${Team_Name}.Common.Appliance_Deployment['DATASTORE']}
+    Set Suite Variable      ${SITELAN_NETWORK}      ${C7000EnvSetup.${Team_Name}.Common.Appliance_Deployment['SITELAN_NETWORK']}
+    Set Suite Variable      ${VM_FOLDER}            ${C7000EnvSetup.${Team_Name}.Common.Appliance_Deployment['VM_FOLDER']}
+    Set Suite Variable      ${Target_Locator}       ${C7000EnvSetup.${Team_Name}.Common.Appliance_Deployment['Target_Locator']}
+    Set Suite Variable      ${vSphere_IP}           ${C7000EnvSetup.${Team_Name}.Common.Appliance_Deployment['vCenter']['server']}
+    Set Suite Variable      ${vSphere_Username}     ${C7000EnvSetup.${Team_Name}.Common.Appliance_Deployment['vCenter']['user']}
+    Set Suite Variable      ${vSphere_Password}     ${C7000EnvSetup.${Team_Name}.Common.Appliance_Deployment['vCenter']['password']}
+    Set Suite Variable      ${VMName_Prefix}        ${C7000EnvSetup.${Team_Name}.Common.Appliance_Deployment['VMName_Prefix']}
+
+    Translate Pass Status   ${Pass_Build}
+
+    ${Image_Name}=      Run Keyword If          '${Image_Name}'=='NONE'
+    ...                 Get LatestBuild Name    ${Fusion_Depot}     ''      ${Image_Ext}
+    ...                 HPE?OneView.*${Build_Number_Filter}.*.%s$
+    ...                 non_passed=${Non_Passed}
+    ...                 ELSE
+    ...                 Set Variable            ${Image_Name}
+
+    Console                 \n[Image Name] = "${Image_Name}"
+    Set Suite Variable      ${Deploy_URL}                   ${Fusion_Depot}${Image_Name}
+    Console                 \nDeploying from: ${Deploy_URL}
+    Log                     ${Deploy_URL}
+    ${name}=                Get substring                   ${Image_Name}                   0   -4
+    Set Suite variable      ${Fusion_Name}                  ${C7000EnvSetup.${Team_Name}.Common.Appliance_Deployment['VMName_Prefix']}-${name}
+    Console                 \nThe Appliance name is: ${Fusion_Name}
+# Check OVFtool
+    ${RC}                   ${Output}=                      Run and Return Rc and Output    dir ${OVFtool}
+    Run Keyword Unless      '${RC}' == '0'                  Fatal Error
+    ...                     msg=Could not find ovftool.exe. Is it installed? (See \\\\eml.usa.hp.com\\emgmt\\Tools\\WMARE)
+
+# Deploy Fusion Appliance
+    Console                 \nDeploying VM: ${Fusion_Name}
+    ${Command}=             Catenate                    ${OVFtool}
+    ...                     --skipManifestCheck
+    ...                     --noSSLVerify
+    ...                     --acceptAllEulas
+    ...                     --machineOutput
+    ...                     --powerOn
+    ...                     --ipProtocol=IPv4
+    ...                     --powerOffTarget
+    ...                     --overwrite
+    ...                     --name="${Fusion_Name}"
+    ...                     --datastore="${DATASTORE}"
+    ...                     --network="${SITELAN_NETWORK}"
+    ...                     --diskMode=thin
+    ...                     --vmFolder="${VM_FOLDER}"
+    ...                     ${Deploy_URL}
+    ...                     ${Target_Locator}
+    Log                     ${Command}
+    ${RC}                   ${Output}=                  Run and Return Rc and Output    ${Command}
+    Run Keyword Unless      '${RC}' == '0'              Fatal Error                     msg=Could not deploy new VM ${Output}
+
+    Connect To VI Server        ${vSphere_IP}           ${vSphere_Username}     ${vSphere_Password}
+    Wait Until Keyword Succeeds                         10 min                  60 sec                  Get VM IPv4 Addresses
+    ...                         ${Fusion_Name}
+    Sleep                       60
+    @{IPs}=                     Get VM IPv4 Addresses   ${Fusion_Name}
+    ${IP}=                      Get From List           ${IPs}                  0
+    Set Suite Variable          ${Fusion_IP}            ${IP}
+    Set Suite Variable          ${Fusion_URL}           https://${Fusion_IP}
+    Set Environment Variable    FUSION_URL              ${Fusion_Url}
+    Set Environment Variable    FUSION_IP               ${Fusion_IP}
+    Console                     \nYour FusionVM URL is: ${Fusion_URL}
+    [Return]                    ${Fusion_IP}
+
+
+
+

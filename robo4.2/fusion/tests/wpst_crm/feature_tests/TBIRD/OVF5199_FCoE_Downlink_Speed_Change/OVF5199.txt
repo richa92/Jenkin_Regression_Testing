@@ -1,0 +1,355 @@
+*** Settings ***
+Documentation        Feature Test: OVF5199 FCoE dowlink speed change for TClass
+#Variables            data_variables_162.py
+Variables            data_variables_Nitro_Rig.py
+Resource             ../../../../../Resources/api/fusion_api_resource.txt
+Resource             ../OVF3322_FcoE/OVF3322_Resource.txt
+Library              FusionLibrary
+Library              RoboGalaxyLibrary
+Library              Collections
+Library              BuiltIn
+Library              ../OVF3322_FcoE/OVF3322_validate.py
+Suite Setup          Suite Setup Tasks
+Suite Teardown       Suite Setup Tasks
+
+*** Variables ***
+${APPLIANCE_IP}     15.245.131.251
+
+*** Test Cases ***
+
+TC_1_Create LIG with FcoE US,enclosure group and LE
+    [Documentation]    Create LIG with FcoE US,enclosure group and LE
+    [Tags]  1
+    Set Log Level    TRACE
+
+    ${resp}    Add Ethernet Networks from variable    ${ethernet_networks}
+    ${l}    Get Length    ${resp}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Run Keyword If  '${resp[${x}]['status_code']}' == '202'    Wait For Task2    ${resp[${x}]}    20m    1m    ELSE    Fail    Log    '${resp[${x}]['errorCode']}'    Console = True
+
+    ${resp}    Add FCoE Networks from variable    ${fcoe_networks}
+    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp}    ELSE    Fail    Log    Failed    console=True
+
+    Log    Updating bandwidth of FcoE networks    console=True
+    ${nets}    Fusion Api Get Fcoe Networks
+    ${net}    Get From Dictionary    ${nets}    members
+    ${l}    Get Length    ${net}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${ct}    Fusion Api Get Connection Templates    ${net[${x}]['connectionTemplateUri']}
+    \    ${bw}    Create Dictionary    maximumBandwidth=50000    typicalBandwidth=2500
+    \    Set to Dictionary    ${ct}    bandwidth=${bw}
+    \    Remove From Dictionary    ${ct}    status_code    headers
+    \    ${resp}    Fusion Api Update Connection Template    ${ct}    ${net[${x}]['connectionTemplateUri']}
+
+    Add LIG from variable    ${ligs['LIG']}
+
+    ${resp}    Add Enclosure Group from variable    ${enc_group['EG']}
+    Run Keyword If  '${resp['status_code']}' == '201'    Wait For Task2    ${resp}    ELSE    Fail    Log    failed    console=True
+
+    Add Logical Enclosure from variable    ${les['LE']}
+
+    Log    Verifying if interconnects are configured    console=True
+    :FOR    ${x}    IN    @{Interconnect_dto}
+    \    Verify Interconnect    ${x}    state=Configured
+
+Verifying Port status and operational speed
+    [Documentation]    Verifying Port status and operational speed
+    Set Log Level    TRACE
+
+    Log    Fetching ICM URI    console=True
+    ${ic_uris}    Create List
+    :FOR    ${icm}    IN    @{Interconnect_name}
+    \    ${uri} =    Get IC URI    ${icm}
+    \    Run Keyword If    '${icm}' == '${Interconnect_name[0]}'    Set Suite Variable    ${ICM6_uri}    ${uri}
+    \    ...    ELSE IF    '${icm}' == '${Interconnect_name[1]}'   Set Suite Variable    ${ICM3_uri}    ${uri}
+    \    Append To List    ${ic_uris}    ${uri}
+    Log     ${ICM3_uri}    console=True
+    Log     ${ICM6_uri}    console=True
+    Set Suite Variable    ${ICM_uris}    ${ic_uris}
+
+    Log    Verify if ports are linked    console=True
+    ${len}    Get Length    ${ICM_uris}
+    Set Suite Variable    ${ICM_length}    ${len}
+
+    :FOR    ${x}    IN RANGE    0   ${ICM_length}
+    \    Wait Until Keyword Succeeds    20 min    20s    Verify Port Status    ${ICM_uris[${x}]}    ${Uplink_ports[${x}]}    Linked
+    \    Wait Until Keyword Succeeds    20 min    20s    Verify Port Status    ${ICM_uris[${x}]}    ${downlink_port_Quack[${x}]}    Linked
+    \    Wait Until Keyword Succeeds    20 min    20s    Verify Port Status    ${ICM_uris[${x}]}    ${downlink_port_Quagmire2[${x}]}    Linked
+
+    Log    Verifying the operationalSpeed of FcoE downlinks    console=True
+    :FOR    ${x}    IN RANGE    0   ${ICM_length}
+    \    Wait Until Keyword Succeeds    20 min    20s    Get Operational Speed    ${ICM_uris[${x}]}    ${downlink_port_Quack[${x}]}    Speed25G
+    \    Wait Until Keyword Succeeds    20 min    20s    Get Operational Speed    ${ICM_uris[${x}]}    ${downlink_port_Quagmire2[${x}]}    Speed25G
+
+TC_2_Create Server Profiles for servers with Quack,each with 2 FcoE connection rbw 8Gb on each port
+    [Documentation]    Create Server Profiles for servers with Quack; each with 2 FcoE connection rbw 8Gb on each port
+    [Tags]  2
+    ${resp}    Add Server Profiles from variable   ${SP_Quack}
+    ${l}    Get Length    ${resp}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Run Keyword If  '${resp[${x}]['status_code']}' == '202'    Wait For Task2    ${resp[${x}]}    20m    1m    ELSE    Fail    Log    failed    console=True
+    \    Power on server    ${SP_Quack[${x}]['serverHardwareUri']}
+    Sleep    10min
+
+TC_3_Verify server DL operationalMode and Validating LUN count and Passing Traffic in Quack servers
+    [Documentation]    Verify server DL operationalMode and Validating LUN count and Passing Traffic in Quack servers
+    [Tags]  3
+
+    Log    Verifying the operationalSpeed of FcoE downlinks    console=True
+    :FOR    ${x}    IN RANGE    0   ${ICM_length}
+    \    Wait Until Keyword Succeeds    20 min    20s    Verify Port Status    ${ICM_uris[${x}]}    ${downlink_port_Quack[${x}]}    Linked
+    \    Wait Until Keyword Succeeds    20 min    20s    Get Operational Speed    ${ICM_uris[${x}]}    ${downlink_port_Quack[${x}]}    Speed25G
+
+    ${lun_count_list}    Create List
+    ${l}    Get Length    ${ilo_details_Quack}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${serverIp}    Get Server Ip Windows    ${ilo_details_Quack[${x}]}
+    \    Wait For Appliance To Become Pingable    ${serverIp[0]}
+
+    \    ${lun_count}    validate_windows_lun_count    ${serverIp[0]}    ${server_credentials_Quack[${x}]['userName']}    ${server_credentials_Quack[${x}]['password']}
+    \    Append To List    ${lun_count_list}    ${lun_count}
+
+    \    ${output}    execute_windows_commands    ${serverIp[0]}    ${server_credentials_Quack[${x}]['userName']}    ${server_credentials_Quack[${x}]['password']}    ${kill_diskspd}
+
+    \    ${output}    execute_windows_commands    ${serverIp[0]}    ${server_credentials_Quack[${x}]['userName']}    ${server_credentials_Quack[${x}]['password']}    ${diskspd_cmd[${x}]}
+    \    Run Keyword If  ${output} == 0    Log    \n Successfully passed the traffic    console=True    ELSE    Fail    Log    Unable to pass traffic    console=True
+    Set Suite Variable    ${win_lun_count_Quack}    ${lun_count_list}
+
+TC_4_Create server profile with Quagmire2 adapters and verify traffic, DL operational speed
+    [Documentation]    Create server profile with Quagmire2 adapters and verify traffic, DL operational speed
+    [Tags]  4
+
+    ${resp}    Add Server Profiles from variable   ${SP_Quagmire2}
+    ${l}    Get Length    ${resp}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Run Keyword If  '${resp[${x}]['status_code']}' == '202'    Wait For Task2    ${resp[${x}]}    20m    1m    ELSE    Fail    Log    failed    console=True
+    \    Power on server    ${SP_Quagmire2[${x}]['serverHardwareUri']}
+    Sleep    10min
+
+
+    Log    Verifying the operationalSpeed of FcoE downlinks    console=True
+    :FOR    ${x}    IN RANGE    0   ${ICM_length}
+    \    Wait Until Keyword Succeeds    20 min    20s    Verify Port Status    ${ICM_uris[${x}]}    ${downlink_port_Quagmire2[${x}]}    Linked
+    \    Wait Until Keyword Succeeds    20 min    20s    Get Operational Speed    ${ICM_uris[${x}]}    ${downlink_port_Quagmire2[${x}]}    Speed25G
+
+Traffic
+    [Documentation]    Traffic
+    Log    Validating LUN count and Passing Traffic in Quagmire2 servers    console=True
+    ${lun_count_list}    Create List
+    ${lun_count_total}    Create List
+    ${l}    Get Length    ${ilo_details_all}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${serverIp}    Get Server Ip Windows    ${ilo_details_all[${x}]}
+    \    Wait For Appliance To Become Pingable    ${serverIp[0]}
+
+    \    ${lun_count}    validate_windows_lun_count    ${serverIp[0]}    ${server_details_all[${x}]['userName']}    ${server_details_all[${x}]['password']}
+    \    Append To List    ${lun_count_list}    ${lun_count}
+
+    \    ${output}    execute_windows_commands    ${serverIp[0]}    ${server_details_all[${x}]['userName']}    ${server_details_all[${x}]['password']}    ${kill_diskspd}
+
+    \    ${output}    execute_windows_commands    ${serverIp[0]}    ${server_details_all[${x}]['userName']}    ${server_details_all[${x}]['password']}    ${diskspd_cmds_1min[${x}]}
+    \    Run Keyword If  ${output} == 0    Log    \n Successfully passed the traffic    console=True    ELSE    Fail    Log    Unable to pass traffic    console=True
+
+    Set Suite Variable    ${lun_count_total}    ${lun_count_list}
+    ${lun_total}    Get Length    ${lun_count_total}
+    Set Suite Variable    ${lun}    ${lun_total}
+
+TC_5_Edit SP for 1 server w/ Quack - FCoE rbw to 16Gb(no need to power off)
+    [Documentation]    Edit SP for 1 server w/ Quack - FCoE rbw to 16Gb(no need to power off)
+    [Tags]  5
+
+    ${resp}    Edit Server Profiles from variable    ${SP_Quack_rbw16}
+    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp[0]}    20m    1m    ELSE    Fail    Log    failed    console=True
+
+    Log    Verifying the operationalSpeed of FcoE downlinks    console=True
+    :FOR    ${x}    IN RANGE    0   ${ICM_length}
+    \    Wait Until Keyword Succeeds    20 min    20s    Get Operational Speed    ${ICM_uris[${x}]}    ${downlink_port_Quack[${x}]}    Speed25G
+
+    Validate Requested bandwidth in SP     ${SP_Quack_rbw16[0]['name']}    ${fcoe_networks}    16000
+
+    ${len}    Get Length    ${ilo_details_all}
+    :FOR    ${x}    IN RANGE    0   ${len}
+    \    Verify Windows LUN Count    ${ilo_details_all}    ${server_details_all}    ${lun_count_total}
+    Execute Traffic In Servers    ${server_details_all}    ${ilo_details_all}    ${kill_diskspd}    ${diskspd_cmds_1min}
+
+TC_6_Edit LI DLS change from 25Gb to 50Gb
+    [Documentation]    Edit LI DLS change from 25Gb to 50Gb
+    [Tags]  6
+    ${resp}    Edit LI    ${Li_body_50GB}    ${LI['name']}
+    Run Keyword If  '${resp['status_code']}' == '202'    Wait For Task2    ${resp}    20m    1m    ELSE    Fail    Log    failed    console=True
+
+    Log    Verifying the operationalSpeed of FcoE downlinks    console=True
+    :FOR    ${x}    IN RANGE    0   ${ICM_length}
+    \    Wait Until Keyword Succeeds    10 min    20s    Get Operational Speed    ${ICM_uris[${x}]}    ${downlink_port_Quack[${x}]}    Speed25G
+    \    Wait Until Keyword Succeeds    10 min    20s    Get Operational Speed    ${ICM_uris[${x}]}    ${downlink_port_Quagmire2[${x}]}    Speed50G
+
+    ${len}    Get Length    ${ilo_details_all}
+    :FOR    ${x}    IN RANGE    0   ${len}
+    \    Verify Windows LUN Count    ${ilo_details_all}    ${server_details_all}    ${lun_count_total}
+    Execute Traffic In Servers    ${server_details_all}    ${ilo_details_all}    ${kill_diskspd}    ${diskspd_cmds_30min}
+
+TC_7_Edit SP for 1 server with Quagmire2 FCoE rbw to 32Gb
+    [Documentation]    Edit SP for 1 server with Quagmire2 FCoE rbw to 32Gb
+    [Tags]  7
+
+    ${resp}    Edit Server Profiles from variable    ${SP_Quagmire2_rbw32}
+    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp[0]}    20m    1m    ELSE    Fail    Log    failed    console=True
+
+    Log    Verifying the operationalSpeed of FcoE downlinks    console=True
+    :FOR    ${x}    IN RANGE    0   ${ICM_length}
+    \    Wait Until Keyword Succeeds    10 min    20s    Get Operational Speed    ${ICM_uris[${x}]}    ${downlink_port_Quagmire2[${x}]}    Speed50G
+
+    Validate Requested bandwidth in SP     ${SP_Quagmire2_rbw32[0]['name']}    ${fcoe_networks}    32000
+
+    ${len}    Get Length    ${ilo_details_all}
+    :FOR    ${x}    IN RANGE    0   ${len}
+    \    Verify Windows LUN Count    ${ilo_details_all}    ${server_details_all}    ${lun_count_total}
+    Execute Traffic In Servers    ${server_details_all}    ${ilo_details_all}    ${kill_diskspd}    ${diskspd_cmds_1min}
+
+TC_8_Edit LI DLS change to 25Gb when Profiles are with >25Gb connections
+    [Documentation]    Edit LI DLS change to 25Gb when Profiles are with >25Gb connections
+    [Tags]  8
+    ${resp}    Edit LI    ${Li_body_25GB}    ${LI['name']}
+    Log    ${resp}    console=True
+    ${task}    Wait For Task    ${resp}    120s    2s
+    ${valDict}    Create Dictionary    errorCode=CRM_NOT_SUPPORTED_CONNECTION_BANDWIDTH_BASED_ON_NEW_DOWNLINK_SPEED_MODE
+    ...                                message=The requested logical interconnect downlink speed of 25 Gb/s is less than the sum of all requested bandwidth settings for connections on the downlink ports associated with this logical interconnect.
+    Validate Response    ${task['taskErrors'][0]}    ${valDict}
+    Log    \nError:${task['taskErrors'][0]['errorCode']}    console=True
+
+TC_9_Edit SP (Quaqmire2 in step 7)- FCoE rbw to 8Gb(no need to power off)
+    [Documentation]    Edit SP (Quaqmire2 in step 7)- FCoE rbw to 8Gb(no need to power off)
+    [Tags]  9
+
+    ${resp}    Edit Server Profiles from variable    ${SP_Quagmire2_rbw8}
+    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp[0]}    20m    1m    ELSE    Fail    Log    failed    console=True
+
+    Log    Verifying the operationalSpeed of FcoE downlinks    console=True
+    :FOR    ${x}    IN RANGE    0   ${ICM_length}
+    \    Wait Until Keyword Succeeds    10 min    20s    Get Operational Speed    ${ICM_uris[${x}]}    ${downlink_port_Quagmire2[${x}]}    Speed50G
+
+    Validate Requested bandwidth in SP     ${SP_Quagmire2_rbw8[0]['name']}    ${fcoe_networks}    8000
+
+    ${len}    Get Length    ${ilo_details_all}
+    :FOR    ${x}    IN RANGE    0   ${len}
+    \    Verify Windows LUN Count    ${ilo_details_all}    ${server_details_all}    ${lun_count_total}
+    Execute Traffic In Servers    ${server_details_all}    ${ilo_details_all}    ${kill_diskspd}    ${diskspd_cmds_1min}
+
+TC_10_Edit LI DLS change from 50Gb to 25Gb
+    [Documentation]    Edit LI DLS change from 50Gb to 25Gb
+    [Tags]  10
+
+    ${resp}    Edit LI    ${Li_body_25GB}    ${LI['name']}
+    Run Keyword If  '${resp['status_code']}' == '202'    Wait For Task2    ${resp}    20m    1m    ELSE    Fail    Log    failed    console=True
+
+    Log    Verifying the operationalSpeed of FcoE downlinks    console=True
+    :FOR    ${x}    IN RANGE    0   ${ICM_length}
+    \    Wait Until Keyword Succeeds    10 min    20s    Get Operational Speed    ${ICM_uris[${x}]}    ${downlink_port_Quack[${x}]}    Speed25G
+    \    Wait Until Keyword Succeeds    10 min    20s    Get Operational Speed    ${ICM_uris[${x}]}    ${downlink_port_Quagmire2[${x}]}    Speed25G
+
+    ${len}    Get Length    ${ilo_details_all}
+    :FOR    ${x}    IN RANGE    0   ${len}
+    \    Verify Windows LUN Count    ${ilo_details_all}    ${server_details_all}    ${lun_count_total}
+    Execute Traffic In Servers    ${server_details_all}    ${ilo_details_all}    ${kill_diskspd}    ${diskspd_cmds_30min}
+
+TC_11_Edit SP for Quack server change FC0E rbw back to 8Gb
+    [Documentation]    Edit SP for Quack server change FC0E rbw back to 8Gb
+    [Tags]  11
+
+    ${resp}    Edit Server Profiles from variable    ${SP_Quack_rbw8}
+    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp[0]}    20m    1m    ELSE    Fail    Log    failed    console=True
+
+    Log    Verifying the operationalSpeed of FcoE downlinks    console=True
+    :FOR    ${x}    IN RANGE    0   ${ICM_length}
+    \    Wait Until Keyword Succeeds    20 min    20s    Get Operational Speed    ${ICM_uris[${x}]}    ${downlink_port_Quack[${x}]}    Speed25G
+
+    ${len}    Get Length    ${ilo_details_all}
+    :FOR    ${x}    IN RANGE    0   ${len}
+    \    Verify Windows LUN Count    ${ilo_details_all}    ${server_details_all}    ${lun_count_total}
+    Execute Traffic In Servers    ${server_details_all}    ${ilo_details_all}    ${kill_diskspd}    ${diskspd_cmds_1min}
+
+    Validate Requested bandwidth in SP     ${SP_Quack_rbw8[0]['name']}    ${fcoe_networks}    8000
+
+*** Keywords ***
+Get Port Speed
+    [Documentation]    Get Port Speed
+    [Arguments]     ${interconnect}    ${ports}
+    ${y}    Set Variable    0
+    ${ic_resp}    Fusion Api Get Interconnect Ports    ${interconnect}
+    ${flag}=    set variable    ${empty}
+    ${len} =    Get Length  ${ic_resp['members']}
+    :FOR    ${x}    IN RANGE    0   ${len}
+    \    ${downlinkSpeed}    Get From Dictionary    ${ic_resp['members'][${x}]}    operationalSpeed
+    \    Run Keyword If  '${ic_resp['members'][${x}]['portName']}' == '${ports}'    Run Keywords    Set Global Variable    ${operationalSpeed}    ${downlinkSpeed}    AND    Exit For Loop    ELSE    Continue For Loop
+    [Return]    ${operationalSpeed}
+
+Get Operational Speed
+    [Documentation]    Get Operational Speed
+    [Arguments]     ${interconnect}    ${ports}    ${downlink_operational_speed}
+    ${len}    Get Length    ${ports}
+    :FOR    ${x}    IN RANGE    0   ${len}
+    \    ${operationalSpeed}    Get Port Speed    ${interconnect}    ${ports[${x}]}
+    \    Run Keyword If  '${operationalSpeed}' != '${downlink_operational_speed}'    Fail    ELSE    Log    successfully verified the Downlink port speed    console=True
+
+Verify Windows LUN Count
+    [Documentation]    Verify Windows LUN Count
+    [Arguments]     ${ilo_details}    ${server_credentials}    ${lun_count_total}
+    ${l}    Get Length    ${ilo_details}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${serverIp}    Get Server Ip Windows    ${ilo_details[${x}]}
+    \    Wait For Appliance To Become Pingable    ${serverIp[0]}
+
+    \    ${lun_count}    validate_windows_lun_count    ${serverIp[0]}    ${server_credentials[${x}]['userName']}    ${server_credentials[${x}]['password']}
+    \    Run Keyword If    ${lun_count}== ${lun_count_total[${x}]}    Log    \n Expected LUN disks are available in local server   console=True    ELSE    Fail    Log    LUNs are not available    console=True
+
+Execute Traffic In Servers
+    [Documentation]    Passing FC traffic in the servers after killing the existing traffic
+    [Arguments]     ${server_details}    ${ilo_details}    ${kill_diskspd}    ${diskspd_cmd}
+
+    ${len}    Get Length    ${server_details}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    ${serverIp}    Get Server Ip Windows    ${ilo_details[${x}]}
+    \    Set To Dictionary    ${server_details[${x}]}    ip    ${serverIp[0]}
+    \    Set To Dictionary    ${server_details[${x}]}    wcmd    ${diskspd_cmd[${x}]}
+
+    Kill_taffic    ${server_details}    ${kill_diskspd}
+
+    execute_traffic    ${server_details}
+
+Edit LI
+    [Documentation]    Edit LI
+    [Arguments]     ${body}    ${LI_name}
+    ${li_uri}    Get LI URI    ${LI_name}
+    ${resp}    fusion_api_patch_li    ${body}    ${li_uri}
+    [Return]    ${resp}
+
+Get Requested bandwidth in SP
+    [Documentation]    Get Requested bandwidth in SP
+    [Arguments]     ${server_profile_name}    ${network_name}
+    ${network_uri}    Get FCoE URI    ${network_name}
+    ${SP_uri}    Get Server Profile URI    ${server_profile_name}
+    ${SP_resp}    Get Server Profile Transformation    ${SP_uri}
+    ${connections}    Get From Dictionary    ${SP_resp}    connectionSettings
+    ${connections}    Get From Dictionary    ${connections}    connections
+    ${l}    Get Length    ${connections}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${requestedMbps}    Get From Dictionary    ${connections[${x}]}    requestedMbps
+    \    Run Keyword If  '${connections[${x}]['networkUri']}' == '${network_uri}'    Run Keywords    Set Global Variable    ${requested_bandwidth}    ${requestedMbps}    AND    Exit For Loop    ELSE    Continue For Loop
+    [Return]    ${requested_bandwidth}
+
+Validate Requested bandwidth in SP
+    [Documentation]    Validate Requested bandwidth in SP
+    [Arguments]     ${server_profile_name}    ${network_name}    ${requestedMbps}
+    ${len}    Get Length    ${network_name}
+    :FOR    ${x}    IN RANGE    0   ${len}
+    \    ${requested_bandwidth}    Get Requested bandwidth in SP     ${server_profile_name}    ${network_name[${x}]['name']}
+    \    Run Keyword If  '${requested_bandwidth}' != '${requestedMbps}'    Fail    ELSE    Log    successfully verified the requestedMbps    console=True
+
+Verify Port Status
+    [Documentation]    Verify Port Status
+    [Arguments]     ${ICM_uris}    ${port_name}    ${state}
+    ${len}    Get Length    ${port_name}
+    :FOR    ${x}    IN RANGE    0   ${len}
+    \    ${Port_Resp}    Get IC Port    ${ICM_uris}    ${port_name[${x}]}
+    \    Run Keyword If    '${Port_Resp['portStatus']}' != '${state}'    Fail    msg=Port ${port_name} is unknown
+    \    ...    ELSE    Log    Successfully verified that ${port_name} is ${Port_Resp['portStatus']}    console=True

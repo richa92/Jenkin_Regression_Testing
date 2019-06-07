@@ -1,0 +1,186 @@
+*** Settings ***
+Documentation    Refreshes the enclosure to fix configuration issues.
+...    = USAGE =
+...    | pybot | -v ENCLOSURE:dcs |-v FUSION_IP:<IP> | sync_enclosure.txt |
+...    = Variables =
+...    | ENCLOSURE | Required; Enclosure to use |
+...    | FUSION_IP | Required when enclosure is DCS; IP address of the FusionVM to use |
+
+Library           requests
+Library           json
+Library           robot.api.logger
+Library           Collections
+Library           FusionLibrary
+Variables         ../resources/variables.py    ${ENCLOSURE}
+Resource          ../resources/defaults.txt
+Resource          ../resources/fusion_api.txt
+Resource          ../resources/fusion_cli.txt
+Resource          ../resources/hal_webapp.txt    # Comet-DVT HAL Webapp extensions
+Suite Setup       Suite Setup    
+Suite Teardown    Suite Teardown
+Force Tags        HW
+
+*** Variables ***
+${Sync_Sleep}    60
+${EFuse_Sleep}    10
+*** Test Case ***
+
+Get Initial Fan Bay Info
+    # Get the initial fan bay info and save for later comparisons
+    ${fanBayInfo}    Get Fan Bay Info    ${bayNumber}
+    Set Suite Variable    ${PreSyncFanBayInfo}    ${fanBayInfo}
+
+    # Print a nicely formatted copy on the console 
+    ${NicelyFormattedJsonString}    json.dumps    ${fanBayInfo}    indent=${4}    sort_keys=${True}
+    Console    \n${NicelyFormattedJsonString}
+
+EFuseOn Fan Bay
+    EFuse Fan Bay    EFuseOn    ${bayNumber}
+    Sleep    ${EFuse_Sleep}
+
+Initiate a PERM syncEnclosure After EFuseOn
+    PERM syncEnclosure
+    #Wait for sync to complete
+    Sleep    ${Sync_Sleep}
+
+Compare Fan Bay Info After EFuseOn and Sync
+    # Get updated Fan Bay Info
+    ${fanBayInfo}    Get Fan Bay Info    ${BayNumber}
+
+    # Print a nicely formatted copy on the console 
+    ${NicelyFormattedJsonString}    json.dumps    ${fanBayInfo}    indent=${4}    sort_keys=${True}
+    Console    \n${NicelyFormattedJsonString}
+
+    # Compare this Fan Bay Info against expected values.
+    Should Be Equal as Strings    ${fanBayInfo['devicePresence']}    Absent
+    Should Be Equal as Strings    ${fanBayInfo['deviceRequired']}    ${False}
+    Should Be Equal as Strings    ${fanBayInfo['model']}             ${Null}
+    Should Be Equal as Strings    ${fanBayInfo['partNumber']}        ${Null}
+    Should Be Equal as Strings    ${fanBayInfo['sparePartNumber']}   ${Null}
+    Should Be Equal as Strings    ${fanBayInfo['state']}             ${Null}
+    Should Be Equal as Strings    ${fanBayInfo['status']}            ${Null}
+
+EFuseOff Fan Bay
+    EFuse Fan Bay    EFuseOff    ${bayNumber}
+    Sleep    ${EFuse_Sleep}
+        
+Initiate a PERM syncEnclosure After EFuseOff
+    PERM syncEnclosure
+    #Wait a minute for sync to complete
+    Sleep    ${Sync_Sleep}
+    
+Compare Fan Bay Info Finale
+    # Get updated Fan Bay Info
+    ${fanBayInfo}    Get Fan Bay Info    ${BayNumber}
+    
+    # Print a nicely formatted copy on the console 
+    ${NicelyFormattedJsonString}    json.dumps    ${fanBayInfo}    indent=${4}    sort_keys=${True}
+    Console    ${NicelyFormattedJsonString}
+
+    # Compare this Fan Bay Info against the pre-sync Fan Bay Info - Should match exactly
+    Dictionaries Should Be Equal    ${PreSyncFanBayInfo}    ${fanBayInfo}
+    ...    msg=Comparing Fan Bay Info before and after syncEnclosure does not match.
+
+Negative: EFuseOn non-existant Fan Bay
+    Run Keyword and Expect Error   EFuse action failed*    EFuse Fan Bay    EFuseOn    37
+
+#Negative: EFuseOff Fan Bay already Off - No failure detected
+#Negative: EFuseOn Fan Bay already On - No failure detected
+
+
+*** Keywords ***
+Suite Setup
+    # Login to Fusion (save the sessionID)
+    ${Response}    ${sessionID}=    Login to Fusion Via REST
+    Set Suite Variable    ${sessionID}
+
+    # Save the Enclosure UUID for the PERM operation
+    ${Response}    Fusion Api Get Enclosures
+    ${Status}      Get From Dictionary    ${Response}    status_code
+    Should be Equal    ${Status}    ${200}    msg=Get Enclosures failed ${Response}    
+    # Make sure we get (more than zero) enclosures listed
+    ${Count}       Get From Dictionary    ${Response}    count
+    Run Keyword If    '${Count}'=='0'    Fatal Error    msg=No enclosures found
+    # Fetch a pointer to the first enclosure - Member0 
+    ${Members}     Get From Dictionary    ${Response}    members
+    ${Member0}     Get From List          ${Members}      0
+    ${Uuid}        Get From Dictionary    ${Member0}      uuid
+    Set Suite Variable    ${Uuid}
+
+    # Get EM Credentials Password
+    ${Output}    Login to Fusion via SSH
+    ${Output}    Execute SSH Command
+    ...    cat /ci/pre-ha-data/tbird/tbird-em-credentials.json | grep } | python -mjson.tool
+    # Remove prompt from buffer.  It messes up loads.
+    ${Output}    String.Fetch From Left    ${Output}    [root@
+    ${Content}    json.loads    ${Output}
+    ${Credentials}    Get From Dictionary    ${Content}    credentials
+    ${Credential0}    Get From List    ${Credentials}    0
+    # Save the EM password
+    Set Suite Variable    ${EM_Pw}    ${Credential0['pw']}
+
+    # Create EM Session id
+    ${Data}    Set Variable     {"UserName":"Administrator","Password":"${EM_Pw}"}
+    ${Output}    Execute SSH Command
+    ...    curl -ikX POST -d '${Data}' https://${EM_IP}%${FUSION_NIC}/rest/v1/Sessions
+    ${Match}    ${EMSessionID}    Should Match Regexp    ${Output}    X-Auth-Token: (\\S+)
+    Set Suite Variable    ${EMSessionId}
+
+    # Select a random Fan Bay
+    ${bayNumber}    Evaluate    random.randint(1, 10)    random
+    Set Suite Variable    ${bayNumber}
+    
+Suite Teardown
+    Logout of Fusion Via REST
+    Logout of Fusion via SSH
+
+PERM syncEnclosure
+    ${Headers}    Create Dictionary    Accept=application/json, */*
+    ...                                Accept-language=en_US
+    ...                                Content-Type=application/json
+    ...                                X-Api-Version=${200}
+    ...                                auth=${sessionID}
+    ${Response}    requests.post       https://${Fusion_IP}/perm/rest/tbird/pemOperation/
+    ...                                headers=${Headers}
+    ...                                data={"PemOperation":"syncEnclosure", "UUID":"${Uuid}"}
+    ...                                verify=${False}
+    Should be Equal    ${Response.status_code}    ${200}    msg=pemOperation failed ${Response.content}
+
+EFuse Fan Bay
+    [Documentation]    Perform an efuse action on a fan bay. Action = EFuseOff | EFuseOn
+    [Arguments]    ${Action}    ${BayNumber}
+    ${Header}    Set Variable    "X-Auth-Token":"${EMSessionID}"
+    ${Data}      Set Variable    {"Action":"${Action}"}
+    ${Output}    Execute SSH Command
+    ...    curl -ikX POST -H ${Header} --data-ascii '${data}' https://${EM_IP}%${FUSION_NIC}/rest/v1/FanBays/${BayNumber}
+    Should Contain    ${Output}    { "Action": "${Action}" }
+    ...    msg=EFuse action failed \n${Output}
+
+Get Fan Bay Info
+    [Documentation]    Return Fan Bay Info from HAL Discover call. 
+    #Returns a dictionary of the form:
+    #... { "bayNumber": 9,
+    #...   "devicePresence": "Present",
+    #...   "deviceRequired": true,
+    #...   "enclosureUri": "/rest/enclosures/000000EM1FFFF101",
+    #...   "fanBayType": "ThunderbirdFanBay",
+    #...   "model": "HP FAN",
+    #...   "partNumber": "0000000010",
+    #...   "sparePartNumber": "000000-010",
+    #...   "state": "OK",
+    #...   "status": "OK"
+    #... }    
+    [Arguments]    ${BayNumber}    ${IP}=${Fusion_IP}
+    ${Response}    HAL API Perform Discover    ${IP}    ${2}
+    # Remove HTTP headers from the dictionary
+    ${Enclosure HAPI}    Remove REST Headers    ${Response}
+
+    # Extract fanBays info from Enclosure 
+    ${Result}       Get From Dictionary    ${Enclosure HAPI}    OperationResult
+    ${Enclosure}    Get From Dictionary    ${Result}            Enclosure
+    ${fanBays}      Get From Dictionary    ${Enclosure}         fanBays
+
+    # Extract selected fan bay information from the fanBays list
+    ${BayIndex}     Evaluate    ${BayNumber}-1
+    ${fanBayInfo}    Get From List         ${fanBays}           ${BayIndex}
+    [Return]    ${fanBayInfo}

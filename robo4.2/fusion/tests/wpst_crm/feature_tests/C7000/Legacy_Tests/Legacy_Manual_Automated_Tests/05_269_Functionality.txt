@@ -1,0 +1,188 @@
+*** Settings ***
+Documentation       Import enclosure and activate IC remove (neg scenerio)
+Library            json
+Library            FusionLibrary
+Library            RoboGalaxyLibrary
+Variables          data_variables.py
+Resource           ../../../../resource/fusion_api_all_resource_files.txt
+Library            data_variables.py
+Library            String
+Library            SSHLibrary
+
+***Variables***
+${firmware_state}    Activating
+${firmware_error_state}    Activation_Failed
+${IC_state}    Configured
+
+
+*** Test cases ***
+###Pre-Conditions -Latest Firmware Bundle is already Uploaded in the appliance###
+1 Login Appliance
+    [Documentation]    Login Appliance
+    Set Log Level    TRACE
+    ${resp}    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    Run Keyword If  '${resp[0]['status_code']}' != '200'    Fail    ELSE    Log to console  \nSuccessfully logged into the appliance
+    #Initial Cleanup
+    Clean OV
+
+2 Verify the presence of SPP Bundle and get URI
+    [Documentation]    Verify presence of SPP Bundle and get URI
+    ${resp}=   Fusion Api Get Firmware Driver    param=?filter="name='${SPP_05_269}'"
+    Log to console    response is ${resp}
+    Run Keyword If   ${resp['count']} == 0   Fail    msg=\n No SPP bundle found!!.Please upload the correct SPP bundle
+    ${fw_uri}=   Get From Dictionary  ${resp['members'][0]}    uri
+    Log to Console and logfile    \nFound ${SPP}SPP bundle
+
+3 Create LIG,EG,Import Enclosure,Uploading Firmware Bundle
+    [Documentation]    Create LIG,EG,Import Enclosure,Uploading Firmware Bundle
+    ${enc_resp}=    Fusion Api Import Server Hardware Type For Enclosure    ${Preview_body}    ${Preview_uri}
+    Log to console and logfile    ${enc_resp}
+    ${interconnectMapTemplate}      Set Variable    ${enc_resp['logicalInterconnectGroup']['interconnectMapTemplate']}
+    Set Global Variable   ${interconnectMapTemplate_Global}    ${interconnectMapTemplate}
+    Set To Dictionary    ${lig_05_269}    interconnectMapTemplate    ${interconnectMapTemplate_Global}
+    ${resp_lig}    Fusion Api Create Lig    ${lig_05_269}
+    Run keyword unless  ${resp_lig['status_code']}== 202    Fail    ${resp_lig['message']}
+    ${task} =   Wait For Task   ${resp_lig}     120s    2s
+    Log to console and logfile    LIG created successfully
+    ${uri} =    Get From Dictionary    ${task['associatedResource']}    resourceUri
+    Set Global Variable    ${LIG_uri}    ${uri}
+    Log to console and logfile    ${LIG_uri}
+
+    ${Test_dict} =    Create Dictionary
+    :FOR    ${x}    IN RANGE    0    8
+    \    ${permittedInterconnectTypeUri} =    Get From Dictionary    ${interconnectMapTemplate_Global['interconnectMapEntryTemplates'][${x}]}   permittedInterconnectTypeUri
+    \    Run Keyword If    '${interconnectMapTemplate_Global['interconnectMapEntryTemplates'][${x}]['logicalLocation']['locationEntries'][0]['type']}'=='Bay'    Set To Dictionary    ${Test_dict}    ${interconnectMapTemplate_Global['interconnectMapEntryTemplates'][${x}]['logicalLocation']['locationEntries'][0]['relativeValue']}    ${permittedInterconnectTypeUri}
+    \    Run Keyword If    '${interconnectMapTemplate_Global['interconnectMapEntryTemplates'][${x}]['logicalLocation']['locationEntries'][1]['type']}'=='Bay'    Set To Dictionary    ${Test_dict}    ${interconnectMapTemplate_Global['interconnectMapEntryTemplates'][${x}]['logicalLocation']['locationEntries'][1]['relativeValue']}    ${permittedInterconnectTypeUri}
+    Log to console and logfile    ${Test_dict}
+
+    ${Keys}=    Get Dictionary Keys    ${Test_dict}
+    Log to console and logfile    ${Keys}
+    ${Values}=    Get Dictionary Values    ${Test_dict}
+    Log to console and logfile    ${Values}
+
+    :FOR    ${y}    IN RANGE    0    8
+    \    Set To Dictionary    ${enc_group_05_269['interconnectBayMappings'][${y}]}    interconnectBay    ${Keys[${y}]}
+    \    Run Keyword If    '${Values[${y}]}' != 'None'    Set To Dictionary    ${enc_group_05_269['interconnectBayMappings'][${y}]}    logicalInterconnectGroupUri    ${LIG_uri}
+    Log to console and logfile    ${enc_group_05_269}
+
+    ${eg_resp}    Fusion Api Create Enclosure Group    ${enc_group_05_269}
+    Run keyword unless  ${eg_resp['status_code']}== 201    Fail    ${eg_resp['message']}
+    Set Global Variable    ${EG_uri}    ${eg_resp['uri']}
+    Log to console and logfile    EG created successfully
+
+4 Adding Enclosure with Firmware Bundle and Firmware update in LI
+    [Documentation]    Adding Enclosure with Firmware Bundle and Firmware update in LI
+    Set To Dictionary    ${enc_body_05_269}    enclosureGroupUri    ${EG_uri}
+    ${SPP_uri}    Get Firmware URI    ${SPP}
+    Set To Dictionary    ${enc_body_05_269}    firmwareBaselineUri    ${SPP_uri}
+    ${resp_enc}=    Fusion Api Add Enclosure    ${enc_body_05_269}
+    Run keyword unless  ${resp_enc['status_code']}== 202    Fail    ${resp_enc['message']}
+
+    Log to Console    \nFetching the LI uri..
+    ${uri}    Wait Until Keyword Succeeds    300s   10s    Get LI URI   ${LE}-${LIG}
+    Log to console    ${uri}
+    Set Global Variable    ${li_uri}    ${uri}
+
+5 Verifying Firmware state - Activating
+    [Documentation]    Verifying Firmware state - Activating
+    Log to Console    \nVerifying the firmware activation state in LI..
+    ${Resp}    Wait Until Keyword Succeeds    1200s   5s    Verify LI firmware state    ${li_uri}    ${firmware_state}
+    Log to Console    \nresp is ${Resp}
+
+    Fusion Api Delete Alert
+
+6 Get Interconnect List
+    [Documentation]    Get Interconnect List
+    ${get_response} =    Fusion Api Get Li    ${li_uri}    param=/firmware
+    ${len}=    Get Length    ${get_response['interconnects']}
+    ${list}=   Create List
+    Log to console and logfile    ${len}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    ${IC_Name} =    Get From Dictionary      ${get_response['interconnects'][${x}]}     interconnectName
+    \   Append To List   ${list}    ${IC_Name}
+    Set Global Variable    ${IC_List}    ${list}
+    Log to console and logfile    ${IC_List}
+
+7 Reset Interconnect and Verify Error Message
+    [Documentation]    Reset Interconnect and Verify Error Message
+    Log to Console    \nResetting interconnect during activation in progress..
+    Reset Interconnect    ${OA_HOST}    ${OA_USER}    ${OA_PASS}    ${BAY}
+    Log to Console    \nVerifying firmware update error message..
+    Wait Until Keyword Succeeds    600s   5s    Verify LI firmware Error    ${li_uri}    ${IC_List[0]}    ${firmware_error_state}
+
+8 Waiting For ICM to be configured
+    [Documentation]    Waiting For ICM to be configured
+    ${len}=    Get Length    ${IC_List}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    ${Resp1}    Wait Until Keyword Succeeds    800s   5s    Verify Interconnect State    ${IC_List[${x}]}    ${IC_state}
+
+    #Final Cleanup
+    Clean OV
+
+***Keywords****
+ Verify LI firmware state
+    [Documentation]    Verify LI firmware state
+    [Arguments]     ${li_uri}    ${firmware_state}
+    ${resp}    Fusion Api Get Li    ${li_uri}     param=/firmware
+    Should Be Equal As Strings    ${resp['state']}    ${firmware_state}
+    [Return]    ${resp['state']}
+
+Verify LI firmware Error
+    [Documentation]    Verify LI firmware error
+    [Arguments]     ${li_uri}    ${ic_name}    ${firmware_error_state}
+    ${resp}    Fusion Api Get Li    ${li_uri}     param=/firmware
+    ${len}=    Get Length    ${resp['interconnects']}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    Run Keyword If  '${resp['interconnects'][${x}]['interconnectName']}' == '${ic_name}'    Should Be Equal As Strings    ${resp['interconnects'][${x}]['state']}    ${firmware_error_state}
+
+Reset Interconnect
+    [Documentation]    issues an POWEROFF command to the given Device\Bay.
+    [Arguments]        ${OA_HOST}    ${OA_USER}     ${OA_PASS}    ${BAY}
+    Open Connection     ${OA_HOST}     prompt=>    timeout=10s
+    Login               ${OA_USER}     ${OA_PASS}
+    Write    ++diag--
+    Sleep    2sec
+    Write    reset_io ${BAY} 120
+    Sleep    10sec
+    ${output}=    Read
+    Close All Connections
+
+Verify Interconnect State
+    [Documentation]    Verify Interconnect State
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    [Arguments]    ${ICM_NAME}    ${POWER_STATE}
+    ${ic}    Get IC    ${ICM_NAME}
+    ${State}    Get From IC    ${ic}    state
+    Log to console and logfile        \tICM state is ${ICM_NAME}:${State}
+    Should Be Equal As Strings    ${State}    ${POWER_STATE}
+
+Get IC
+    [Documentation]    Get IC
+    [Arguments]    ${ICM_NAME}
+    ${resp}    fusion api get interconnect
+    ${ics}    Get From Dictionary    ${resp}    members
+    ${l}     Get Length    ${ics}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    ${ic}    Get From List    ${ics}    ${x}
+    \    Exit For Loop If    '${ic['name']}' == '${ICM_NAME}'
+    [Return]    ${ic}
+
+Get Firmware URI
+    [Documentation]    Get Firmware URI
+    [Arguments]    ${SPP}
+    ${resp} =    Fusion Api Get Firmware Driver    param=?filter="'name'=='${SPP}'"
+    ${uri} =    Get From Dictionary    ${resp['members'][0]}   uri
+    [Return]    ${uri}
+
+Clean OV
+    [Documentation]    Cleans the appliance
+    Log to console    \nCleaning the OV
+    Power off ALL Servers
+    Remove All Server Profiles
+    Remove ALL Enclosures
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove ALL Ethernet Networks
+    Remove ALL FC Networks
+    Remove ALL FCoE Networks
+    Remove ALL Network Sets

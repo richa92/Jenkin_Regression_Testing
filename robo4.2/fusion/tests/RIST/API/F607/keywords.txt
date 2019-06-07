@@ -1,0 +1,211 @@
+*** Settings ***
+Library				RoboGalaxyLibrary
+Library				FusionLibrary
+Library				OperatingSystem
+Library				BuiltIn
+Library				Collections
+Library				XML
+Library		        SSHLibrary
+Library				String
+Library				Dialogs
+Resource             ./../../../../Resources/api/fusion_api_resource.txt
+Resource             ../../UI/resource.txt
+Variables            ./Regression_Data.py
+
+*** Variables ***
+${APPLIANCE_IP}                 ${None}         # leave it as ${None} if you want this test to create a new one
+${UIDataFile}                   F607/Regression_data.xml  # Data File Location
+${ApplianceUrl}     https://${APPLIANCE_IP}     # Appliance Url
+
+*** Keywords ***
+
+Get Run Specific Data File Variables Login the Users
+    [Arguments]	            ${Firmware_Bundle}=Snap6
+    Log To Console And Logfile      \nFirmware Bundle is ${Firmware_Bundle}
+    Load Test Data  ${UIDataFile}
+    Log Variables
+    Open Browser  ${ApplianceUrl}  ${Browser}
+    Maximize Browser Window
+    Run Keyword If  "${Browser}" == "ie"   Go To  javascript:document.getElementById('overridelink').click()
+    Set Selenium Speed  ${SeleniumSpeed}
+    Log into Fusion appliance as Administrator
+    Run Keyword If          '${Firmware_Bundle}'=='Snap6'
+    ...                     Upload SPP And Remove Another
+    Run Keyword If          '${Firmware_Bundle}'=='OldSnap6'
+    ...                     Upload SPP And Remove Another   ${OldSnap6}    ${OldSnap6SPP}  ${Snap6SPP}
+
+    Close All Browsers
+    Log to Console and Logfile    Logging in OneView appliance
+    Should Not Be Equal           ${APPLIANCE_IP}  unknown  msg=The appliance IP must be defined, Example:'APPLIANCE_IP:16.114.220.131'
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    Power off ALL servers   PressAndHold
+    Run Keyword And Ignore Error    Wait For ALL Enclosures In OK Status
+
+Upload SPP And Remove Another
+    [Arguments]	            ${uploadSPP}=${Snap6}     ${uploadURI}=${Snap6SPP}     ${removeSPP}=${OldSnap6SPP}
+    Log To Console And Logfile      Start to upload SPP ${uploadURI} and remove ${removeSPP}
+    ${resp}  ${sessionID}=  Fusion Api Login Appliance
+    ...                     ${APPLIANCE_IP}         ${admin_credentials}
+    ${firmware}=    Get Firmware Bundle     ${uploadURI}
+    Run Keyword If          '${firmware}'=='Firmware Not Found'
+    ...                     Remove Firmware Bundle
+    ...                     ${removeSPP}
+#    Cannot used CLI keyword on NoSHH appliance
+#    Upload Firmware Bundle  ${sessionID}    ${uploadSPP}
+    ${data}=    Get Data By Xpath    //spps/spp[@uri='${uploadURI}']
+    Fusion UI Add Firmware Bundle    @{data.spp}
+
+Clear Test Environtment
+    Log to console and logfile  Power Off Servers and remove all profiles
+    Run Keyword And Ignore Error    Wait For ALL Server Profile In Normal State
+    Run Keyword And Ignore Error    Power off ALL servers   PressAndHold
+    Run Keyword And Ignore Error    Wait For ALL Servers Complete Refresh
+    Run Keyword And Ignore Error    Remove All Server Profiles
+
+Get LE URI
+    [Arguments]          ${le}
+    ${resp} =     Fusion Api Get Logical Enclosure
+    ${l} =        Get Length    ${resp['members']}
+    :FOR   ${x}   IN RANGE      0      ${l}
+    \      Run Keyword If       '${resp['members'][${x}]['name']}' != '${le}'          Continue For Loop
+    \      ${uri} =      Get From Dictionary        ${resp['members'][${x}]}   uri
+    [Return]      ${uri}
+
+Check LE Consistency by name
+	[Arguments]		${LE}
+    Log to console and logfile    \n Verifying whether LE is properly updated and in Consistent state
+    ${resp} =      Fusion Api Get Logical Enclosure     param=?filter="'name'=='${LE}'"
+    Run Keyword If      '${resp['members'][0]['state']}' != 'Consistent'   fail  msg=LE is in inconsistent state
+    ...            ELSE    Log to console and logfile   \n- LE is in Consistent state
+    [Return]    ${resp}
+
+Create LE and update firmware
+    [Arguments]     ${LE_NAME}   ${EG_Name}    ${fw_data}
+    Set Log Level   TRACE
+    # Get enclosureGroupUri
+    ${Response}=            Fusion Api Get Enclosure Groups     param=?filter="name=${EG_NAME}"
+    ${members}=             Get From Dictionary                 ${Response}     members
+    ${member}=              Get From List                       ${members}      0
+    ${enclosureGroupUri}=   Get From Dictionary                 ${member}       uri
+    Log to console    reading enclosureuri
+    # Get enclosureUri
+    ${Response}=        Fusion Api Get Enclosures
+    ${members}=         Get From Dictionary     ${Response}     members
+    ${member}=          Get From List           ${members}      0
+    ${enclosureUri}=    Get From Dictionary     ${member}       uri
+    ${enclosureUris}=   Create List             ${enclosureUri}
+
+    # Get Firmware data
+    Log to console    getting firmware data
+    ${firmwareBaselineUri}=         Get From Dictionary     ${fw_data}      firmwareBaselineUri
+    ${forceInstallFirmware}=        Get From Dictionary     ${fw_data}      forceInstallFirmware
+
+    # Build Payload
+    ${LE Payload}=      Fusion API Create Logical Enclosure Payload     name=${LE_Name}
+    ...                 enclosureGroupUri=${enclosureGroupUri}
+    ...                 enclosureUris=${enclosureUris}
+    ...                 firmwareBaselineUri=${firmwareBaselineUri}
+    ...                 forceInstallFirmware=${forceInstallFirmware}
+
+    # Create Logical Enclosure
+    Log to console     Creating LE with firmware
+    ${Response}=        Fusion Api Create Logical Enclosure         body=${LE Payload}
+    ${status_code}=     Get From Dictionary     ${Response}         status_code
+    Should Be Equal as Strings                  ${status_code}      202
+    ...                 msg=Failed to initiate create Enclosure.
+
+    # Wait for task to complete
+    ${task} =                       Wait For Task           ${Response}     5000s    30s
+    ${valDict} =    Create Dictionary    status_code=${200}
+    ...                                  taskState=Completed
+    Validate Response   ${task}     ${valDict}
+
+    [Return]    ${Response}
+
+Update LE Firmware
+    [Arguments]       ${LE_FIRMWARE_DATA}    ${LE_NAME}
+    ${uri} =    Get LE URI    ${LE_NAME}
+    log to console   ${uri}
+    ${body} =    Build LE FwUpdate body    ${LE_FIRMWARE_DATA}
+    Log to console and logfile   ${body}
+    ${resp} =   Fusion Api LE Firmware Update   body=${body}    uri=${uri}
+    log to console  ${resp}
+    ${task}=  Wait For Task     ${resp}     3600s    30s
+    ${valDict} =    Create Dictionary    status_code=${200}
+    ...                                  taskState=Completed
+    Validate Response   ${task}     ${valDict}
+
+Build LE FwUpdate body
+      [Arguments]       ${le-fw-update}
+      ${op} =                       Get From Dictionary     ${le-fw-update}    op
+      ${path} =                     Get From Dictionary     ${le-fw-update}    path
+      ${firmwareBaselineUri} =                        Get From Dictionary     ${le-fw-update}  firmwareBaselineUri
+      ${forceInstallFirmware} =                       Get From Dictionary     ${le-fw-update}  forceInstallFirmware
+      ${firmwareUpdateOn} =                           Get From Dictionary     ${le-fw-update}  firmwareUpdateOn
+      ${logicalInterconnectUpdateMode} =              Get From Dictionary     ${le-fw-update}  logicalInterconnectUpdateMode
+
+      ${value} =    Create Dictionary    firmwareBaselineUri=${firmwareBaselineUri}
+      ...                                forceInstallFirmware=${forceInstallFirmware}
+      ...                                firmwareUpdateOn=${firmwareUpdateOn}
+      ...                                logicalInterconnectUpdateMode=${logicalInterconnectUpdateMode}
+
+
+      ${body} =   Create Dictionary         op=${op}
+      ...                                   path=${path}
+      ...                                   value=${value}
+
+      ${body1} =   Create list     ${body}
+      Log to console    ${body1}
+      [Return]    ${body1}
+
+Validate server hardwares Firmware Version
+    [Arguments]    ${SHS}  ${baseline}
+    [Documentation]    Validate if firmware update success
+    :FOR    ${SH}    IN    @{SHS}
+    \    ${hardware} =   Get from Dictionary    ${SH}    serverHardwareUri
+    \    ${model} =   Get from Dictionary    ${SH}    description
+    \    Log to console and logfile  ${hardware}
+    \    Power On Server    ${hardware}
+    \    ${expectedFirmwares} =     Get from Dictionary    ${firmwares}    ${baseline}
+    \    ${expectedFirmware} =     Get from Dictionary    ${expectedFirmwares}    ${model}
+    \    Log to console and logfile  ${expectedFirmware}
+    \    Wait Until Keyword Succeeds    600s    15s    Server Hardware Firmware Version Correct    ${hardware}    ${expectedFirmware}
+    \    Log to console and logfile  Firmware update success!
+
+Server Hardware Firmware Version Correct
+    [Arguments]    ${hardware}    ${expectedFirmware}
+    Set Log Level    TRACE
+    ${firmware} =   Get Server Hardware Firmware    ${hardware}
+    Validate Firmware Version   ${firmware}     ${expectedFirmware}
+
+Validate Firmware Version
+    [Arguments]    ${firmware}  ${expectedFirmware}
+    [Documentation]    Check if firmware version update to expected value
+    Log to console and logfile  Check if firmware version update to expected value
+    Log to console and logfile  Actual firmware:\n${firmware}
+    Log to console and logfile  Expected firmware:\n${expectedFirmware}
+    :FOR    ${checkFirmware}    IN    @{expectedFirmware}
+    \    ${name} =   Get from Dictionary     ${checkFirmware}    componentName
+    \    ${version} =   Get from Dictionary  ${checkFirmware}    componentVersion
+    \    ${hardwareVersion} =    Search Firmware Version     ${firmware}     ${name}
+    \    Should Be Equal     ${hardwareVersion}  ${version}  Firmware update failed,${name} should be ${version}, but actually ${hardwareVersion}
+    \    Log to console and logfile  ${name} validate success
+
+Search Firmware Version
+    [Arguments]    ${firmware}  ${name}
+    :FOR    ${component}    IN    @{firmware}
+    \    ${componentName} =   Get from Dictionary    ${component}    componentName
+    \    ${version} =   Get from Dictionary  ${component}    componentVersion
+    \    Return From Keyword If    "${name}"=="${componentName}"     ${version}
+    [Return]    Firmware ${name} not found!
+
+Clear Base Resources
+    [Documentation]   Delete base resources
+    Log To Console And Logfile    \nCleaning test environment before test...
+    Power off ALL servers    control=PressAndHold
+    Remove All Server Profiles
+    Remove All Server Profile Templates
+    Remove All LEs           ${True}
+    Remove All Enclosure Groups    ${True}
+    Remove All LIGs
+#    Remove All Firmware Bundles

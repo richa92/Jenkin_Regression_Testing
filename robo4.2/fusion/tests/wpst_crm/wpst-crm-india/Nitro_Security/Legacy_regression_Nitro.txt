@@ -1,0 +1,688 @@
+*** Settings ***
+Documentation    ...     Regression test work flow after changing cryptographic mode.
+Resource                        ../../../../Resources/api/fusion_api_resource.txt
+#Variables                       ./data_variables_FIPS_regression.py
+#Variables                       ./data_variables_nitro.py
+Variables                       ./data_variables_nitro_420.py
+
+*** Variables ***
+${APPLIANCE_IP}                 192.168.144.142
+${SSH_PASS}                     hpvse1
+${Bayset}                      	2
+${NITRO_IC_TYPE}     Virtual Connect SE 100Gb F32 Module for Synergy
+
+*** Keywords ***
+Write Canmic
+	[Documentation]     Write Canmic
+    [Arguments]     ${ic}   ${blk}   ${data}
+    ${temp1}=  Split String    ${ic}    ,
+    ${enc_name}=  Get From List    ${temp1}     0
+    ${temp2}=  Get From List    ${temp1}     1
+    ${temp3}=  Split String    ${temp2}
+    ${bayno}=  Get From List    ${temp3}  -1
+    Open Connection And Log In      ${APPLIANCE_IP}
+    ${em_ip}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}"
+    ${xauth}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}" -o t
+    ${out}=  Execute Command    curl -g -x "" -k -i -H "x-auth-token:${xauth}" -X POST https://[${em_ip}%bond0]/rest/v1/InterconnectManager/${bayno} -d '{ "Action": "WriteCanmicBlocks","List": [ { "Block": ${blk}, "Data" : "${data}", "Format" : "Base64" }]}'
+    ${regex_match}=  Should Match Regexp   ${out}    "Result": "Success"
+
+Read Canmic
+	[Documentation]     Read Canmic
+    [Arguments]     ${ic}   ${blk}
+    ${temp1}=  Split String    ${ic}    ,
+    ${enc_name}=  Get From List    ${temp1}     0
+    ${temp2}=  Get From List    ${temp1}     1
+    ${temp3}=  Split String    ${temp2}
+    ${bayno}=  Get From List    ${temp3}  -1
+    Open Connection And Log In      ${APPLIANCE_IP}
+    ${em_ip}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}"
+    ${xauth}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}" -o t
+    ${out}=  Execute Command    curl -g -x "" -k -i -H "x-auth-token:${xauth}" https://[${em_ip}%bond0]/rest/v1/InterconnectManager/${bayno} -d '{"Action":"ReadCanmicBlocks","List":[${blk}]}'
+    ${regex_match}=  Should Match Regexp   ${out}    "Data": ".+"
+    ${regex_match}=  Replace String Using Regexp   ${regex_match}   : "    :"
+    ${regex_match}=  Remove String  ${regex_match}   "
+    ${temp}=   Split String   ${regex_match}   :
+    ${value}=   Get From List   ${temp}   1
+    [Return]      ${value}
+
+Efuse ICM
+	[Documentation]     Efuse ICM
+    [Arguments]     ${ic}   ${action}
+    ${temp1}=  Split String    ${ic}    ,
+    ${enc_name}=  Get From List    ${temp1}     0
+    ${temp2}=  Get From List    ${temp1}     1
+    ${temp3}=  Split String    ${temp2}
+    ${bayno}=  Get From List    ${temp3}  -1
+    Open Connection And Log In      ${APPLIANCE_IP}
+    ${em_ip}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}"
+    ${xauth}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}" -o t
+    ${ret}=  Execute Command    curl -g -x "" -k -i -H "x-auth-token:${xauth}" -X POST https://[${em_ip}%bond0]/rest/v1/InterconnectBays/${bayno} -d '{"Action":"${action}"}'
+    Should Contain    ${ret}    { "Action": "${action}" }
+    ...    msg=EFuse action failed \n${ret}
+
+Get LI URI
+	[Documentation]     Get LI URI
+	[Arguments]          ${li}
+	${resp} =     Fusion Api Get LI
+	${l} =        Get Length    ${resp['members']}
+	:FOR   ${x}   IN RANGE      0      ${l}
+	\      Run Keyword If       '${resp['members'][${x}]['name']}' != '${li}'          Continue For Loop
+	\      ${uri} =      Get From Dictionary        ${resp['members'][${x}]}   uri
+	[Return]      ${uri}
+
+Get Li Name
+	[Documentation]     Get Li Name
+    [Arguments]     ${Bayset}
+    ${LIs} =   Get Li Names
+    ${desired_li}=    set variable   test
+    :FOR  ${x}  IN    @{LIs}
+    \    ${desired_li} =    Get ICM BayNo in LI    ${x}  ${Bayset}
+    \    Exit For Loop If    '${desired_li}'!='test'
+    Log to Console    \n\nDesired LI: ${desired_li}\n
+    [return]    ${x}
+
+
+Get ICM BayNo in LI
+	[Documentation]     Get ICM BayNo in LI
+    [Arguments]     ${LI}  ${Bayset}
+    @{ICMS} =    ICMs in LI    ${LI}
+    ${BayNo_list} =    Create List
+    :FOR  ${ICM_name}  IN  @{ICMS}
+    \    ${icm_split} =     Split String  ${ICM_name}  ,
+    \    ${bay_no} =       Get from List    ${icm_split}    1
+    \    ${bay_no1} =    Remove String Using Regexp   ${bay_no}   [interconnect ]
+    \    run keyword if   '${bay_no1}'=='${Bayset}'    Return From Keyword   ${LI}
+        ...         ELSE   Return From Keyword   test
+    [return]    ${BayNo_list}
+
+Get IC
+	[Documentation]     Get IC
+    [Arguments]                   ${ICM_NAME}
+    ${resp} =   fusion api get interconnect
+    Log           ${resp}
+    ${ics} =     Get From Dictionary     ${resp}    members
+    ${l} =      Get Length  ${ics}
+    :FOR  ${x}  IN RANGE    0     ${l}
+    \    ${ic} =     Get From List   ${ics}    ${x}
+    \    Exit For Loop If     '${ic['name']}' == '${ICM_NAME}'
+    [Return]    ${ic}
+    Log         ${ic}
+
+Get IC From URI
+	[Documentation]     Get IC From URI
+    [Arguments]                   ${ic_uri}
+    ${resp} =   fusion api get interconnect
+    Log           ${resp}
+    ${ics} =     Get From Dictionary     ${resp}    members
+    ${l} =      Get Length  ${ics}
+    :FOR  ${x}  IN RANGE    0     ${l}
+    \    ${ic} =     Get From List   ${ics}    ${x}
+    \    Exit For Loop If     '${ic['uri']}' == '${ic_uri}'
+    [Return]    ${ic}
+    Log         ${ic}
+
+Get from IC
+	[Documentation]     Get from IC
+	[Arguments]     ${ic}   ${element}
+    ${return} =     Get From Dictionary     ${ic}   ${element}
+    [Return]    ${return}
+
+Validate LI Stacking Domain ID
+	[Documentation]     Validate LI Stacking Domain ID
+    [Arguments]     @{ICMS}
+     ${STACKING_DOMAIN_ID} =    Create List
+     :for    ${ICM}    in     @{ICMS}
+     \    ${Nitro_ic_role} =  Get IC        ${ICM}
+     \    ${Nitro_ic_role_from_ov} =    Get From IC    ${Nitro_ic_role}   stackingDomainId
+     \    Append to List    ${STACKING_DOMAIN_ID}    ${Nitro_ic_role_from_ov}
+     \    Log to Console      \n\nICM ${ICM} Stacking Domain ID from OneView API : ${Nitro_ic_role_from_ov}
+     ${Member1} =    Get From List    ${STACKING_DOMAIN_ID}    0
+     ${Member2} =    Get From List    ${STACKING_DOMAIN_ID}    1
+     run keyword if   '${Member1}'=='${Member2}'    Log To console    \nstackingDomainId is same for both Nitro ICMs\n    ELSE    Fatal error    \n\nstackingDomainId is DIFFERENT for both Nitro ICMs
+
+Validate LI Stacking Member ID
+	[Documentation]     Validate LI Stacking Member ID
+    [Arguments]     @{ICMS}
+     ${STACKING_Member_ID} =    Create List    0  1
+     Log to Console    \n\nExpected ICM Stacking Member ID should be in ${STACKING_Member_ID}
+     :for    ${ICM}    in     @{ICMS}
+     \    ${Nitro_ic_role} =  Get IC        ${ICM}
+     \    ${Nitro_ic_role_from_ov} =    Get From IC    ${Nitro_ic_role}   stackingMemberId
+     \    Log to Console      \n\nICM ${ICM} Stacking Member ID from OneView API : ${Nitro_ic_role_from_ov}
+     \    ${abc} =    Convert To String  ${Nitro_ic_role_from_ov}
+     \    Log to Console   ${abc}
+     \    Should Contain    ${STACKING_Member_ID}     ${abc}
+
+Get Le Name
+	[Documentation]     Get Le Name
+    ${resp} =   Fusion Api Get Logical Enclosure
+    Log           ${resp}
+    ${Le_name} =    Get From Dictionary  ${resp['members'][0]}  name
+    Log to Console   \n\nLE Name: ${Le_name}\n
+    Log           ${Le_name}
+    [return]    ${Le_name}
+
+Get Li Names
+	[Documentation]     Get Li Names
+    ${resp} =    Fusion Api Get Li
+    Log           ${resp}
+    ${lis} =     Get From Dictionary     ${resp}    members
+    ${l} =      Get Length  ${lis}
+    ${li_list} =    Create List
+    :FOR  ${x}  IN RANGE    0     ${l}
+    \    ${li} =     Get From List   ${lis}    ${x}
+    \    ${li_name} =     Get from IC    ${li}    name
+    \    Append To List   ${li_list}   ${li_name}
+    Log to Console    \n\nLI Names : ${li_list}\n
+    [return]    ${li_list}
+
+List NitroICM Names In LI
+	[Documentation]     List NitroICM Names In LI
+    [Arguments]     ${LI}
+    ${li_uri}=    Get LI URI    ${LI}
+    Log to Console   \nli_uri:${li_uri}\n
+    ${resp} =     fusion_api_get_li     uri=${li_uri}
+    ${x}=    Get Variable Value  ${resp['interconnects']}
+    ${l} =      Get Length  ${x}
+    ${icm_list} =    Create List
+   :FOR  ${y}  IN RANGE    0     ${l}
+    \    ${ic_uri} =     Get From List   ${x}    ${y}
+    \    ${ic} =  Get IC From URI   ${ic_uri}
+    \    ${ic_name} =     Get from IC    ${ic}    name
+    \    ${ic_type} =     Get from IC    ${ic}    productName
+    \    run keyword if   '${ic_type}'=='${NITRO_IC_TYPE}'    Append To List   ${icm_list}   ${ic_name}
+    Log to Console    \n\nHFNitro ICM Names in LI: ${icm_list}\n
+    [return]    ${icm_list}
+
+ICMs in LI
+	[Documentation]     ICMs in LI
+    [Arguments]     ${LI}
+    ${li_uri}=    Get LI URI    ${LI}
+    Log to Console   \nli_uri:${li_uri}\n
+    ${resp} =     fusion_api_get_li     uri=${li_uri}
+    ${x}=    Get Variable Value  ${resp['interconnects']}
+    ${l} =      Get Length  ${x}
+    ${icm_list} =    Create List
+   :FOR  ${y}  IN RANGE    0     ${l}
+    \    ${ic_uri} =     Get From List   ${x}    ${y}
+    \    ${ic} =  Get IC From URI   ${ic_uri}
+    \    ${ic_name} =     Get from IC    ${ic}    name
+    \    Append To List   ${icm_list}   ${ic_name}
+    Log to Console    \n\nICM Names in ${LI}: ${icm_list}\n
+    [return]    ${icm_list}
+
+Validate ICM Power
+	[Documentation]     Validate ICM Power
+    [Arguments]     ${POWER}    @{ICMS}
+      ${ICM_POWERS} =    Create List
+     :for    ${ICM}    in     @{ICMS}
+     \    ${hfNitro_ic_powerState} =    Get IC        ${ICM}
+     \    ${hfNitro_ic_powerState_from_ov} =      Get From IC    ${hfNitro_ic_powerState}   powerState
+     \    Append to List    ${ICM_POWERS}    ${hfNitro_ic_powerState_from_ov}
+     \    Log to Console      \nICM ${ICM} Power from OneView API : ${hfNitro_ic_powerState_from_ov}
+     :for    ${ICM_POWER}    in     @{ICM_POWERS}
+      \    run keyword if   '${ICM_POWER}'!='${POWER}'      Fatal error    \n\nOne or more ICM Power is Off
+
+Validate LI StackingHealth
+	[Documentation]     Validate LI StackingHealth
+	[Arguments]       ${LI}
+	${LI_URI} =    Get LI        ${LI}
+	${li_stackingHealth} =       Get From LI    ${LI_URI}   stackingHealth
+	Log to Console   \nLogicalInterconnect ${LI} consistency state is: ${li_stackingHealth}
+	run keyword if   '${li_stackingHealth}'=='BiConnected'    Log To console    \nlogical interconnect Stacking Health: Redundantly connected   ELSE    Fatal error    \n\nlogical interconnect Stacking Health: ${li_stackingHealth}
+
+Get LE URI
+	[Documentation]     Get LE URI
+	[Arguments]          ${le}
+	${resp} =     Fusion Api Get Logical Enclosure
+	${l} =        Get Length    ${resp['members']}
+	:FOR   ${x}   IN RANGE      0      ${l}
+	\      Run Keyword If       '${resp['members'][${x}]['name']}' != '${le}'          Continue For Loop
+	\      ${uri} =      Get From Dictionary        ${resp['members'][${x}]}   uri
+	[Return]      ${uri}
+
+Build LE SPP Body
+	[Documentation]     Build LE SPP Body
+      [Arguments]       ${le_spp}
+
+      ${firmwareBaselineUri} =           Get Variable Value  ${le_spp['firmwareBaselineUri']}
+      ${forceInstallFirmware} =              Get Variable Value  ${le_spp['forceInstallFirmware']}
+      ${firmwareUpdateOn} =              Get Variable Value  ${le_spp['firmwareUpdateOn']}
+      ${logicalInterconnectUpdateMode} =              Get Variable Value  ${le_spp['logicalInterconnectUpdateMode']}
+
+      ${validateIfLIFirmwareUpdateIsNonDisruptive} =              Get Variable Value  ${le_spp['validateIfLIFirmwareUpdateIsNonDisruptive']}
+      ${value_dict} =   Create Dictionary       firmwareBaselineUri=${firmwareBaselineUri}
+      ...                                             forceInstallFirmware=${forceInstallFirmware}
+      ...                                             firmwareUpdateOn=${firmwareUpdateOn}
+      ...                                             logicalInterconnectUpdateMode=${logicalInterconnectUpdateMode}
+      ...                                          validateIfLIFirmwareUpdateIsNonDisruptive=${validateIfLIFirmwareUpdateIsNonDisruptive}
+      ${value} =     Create list     ${value_dict}
+      Log To Console                ${value_dict}
+      ${body} =   Create Dictionary   op=replace
+      ...                             path=/firmware
+      ...                             value=${value_dict}
+      ${body} =     Create list     ${body}
+      [Return]    ${body}
+
+Get Le eTag
+	[Documentation]     Get Le eTag
+    ${resp} =   Fusion Api Get Logical Enclosure
+    Log           ${resp}
+    ${Le_eTag} =    Get From Dictionary  ${resp['members'][0]}  eTag
+    Log to Console   \n\nLE eTag: ${Le_eTag}\n
+    Log           ${Le_eTag}
+    [return]    ${Le_eTag}
+
+Validate ICM State
+	[Documentation]     Validate ICM State
+    [Arguments]     ${STATE}    @{ICMS}
+      ${ICM_STATES} =    Create List
+      :for    ${ICM}    in     @{ICMS}
+      \    ${hfNitro_ic_state} =    Get IC        ${ICM}
+      \    ${hfNitro_ic_state_from_ov} =      Get From IC    ${hfNitro_ic_state}   state
+      \    Append to List    ${ICM_STATES}    ${hfNitro_ic_state_from_ov}
+      \    Log to Console     \n${ICM} State from OneView API : ${hfNitro_ic_state_from_ov}
+      :for    ${ICM_STATE}    in     @{ICM_STATES}
+      \    run keyword if   '${ICM_STATE}'!='${STATE}'    Fatal error    \nOne or more ICM state is not Configured
+
+Validate LI Stacking Domain Role
+	[Documentation]     Validate LI Stacking Domain Role
+    [Arguments]     @{ICMS}
+     ${STACKING_DOMAIN_ROLES} =    Create List
+     :for    ${ICM}    in     @{ICMS}
+     \    ${Nitro_ic_role} =  Get IC        ${ICM}
+     \    ${Nitro_ic_role_from_ov} =    Get From IC    ${Nitro_ic_role}   stackingDomainRole
+     \    Append to List    ${STACKING_DOMAIN_ROLES}    ${Nitro_ic_role_from_ov}
+     \    Log to Console      \n\nICM ${ICM} Stacking Domain Role from OneView API : ${Nitro_ic_role_from_ov}
+     ${Member1} =    Get From List    ${STACKING_DOMAIN_ROLES}    0
+     ${Member2} =    Get From List    ${STACKING_DOMAIN_ROLES}    1
+     run keyword if   '${Member1}'=='${Member2}'    Fatal error    \n\nBoth Nitro ICMs have same Stacking Domain Role    ELSE    Log To console    \nOne ICM is Master and another ICM is Subordinate\n
+
+Finding Master Nitro
+	[Documentation]     Finding Master Nitro
+    [Arguments]     @{ICMS}
+     ${STACKING_DOMAIN_ROLES} =    Create List
+     :for    ${ICM}    in     @{ICMS}
+     \    ${Nitro_ic_role} =  Get IC        ${ICM}
+     \    ${Nitro_ic_role_from_ov} =    Get From IC    ${Nitro_ic_role}   stackingDomainRole
+     \    Exit For Loop If   '${Nitro_ic_role_from_ov}' == 'Master'
+      [return]  ${ICM}
+
+Validate LI Consistency State
+	[Documentation]     Validate LI Consistency State
+	[Arguments]       ${LI}
+	${LI_URI} =    Get LI        ${LI}
+	${li_consistency_state} =    Get From LI    ${LI_URI}   consistencyStatus
+	Log to Console   \nLogicalInterconnect ${LI} consistency state is: ${li_consistency_state}
+	run keyword if   '${li_consistency_state}'=='CONSISTENT'    Log To console    \nlogical interconnect consistency state: Consistent   ELSE    Fatal error    \n\nlogical interconnect is Not Consistent
+
+Get LI
+	[Documentation]     Get LI
+    [Arguments]                   ${LI_NAME}
+    ${resp} =   Fusion Api Get Li
+    Log           ${resp}
+    ${lis} =     Get From Dictionary     ${resp}    members
+    ${l} =      Get Length  ${lis}
+    :FOR  ${x}  IN RANGE    0     ${l}
+    \    ${li} =     Get From List   ${lis}    ${x}
+    \    Exit For Loop If     '${li['name']}' == '${LI_NAME}'
+    [Return]    ${li}
+    Log         ${li}
+
+Get from LI
+	[Documentation]     Get from LI
+    [Arguments]     ${li}   ${element}
+    ${return} =     Get From Dictionary     ${li}   ${element}
+    [Return]    ${return}
+
+Reboot appliance via API
+	[Documentation]     Reboot appliance via API
+    [Arguments]  ${APPLIANCE_IP}    ${admin_credentials}
+    Fusion API Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+    ${resp} =  Fusion Api Appliance Shutdown        REBOOT
+    ${task} =  wait for task2   ${resp}     10min   5   None Expected   Completed
+    sleep  10m
+    Log      -- Waiting for OneView state to change to "STARTING"
+    Wait For Appliance State To Be STARTING
+    Log      -- Waiting for OneView state to change to "OK"
+    Wait For Appliance State To Be OK
+
+Populate the role and reboot
+    [Arguments]  ${APPLIANCE_IP}    ${admin_credentials}    ${ssh_credentials}      ${populateCMDs}
+    [Documentation]     For Scope test need to populate the role
+    Run Multi Cmd  ${APPLIANCE_IP}      ${ssh_credentials["userName"]}     ${ssh_credentials["password"]}   ${populateCMDs}
+    Reboot appliance via API    ${APPLIANCE_IP}     ${admin_credentials}
+
+Wait For Appliance State To Be STARTING
+	[Documentation]     Wait For Appliance State To Be STARTING
+    [Arguments]                     ${timeout}=20 min   ${interval}=30 s
+    Wait Until Keyword Succeeds     ${timeout}  ${interval}     Appliance State Should Be STARTING
+
+Wait For Appliance State To Be OK
+	[Documentation]     Wait For Appliance State To Be OK
+    [Arguments]                     ${timeout}=20 min   ${interval}=30 s
+    Wait Until Keyword Succeeds     ${timeout}  ${interval}     Appliance State Should Be OK
+
+Appliance State Should Be STARTING
+	[Documentation]     Appliance State Should Be STARTING
+    ${state} =  Fusion Api Get Resource     /controller-state.json
+    Log  -Appliance state: ${state['state']}
+    Should Match Regexp     ${state['state']}   ((?i)STARTING)
+
+Appliance State Should Be OK
+	[Documentation]     Appliance State Should Be OK
+    ${state} =  Fusion Api Get Resource     /controller-state.json
+    Log  -Appliance state: ${state['state']}
+    Should Match Regexp     ${state['state']}   ((?i)OK)
+
+*** Test Cases ***
+Login
+	[Documentation]     SETUP
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+*** Comments ***
+#Enable feature toggles to test FIPS mode
+    #${resp} =  Fusion Cli Enable Feature Toggles    ${APPLIANCE_IP}    ${features}     ${featureTogglesMapping}    ${ssh_credentials}
+    #Run Keyword If  ${resp}      Reboot appliance via API    ${APPLIANCE_IP}    ${admin_credentials}
+
+#Creating Ethernet networks
+    Add Ethernet Networks from variable    ${ethernet_networks}
+
+#Creating FC networks
+    Add FC Networks from variable     ${fc_networks}
+
+#Creating FCoE networks
+    Add FCoE Networks from variable    ${fcoe_networks}
+
+#Creating LIG
+    Set Suite Variable      ${TRUE}                 True
+    Add LIG from variable       ${lig_nitro}
+    
+#Creating EG
+    ${responses}=  Add Enclosure Group from variable      ${enc_groups_me}
+    Wait For Task2    ${responses}    timeout=300    interval=15
+
+#Add valid Licenses
+#   Add Licenses from variable   ${licenses_1}
+
+
+#Creating LE
+    Add Logical Enclosure from variable     ${logical_enclosure_multi}
+    Sleep  5m
+
+#Validating LI consistency state
+    ${LIs} =    Get Li Names
+    :FOR  ${LI}  IN  @{LIs}
+    \   Validate LI Consistency State    ${LI}
+
+#Validating ICM state for IBS 2
+     @{ICMS} =    ICMs in LI    ${Nitro_LI_ibs2['name']}
+     Validate ICM State     Configured    @{ICMS}
+
+#Validating Stacking Domain Role for IBS 3
+      @{ICMS} =    List NitroICM Names In LI     ${Nitro_LI_ibs2['name']}
+      Validate LI Stacking Domain Role      @{ICMS}
+
+#Validating Stacking Domain ID for IBS 3
+      @{ICMS} =    List NitroICM Names In LI     ${Nitro_LI_ibs2['name']}
+      Validate LI Stacking Domain ID    @{ICMS}
+
+#Validating Stacking Member ID for IBS 3
+      @{ICMS} =    List NitroICM Names In LI     ${Nitro_LI_ibs2['name']}
+      Validate LI Stacking Member ID    @{ICMS}
+
+#Validating Stacking Health for IBS 3
+      Validate LI StackingHealth    ${Nitro_LI_ibs2['name']}
+
+#Adding Storage Systems,Pool & Volume
+#    Add Storage System     ${storage_systems_fc}
+#    Sleep    30s
+#    Run Keyword And Ignore Error   Edit Storage System    ${storage_systems_fc}
+#    Sleep    30s
+#    Run Keyword And Ignore Error   Edit Storage System    ${storage_systems_desc_fc}
+#    Sleep    30s
+#    Verify Resources for List          ${expected_storage_systems_fc}
+#    Edit Storage Pool       ${storage_pool_fc}
+#    sleep  2m
+#    Add Existing Storage Volumes Async     ${storage_volumes_fc}
+
+#Adding server profile
+    Log    \nPowering off the server ${\n}${server_profile['serverHardwareUri']}
+    Power off Server    ${server_profile['serverHardwareUri']}
+    ${responses}=  Add Server Profile    ${server_profile}
+    Wait For Task2    ${responses}    timeout=3000    interval=15
+    Power on server     ${server_profile['serverHardwareUri']}
+
+#Disable and enable uplink
+     Update IC Port  ${disable_uplink['interconnectName']}  ${disable_uplink['portName']}       ${disable_uplink}
+     Sleep   5m
+     Update IC Port  ${enable_uplink['interconnectName']}   ${enable_uplink['portName']}        ${enable_uplink}
+     Sleep  5m
+*** Test Cases ***
+Nitro Power Cycle
+	[Documentation]     Nitro Power Cycle
+    @{ICMS} =    List NitroICM Names In LI     ${Nitro_LI_ibs2['name']}
+    ${master_Nitro} =  Finding Master Nitro      @{ICMS}
+    Log   \nMaster Nitro is ${master_Nitro}
+    ${Nitro_URI}=  Get IC URI  ${master_Nitro}
+    IC reached state  ${Nitro_URI}  Configured
+    Log      \n Powering Off ${master_Nitro}
+    ${Nitro_IC} =    Create Dictionary    name=${master_Nitro}
+    Patch Interconnect  ${Nitro_IC}  op=replace  path=/powerState  value=Off  timeout=60  interval=5
+    Sleep   5m
+    Log      \n Checking ICM Power State after Power Off
+    ${ic_resp} =     Get IC    ${master_Nitro}
+    ${ic_powerState} =     Get From IC    ${ic_resp}   powerState
+    Should Be Equal  ${ic_powerState}    Off
+    Log      \n Powering On ${master_Nitro}
+    Patch Interconnect  ${Nitro_IC}  op=replace  path=/powerState  value=On  timeout=60  interval=5
+    Sleep  20m
+    Log      \n Checking ICM State after Power On
+    ${Nitro_URI}=  Get IC URI  ${master_Nitro}
+    IC reached state  ${Nitro_URI}  Configured
+
+#Validating ICM state
+      @{ICMS} =    ICMs in LI    ${Nitro_LI_ibs2['name']}
+      Validate ICM State     Configured    @{ICMS}
+
+#Validating Stacking Domain Role
+      @{ICMS} =    List NitroICM Names In LI     ${Nitro_LI_ibs2['name']}
+      Validate LI Stacking Domain Role      @{ICMS}
+
+#Validating Stacking Domain ID
+      @{ICMS} =    List NitroICM Names In LI     ${Nitro_LI_ibs2['name']}
+      Validate LI Stacking Domain ID    @{ICMS}
+
+#Validating Stacking Member ID
+      @{ICMS} =    List NitroICM Names In LI     ${Nitro_LI_ibs2['name']}
+      Validate LI Stacking Member ID    @{ICMS}
+
+#Validating LI consistency state
+      ${LIs} =    Get Li Names
+      :FOR  ${LI}  IN  @{LIs}
+      \   Validate LI Consistency State    ${LI}
+
+#Validating Stacking Health
+      Validate LI StackingHealth    ${Nitro_LI_ibs2['name']}
+
+
+
+Nitro Reset
+	[Documentation]     Nitro Reset
+    @{ICMS} =    List NitroICM Names In LI     ${Nitro_LI_ibs2['name']}
+    ${master_Nitro} =  Finding Master Nitro      @{ICMS}
+    Log   \nMaster Nitro is ${master_Nitro}
+    ${Nitro_URI}=  Get IC URI  ${master_Nitro}
+    IC reached state  ${Nitro_URI}  Configured
+    Log      \nResetting Interconnect ${master_Nitro}
+    ${Nitro_IC} =    Create Dictionary    name=${master_Nitro}
+    Patch Interconnect  ${Nitro_IC}  op=replace  path=/deviceResetState  value=Reset  timeout=60  interval=5
+    Sleep  10m
+    Log      \n Checking ICM State after Reset
+    ${Nitro_URI}=  Get IC URI  ${master_Nitro}
+    IC reached state  ${Nitro_URI}  Configured
+
+#Validating ICM state
+      @{ICMS} =    ICMs in LI    ${Nitro_LI_ibs2['name']}
+      Validate ICM State     Configured    @{ICMS}
+
+#Validating Stacking Domain Role
+      @{ICMS} =    List NitroICM Names In LI     ${Nitro_LI_ibs2['name']}
+      Validate LI Stacking Domain Role      @{ICMS}
+
+#Validating Stacking Domain ID
+      @{ICMS} =    List NitroICM Names In LI     ${Nitro_LI_ibs2['name']}
+      Validate LI Stacking Domain ID    @{ICMS}
+
+#Validating Stacking Member ID
+      @{ICMS} =    List NitroICM Names In LI     ${Nitro_LI_ibs2['name']}
+      Validate LI Stacking Member ID    @{ICMS}
+
+#Validating LI consistency state
+      ${LIs} =    Get Li Names
+      :FOR  ${LI}  IN  @{LIs}
+      \   Validate LI Consistency State    ${LI}
+
+#Validating Stacking Health
+      Validate LI StackingHealth    ${Nitro_LI_ibs2['name']}
+
+Nitro Efuse
+	[Documentation]     Nitro Efuse
+    @{ICMS} =    List NitroICM Names In LI     ${Nitro_LI_ibs2['name']}
+    ${master_Nitro} =  Finding Master Nitro      @{ICMS}
+    Log   \nMaster Nitro is ${master_Nitro}
+    ${Nitro_URI}=  Get IC URI  ${master_Nitro}
+    IC reached state  ${Nitro_URI}  Configured
+    Log      \n Removing Interconnect ${master_Nitro}
+    Efuse ICM  ${master_Nitro}  EFuseOn
+    Sleep   5m
+    Log      \n Checking ICM state
+    ${ic_resp} =     Get IC    ${master_Nitro}
+    ${ic_State} =      Get From IC    ${ic_resp}   state
+    Should Be Equal  ${ic_State}    Absent
+    Log      \n Inserting Interconnect ${master_Nitro}
+    Efuse ICM  ${master_Nitro}  EFuseOff
+    Sleep  20m
+    Log      \n Checking ICM State after inserting
+    ${Nitro_URI}=  Get IC URI  ${master_Nitro}
+    IC reached state  ${Nitro_URI}  Configured
+
+
+
+#Validating ICM state
+      @{ICMS} =    ICMs in LI    ${Nitro_LI_ibs2['name']}
+      Validate ICM State     Configured    @{ICMS}
+
+#Validating Stacking Domain Role
+      @{ICMS} =    List NitroICM Names In LI     ${Nitro_LI_ibs2['name']}
+      Validate LI Stacking Domain Role      @{ICMS}
+
+#Validating Stacking Domain ID
+      @{ICMS} =    List NitroICM Names In LI     ${Nitro_LI_ibs2['name']}
+      Validate LI Stacking Domain ID    @{ICMS}
+
+#Validating Stacking Member ID
+      @{ICMS} =    List NitroICM Names In LI     ${Nitro_LI_ibs2['name']}
+      Validate LI Stacking Member ID    @{ICMS}
+
+#Validating LI consistency state
+      ${LIs} =    Get Li Names
+      :FOR  ${LI}  IN  @{LIs}
+      \   Validate LI Consistency State    ${LI}
+
+#Validating Stacking Health
+      Validate LI StackingHealth    ${Nitro_LI_ibs2['name']}
+
+
+
+#Modify Uplink set in LIG
+   ${lig_uri}=  Get LIG URI   ${lig_nitro['name']}
+   ${resp}=  Get LIG member  ${lig_nitro['name']}
+   ${networks} =        Get From Dictionary     ${uplink_set_new}   networkUris
+   ${ethernetUris} =   Get Ethernet URIs   ${networks}
+   Set to dictionary    ${uplink_set_new}   networkUris     ${ethernetUris}
+   Append To List   ${resp['uplinkSets']}   ${uplink_set_new}
+   ${resp_edit}=  Fusion API Edit LIG   ${resp}  ${lig_uri}
+   ${task} =       Wait For Task       ${resp_edit}     1m       10s
+   ${valDict} =    Create Dictionary    status_code=${200}
+   ...                                  taskState=Completed
+   Validate Response    ${task}     ${valDict}
+   Sleep  2m
+
+#DO LE UFG
+     Update Logical Enclosure from Group   ${logical_enclosure_multi}
+     @{ICMS} =    ICMs in LI    ${Nitro_LI_ibs2['name']}
+     Validate ICM State     Configured    @{ICMS}
+
+#Edit Server Profile to add new connection
+    Log    ${\n}Powering off the server ${edit_server_profile['serverHardwareUri']}
+    #Power off Server    ${edit_server_profile['serverHardwareUri']}   powerControl=MomentaryPress
+	Power off Server    ${edit_server_profile['serverHardwareUri']}   powerControl=PressAndHold
+    ${responses}=  Edit Server Profile    ${edit_server_profile}
+    Wait For Task2    ${responses}    timeout=3000    interval=15
+    Power on server     ${edit_server_profile['serverHardwareUri']}
+    Sleep    120s
+    Log   \nVerifying ping & active path
+
+#Add Firmware Bundles
+    Log to console     \nBundle1 - Started uploading
+    ${resp}=    Fusion Api Upload Firmware Bundle    ${upgradeBundleAbsloutePath}
+    Log to console     \nBundle1 - Uploaded successful
+*** Comments ***
+Compatible LE Orchestrated Firmware Upgrade
+	[Documentation]     Compatible LE Orchestrated Firmware Upgrade
+    Log   "Performing LE Firmware Upgrade"
+    ${resp} =    Fusion Api Get Logical Enclosure
+    ${headers} =   Get From Dictionary     ${resp}  headers
+    ${LE} =     Get Le Name
+    ${le_uri} =         Get LE URI   ${LE}
+    ${LE_eTag} =     Get Le eTag
+    Set To Dictionary    ${headers}    If-Match    ${LE_eTag}
+    ${body} =      Build LE SPP Body      ${LE_FW_UPGRADE}
+    ${resp1} =    Fusion Api Le Firmware Update      body=${body}    uri=${le_uri}    headers=${headers}
+    ${task} =       Wait For Task       ${resp1}    7200s    60s
+    ${valDict} =    Create Dictionary    status_code=${200}
+    ...                                  taskState=Completed
+    Validate Response   ${task}     ${valDict}
+    Log To Console    \nLE Firmware Upgrade complete
+    Remove from Dictionary   ${headers}    If-Match
+    Sleep    5m
+
+#Compatible LI Orchestrated firmware Upgrade
+	${LI} =    Get Li Name    ${Bayset}
+    Log    \n LI for update: ${LI}
+    ${li_uri} =     Get LI URI       ${LI}
+    Log   "Performing LI Firmware Upgrade"
+    ${resp1} =    Fusion Api Li Upgrade Firmware      body=${LI_fwupdate_orchestrated}    uri=${li_uri}
+    ${task} =       Wait For Task       ${resp1}    7200s    10s
+    ${valDict} =    Create Dictionary    status_code=${200}
+    ...                                  taskState=Completed
+    Validate Response   ${task}     ${valDict}
+    Log to Console    \n LI Firmware Upgrade complete
+    Sleep    5m
+
+#LE Reapply config
+    Log  \n"Checking LE status and state"
+    ${le_resp}=  Get Logical Enclosure By Name   ${logical_enclosure_multi['name']}
+    ${le_status}=  Get From Dictionary    ${le_resp}   status
+    Should Be Equal   ${le_status}   OK
+    ${le_state}=  Get From Dictionary    ${le_resp}   state
+    Should Be Equal   ${le_state}   Consistent
+    Log  \n"Performing LE repply config"
+    Reapply Logical Enclosure Configuration   ${logical_enclosure_multi}
+    Sleep   2m
+*** Test Cases ***
+LE support Dump
+	[Documentation]     LE support Dump
+     ${le_uri}=  Get LE URI  ${logical_enclosure_multi['name']}
+     ${le_uri}=  Replace String   ${le_uri}    /rest/logical-enclosures/    ${EMPTY}
+     ${resp}=  fusion_api_get_logical_enclosure_support_dump   ${le_sd_body_enc}  ${le_uri}
+     ${task} =       Wait For Task       ${resp}    60min    1min
+     ${uri}=     Get From Dictionary        ${task['associatedResource']}       resourceUri
+     ${resp}=    Fusion Api Download Support Dump    ${uri}     ./le_supportdump_legacy.sdmp
+
+#Appliance Support dump
+     ${resp} =    Fusion Api Create Support Dump    ${app_sd_body}
+     Should Be Equal    '${resp['status_code']}'    '200'    msg= Support dump is not created
+     Should Contain    ${resp['uri']}   .sdmp    msg= Support dump is not created
+     Log    Support dump is created for the appliance
+     ${response} =    Fusion Api Download Support Dump    ${resp['uri']}    ./app_dump.sdmp

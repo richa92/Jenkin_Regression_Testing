@@ -1,0 +1,546 @@
+*** Settings ***
+Documentation          This set of test cases is to test/verify Fabric Manager Compliance APIs
+Variables              data_variables2.py
+Resource               ../../../../Resources/api/fusion_api_resource.txt
+Library                Collections
+# APIC Libraries and Resources
+Library                APICOperations.py
+Library                json
+Resource               ACI-Resources.txt
+Resource               ../../../../Resources/api/networking/fabric_manager.txt
+
+Test Setup             Fabric Manager Test Setup    ${fabric_manager_create['name']}     ${fm_variables['FM_Edit_Tenant_name']}
+Suite Setup            Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+Suite Teardown         Fusion Api Logout Appliance
+
+*** Variables ***
+${APPLIANCE_IP}                  192.168.144.199
+${LIG_Name}                      ${ligs['name']}
+${LI_Name}                       ${logical_encl[0]['name']}-${ligs['name']}
+${US_Name}                       ${uplink_sets['US1']['name']}
+${US_Missing_NW_VLAN}            ${fm_variables['us_expected_nw_absent'][0]}
+${US_Remove_NW_VLAN}             ${fm_variables['us_unexpected_nw_present'][0]}
+${US_Remove_NW}                  us_unexpected_nw_present_1
+${NS_Missing_NW_VLAN}            ${fm_variables['ns_expected_nw_absent'][0]}
+${FM_NS_Test_EPG_NAME}           FM_NS_Test_EPG_New
+
+*** Test cases ***
+
+Setup: Cleanup
+    [Tags]    FM    Cleanup
+    [Setup]    Set Suite Variable    ${WFT2_CONTINUE_ON_ERROR}    TRUE
+    # Delete all FM Alerts
+    Delete All Fabric Manager Alerts
+    # Remove All OV Resources
+    Delete Fabric Manager    ${fabric_manager_create['name']}
+    # Delete Fabric Manager    ${fabric_manager_add_tenant['name']}
+    Remove All LEs    force=${True}    timeout=1800    interval=10
+    Remove All Enclosure Groups
+    Remove All LIGs
+    Remove All Network Sets
+    Remove All Ethernet Networks
+    Remove All FC Networks
+
+Setup: Get ALL VMM Domain VLANS
+    [Tags]    APIC    GET-VLANS
+    [Setup]    Get ACI APIC session  ${APIC_URL}  ${APIC_USERNAME}  ${APIC_PASSWORD}
+    ${vlans_all} =  Get VMM domain and static binding vlans of given Tenant  Automation_Tenant_Wipro  Automation_Wipro_VMM
+    Log To Console  VMM domain and static binding vlans: ${vlans_all}
+    Sort List    ${vlans_all}
+    Log To Console  VMM domain and static binding vlans Sorted: ${vlans_all}
+    ${vlan_count}=    Get Length    ${vlans_all}
+    ${vlan_count}=    Convert To Integer    ${vlan_count}
+    ${fm_variables['ns_expected_nw_absent']}=    Run Keyword If    '${vlan_count}'>'0'    Set Variable    ${vlans_all}
+    ...    ELSE    FATAL ERROR    msg=Test Setup Failed. One or more VLANS are required for the tests.
+
+Setup: Add Base Resources
+    [Tags]  FM   Setup
+    [Setup]
+    Run Keyword If    ${ethernet_networks_present} is not ${null}      Add Ethernet Networks from variable async    ${ethernet_networks_present}
+    Run Keyword If    ${ligs} is not ${null}   Add LIG from variable async   ${ligs}
+    Run Keyword If    ${encl_group} is not ${null}      Add Enclosure Group from variable async    ${encl_group}
+    Run Keyword If    ${logical_encl} is not ${null}      Add Logical Enclosure from lists Async    ${logical_encl}
+
+TC01 Add Fabric Manager
+    [Tags]  FM    Add    TC01
+    [Setup]
+    # Add Fabric Manager
+    Add Fabric Manager    ${fabric_manager_create}
+    ${resp1}=    Fusion Api Get Fabric Manager    param=?filter="'name'=='${fabric_manager_create['name']}'"
+    Run Keyword If     '${resp1['count']}'=='0'
+    ...    FAIL   msg=Fabric Manager ${fabric_manager_create['name']} Not Created
+    Sleep  30Sec
+
+TC01-b Add Tenant to the Fabric Manager and Verify Tenant Compliance Status
+    [Tags]  FM    Add-Tenant    TC01
+    ${fm_uri}=   Get Fabric Manager URI   ${fabric_manager_edit['name']}
+    ${payload}=    Create Fabric Manager Edit Payload    ${fabric_manager_edit}
+    # Edit Fabric Manager to add the Tenant
+    ${resp} =    Fusion Api Edit Fabric Manager    ${payload}   ${fm_uri}
+    Wait For Task2   ${resp}
+
+TC01-c Verify if the Added Tenant Exists in Fabric Manager
+    [Tags]  FM    Verify-Add    TC01
+    ${tenant_exists}=   Check Tenant Exists in Fabric Manager    ${fm_uri}    ${fm_variables['FM_Edit_Tenant_name']}
+    Run Keyword If    '${tenant_exists}'!='True'
+    ...    FAIL    msg=Tenant ${fm_variables['FM_Edit_Tenant_name']} not added to Fabric Manager.
+    ...    ELSE    Log to Console and Logfile    Tenant ${fm_variables['FM_Edit_Tenant_name']} added to Fabric Manager Successfully.
+
+TC01-d Verify Tenant Compliance Status
+    [Tags]  FM    Verify-Tenant-Compliance    TC01
+    ${fm_tenant_uri}=    Get Fabric Manager Tenant URI    ${fm_uri}    ${fm_variables['FM_Edit_Tenant_name']}
+    ${comp_status}=  Get Tenant Compliance Status from Report    ${fm_tenant_uri}
+    Log to Console and Logfile   ${comp_status}
+    Run Keyword If     '${comp_status}'=='COMPLIANT'    FAIL    msg=Tenant Status is Compliant
+    ...    ESLE    Tenant status is not '${comp_status}'.
+
+TC01-e Verify Manual Inconsistencies exists
+    [Tags]    FM    Check-Manual-Inconsistencies    TC01
+    # Check Uplink Set Manual Remediation Inconsistency Exists
+    ${US_Inconsistency_list}=    Get Uplink Set Inconsistency List From Compliance Report    ${fm_tenant_uri}    null
+    # Verify the Inconsistency List to the Expected inconsistency from datafile
+    ${status}    ${remediate_dict}=    Compare Compliance Report Inconsistency Dictionary List   ${US_Inconsistency_list}    ${fm_inconsistencies2['Manual_Uplink_Set_Missing']}
+    Run keyword If    '${status}'=='False'    FAIL    msg= Uplink Set Manual remediation Inconsistency Does not Exist
+    ...    ELSE     Log to Console and Logfile    Uplink Set Manual remediation Inconsistency is present.
+
+TC01-f Verify Autoremediate Inconsistencies exists
+    [Tags]    FM    Check-Auto-Inconsistencies    TC01
+    #Check LLDP Autoremediate Inconsistency exists
+    ${LLDP_Inconsistency_dict}    ${LLDP_remediate_dict}=    Get LI LLDP Inconsistency From Compliance Report    ${fm_tenant_uri}    ${LI_Name}
+    ${status}=    Compare Compliance Report Inconsistency Dictionaries   ${LLDP_Inconsistency_dict}    ${fm_inconsistencies2['LLDP_TAG_DISABLED']}
+    Run Keyword IF   '${status}'=='FALSE'    FAIL    msg=LLDP Tagging Disabled Inconsistency does not exist
+    # Check Expected NW Missing from US Autoremediate Inconsistency exists
+    ${USNW_Inconsistency_dict1}    ${remediate_dict}=    Get Uplink Set Network Inconsistency From Compliance Report    ${fm_tenant_uri}    ${LI_Name}    ${US_Name}    ${US_Missing_NW_VLAN}
+    ${status1}=    Compare Compliance Report Inconsistency Dictionaries   ${USNW_Inconsistency_dict1}    ${fm_inconsistencies2['US_NW_Missing']}
+    Run Keyword If     '${status}'=='FALSE'     FAIL    msg=Add Missing VLAN Network to Uplink Set Inconsistency does not exist
+    # Check Unexpected NW Remove from US Autoremediate Inconsistency exists
+    ${USNW_Inconsistency_dict2}    ${remediate_dict}=    Get Uplink Set Network Inconsistency From Compliance Report    ${fm_tenant_uri}    ${LI_Name}    ${US_Name}    ${US_Remove_NW_VLAN}
+    ${status2}=    Compare Compliance Report Inconsistency Dictionaries   ${USNW_Inconsistency_dict2}    ${fm_inconsistencies2['US_NW_Remove']}
+    Run Keyword If     '${status}'=='FALSE'     FAIL    msg=Uplink Set Network/VLAN Remove inconsistency does not exist
+    # Check NS Missing Autoremediate Inconsistency exists
+    ${NS_Inconsistency_list}    Get Network Set Inconsistency List From Compliance Report    ${fm_tenant_uri}
+    ${status}    ${remediate_dict}=    Compare Compliance Report Inconsistency Dictionary List   ${NS_Inconsistency_list}    ${fm_inconsistencies2['NS_Missing']}
+    Run keyword If    '${status}'=='False'    FAIL    msg= NS Missing inconsistency does not exist
+    ...    ELSE     Log to Console and Logfile    NS Missing inconsistency exist.
+
+TC02-a Autoremediate LLDP Tagging Disabled Inconsistency
+    [Tags]  FM   Remediate-LLDP    TC02
+    ${LLDP_Inconsistency_dict}    ${LLDP_remediate_dict}=    Get LI LLDP Inconsistency From Compliance Report    ${fm_tenant_uri}    ${LI_Name}
+    ${status}=    Compare Compliance Report Inconsistency Dictionaries   ${LLDP_Inconsistency_dict}    ${fm_inconsistencies2['LLDP_TAG_DISABLED']}
+    Run Keyword IF   '${status}'=='FALSE'    FAIL    msg=LLDP TAG Disabled Inconsistency Does not Exist
+    # Perform Autoremediate
+    ${resp3}=    fusion_api_fabric_manager_remediate    ${LLDP_remediate_dict}    ${fm_uri}
+    Wait For Task2   ${resp3}    timeout=600    interval=10
+
+TC02-b Verify LLDP Tag is enabled after Autoremediation in LI
+    [Tags]  FM   Verify-LI-Remediate-LLDP    TC02
+    ${LIData}=    Get LI member    ${LI_Name}
+    Run Keyword If    '${LIData['ethernetSettings']['enableTaggedLldp']}'=='True'    Log to Console and Logfile    LLDP Tagging is enabled in LI. Remediation is Successfull.
+    ...   ELSE    FAIL    msg=LLDP Tagging is still disabled in LI. Remediation is Successfull.
+
+TC02-c Verify LLDP Tag is enabled after Autoremediation in LIG
+    [Tags]  FM   Verify-LIG-Remediate-LLDP    TC02
+    ${LIGData}=    Get LIG member    ${LIG_Name}
+    Run Keyword If    '${LIGData['ethernetSettings']['enableTaggedLldp']}'=='True'    Log to Console and Logfile    LLDP Tagging is enabledin LIG. Remediation is Successfull.
+    ...   ELSE    FAIL    msg=LLDP Tagging is still disabled in LIG. Remediation is Successfull.
+
+TC03-a Autoremediate Add Missing VLAN Network to Uplink Set Inconsistency
+    [Tags]  FM   Remediate-USNW-Missing    TC03
+    ${USNW_Inconsistency_dict}    ${remediate_dict}=    Get Uplink Set Network Inconsistency From Compliance Report    ${fm_tenant_uri}    ${LI_Name}    ${US_Name}    ${US_Missing_NW_VLAN}
+    ${status}=    Compare Compliance Report Inconsistency Dictionaries   ${USNW_Inconsistency_dict}    ${fm_inconsistencies2['US_NW_Missing']}
+    Run Keyword If     '${status}'=='FALSE'     FAIL    msg=Add Missing VLAN Network to Uplink Set Inconsistency does not exist
+    # AutoRemediate
+    ${resp}=    fusion_api_fabric_manager_remediate    ${remediate_dict}    ${fm_uri}
+    Wait For Task2   ${resp}    timeout=600    interval=10
+
+TC03-b Verify Expected Network is added in LI Uplink Set after Autoremediation
+    [Tags]  FM   Verify-LI-Remediate-USNW-Missing    TC03
+    ${us_uri}=    Get Uplink Set URI     ${US_Name}
+    ${USData}=    Get Resource by URI   ${us_uri}
+    # Get Network URI list for the LIG US
+    ${nw_exists}    ${created_nw_list}=    Check Network With VLAN ID Exists    ${US_Missing_NW_VLAN}
+    Run Keyword If    '${nw_exists}'=='FALSE'    msg= Network With VLAN ID ${US_Missing_NW_VLAN} not created. AutoRemediation Failed.
+    ${nw_uri}=    Get Ethernet URI    ${created_nw_list[0]}
+    List Should Contain Value   ${USData['networkUris']}    ${nw_uri}    msg=Network with VLAN ${US_Missing_NW_VLAN} does not exist in Uplink Set. Remediation Failed.
+
+TC03-c Verify Expected Network is added in LIG Uplink Set after Autoremediation
+    [Tags]  FM   Verify-LIG-Remediate-USNW-Missing    TC03
+    ${LIGData}=    Get LIG member    ${LIG_Name}
+    # Get Network URI list for the LIG US
+    :FOR    ${us}    IN    @{LIGData['uplinkSets']}
+    \    Run Keyword If     '${us['name']}'!='${US_Name}'    Continue For Loop
+    \    ${LIG_nw_uri_list}=    Get from Dictionary    ${us}    networkUris
+    ${nw_exists}    ${created_nw_list}=    Check Network with VLAN ID Exists    ${US_Missing_NW_VLAN}
+    Run Keyword If    '${nw_exists}'=='FALSE'    msg= Network With VLAN ID ${US_Missing_NW_VLAN} not created. AutoRemediation Failed.
+    ${nw_uri}=    Get Ethernet URI    ${created_nw_list[0]}
+    List Should Contain Value   ${LIG_nw_uri_list}    ${nw_uri}    msg=Network with VLAN ${US_Missing_NW_VLAN} does not exist in Uplink Set. Remediation Failed.
+
+TC04-a Autoremediate Unexpected Network Remove from Uplink Set Inconsistency exists
+    [Tags]  FM   Remediate-USNW-Remove    TC04
+    ${USNW_Inconsistency_dict}    ${remediate_dict}=    Get Uplink Set Network Inconsistency From Compliance Report    ${fm_tenant_uri}    ${LI_Name}    ${US_Name}    ${US_Remove_NW_VLAN}
+    ${status}=    Compare Compliance Report Inconsistency Dictionaries   ${USNW_Inconsistency_dict}    ${fm_inconsistencies2['US_NW_Remove']}
+    Run Keyword If     '${status}'=='FALSE'     FAIL    msg=Unexpected Network Remove from Uplink Set Inconsistency does not exist
+    # AutoRemediate
+    ${resp}=    fusion_api_fabric_manager_remediate    ${remediate_dict}    ${fm_uri}
+    Wait For Task2   ${resp}    timeout=600    interval=10
+
+TC04-b Verify Unexpected Network is removed in LI US after autoremediation
+    [Tags]  FM   Verify-LI-Remediate-USNW-Remove    TC04
+    ${us_uri}=    Get Uplink Set URI     ${US_Name}
+    ${USData}=    Get Resource by URI   ${us_uri}
+    ${nw_uri}=    Get Ethernet URI    ${US_Remove_NW}
+    List Should Not Contain Value   ${USData['networkUris']}    ${nw_uri}    msg=Network with VLAN ${US_Remove_NW_VLAN} still exist in LI Uplink Set. Remediation Failed.
+
+TC04-c Verify Unexpected Network is removed in LIG US after autoremediation
+    [Tags]  FM   Verify-LIG-Remediate-USNW-Missing    TC04
+    ${LIGData}=    Get LIG member    ${LIG_Name}
+    # Get Network URI list for the LIG US
+    :FOR    ${us}    IN    @{LIGData['uplinkSets']}
+    \    Run Keyword If     '${us['name']}'!='${US_Name}'    Continue For Loop
+    \    ${LIG_nw_uri_list}=    Get from Dictionary    ${us}    networkUris
+    ${nw_uri}=    Get Ethernet URI    ${US_Remove_NW}
+    List Should Not Contain Value   ${LIG_nw_uri_list}    ${nw_uri}    msg=Network with VLAN ${US_Remove_NW_VLAN} still exist in LIG Uplink Set. Remediation Failed.
+
+TC04-2 Create Uplink Set Private Network Inconsistency
+    [Tags]  FM   US-Private-1    TC04-2
+    ${nw_exists}    ${created_nw_name}=    Check Network with VLAN ID Exists    ${US_Missing_NW_VLAN}
+    ${created_nw_uri}=    Get Ethernet URI    ${created_nw_name}
+    ${us_private_nw_body} =    Get Resource by URI    ${created_nw_uri}
+    Remove From Dictionary    ${us_private_nw_body}    created    eTag    headers    modified    status_code   connectionTemplateUri    privateNetwork
+    Set To Dictionary    ${us_private_nw_body}    privateNetwork=True
+    ${resp1}=    Update Ethernet Network    ${created_nw_name}    ${us_private_nw_body}
+    Wait For Task2    ${resp1}
+    Sleep  60Sec
+    ${USNW_Inconsistency_dict}    ${remediate_dict}=    Get US Network Inconsistency From Compliance Report    ${fm_tenant_uri}    ${LI_Name}    ${US_Name}    ${US_Missing_NW_VLAN}
+    ${status}=    Compare Compliance Report Inconsistency Dictionaries   ${USNW_Inconsistency_dict}    ${fm_inconsistencies2['US_Private_NW']}
+    Run Keyword If     '${status}'=='FALSE'     FAIL    msg=Private Network in Uplink Set Inconsistency does not exist
+    Sleep  60Sec
+
+TC04-2 Remediate Uplink Set Private Network Inconsistency
+    [Tags]  FM   US-Private-2    TC04-2
+    ${USNW_Inconsistency_dict}    ${remediate_dict}=    Get US Network Inconsistency From Compliance Report    ${fm_tenant_uri}    ${LI_Name}    ${US_Name}    ${US_Missing_NW_VLAN}
+    ${resp}=    fusion_api_fabric_manager_remediate    ${remediate_dict}    ${fm_uri}
+    Wait For Task2   ${resp}    timeout=600    interval=10
+    Sleep  60Sec
+    ${USNW_Inconsistency_dict}    ${remediate_dict}=    Get US Network Inconsistency From Compliance Report    ${fm_tenant_uri}    ${LI_Name}    ${US_Name}    ${US_Missing_NW_VLAN}
+    ${status}=    Compare Compliance Report Inconsistency Dictionaries   ${USNW_Inconsistency_dict}    ${fm_inconsistencies2['US_Private_NW']}
+    Run Keyword If     '${status}'=='True'     FAIL    msg=Private Network in Uplink Set Inconsistency still exist
+    ${nw_exists}    ${created_nw_list}=    Check Network with VLAN ID Exists    ${US_Missing_NW_VLAN}
+    ${created_nw_uri}=    Get Ethernet URI    ${created_nw_list[0]}
+    ${us_private_nw_body} =    Get Resource by URI    ${created_nw_uri}
+    Run Keyword If    '${us_private_nw_body['privateNetwork']}'=='True'    FAIL    msg=Remediation Failed. ${created_nw_name} is still Private.
+    Sleep  60Sec
+
+TC05-a Autoremediate Network Set Missing Inconsistency
+    [Tags]  FM    Remediate-NWSET-Missing    TC05
+    ${NS_Inconsistency_list}    Get Network Set Inconsistency List From Compliance Report    ${fm_tenant_uri}
+    ${status}    ${remediate_dict}=    Compare Compliance Report Inconsistency Dictionary List   ${NS_Inconsistency_list}    ${fm_inconsistencies2['NS_Missing']}
+    Run keyword If    '${status}'=='False'    FAIL    msg= NS Missing inconsistency does not exist.
+    ...    ELSE     Log to Console and Logfile    NS Missing inconsistency is present.
+    # Perform remediation
+    ${resp2}=    fusion_api_fabric_manager_remediate    ${remediate_dict}    ${fm_uri}
+    Wait For Task2   ${resp2}    timeout=600    interval=10
+
+TC05-b Verify If Networks with the given VLANs are created after Remediation
+    [Tags]  FM    Verify-Remediate-NWSET-Missing    TC05
+    ${created_nw_list}=    Create List
+    :FOR    ${vlan}    IN    @{fm_variables['ns_expected_nw_absent']}
+    \    ${nw_exists}    ${nw_list}=    Check Network with VLAN ID Exists    ${vlan}
+    \    Run Keyword IF     '${nw_exists}' == 'FALSE'
+    \    ...    FAIL    msg=Network with VLAN ID ${vlan} is NOT created.
+    \    ...    ELSE    Log To Console and Logfile     Network ${nw_list[0]} with VLAN ID ${vlan} is created.
+    \    Append to List    ${created_nw_list}    ${nw_list[0]}
+    # Check if the created networks are part of the created Network Set
+    :FOR    ${created_nw}    IN    @{created_nw_list}
+    \    ${created_nw_uri}=    Get Ethernet URI    ${created_nw}
+    \    ${ns_contains}    ${ns_list}=    Check Network Set Containing A Given Network Exists    ${created_nw_uri}
+    \    ${created_ns_name}=    Set Variable    ${ns_list[0]}
+    \    Run Keyword IF     '${ns_contains}' == 'FALSE'
+    \    ...    FAIL    msg=Network ${created_nw} is NOT part of any Network Set or Network Set is not created
+    \    ...    ELSE    Log To Console     Network ${created_nw[0]} is added to Network Set with name ${created_ns_name} is created.
+    Set Suite Variable    ${created_ns_name}
+
+TC06-a Create Remove Unexpected Network from Network Set Inconsistency
+    [Documentation]     Insert Inconsistency Into Created Network Set by Adding unexpected network to Network Set
+    [Tags]    FM    NWSET-Remove-NW    TC06
+    ${created_ns_name}=    Set Variable    NS_DVS-dom-Automation_Wipro_VMM
+    Run Keyword If    ${ethernet_networks_present} is not ${null}      Add Ethernet Networks From Variable Async    ${ethernet_networks_present}
+    Set to Dictionary    ${network_sets_update_add[0]}    name=${created_ns_name}
+    Update Network Set    ${network_sets_update_add}
+    Sleep  10Sec
+    ${NS_Inconsistency_list}    Get Network Set Inconsistency List From Compliance Report    ${fm_tenant_uri}
+    ${status}    ${remediate_dict}=    Compare Compliance Report Inconsistency Dictionary List   ${NS_Inconsistency_list}    ${fm_inconsistencies2['NS_Remove_Vlan']}
+    Run keyword If    '${status}'=='False'    FAIL    msg=Remove Network from NS inconsistency is absent.
+    ...    ELSE     Log to Console and Logfile    Remove Network from NS inconsistency is present.
+
+TC06-b Verify Remove Unexpected Network from Network Set Inconsistency Alert
+    [Tags]    FM    Alert-NWSET-Remove-NW    TC06
+    ${status}=    Check Fabric Manager Alert With Similar Description Exists    ${fm_uri}    NS_Remove_Vlan    alertState=Active
+    Run Keyword If     '${status}'=='True'    Log To Console and Logfile    ALERT Exists
+    ...    ELSE    FAIL    msg=ALERT DOES NOT EXIST / NOT CLEARED
+
+TC06-c Remediate Remove Unexpected Network from Network Set Inconsistency
+    [Tags]    FM    Remediate-NWSET-Remove-NW    TC06
+    ${NS_Inconsistency_list}    Get Network Set Inconsistency List From Compliance Report    ${fm_tenant_uri}
+    ${status}    ${remediate_dict}=    Compare Compliance Report Inconsistency Dictionary List   ${NS_Inconsistency_list}    ${fm_inconsistencies2['NS_Remove_Vlan']}
+    ${resp2}=    fusion_api_fabric_manager_remediate    ${remediate_dict}    ${fm_uri}
+    Wait For Task2   ${resp2}    timeout=600    interval=10
+    ${added_nw_uri}=     Get Ethernet URI    ${network_sets_update_add[0]['add_networkUris'][0]}
+    ${ns_contains}    ${ns_list}=    Check Network Set Containing A Given Network Exists    ${added_nw_uri}
+    Run Keyword IF     '${ns_contains}' == 'TRUE'
+    ...    FAIL    msg=Network ${added_nw_uri} still exists in Network Set ${created_ns_name}. Network Set is NOT Updated. Remediation Failed.
+    ...    ELSE    Log To Console    Network Set is updated. Network ${added_nw_uri} is removed from the  Network Set.
+    #${created_ns_name}=    Set Variable    ${ns_list[0]}
+
+TC06-d Verify Remove Unexpected Network from Network Set Inconsistency Alert
+    [Tags]    FM    Alert-Remediate-NWSET-Remove-NW    TC06
+    ${status}=    Check Fabric Manager Alert With Similar Description Exists    ${fm_uri}    NS_Remove_Vlan    alertState=Active
+    Run Keyword If     '${status}'=='True'    FAIL    msg=ALERT Still Exists
+    ...    ELSE    Log To Console and Logfile    ALERT DOES NOT EXIST
+
+TC07-a Create Missing Expected Network from Network Set Inconsistency
+    [Documentation]    Insert Inconsistency Into Created Network Set by Removing expected network to NS
+    [Tags]    FM    NWSET-Missing-NW    TC07
+    #${created_ns_name}=    Set Variable    NS_DVS-dom-Automation_Wipro_VMM
+    Run Keyword If    ${ethernet_networks_present} is not ${null}      Add Ethernet Networks From Variable Async    ${ethernet_networks_present}
+    ${nw_exists}    ${created_nw_list}=    Check Network with VLAN ID Exists    ${NS_Missing_NW_VLAN}
+    ${delete_networkUris}=    Create List    ${created_nw_list[0]}
+    Set to Dictionary    ${network_sets_update_delete[0]}    name=${created_ns_name}    delete_networkUris=${delete_networkUris}
+    Update Network Set    ${network_sets_update_delete}
+    Sleep  10Sec
+    ${NS_Inconsistency_list}    Get Network Set Inconsistency List From Compliance Report    ${fm_tenant_uri}
+    ${status}    ${remediate_dict}=    Compare Compliance Report Inconsistency Dictionary List   ${NS_Inconsistency_list}    ${fm_inconsistencies2['NS_Missing_Vlan']}
+    Run keyword If    '${status}'=='False'    FAIL    msg=Missing Network from NS inconsistency is absent.
+    ...    ELSE     Log to Console and Logfile    Missing Network from NS inconsistency is present.
+
+TC07-b Verify Missing Expected Network from Network Set Inconsistency
+    [Tags]    FM    Alert-NWSET-Missing-NW    TC07
+    ${status}=    Check Fabric Manager Alert With Similar Description Exists    ${fm_uri}    NS_Missing_Vlan    alertState=Active
+    Run Keyword If     '${status}'=='True'    Log To Console and Logfile    ALERT Exists
+    ...    ELSE    FAIL    msg=ALERT DOES NOT EXIST / NOT CLEARED
+
+TC07-c Remediate Missing Expected Network from Network Set Inconsistency
+    [Tags]    FM    Remediate-NWSET-Missing-NW   TC07
+    #${created_ns_name}=    Set Variable    NS_DVS-dom-Automation_Wipro_VMM
+    ${nw_exists}    ${created_nw_list}=    Check Network with VLAN ID Exists    ${NS_Missing_NW_VLAN}
+    ${NS_Inconsistency_list}    Get Network Set Inconsistency List From Compliance Report    ${fm_tenant_uri}
+    ${status}    ${remediate_dict}=    Compare Compliance Report Inconsistency Dictionary List   ${NS_Inconsistency_list}    ${fm_inconsistencies2['NS_Missing_Vlan']}
+    ${resp2}=    fusion_api_fabric_manager_remediate    ${remediate_dict}    ${fm_uri}
+    Wait For Task2   ${resp2}    timeout=600    interval=10
+    ${created_nw_uri}=     Get Ethernet URI    ${created_nw_list[0]}
+    ${ns_contains}    ${ns_list}=    Check Network Set Containing A Given Network Exists    ${created_nw_uri}
+    Run Keyword IF     '${ns_contains}' == 'FALSE'
+    ...    FAIL    msg=Network ${created_nw_list[0]} does not exist in Network Set ${created_ns_name}. Network Set is NOT Updated. Remediation Failed.
+    ...    ELSE    Log To Console    Network Set is updated. Network ${created_nw_list[0]} is added to Network Set ${created_ns_name}.
+
+TC07-d Verify Remove Unexpected Network from Network Set Inconsistency Alert
+    [Tags]    FM    Alert-Remediate-NWSET-Missing-NW    TC07
+    ${status}=    Check Fabric Manager Alert With Similar Description Exists    ${fm_uri}    NS_Missing_Vlan    alertState=Active
+    Run Keyword If     '${status}'=='True'    FAIL    msg=ALERT Still Exists
+    ...    ELSE    Log To Console and Logfile    ALERT DOES NOT EXIST
+
+TC08-a Create Remove Unexpected Port in LI Inconsistency
+    [Tags]    FM    Remove-LI-Port    TC08
+    # Edit LI to Introduce LI Ports Inconsistency
+    ${us_list_edit}=    Create List    ${uplink_sets['US_Inconsistent_Ports']}
+    Pop From Dictionary    ${ligs}    uplinkSets
+    Set To Dictionary    ${ligs}    uplinkSets=${us_list_edit}
+    ${ligs_list}=    Create List    ${ligs}
+    ${resp}=    Edit LIG    ${ligs_list}
+    Wait For Task2    ${resp}    timeout=600    interval=10
+    ${Update_LI_dict}=    Create Dictionary    name=${LI_Name}
+    Update Logical Interconnect from Group   ${Update_LI_dict}
+    Sleep  10Sec
+
+TC08-b Verify Create Remove Unexpected Port in LI Inconsistency Alert
+    [Tags]    FM    Alert-Remove-LI-Port    TC08
+    ${status}=    Check Fabric Manager Alert With Similar Description Exists    ${fm_uri}    LI_PORT_Inconsistent    alertState=Active
+    Run Keyword If     '${status}'=='True'    Log To Console and Logfile    ALERT Exists
+    ...    ELSE    FAIL    msg=ALERT DOES NOT EXIST / NOT CLEARED
+    ${US_Port_Inconsistency_list}=    Get Uplink Set Port Inconsistency List From Compliance Report    ${fm_tenant_uri}    ${LI_Name}    ${US_Name}
+    # Verify the Inconsistency List to the Expected inconsistency from datafile
+    ${status}    ${remediate_dict}=    Compare Compliance Report Inconsistency Dictionary List   ${US_Port_Inconsistency_list}    ${fm_inconsistencies2['Manual_US_Unexpexted_Port']}
+    Run keyword If    '${status}'=='False'    FAIL    msg= Uplink set Port inconsistency does not exist.
+    ...    ELSE     Log to Console and Logfile    Uplink set Port inconsistency is present.
+
+TC09-a Manual Remediate Remove Unexpected Port in LI Inconsistency
+    [Tags]    FM    Remediate-Remove-LI-Port    TC09
+    ${us_list_edit}=    Create List    ${uplink_sets['US1']}
+    Pop From Dictionary    ${ligs}    uplinkSets
+    Set To Dictionary    ${ligs}    uplinkSets=${us_list_edit}
+    ${ligs_list}=    Create List    ${ligs}
+    ${resp}=    Edit LIG    ${ligs_list}
+    Wait For Task2    ${resp}    timeout=600    interval=10
+    ${Update_LI_dict}=    Create Dictionary    name=${LI_Name}
+    Update Logical Interconnect from Group   ${Update_LI_dict}
+    Sleep  10Sec
+
+TC09-b Check Unexpected Port Autoremediation Removed
+    [Tags]    FM    Alert-Remediate-Remove-LI-Port    TC09
+    ${US_Port_Inconsistency_list}=    Get Uplink Set Port Inconsistency List From Compliance Report    ${fm_tenant_uri}    ${LI_Name}    ${US_Name}
+    # Verify the Inconsistency List to the Expected inconsistency from datafile
+    ${status}    ${remediate_dict}=    Compare Compliance Report Inconsistency Dictionary List   ${US_Port_Inconsistency_list}    ${fm_inconsistencies2['Manual_US_Unexpexted_Port']}
+    Run keyword If    '${status}'=='True'    FAIL    msg= Uplink set Port inconsistency is present.
+    ...    ELSE     Log to Console and Logfile    Uplink set Port inconsistency does not Exist.
+
+TC10-a Create Missing Uplink Set Inconsistency - Add Access Port to EPG
+    [Tags]    FM    Add-AccessPort-EPG    TC10
+    [Setup]    Get ACI APIC session  ${APIC_URL}  ${APIC_USERNAME}  ${APIC_PASSWORD}
+    Attach staticBinding interface to EPG
+    Sleep  10Sec
+
+TC10-b Verify Missing Uplink Set Alert - Add Access Port to EPG
+    [Tags]    FM    Alert-Add-AccessPort-EPG   TC10
+    # Get US Inconsistency List from the report
+    ${USNW_Inconsistency_list}=    Get Uplink Set Inconsistency List From Compliance Report    ${fm_tenant_uri}    null
+    # Verify the Inconsistency List to the Expected inconsistency from datafile
+    ${status}    ${remediate_dict}=    Compare Compliance Report Inconsistency Dictionary List   ${USNW_Inconsistency_list}    ${fm_inconsistencies2['Manual_US_Missing_PortGroup']}
+    Run keyword If    '${status}'=='False'    FAIL    msg= Missing uplink set inconsistency does not Exist.
+    ...    ELSE     Log to Console and Logfile    Missing uplink set inconsistency is present.
+
+TC11-a Missing Uplink Set - Remove Access Port to EPG
+    [Tags]    FM2    Remove-AccessPort-EPG    TC11
+    [Setup]    Get ACI APIC session  ${APIC_URL}  ${APIC_USERNAME}  ${APIC_PASSWORD}
+    Remove staticBinding interface from EPG
+    Sleep  10Sec
+
+TC11-b Verify Missing Uplink Set Inconsistency Alert Removed
+    [Tags]    FM    Alert-Remove-AccessPort-EPG    TC11
+    # Get US Inconsistency List from the report
+    ${USNW_Inconsistency_list}=    Get Uplink Set Inconsistency List From Compliance Report    ${fm_tenant_uri}    null
+    # Verify the Inconsistency List to the Expected inconsistency from datafile
+    ${status}    ${remediate_dict}=    Compare Compliance Report Inconsistency Dictionary List   ${USNW_Inconsistency_list}    ${fm_inconsistencies2['Manual_US_Missing_PortGroup']}
+    Run keyword If    '${status}'=='True'    FAIL    msg= Missing uplink set inconsistency is not cleared.
+    ...    ELSE     Log to Console and Logfile    Missing uplink set inconsistency does not Exist.
+
+TC12-a Create Missing Uplink Set Inconsistency - Add port Channel to EPG
+    [Tags]    FM    Add-PortChannel-EPG    TC12
+    [Setup]    Get ACI APIC session  ${APIC_URL}  ${APIC_USERNAME}  ${APIC_PASSWORD}
+    Attach staticBinding interface portchannel to EPG with existing policy group  ${fm_variables['FM_Edit_Tenant_name']}  Automation_Wipro_Appl_Profile  Automation_Wipro_EPG
+    Sleep  60Sec
+
+TC12-b Verify Missing Uplink Set Inconsistency Alert
+    [Tags]    FM    Alert-Add-PortChannel-EPG    TC12
+    ${USNW_Inconsistency_list}=    Get Uplink Set Inconsistency List From Compliance Report    ${fm_tenant_uri}    null
+    # Verify the Inconsistency List to the Expected inconsistency from datafile
+    ${status}    ${remediate_dict}=    Compare Compliance Report Inconsistency Dictionary List   ${USNW_Inconsistency_list}    ${fm_inconsistencies2['Manual_US_Missing_PortChannel']}
+    Run keyword If    '${status}'=='False'    FAIL    msg= Missing uplink set inconsistency does not Exist.
+    ...    ELSE     Log to Console and Logfile    Missing uplink set inconsistency is present.
+
+TC13-a Create Missing Uplink Set Inconsistency - Remove port Channel to EPG
+    [Tags]    FM    Remove-PortChannel-EPG    TC13
+    [Setup]    Get ACI APIC session  ${APIC_URL}  ${APIC_USERNAME}  ${APIC_PASSWORD}
+    Remove staticBinding interface portchannel to EPG with existing policy group    ${fm_variables['FM_Edit_Tenant_name']}  Automation_Wipro_Appl_Profile  Automation_Wipro_EPG
+    Sleep  60Sec
+
+TC13-b Verify Missing Uplink Set Inconsistency Alert Removed
+    [Tags]    FM    Alert-Remove-PortChannel-EPG    TC13
+    ${USNW_Inconsistency_list}=    Get Uplink Set Inconsistency List From Compliance Report    ${fm_tenant_uri}    null
+    # Verify the Inconsistency List to the Expected inconsistency from datafile
+    ${status}    ${remediate_dict}=    Compare Compliance Report Inconsistency Dictionary List   ${USNW_Inconsistency_list}    ${fm_inconsistencies2['Manual_US_Missing_PortChannel']}
+    Run keyword If    '${status}'=='True'    FAIL    msg= Missing uplink set inconsistency is not removed.
+    ...    ELSE     Log to Console and Logfile    Missing uplink set inconsistency does not Exist.
+
+TC14-a Create Missing Uplink Set Inconsistency - Add Virtual Port Channel to EPG
+    [Tags]    FM    Add-VPC-EPG    TC14
+    [Setup]    Get ACI APIC session  ${APIC_URL}  ${APIC_USERNAME}  ${APIC_PASSWORD}
+    Attach staticBinding interface virtual portchannel to EPG with existing policy group  ${fm_variables['FM_Edit_Tenant_name']}  Automation_Wipro_Appl_Profile  Automation_Wipro_EPG
+    Sleep  60Sec
+
+TC14-b Verify Missing Uplink Set Inconsistency Alert
+    [Tags]    FM    Alert-Add-VPC-EPG    TC14
+    ${USNW_Inconsistency_list}=    Get Uplink Set Inconsistency List From Compliance Report    ${fm_tenant_uri}    null
+    ${status}    ${remediate_dict}=    Compare Compliance Report Inconsistency Dictionary List   ${USNW_Inconsistency_list}    ${fm_inconsistencies2['Manual_US_Missing_VirtualPortChannel']}
+    Run keyword If    '${status}'=='False'    FAIL    msg= Missing uplink set inconsistency does not Exist.
+    ...    ELSE     Log to Console and Logfile    Missing uplink set inconsistency is present.
+
+TC15-a Create Missing Uplink Set Inconsistency - Remove Virtual Port Channel to EPG
+    [Tags]    FM    Remove-VPC-EPG    TC15
+    [Setup]    Get ACI APIC session  ${APIC_URL}  ${APIC_USERNAME}  ${APIC_PASSWORD}
+    Remove staticBinding interface virtual portchannel to EPG with existing policy group      ${fm_variables['FM_Edit_Tenant_name']}  Automation_Wipro_Appl_Profile  Automation_Wipro_EPG
+    Sleep  60Sec
+
+TC15-b Verify Missing Uplink Set Inconsistency Alert Removed
+    [Tags]    FM    Alert-Remove-VPC-EPG    TC15
+    ${USNW_Inconsistency_list}=    Get Uplink Set Inconsistency List From Compliance Report    ${fm_tenant_uri}    null
+    ${status}    ${remediate_dict}=    Compare Compliance Report Inconsistency Dictionary List   ${USNW_Inconsistency_list}    ${fm_inconsistencies2['Manual_US_Missing_VirtualPortChannel']}
+    Run keyword If    '${status}'=='True'    FAIL    msg= Missing uplink set inconsistency is not removed.
+    ...    ELSE     Log to Console and Logfile    Missing uplink set inconsistency does not Exist
+
+TC16-a Update LI to Create Tunnel Network Uplink Set
+    [Tags]    FM    TC16
+    ${us_list_edit}=    Create List    ${uplink_sets['US_Tunnel']}
+    Pop From Dictionary    ${ligs}    uplinkSets
+    Set To Dictionary    ${ligs}    uplinkSets=${us_list_edit}
+    ${ligs_list}=    Create List    ${ligs}
+    ${resp}=    Edit LIG    ${ligs_list}
+    Wait For Task2    ${resp}    timeout=600    interval=10
+    ${Update_LI_dict}=    Create Dictionary    name=${LI_Name}
+    Update Logical Interconnect from Group   ${Update_LI_dict}
+    Sleep   60Sec
+
+TC16-b Verify Resource Mapping After Creating Tunnel Network Uplink Set
+    [Tags]    FM    TC16
+    # Verify LI Resource Mapping
+    ${empty}=   Create Dictionary
+    ${li_resource_dict}=   Get Fabric Manager LI Resource Mapping List    ${fm_tenant_uri}    ${LI_Name}    US-Tunnel
+    Log To Console and Logfile    ${li_resource_dict}
+    ${status1}=   Verify Fabric Manager Resource Mapping    ${Tunnel_LI_Resource_Mapping}    ${li_resource_dict}
+    Run keyword If    '${status1}'=='False'    FAIL    msg= LI Uplink Set Resource Mapping Verification Failed
+    # Verify Networks Resource Mapping
+    ${nw_resource_dict}=    Get Fabric Manager Networks Resource Mapping   ${fm_tenant_uri}
+    Log To Console and Logfile    ${nw_resource_dict}
+    Run keyword If    '${nw_resource_dict}'!='${empty}'    FAIL    msg= Network Resource Mapping Verification Failed
+    # Verify Networks Resource Mapping
+    ${nw_set_resource_dict}=   Get Fabric Manager Network Set Resource Mapping   ${fm_tenant_uri}
+    Log To Console and Logfile    ${nw_set_resource_dict}
+    Run keyword If    '${nw_set_resource_dict}'!='${empty}'    FAIL    msg= Network Set Resource Mapping Verification Failed
+    Sleep   60Sec
+
+TC17-a Update LI To Create Tunnel Network Missing Inconsistency
+    [Tags]   FM   TC17
+    ${us_list_edit}=    Create List    ${uplink_sets['US_Tunnel_No_Network']}
+    Pop From Dictionary    ${ligs}    uplinkSets
+    Set To Dictionary    ${ligs}    uplinkSets=${us_list_edit}
+    ${ligs_list}=    Create List    ${ligs}
+    ${resp}=    Edit LIG    ${ligs_list}
+    Wait For Task2    ${resp}    timeout=600    interval=10
+    ${Update_LI_dict}=    Create Dictionary    name=${LI_Name}
+    Update Logical Interconnect from Group   ${Update_LI_dict}
+    Sleep   60Sec
+    Log To Console and Logfile     Verify Fabric Manager Resource Mapping for missing tunnel Network
+    ${li_resource_dict}=   Get Fabric Manager LI Resource Mapping List    ${fm_tenant_uri}    ${LI_Name}    US-Tunnel_No_Network
+    Log To Console and Logfile    ${li_resource_dict}
+    ${status1}=   Verify Fabric Manager Resource Mapping    ${Tunnel_LI_No_NW_Resource_Mapping}    ${li_resource_dict}
+    Run keyword If    '${status1}'=='False'    FAIL    msg= LI Uplink Set Resource Mapping Verification Failed
+    # Verify Inconsistency Exists
+    ${US_Property_Inconsistency_list}    ${US_Property_Remediate_dict}=    Get Uplink Set Property Inconsistency List From Compliance Report    ${fm_tenant_uri}    ${LI_Name}    US-Tunnel_No_Network
+    # Verify the Inconsistency List to the Expected inconsistency from datafile
+    ${status}=    Compare Compliance Report Inconsistency Dictionaries   ${US_Property_Inconsistency_list}    ${fm_inconsistencies2['Missing_Tunnel_NW']}
+    Run Keyword IF   '${status}'=='FALSE'    FAIL    msg=Tunnel Network Missing Inconsistency Does not Exist
+    
+TC17-b Autoremediate Tunnel Network Missing Inconsistency
+    [Tags]   FM   TC17
+    ${US_Property_Inconsistency_list}    ${US_Property_Remediate_dict}=    Get Uplink Set Property Inconsistency List From Compliance Report    ${fm_tenant_uri}    ${LI_Name}    US-Tunnel_No_Network
+    ${resp}=    fusion_api_fabric_manager_remediate    ${US_Property_Remediate_dict}    ${fm_uri}
+    Wait For Task2   ${resp}    timeout=600    interval=10
+    ${us_uri}=    Get Uplink Set URI     US-Tunnel_No_Network
+    ${USData}=    Get Resource by URI   ${us_uri}
+    ${created_tunnel_nw_uri}=    Set Variable    ${USData['networkUris'][0]}
+    ${resp1} =    Get Resource by URI    ${created_tunnel_nw_uri}
+    ${created_tunnel_nw_name}=    Set Variable    ${resp1['name']}
+    ${created_tunnel_nw_metaname}=    Set Variable    ETH:${created_tunnel_nw_name}
+    Set to Dictionary    ${Tunnel_LI_Resource_Mapping}    UPLINK_SET_TUNNEL_NETWORK=${created_tunnel_nw_metaname}
+    ${li_resource_dict}=   Get Fabric Manager LI Resource Mapping List    ${fm_tenant_uri}    LE-LIG-FM    US-Tunnel_No_Network
+    ${status2}=   Verify Fabric Manager Resource Mapping    ${Tunnel_LI_Resource_Mapping}     ${li_resource_dict}
+    Run keyword If    '${status2}'=='False'    FAIL    msg= LI Uplink Set Resource Mapping Verification Failed
+
+*** Keywords ***
+
+Fabric Manager Test Setup
+    [Documentation]  Gets the FM and Tenant URIs from the given names and sets them as Suite Variables.
+    [Arguments]    ${fm_name}    ${tenant_name}
+    ${fm_uri}=    Get Fabric Manager URI    ${fm_name}
+    ${fm_tenant_uri}=    Get Fabric Manager Tenant URI    ${fm_uri}    ${tenant_name}
+    Set Suite Variable    ${fm_uri}
+    Set Suite Variable    ${fm_tenant_uri}

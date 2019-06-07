@@ -1,0 +1,255 @@
+*** Settings ***
+Library             RoboGalaxyLibrary
+Library             FusionLibrary
+Library             OperatingSystem
+Library             BuiltIn
+Library             Collections
+Library             XML
+Library             SSHLibrary
+Library             String
+Library             Dialogs
+Resource            ../global_variables.robot
+
+*** Variables ***
+${APPLIANCE_IP}      unknown
+
+*** Keywords ***
+
+Prepare Environment
+    [Documentation]    Prepare the test case pre condition according to the profile
+    Prepare Directories For Test   ${directory_profiles}
+    ${scope_uri} =    Prepare Scope For Test   ${scope_profile}
+    ${permission_list} =    Prepare Permissions For Test    ${scope_uri}
+    Prepare Groups For Test    ${group_profiles}    ${permission_list}
+    Prepare Users For Test     ${user_profiles}     ${permission_list}
+
+Prepare Directories For Test
+    [Arguments]    ${directory_profiles}
+    [Documentation]    Create directories and check the result
+    Import AD Server Certificates    ${CERT_BODY}    ${AD_CERTIFICATE}    ${ALIAS_NAME}
+    ${response} =     Add Active Directory    ${directory_profiles}
+    :FOR    ${resp}    IN    @{response}
+    \       Convert To String     ${resp}
+    \       log To Console       \n- create_directory_result_is_${resp}
+    \       ${status}=    Get From Dictionary    ${resp}    status_code
+    \       Should Be Equal    ${status}    ${201}
+
+Prepare SPA Role Permissions For Test
+    [Arguments]     ${scope_uri}
+    [Documentation]    Create SPA role User with resources Scope permission
+    ${permission_list} =    Create List
+    ${permission} =    Create Dictionary    roleName=Server profile architect    scopeUri=${scope_uri}
+    Append To List    ${permission_list}    ${permission}
+    [Return]    ${permission_list}
+
+Prepare Permissions For Test
+    [Arguments]     ${scope_uri}
+    [Documentation]    Create IA role User with None resource Scope permission
+    ${permission_list} =    Create List
+    ${permission} =    Create Dictionary    roleName=Server profile architect    scopeUri=${scope_uri}
+    Append To List    ${permission_list}    ${permission}
+    [Return]    ${permission_list}
+
+Prepare Groups For test
+    [Arguments]     ${group_profiles}    ${permission_list}
+    [Documentation]    Create Groups and Check Results
+    :FOR    ${group_profile}   IN    @{group_profiles}
+    \       ${resp} =    Create Group With Permissions    ${group_profile}    ${permission_list}
+    \       convert to string    ${resp}
+    \       ${status} =    Get From Dictionary    ${resp}    status_code
+    \       Should Be Equal    ${status}    ${201}
+
+Prepare Users For test
+    [Arguments]     ${user_profiles}    ${permission_list}
+    [Documentation]    Create Users and Check Results
+    :FOR    ${user_profile}   IN    @{user_profiles}
+    \       ${resp} =    Create User With Permissions    ${user_profile}    ${permission_list}
+    \       convert to string    ${resp}
+    \       ${status} =    Get From Dictionary    ${resp}    status_code
+    \       Should Be Equal    ${status}    ${200}
+
+Prepare SPT For Test
+    [Arguments]    ${server_profile_template_profiles}
+    [Documentation]    Create a SPT for test usage
+    ${response} =     Add Server Profile Templates from variable     ${server_profile_template_profiles}
+    Wait For Task2    ${response}    timeout=60    interval=5
+
+Clear Environment
+    [Documentation]    Prepare the test case pre condition according to the profile
+    Fusion Api Login Appliance      ${APPLIANCE_IP}    ${admin_credentials}
+    Remove All Users
+    Remove All Directories Async
+    Remove All Scopes
+    Remove All Server Profile Templates Async
+    Remove All Server Profiles
+    Run Keyword And Ignore Error    Remove CA By Allias Name    ${ALIAS_NAME}
+
+Credential Login
+    [Arguments]    ${credentials_list}
+    [Documentation]    Login as each credential, so can switch session for test needs
+    :FOR    ${credential}    IN    @{credentials_list}
+    \       Fusion Api Login Appliance    ${APPLIANCE_IP}    ${credential}
+    [Return]    ${True}
+
+Pre Test
+    [Documentation]    Prepare the test case pre condition according to the profile
+    Fusion Api Login Appliance      ${APPLIANCE_IP}    ${admin_credentials}
+    Clear Environment
+    Prepare Environment
+
+After Test
+    [Documentation]    Clear Environment after test execution
+    Fusion Api Login Appliance      ${APPLIANCE_IP}    ${admin_credentials}
+    Clear Environment
+    ${resplist}=    Run Keyword And Ignore Error    Remove ALL Storage Volumes Async  param=?suppressDeviceUpdates=false
+    Run Keyword And Ignore Error    Wait For Task2    ${resplist}    timeout=60    interval=5
+    Run Keyword And Ignore Error    Remove ALL Storage Volume Templates Async
+
+Prepare Scope For test
+    [Arguments]     ${scope_profile}
+    [Documentation]    Create Scope and return its uri
+    ${resp} =    Create Scope    ${scope_profile}
+    Should Be Equal    '${resp["status_code"]}'   '202'    msg= Failed to create scope!
+    ${task} =    Wait For Task    ${resp}    20min    5s
+    ${taskState} =    Get From Dictionary    ${task}    taskState
+    Should Match    ${taskState}    Completed
+    ${scope_uri} =    Get From Dictionary    ${task['associatedResource']}    resourceUri
+    [Return]    ${scope_uri}
+
+Create Groups
+    [Arguments]    ${groupProfiles}
+    [Documentation]    Add Group in specify Directory according to the group profile and return the uris list
+    ${group_uri_list}    Create List    ${EMPTY}
+    :FOR    ${profile}    IN    @{groupProfiles}
+    \       ${resps} =  Fusion Api Assign Roles To Directory Group    ${profile}
+    \       ${status}=    Get From Dictionary    ${resps}    status_code
+    \       Should Be Equal    ${status}    ${201}
+    \       ${group_uri} =    Get From Dictionary    ${resps}    uri
+    \       Append To List    ${group_uri_list}    ${group_uri}
+    [Return]    ${group_uri_list}
+
+Can Create SPT
+    [Arguments]    ${server_profile_template_profiles}
+    [Documentation]    With current session ID of SPA role, Create a SPT with resources in its scope
+    ${response} =     Add Server Profile Template     ${server_profile_template_profiles}
+    Wait For Task2    ${response}    timeout=60    interval=5
+
+Can Not Create SPT
+    [Arguments]    ${server_profile_template_profiles}
+    [Documentation]    With current session ID of SPA role, Create a SPT with resources in its scope
+    ${resp} =     Add Server Profile Template     ${server_profile_template_profiles}
+    Should Be Equal    '${resp["status_code"]}'   '202'    msg= Failed to post the server profile template API!
+    Wait For Task2    ${resp}    50    5     PASS=Error    errorMessage=ASSOCIATION_FORBIDDEN_BY_SCOPE    VERBOSE=True
+
+Can Update SPT
+    [Arguments]    ${server_profile_template_profiles}
+    [Documentation]    With current session ID of SPA role, Create a SPT with resources in its scope
+    ${response} =    Edit Server Profile Template    ${server_profile_template_profiles}
+    Wait For Task2    ${response}
+
+Can Not Edit SPT
+    [Arguments]    ${server_profile_template_profiles}
+    [Documentation]    With current session ID of SPA role, Create a SPT with resources in its scope
+    ${resp} =    Edit Server Profile Template    ${server_profile_template_profiles}
+    Should Be Equal    '${resp["status_code"]}'   '202'    msg= Failed to post the server profile template API!
+    Wait For Task2    ${resp}    50    5     PASS=Error    errorMessage=ASSOCIATION_FORBIDDEN_BY_SCOPE    VERBOSE=True
+
+Can Delete SPT
+    [Arguments]    ${server_profile_template_profile}
+    [Documentation]    With current session ID of SPA role, Create a SPT with resources in its scope
+    ${response} =    Remove Server Profile Template    ${server_profile_template_profile}
+    Wait For Task2    ${response}
+
+Can Not Delete SPT
+    [Arguments]    ${server_profile_template_profiles}
+    [Documentation]    With current session ID of SPA role, Create a SPT with resources in its scope
+    ${response} =    Remove Server Profile Templates from variable    ${server_profile_template_profiles}
+    :FOR    ${resp}    IN    @{response}
+    \       Should Be Equal    '${resp["status_code"]}'   '403'    msg= Not Failed to delete the server profile template API!
+    \       Should Match        ${resp['errorCode']}    ACTION_FORBIDDEN_BY_SCOPE
+
+Edit Existing User Role
+    [Arguments]    ${bodyProfile}    ${user_profile}
+    [Documentation]    Edit User Role Assignment
+    ${index} =    Set Variable    ${0}
+    :FOR    ${body}    IN    @{bodyProfile}
+    \       ${name} =     Get From Dictionary     ${user_profile[${index}]}    userName
+    \       ${resps} =    Fusion Api Edit User    body=${body}    uri=/rest/users/${name}/roles?multiResource=true
+    \       ${index} =    Set Variable    ${index + 1}
+    \       ${status} =    Get From Dictionary    ${resps}    status_code
+    \       Should Match    '${status}'    '${200}'
+
+Can Power SH
+    [Arguments]    ${server_hardware_name}    ${poweron_flag}=${true}
+    [Documentation]    With current session ID of SPA role, can power on/off the sh in its scope
+    Run Keyword If    ${poweron_flag}    Power On Server    ${server_hardware_name}
+    ...               ELSE               Power Off Server   ${server_hardware_name}
+
+Can Not Power SH
+    [Arguments]    ${server_hardware_name}    ${poweron_flag}=${true}
+    [Documentation]    With current session ID of SPA role, can not power on/off the sh in its scope
+    Run Keyword If    ${poweron_flag}    Can Not Power On Server    ${server_hardware_name}
+    ...               ELSE               Can Not Power Off Server   ${server_hardware_name}
+
+Can Not Power On Server
+    [Arguments]    ${server_hardware_name}
+    [Documentation]    With current session ID of SPA role, can not power on the sh in its scope
+    ${body} =    Create Dictionary    powerState=On
+    ...                               powerControl=MomentaryPress
+    Can Not Edit Server Power State    ${body}    ${server_hardware_name}
+
+Can Not Power Off Server
+    [Arguments]    ${server_hardware_name}
+    [Documentation]    With current session ID of SPA role, can not power off the sh in its scope
+    ${body} =   Create Dictionary   powerState=Off
+    ...                             powerControl=MomentaryPress
+    Can Not Edit Server Power State    ${body}    ${server_hardware_name}
+
+Validate Response Error Code
+    [Arguments]    ${resp}    ${error_code}
+    [Documentation]    Validate the response return value and error code as required
+    Should Be Equal    '${resp["status_code"]}'   '403'
+    Should Match    '${resp['errorCode']}'     '${error_code}'
+
+Can Not Edit Server Power State
+    [Arguments]    ${body}    ${server_hardware_name}
+    [Documentation]    With current session ID of SPA role, can not power on/off the sh in its scope
+    ${server} =    Get Resource    SH:${server_hardware_name}
+    ${resp} =     Fusion Api Edit Server Hardware Power State    body=${body}    uri=${server['uri']}
+    Validate Response Error Code    ${resp}    error_code=ACTION_FORBIDDEN_BY_SCOPE
+
+Can Not Modify Resources
+    [Arguments]    ${enc_profile}=${None}    ${fc_profile}=${None}     ${fcoe_profile}=${None}
+    ...            ${sp_profile}=${None}    ${svt_profile}=${None}    ${vol_profile}=${None}
+    ...            ${storage_pool_profile}=${None}    ${spt_profile}=${None}
+    ...            ${eth_profile}=${None}    ${interconnect_dto}=${None}    ${lig_profile}=${None}
+    ...            ${li_profile}=${None}    ${errorCode}=ACTION_FORBIDDEN_BY_SCOPE
+    [Documentation]    With current session ID of SPA role, Can not modify enclosure
+    ${resp} =    Run Keyword If    ${enc_profile}     Edit Enclosure    ${enc_profile}
+    ...          ELSE IF    ${eth_profile}     Update Ethernet Network     ${eth_profile['name']}    ${eth_profile}
+    ...          ELSE IF    ${fc_profile}      Update FC Network     ${fc_profile[0]['name']}    ${fc_profile}
+    ...          ELSE IF    ${fcoe_profile}    Update Fcoe Network    ${fcoe_profile[0]['name']}    ${fcoe_profile}
+    ...          ELSE IF    ${li_profile}      Edit Telemetry Configurations for LI       ${li_profile}
+    ...          ELSE IF    ${interconnect_dto}    Patch Interconnect    ${interconnect_dto}
+    ...          ELSE IF    ${sp_profile}      Edit Server Profile   ${sp_profile}    param=?force=true
+    ...          ELSE IF    ${svt_profile}     Edit Storage Volume Template     ${svt_profile}
+    ...          ELSE IF    ${vol_profile}     Edit Storage Volume              ${vol_profile}
+    ...          ELSE IF    ${storage_pool_profile}     Edit Storage Pool     ${storage_pool_profile}
+    ...          ELSE IF    ${spt_profile}     Edit Server Profile Template    ${spt_profile}
+    ...          ELSE IF    ${lig_profile}     Edit LIG     ${lig_profile}
+    Run Keyword If    ${lig_profile}     Validate Response Error Code    ${resp[0]}    error_code=${errorCode}
+    ...               ELSE    Validate Response Error Code    ${resp}    error_code=${errorCode}
+
+Can Create And Delet SP
+    [Arguments]    ${server_profile_profile}
+    [Documentation]    With current session ID of SPA role, Create and delete a SP with resources in its scope
+    ${resp} =     Add Server Profile     ${server_profile_profile}    param=?force=true
+    Wait For Task2    ${resp}
+    ${response} =    Remove Server Profile    ${server_profile_profile}
+    Wait For Task2    ${resp}    timeout=60    interval=5
+
+Can Not Delete Network Set
+    [Arguments]    ${network_set_name}
+    [Documentation]    With current session ID of SPA role, Can Not Delete a NS with resources in its scope
+    ${resp} =    Fusion Api Delete Network Set    name=${network_set_name}
+    Validate Response Error Code    ${resp}    error_code=ACTION_FORBIDDEN_BY_SCOPE

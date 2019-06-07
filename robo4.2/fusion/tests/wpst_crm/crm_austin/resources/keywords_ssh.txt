@@ -1,0 +1,182 @@
+*** Settings ***
+Library           RoboGalaxyLibrary
+Library           FusionLibrary
+Library             BuiltIn
+Library          SSHLibrary
+#Library           ../lib/WPSTUtil.py
+
+Variables                       ../resources/defaults.py
+
+Resource                        ../resources/keywords.txt
+
+
+*** Variables ***
+@{snapshotCommands}                     show profile *  show enclosure *  show server *  show interconnect *  show serverid  show qos *  show config -includepoolinfo
+
+*** Keywords ***
+Save VC Config
+    [Arguments]   ${outputFile}   ${snapshotCommands}=${snapshotCommands}
+    ${log}=   Run CLI In Interconnect From List    ${snapshotCommands}
+    Create File   ${outputFile}    ${log}
+
+Run VC CLI and Save Output
+    [Arguments]    ${VCMCLICommands}    ${outputFile}
+    ${log}=   Run CLI In Interconnect From List    ${VCMCLICommands}
+    Create File   outputFile    ${log}
+
+Open SSH Connection And Execute Commands
+   [Documentation]   Open an ssh connection and execute list of commands
+   [Arguments]   ${ipAddress}   ${userName}   ${password}   ${SSHCommands}   ${prompt}=\#   ${timeout}=120
+   Log Many   ${ipAddress}   ${userName}   ${password}   ${prompt}   ${timeout}
+   Set Default Configuration    prompt=${prompt}    timeout=${timeout}
+   ${Id}=    Open Connection    ${ipAddress}
+   ${Output}=    Login    ${userName}   ${password}
+   :FOR   ${command}   IN   @{SSHCommands}
+   \    ${stdout}    ${stderr}    ${rc}=    Execute Command    ${command}   return_stderr=True   return_rc=True
+   Close SSH Connection
+
+Open SSH Connection To Interconnect And Get VC Version
+    [Documentation]    Connect to Virtual Connect Interconnect via SSH
+    ...                Example:\n| Open SSH Connection To Interconnect And Get VC Version | 10.0.12.106 | VCMCLI_USER | VCMCLI_PASSWORD |
+    [Arguments]    ${IP}=${VC_CREDENTIAL_DATA['vcmIpAddress']}   ${USERNAME}=${VC_CREDENTIAL_DATA['vcmUsername']}    ${PASSWORD}=${VC_CREDENTIAL_DATA['vcmPassword']}
+    ...             ${PROMPT}=>    ${TIMEOUT}=${120}
+    Log Many    ${IP}    ${USERNAME}    ${PASSWORD}    ${PROMPT}    ${TIMEOUT}
+    Set Default Configuration    prompt=${PROMPT}    timeout=${TIMEOUT}
+    ${Id}=    Open Connection    ${IP}
+    ${Output}=    Login    ${USERNAME}    ${PASSWORD}
+    ${VCBuild}=    Get Lines Containing String    ${Output}   Build:
+    ${VCVersion}=   Split String   ${VCBuild}   ${SPACE}   2
+    ${VCVersion}=   Split String   ${VCVersion[1]}   -   1
+    Log   ${VCVersion[1]}
+    ${VCBuild}=   Catenate   ${VCVersion[0]}-${VCVersion[1]}
+    Set Test Variable   ${VCVersion}   ${VCVersion[0]}
+    Log to console and logfile    Open SSH Connection to Interconnect ${IP} ....
+    Log to console and logfile    VC Build: ${VCBuild}
+    Set Suite Metadata     VC Build   ${VCBuild}
+    [Return]    ${Id}   ${VCVersion}
+
+
+Open SSH to OA
+    [Documentation]    Connect to Virtual Connect Interconnect via SSH
+    ...                Example:\n| Login to Fusion Via SSH | 10.0.12.106 | Administrator | hpvse123 |
+    [Arguments]    ${IP}=${OA_CREDENTIAL_DATA['oaIpAddress']}   ${USERNAME}=${OA_CREDENTIAL_DATA['oaUsername']}    ${PASSWORD}=${OA_CREDENTIAL_DATA['oaPassword']}
+    ...             ${PROMPT}=>    ${TIMEOUT}=${120}
+    Log Many    ${IP}    ${USERNAME}    ${PASSWORD}    ${PROMPT}    ${TIMEOUT}
+    Set Default Configuration    prompt=${PROMPT}    timeout=${TIMEOUT}
+    ${Id}=    Open Connection    ${IP}
+    ${Output}=    Login    ${USERNAME}    ${PASSWORD}
+    ${stdout}    ${stderr}    ${rc}=    Execute Command    show oa info    return_stderr=True    return_rc=True
+    ${OAVersion}=    Get Lines Containing String    ${stdout}   Firmware Ver.
+     ${OAVersion}=      Fetch From Right      ${OAVersion}   :
+    Log to console and logfile    \n Open SSH Connection to Onboard Administrator ${IP} ....
+    Log to console and logfile    OA Firmware Ver: ${OAVersion}
+    Set Suite Metadata     OA Firmware Version    ${OAVersion}
+    [Return]    ${Id}  ${OAVersion}
+
+Close SSH Connection
+    [Documentation]    Exits the current SSH session
+    Close Connection
+
+Run CLI In Interconnect From List
+    [Documentation]     Run list of VC CLI commands
+    [Arguments]    ${VCMCLICommands}
+    Open SSH Connection To Interconnect And Get VC Version
+    ${stdoutlog}=   Set Variable     \# VC CLI output
+    :FOR    ${Command}    IN    @{VCMCLICommands}
+    \    Log to console and logfile    ...Output of cli command "${Command}"
+    \    ${stdout}    ${stderr}    ${rc}=    Execute Command    ${Command}    return_stderr=True    return_rc=True
+    \    Log to console and logfile    ${stdout}
+    \    ${state}=    Run Keyword If   ${rc}>0    Check VC CLI Error     ${stdout}   ${rc}
+    \    Run Keyword If   '${state}'=='Aborted'   Fail    msg=Execute VC CLI commands aborted due to errors above.
+    \    ${stdoutlog}=   Catenate   ${stdoutlog}   \n   ->${Command}    \n    ${stdout}
+    Close SSH Connection
+    #Sleep    5 s
+    [Return]     ${stdoutlog}
+
+Check VC CLI Error
+    [Documentation]   Escapes when error code is retruned but will continue to execute other commands
+    [Arguments]   ${input}   ${rc}
+    ${domainExist}=   Run Keyword and Return Status   Should Contain   ${input}   ERROR: Enclosure already exists in the domain
+    ${importFail}=   Run Keyword and Return Status   Should Contain   ${input}   ERROR: Request to import Local Enclosure failed: Error undefined error
+    ${warningRC}=   Run Keyword and Return Status   Should Be Equal  ${rc}   ${13}
+    ${state}=   Run Keyword If   ${domainExist}==${True}        Set Variable   OK
+    ...                ELSE IF   ${importFail}                  Set Variable   Retry
+    ...                ELSE IF   ${warningRC}                   Set Variable    OK
+    ...                ELSE      Set Variable   Aborted
+    Log to console and logfile   state: ${state}
+    [Return]  ${state}
+
+Run CLI In OA From List
+    [Documentation]     Run list of OA CLI commands
+    [Arguments]    ${OACLICommands}
+    Open SSH to OA
+    ${stdoutlog}=   Set Variable     \# OA CLI output
+    :FOR    ${Command}    IN    @{OACLICommands}
+    \    Log to console and logfile    ...Output of cli command "${Command}"
+    \    ${stdout}    ${stderr}    ${rc}=    Execute Command    ${Command}    return_stderr=True    return_rc=True
+    \    Log to console and logfile    ${stdout}
+    #  rc seems always greater than zero even there is syntax error. Need to revisit when time permitted.
+    \    Run Keyword If   ${rc}>0    Fail    msg=Execute OA CLI commands aborted due to errors above.
+    \    ${stdoutlog}=   Catenate   ${stdoutlog}   \n   ->${Command}    \n    ${stdout}
+    Close SSH Connection
+
+#######################################
+# LOGGING
+#######################################
+
+Get Latest Log
+    [Documentation]     Get the latest log file
+    [Arguments]      ${destLOG}=/ci/logs/ciDebug.*
+    ${LATEST_LOG_FILE}=  Execute Command  ls \-r ${destLOG} | head \-1
+    [return]  ${LATEST_LOG_FILE}
+
+Write To ciDebug Log
+    [Documentation]    This example uses ssh to write out to the latest
+    ...                ciDebug on on the OV appliance.
+    [Arguments]             ${TEXT_TO_LOG}=[${SUITE_NAME}:${TEST_NAME}]
+    #Open Connection And Log In      ${SSH_HOST}
+    Login to Fusion via SSH   ${OV_IP}
+    ${ciDebugLog}=  Get Latest Log
+    ${rc}=    Execute Command    echo "\n#### ${TEXT_TO_LOG}\n" >> ${ciDebugLog}     return_stdout=False    return_rc=True
+    Should Be Equal    ${rc}    ${0}
+    Close All Connections
+
+Start Monitor Session
+    [Arguments]    ${logFile}=${EMPTY}   ${OV_IP}=${OV_IP}
+    [Documentation]     Start monitor session by inserting banner string to log file
+    Login to Fusion via SSH   ${OV_IP}
+    ${logFile}=   Run Keyword If   '${logFile}' == '${EMPTY}'    Get Latest Log
+    ...             ELSE    Set Variable  ${logFile}
+    ${timestamp}=    Get Concatenated Timestamp
+    ${beginBanner}=   Catenate   SEPARATOR=   \####RGTESTBEGIN(${timestamp})####  ${SUITE_NAME}
+    Set Suite Variable   ${beginBanner}    ${beginBanner}
+    ${stderr}    ${rc}=    Execute Command    echo "\n${beginBanner}\n" >> ${logFile}     return_stdout=False    return_stderr=True   return_rc=True
+    Log to console and logfile   \nLog ${beginBanner} to ${logFile}
+    Should Be Empty    ${stderr}   msg=Fail to execute the bash command: echo "\\n${beginBanner}\\n" >> ${logFile} \nSTDERR: ${stderr}
+    Close SSH Connection
+
+End Monitor Session
+    [Arguments]    ${logFile}=${EMPTY}    ${OV_IP}=${OV_IP}
+    [Documentation]     End monitor session by inserting banner string to log file
+    Login to Fusion via SSH   ${OV_IP}
+    ${logFile}=   Run Keyword If   '${logFile}'== '${EMPTY}'    Get Latest Log
+    ...             ELSE    Set Variable  ${logFile}
+    ${timestamp}=    Get Concatenated Timestamp
+    ${endBanner}=   Catenate  SEPARATOR=   \####RGTESTEND(${timestamp})####  ${SUITE_NAME}
+    Set Suite Variable   ${endBanner}    ${endBanner}
+    ${stderr}    ${rc}=        Execute Command    echo "\n${endBanner}\n" >> ${logFile}     return_stdout=False    return_stderr=True   return_rc=True
+    Log to console and logfile   \nLog ${endBanner} to ${logFile}
+    Should Be Empty    ${stderr}     msg=Fail to execute the bash command: echo "\\n${endBanner}\\n" >> ${logFile} \nSTDERR: ${stderr}
+    Close SSH Connection
+
+Search for Patterns
+    [Arguments]     ${grepString}   ${startString}=${beginBanner}   ${endString}=${endBanner}    ${destLOG}=/ci/logs/ciDebug.*    ${OV_IP}=${OV_IP}
+    [Documentation]  Search log files for lines match $grepString bound by startString and endString
+    ...              grepString can contain any valid grep options but make sure to use backslash(\) to escape special characters like backslash (\) and pipe (|)
+    Login to Fusion via SSH   ${OV_IP}
+    Should Not Be Empty    ${startString}    msg=Error: please specify the starting string or run keyword Start Monitor Session first
+    Should Not Be Empty    ${endString}    msg=Error: please specify the ending string or run keyword End Monitor Session first
+    ${stdout}  ${stderr}  ${rc}=    Execute Command    sed -n '/${startString}/,/${endString}/p' ${destLOG} | ${grepString}     return_stdout=True   return_stderr=True   return_rc=True
+    Should Be Empty    ${stderr}     msg=Fail to execute the bash command: sed -n '/${startString}/,/${endString}/p' ${destLOG} | ${grepString} \nSTDERR: ${stderr}
+    Log   ${stdout}
+    Close SSH Connection

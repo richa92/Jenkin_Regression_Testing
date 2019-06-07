@@ -1,0 +1,454 @@
+*** Settings ***
+Library         RoboGalaxyLibrary
+Library         FusionLibrary
+Library         Collections
+Library         String
+Library			OperatingSystem
+Library         RoboGalaxyLibrary
+Library         BuiltIn
+Library			functions.py
+Variables		variables.py
+
+*** Keywords ***
+Login to Fusion Via REST
+	[Documentation]    Connects to the Appliance and creates a session using the Username and Password.
+	...				   Example : \n| Login to Fusion Via REST | 10.0.12.106 | Administrator | hpvse123 |
+	[Arguments]    ${IP}    ${USERNAME}
+    ${Response}    ${SessionId}	    Fusion Api Login Appliance    ${IP}    ${admin_credentials}
+    #Log to console 		${Response}
+    ${Status}    Get From Dictionary    ${Response}    status_code
+    Return From Keyword If    '${Status}' == '200'    ${Response}
+    ${errorCode}    Get From Dictionary    ${Response}    errorCode
+    ${message}      Get From Dictionary    ${Response}    message
+    Fatal Error    msg=Invalid response returned ${Status} ${errorCode} ${message}
+    Logger		Successfully Logged into Fusion.
+
+Logout from fusion via REST
+	[Documentation]		Log out from the session
+	${resp}  		Fusion Api Logout Appliance
+	Logger 		${resp}			DEBUG 
+	
+
+Logger
+	[Documentation]		Logs the messages for particular level mentioned. Eg: Logger *messages  DEBUG	| Now supporting INFO and DEBUG				
+	[Arguments]		${message}		${Arg_log}=None
+	Run Keyword If		'${Arg_log}'=='None' 	Log to console 		${message}
+	Run Keyword If		'${Arg_log}'=='DEBUG' and '${loggerlevel}'=='DEBUG'		Log to console		${message}
+	
+	
+###########################################UI keywords##################################################################
+
+Open Browser and Login
+	[Documentation]		Opens the Browser and Logs in Hp Oneview 
+	Set Log Level    TRACE
+	Logger			The ip is ${IP} and browser ${BROWSER}		DEBUG
+	Open Browser	https://${IP}/		${BROWSER}
+	Sleep	8
+	LoginGUI
+
+LoginGUI
+	Input Text    id=hp-login-user    ${UI_USERNAME}
+	Input Text    id=hp-login-password     ${UI_PASSWORD}
+	Click Button    hp-login-button
+	Sleep 	3
+	
+
+Append the LIG xml output to a file
+        [Documentation]        Appending LIG combinations output to a xml file
+        [Arguments]		${EG_count}		${Ligs_list}	
+        Create File		${CURDIR}/EGdata.xml		<data><Eggrp>
+        ${LIGS_LENGTH}=  Get Length  ${Ligs_list} 
+        :FOR  ${eachLig}   IN RANGE  0  ${LIGS_LENGTH}
+        \	Logger		The lig list ${Ligs_list[${eachLig}]}		DEBUG
+        \	 ${final_Ligs_list} = 	Convert to list		${Ligs_list[${eachLig}]}
+        \	 ${Bay_list} =		Get Bay List	${final_Ligs_list}
+        \	 Logger		The lig list is ${final_Ligs_list}		
+        \	 Logger		The bay  list is ${Bay_list}
+        \    ${EgName}=    catenate  EG${EG_count}${eachLig}   
+        \	Logger	EGname ${EgName} 
+        \    ${LigXml}=   CreateEgXML     ${EgName}        ${final_Ligs_list}        ${Bay_list}
+        \    Append To File  ${CURDIR}/EGdata.xml	  ${LigXml}
+        Append To File		${CURDIR}/EGdata.xml		</Eggrp></data>
+        Sleep	2
+
+Get Bay List 
+	[Arguments]		${bay_lig_list}
+		${baylistno} = 		Create List		
+		${LIG_LENGTH} =		Get Length		${bay_lig_list}
+   		:FOR	${j}	IN RANGE	0	${LIG_LENGTH}
+    	\	${bay_no} =  	Get Logical Interconnect Group Bay		${bay_lig_list[${j}]}
+    	\	Logger		the bay no is ${bay_no}		DEBUG   
+    	\	Append To List		${baylistno}		${bay_no}	
+			Logger		The final baylist is ${baylistno}		DEBUG    
+    [Return]	${baylistno}	
+
+
+
+
+
+
+
+
+
+
+
+###########################################End of UI keyword############################################################	
+
+##########################################Start of LIG Keywords##########################################################
+Get Logical Interconnect Group Uri
+    [Documentation]    Return a Logical Interconnect Groups' Uri by Name
+    [Arguments]    ${Name}
+    ${resp}		Fusion Api Get Resource			uri=/rest/sas-logical-interconnect-groups
+    Validate URI for the response		${resp}
+    #log to console    ${resp}
+    ${length} =		Get Length			${resp['members']}
+										:FOR	${x}	IN RANGE	0	${length}
+										\	${resp_name}		Get From Dictionary		${resp['members'][${x}]}   name
+										\   ${resp_uri}     	Get From Dictionary		${resp['members'][${x}]}   uri
+										\   return from Keyword If  '${Name}' == '${resp_name}'   ${resp_uri}
+
+Get Logical Interconnect Group Bay
+    [Documentation]    Return a Logical Interconnect Groups' bay by Name
+    [Arguments]    ${Name}
+    ${resp}		Fusion Api Get Resource			uri=/rest/sas-logical-interconnect-groups
+    Validate URI for the response		${resp}
+    ${length} =		Get Length			${resp['members']}
+										:FOR	${x}	IN RANGE	0	${length}
+										\	${resp_name}		Get From Dictionary		${resp['members'][${x}]}   name
+										\   ${bay_length} =  Get Length  ${resp['members'][${x}]['interconnectMapTemplate']['interconnectMapEntryTemplates']}
+										\   ${bay_list}=  Bay loop   ${resp}  ${bay_length}  ${x}										
+										\   Return from keyword if   '${Name}' == '${resp_name}'  ${bay_list}
+								
+Bay loop
+	[Documentation]    Return a list of bay for each LIG
+    [Arguments]    ${resp}  ${bay_length}  ${memb_count} 
+    
+    ${bay_list} =   Create List
+    :FOR  ${x}	IN RANGE	0  ${bay_length}
+    \	${bay_expr}=  Set Variable  ${resp['members'][${memb_count}]['interconnectMapTemplate']['interconnectMapEntryTemplates'][${x}]['logicalLocation']['locationEntries'][0]['type']}
+    \	${bay_val}=  Set Variable If   "${bay_expr}"=="Bay"    0  1
+    \	${resp_uri_bay}     	Get From Dictionary		${resp['members'][${memb_count}]['interconnectMapTemplate']['interconnectMapEntryTemplates'][${x}]['logicalLocation']['locationEntries'][${bay_val}]}   relativeValue
+    \   Append to list  ${bay_list}  ${resp_uri_bay}
+    return from keyword  ${bay_list}
+    
+    
+Create LIG
+	[Documentation]    Build json payload to Add new Enclosure Group
+   	[Arguments]    ${LIG_Name}    ${BAY_LIST}
+   	    Logger		Creating LIG : ${LIG_Name}
+  		${Lig_Payload}  Build LIG Payload  ${LIG_Name}    ${BAY_LIST}
+  		${resp} = 	Fusion Api SAS Create LIG	${Lig_Payload}
+  		Sleep		3s
+		Validating task URI 		${resp}		${task_create_status}
+  		Logger  The response is ${resp}		DEBUG
+
+Build LIG Payload
+    [Documentation]    Build json payload to Add new Enclosure Group
+    [Arguments]    ${LIG_Name}    ${BAY_LIST}
+        
+    ${InterconnectMapEntryTemplatesList}    Build Interconnect Map Entry Templates List    ${BAY_LIST}
+    ${InterconnectMapTemplate}    Create Dictionary    interconnectMapEntryTemplates=${InterconnectMapEntryTemplatesList}
+    ${enclosureType}   Create List   ${1}
+    
+    ${LIG}    Create Dictionary    type=sas-logical-interconnect-group
+    ...                                        name=${LIG_Name}
+    ...                                        interconnectMapTemplate=${InterconnectMapTemplate}
+    ...										   state=Active
+    ...										   enclosureIndexes=${enclosureType}
+    ...										   enclosureType=SY12000
+    ...										   interconnectBaySet=1
+    Logger	  *********${LIG}		DEBUG   
+    [Return]    ${LIG}
+    
+Build Interconnect Map Entry Templates List
+    [Documentation]    For internal use only.
+    [Arguments]    ${BAY_LIST}
+    ${InterconnectMapEntryTemplatesList}    Create List
+    : FOR    ${Index}    IN   @{BAY_LIST}
+    \    ${InterconnectMapEntryTemplate}    Build Interconnect Map Entry Template    ${Index}
+    \    Append To List    ${InterconnectMapEntryTemplatesList}    ${InterconnectMapEntryTemplate}
+    [Return]    ${InterconnectMapEntryTemplatesList}
+
+
+Build Interconnect Map Entry Template
+    [Documentation]    For internal use only.
+    [Arguments]       ${BayNumber} 
+    ${Enclosure}    Create Dictionary                       relativeValue=1
+    ...                                                     type=Enclosure
+    ${Bay}    Create Dictionary                             relativeValue=${BayNumber}
+    ...                                                     type=Bay
+    ${locationEntriesList}    Create List    ${Enclosure}    ${Bay}
+    ${logicalLocation}    Create Dictionary    locationEntries=${locationEntriesList}
+    ${interconnectMapEntryTemplate}    Create Dictionary    enclosureIndex=1
+    ...                                                     logicalLocation=${logicalLocation}
+    ...                                                     permittedInterconnectTypeUri=${permittedInterconnectTypeUri}
+    
+   [Return]    ${interconnectMapEntryTemplate}
+
+Create LIG with bay combinations
+    [Documentation]    Creates LIG with according to bay
+    [Arguments]		${LIG_LIST}
+    ${Lig_Length}=  Get Length  ${LIG_LIST}
+    :FOR  ${bay}  IN RANGE   0   ${Lig_Length}
+    \	Create LIG    ${LIG_LIST[${bay}]}  ${bay_list[${bay}]}
+    
+Delete LIG from a list
+	[Documentation]		Deletes Ligs froma given list
+	[Arguments]		${LIG_LIST}
+	:FOR  ${lig}  IN  @{LIG_LIST}
+	\	Log To Console   ${lig}
+	\	${lig_uri}  Get Logical Interconnect Group Uri  ${lig}
+	\	Log to Console   ${lig_uri}
+	\	${resp}  Fusion Api Delete Lig   uri=${lig_uri}
+
+Get Logical Interconnect Group
+    [Documentation]    Return a Logical Interconnect Group by Name
+    [Arguments]    ${Name}
+    #${LogicalInterconnectGroupCollection}    Fusion Api Get Logical Interconnect Groups    filter="'name'='${Name}'"
+    ${LogicalInterconnectGroupCollection}    Fusion Api Get Enclosure Groups     filter="'name'='${Name}'"
+    ${Count}    Get From Dictionary    ${LogicalInterconnectGroupCollection}    count
+    Should Be Equal As Numbers    ${Count}    1    msg=Cant find lig named ${Name}
+    ${Members}    Get From Dictionary    ${LogicalInterconnectGroupCollection}    members
+    ${Lig}    Get From List    ${Members}    0
+    ${LigName}    Get From Dictionary    ${Lig}    name
+    Should Be Equal As Strings    ${Name}    ${LigName}
+    [Return]    ${Lig}
+    
+######################################End of LIG Keywords#######################################################################	
+
+######################################Start of EG Keywords######################################################################
+Get Enclosure Group Uri
+    [Documentation]    Return a Enclosure Groups' Uri by Name
+    [Arguments]    ${Name}
+    ${resp}		Fusion Api Get Resource			uri=/rest/enclosure-groups
+    Validate URI for the response		${resp}
+    #log to console    ^^^^^${resp}
+    ${length} =		Get Length			${resp['members']}
+    #log to console  *****${length}
+										:FOR	${x}	IN RANGE	0	${length}
+										\	${resp_name}		Get From Dictionary		${resp['members'][${x}]}   name
+										\   ${resp_uri}     	Get From Dictionary		${resp['members'][${x}]}   uri
+										\   return from Keyword If  '${Name}' == '${resp_name}'   ${resp_uri}
+										
+Build EG Payload
+    [Documentation]    Build json payload to Add new Enclosure Group
+    [Arguments]    ${EG_Name}    ${LIG_ENC_LIST}
+    
+    ${InterconnectBayMappings}=    Create List
+    ${enclosure_count}=  Get Length  ${LIG_ENC_LIST}
+    ${x}=  Create List
+    :FOR  ${each_enclosure}  IN RANGE  0  ${enclosure_count}
+    \	${LIG_NAME}=  Set Variable  ${LIG_ENC_LIST[${each_enclosure}]}
+    \	${LIG_uri}=    Get Logical Interconnect Group Uri    ${LIG_NAME}
+    \   ${interconnect_bay}=  Get Logical Interconnect Group Bay  ${LIG_NAME}
+    \	${enclosure_index}=	 Evaluate  ${each_enclosure}+1
+    \	${InterconnectBay}=  Create EG Bay Payload   ${enclosure_index}   ${LIG_uri}  ${interconnect_bay}
+    \	${InterconnectBayMappings}=  Combine Lists    ${InterconnectBayMappings}     ${InterconnectBay}
+    # Create Dictionary Structure
+    ${EnclosureGroups}    Create Dictionary    type=EnclosureGroupV300
+    ...                                        name=${EG_Name}    
+    ...                                        stackingMode=Enclosure
+    ...                                        interconnectBayMappings=${InterconnectBayMappings}
+    ...										   interconnectBayMappingCount=6
+    ...										   ipAddressingMode=External
+    ...										   enclosureCount=${enclosure_count}
+    ...										   enclosureTypeUri="/rest/enclosure-types/SY12000"
+    Logger	  *********${EnclosureGroups}		DEBUG    
+    [Return]    ${EnclosureGroups}
+
+
+Create EG Bay Payload
+	[Documentation]    Build json payload to Add new Enclosure Group
+    [Arguments]    ${EnclosureIndex}  ${LIG_Uri}   ${Interconnect_Bay_Index}
+    
+    ${InterconnectBayMappings}=    Create List
+    	
+    ${InterconnectBay}=     Create Dictionary 
+    :FOR  ${bay}  IN  @{Interconnect_Bay_Index}
+    \	  ${InterconnectBay}=     Create Dictionary	    interconnectBay=${bay}
+    \	  ...  											logicalInterconnectGroupUri=${LIG_Uri}
+    \	  ...											enclosureIndex=${EnclosureIndex}
+    \	  Append To List    ${InterconnectBayMappings}     ${InterconnectBay}
+    Return From Keyword   ${InterconnectBayMappings}
+    
+Create Enclosure Group
+    [Documentation]    Creates a new Enclosure Group
+    [Arguments]    ${Name}    ${LIG_NAME_List}
+
+    # Build Payload
+    ${EnclosureGroups}=    Build EG Payload    ${Name}    ${LIG_NAME_List}
+    # Add Enclosure Groups
+    ${Response}=     Fusion API Create Enclosure Group    ${EnclosureGroups}
+    Logger   ^^^^^^^^${Response}		DEBUG
+    #Validate resource attribute  status_code  ${Name}  ${Response}  
+    #Get LIG and EG Uris by Name
+    #${LIG_uri}=    Get Logical Interconnect Group Uri    ${LIG_NAME}
+    ${EG_uri}=     Get From Dictionary  ${Response}  uri
+    #Validation of EG and LIG
+    
+    Log to console 	Validation for ${EG_uri}
+    Validate resource attribute  status_code  ${Name}  ${Response}
+    Validate resource attribute  uri  ${EG_uri}  ${Response}
+    Validate resource attribute  status   ${EG_uri}  ${Response}  OK
+    #Validate resource attribute  name  ${Name}  ${Response}  ${Name}
+    #${LIG_resp}		Fusion Api Get Resource			uri=${LIG_uri}
+    #Log to console  Validation for ${LIG_uri}
+    #Validate resource attribute  status_code  ${LIG_uri}  ${Response}    
+    
+
+######################################END of EG Keywords########################################################################
+
+######################################Start of LE Keywords######################################################################
+
+Build Logical Enclosure Payload
+    [Documentation]    Build json payload to Add new Logical Enclosure
+    [Arguments]    ${Name}    ${EG_NAME}
+
+    ${EG_uri}=    Get Enclosure Group Uri    ${EG_NAME}
+    #${interconnect_bay}=  Get Logical Interconnect Group Bay  ${LIG_NAME}
+    # Create InterconnectBayMappings Dictionary
+    ${enclosureUris}=    Create List  "/rest/enclosures/0000000000A66101","/rest/enclosures/0000000000A66102","/rest/enclosures/0000000000A66103"
+	
+    # Create Dictionary Structure
+    ${LogicalEnclosure}    Create Dictionary    name=${Name}    
+    ...                                        enclosureGroupUri=${EG_uri}
+    ...                                        enclosureUris=${enclosureUris}
+    [Return]    ${LogicalEnclosure}
+    
+    
+Create Logical Enclosure 
+    [Documentation]    Creates a new Enclosure Group
+    [Arguments]    ${Name}    ${EG_NAME}
+
+    # Build Payload
+    ${LogicalEnclosure}=    Build Logical Enclosure Payload    ${Name}    ${EG_NAME}
+    Log to console  ***${LogicalEnclosure}
+	
+    # Add Enclosure Groups
+    ${Response}=      Fusion Api Create Logical Enclosure    ${LogicalEnclosure}
+    
+    Log to console  ${Response}
+    
+    #Get LIG and EG Uris by Name
+    #${LIG_uri}=    Get Logical Interconnect Group Uri    ${LIG_NAME}
+    #${EG_uri}=     Get From Dictionary  ${Response}  uri
+    #Validation of EG and LIG
+    
+    #Log to console 	Validation for ${EG_uri}
+    #Validate resource attribute  status_code  ${Name}  ${Response}    201
+    #Validate resource attribute  uri  ${EG_uri}  ${Response}
+    #Validate resource attribute  status   ${EG_uri}  ${Response}  OK
+    #Validate resource attribute  name  ${Name}  ${Response}  ${Name}
+    #${LIG_resp}		Fusion Api Get Resource			uri=${LIG_uri}
+    #Log to console  Validation for ${LIG_uri}
+    #Validate resource attribute  status_code  ${LIG_uri}  ${Response}    201
+
+
+Verify sas_Interconnects
+	[Documentation]   Verify sas-interconnect through rest
+    [Arguments]    ${sas_interconnect_list}
+    ${length} =		Get Length  ${sas_interconnect_list}
+    :FOR	${x}	IN RANGE	0	${length}
+    \	${sasInterconnectUri}=  Set Variable  ${sas_interconnect_list[${x}]}
+    \	Logger		\n Validating for ${sasInterconnectUri}
+    \	${resp2}=   Fusion Api Get Resource			uri=${sasInterconnectUri}
+    \	Validate resource attribute  status_code  ${sasInterconnectUri}  ${resp2}    200
+    \	Validate resource attribute  state	 ${sasInterconnectUri}  ${resp2}     
+######################################END of LE Keywords########################################################################
+
+######################################Start of JBOD ############################################################################
+Build sas logical jbod Payload
+    [Documentation]    Build json payload to Add new sas logical jbod
+    [Arguments]    ${jbod_Name}    ${sasLogicalInterconnectUri}
+
+    # Create InterconnectBayMappings Dictionary
+    #${enclosureUris}=    Create List  "/rest/enclosures/0000000000A66101"
+	
+	#${drive_enc_resp}=  Fusion Api Get Resource  uri=${drive_enclosure_uri}
+	#Logger   *****${drive_enc_resp['members'][0]['driveBays']}
+	#${drive_bays_len}=  Get Length  ${drive_enc_resp['members'][0]['driveBays']}
+	#Logger  *****${drive_bays_len}
+	#:FOR  ${drive_num}  IN RANGE  0  ${drive_bays_len}
+	#\	  
+	#exit
+	${driveTechnology_dict}  Create Dictionary  deviceInterface=${0}
+	...											driveMedia=${1}
+    # Create Dictionary Structure
+    ${sas_logical_jbod}    Create Dictionary   name=${jbod_Name} 
+    ...										   type=${sasLogicalJbodType}
+    ...										   numPhysicalDrives=2
+    ...										   minSizeGB=${LJbodminSizeGB}
+    ...										   maxSizeGB=${LJbodmaxSizeGB}
+    ...										   clearMetaData=false
+    ...										   driveTechnology=${driveTechnology_dict}
+    ...										   sasLogicalInterconnectUri= ${sasLogicalInterconnectUri}
+    [Return]   ${sas_logical_jbod}
+
+####################################End of JBOD keywords########################################################################
+
+######################################Start of Validation Keywords##############################################################
+Validating task URI 
+	[Documentation]	Validates the given response for the particular task
+	[Arguments]		${resp}		${task_status}	
+	Logger		${resp}		DEBUG
+	${uri} = 	Get From Dictionary		${resp}	uri
+	Logger		The task uri is ${uri}
+	${resp}		Fusion Api Get Li			uri=${uri}
+	Logger 		Response from taskuri ${resp}		DEBUG
+	Validate resource attribute	taskStatus  ${uri}  ${resp}   ${task_status}
+	Validate resource attribute	taskState  ${uri}  ${resp}   ${task_state}
+	
+
+Validate resource attribute
+	[Documentation]  Verify the permitted interconnect type of the resource and log messages if the permitted interconnect type is not the expected one
+    [Arguments]      ${attribute}  ${uri}  ${response}   ${expected_attribute_value}=''
+    ${list} =  Create List  '201' '202' '200'
+    ${actual_attribute_value} =   get from dictionary     ${response}     ${attribute}
+    Run Keyword If  "${attribute}" in ['uri','productName']
+    ... 	Run Keyword If  "${actual_attribute_value}" is 'None'  Fail    msg=Failed as the actual ${attribute} has None as the value
+    Run Keyword If  "${attribute}" == 'status_code'
+    ...     List should contain Value  @{list}  '${actual_attribute_value}'  msg='Failed as the actual ${attribute} is ${actual_attribute_value} and expected is @{list}'
+    Run Keyword If  "${attribute}" not in ['uri','productName','status_code']
+   	...     Run Keyword If  "${actual_attribute_value}" is not '${expected_attribute_value}'  Fail    msg=Failed as the actual ${attribute} is ${actual_attribute_value} and expected is ${expected_attribute_value}
+    Run Keyword If  '${attribute}' == 'state'
+    ...     Run Keyword If   "${actual_attribute_value}" not in ['ConfigError','Configured']  Fail    msg=Failed as the actual ${attribute}  in Configuring state
+    Log to console  SUCCESS:The ${attribute} of the above uri is ${actual_attribute_value}
+
+Output Response Error Messages
+    [Documentation]     Output all response errors
+    [Arguments]     ${response}
+    Log     \n Response code is: ${response['status_code']}  console=${True}
+    Log     \n Message: ${response['message']}  console=${True}
+    Log     \n recommendedActions: ${response['recommendedActions']}  console=${True}
+    
+Validate URI for the response
+	[Documentation]  Verify the URI of the resource and log message if the URI is not available
+    [Arguments]      ${response}
+    ${actual_resp_uri} =   get from dictionary  ${response}  uri
+    #Log to console 		***${actual_resp_uri} 
+	Run Keyword If  "${actual_resp_uri}" is 'None'  Fail    msg=The expected URI is not available  
+	Log to Console   SUCCESS:The Uri from the response is ${actual_resp_uri}	
+######################################End of Validation Keywords###############################################################
+
+######################################CLI Keywords#############################################################################
+Login to Fusion via SSH
+    [Documentation]             Connect to Fusion VM Bash via SSH
+    ...                         Example:\n| Login to Fusion Via SSH | 10.0.12.106 | Administrator | hpvse123 |
+    [Arguments]                 ${IP}      ${USERNAME}  ${PASSWORD}
+    #Log Many                    ${IP}                   ${USERNAME}     ${PASSWORD}     ${PROMPT}   ${TIMEOUT}
+    #Set Default Configuration   prompt=${PROMPT}        timeout=${TIMEOUT}
+    ${Id}=                      Open Connection         ${IP}    alias=${ALIAS}
+    ${OP}=                  Login                   ${USERNAME}     ${PASSWORD}
+    #[Return]                    ${Id}
+    
+    
+Execute the command and log the output
+	[Documentation]             Execute the command and log the output
+	[Arguments]					${command}
+										
+    									Log to Console	Command executed is ${command} \n
+										Write 	 ${command}
+    									${Output}=          Read     delay=0.5s
+    									Log to console  ${Output}
+			
+######################################END of CLI Keywords######################################################################

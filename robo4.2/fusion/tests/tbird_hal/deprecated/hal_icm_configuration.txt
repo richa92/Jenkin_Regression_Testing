@@ -1,0 +1,461 @@
+*** Settings ***
+Documentation   Verifies Interconnect Module Configuration settings
+...             = Usage =
+...             | pybot | -L DEBUG | hal_icm_configuration.txt |
+...             = Variables =
+...             | FUSION IP     | Required; IP address of the FusionVM to use |
+...             | ENCLOSURE     | Required; Enclosure name to run on (dcs, tesla, etc) |
+...             = Preconditions =
+...             None
+
+Library             RoboGalaxyLibrary               # RoboGalaxy Robot Framework extensions
+Library             FusionLibrary                   # RoboGalaxy Fusion extensions
+Variables           ../resources/variables.py       ${ENCLOSURE}    # Variables file
+Resource            ../resources/fusion_api.txt     # AM-DVT fusion API extensions
+Resource            ../resources/hal_webapp.txt     # AM-DVT HAL webapp extensions
+Resource            ../resources/fusion_cli.txt     # AM-DVT fusion CLI extensions
+Resource            ../resources/system_info.txt    # AM-DVT System Info extensions
+Resource            ../resources/defaults.txt       # AM-DVT default variables
+Force Tags          HAL  DCS  HW
+
+Suite Setup         Run Keywords
+...                 Login to Fusion Via REST
+#...                Verify Claimed EM     # Keyword not available
+...                 Select Random Populated ICM Bay
+...                 Get Initial ICM Configuration
+Suite Teardown      Run Keywords
+...                 Restore Initial ICM Configuration
+...                 Logout of Fusion Via REST
+
+
+*** Variables ***
+${Invalid Bay}      25
+
+# Error message is received due to the empty response when attempting to get information from an empty bay
+# Currently this is not handled correctly and an empty JSON structure is returned. (#AM47)
+${Error Message}     Failed to get/set Icm Configuration information.: ERROR != SUCCESS
+
+# ICM Configurations reported differ on DCS and HW.
+@{ICM Configs}    IPv4NetworkConfiguration
+...               IPv6NetworkConfiguration
+...               ClientAccessCredentials 
+
+# Using separate model files for DCS and HW due to differences in available fields.
+${HW Model}     hal_icm_configuration_model_hw.xml
+${DCS Model}    hal_icm_configuration_model_dcs.xml
+
+*** Test Cases ***
+Verify ICM Properties
+	${Model}=    Set Variable If    '${DCS}'=='${TRUE}'    ${DCS Model}    ${HW Model}
+    Run All Transitions Model   model=${Model}
+
+#-----------------------------------------------------------------------
+# NEGATIVE TEST CASES
+#-----------------------------------------------------------------------
+Set IPv4 DNS to a invalid IP address
+    # Build Payload
+    # Should be a valid IP address
+    # "DNS": [ { "IpAddress": "0.0.0.0" } ],
+    ${IpAddress}=   Create Dictionary   IpAddress   256.255.255.255
+    ${DNS}=         Create List         ${IpAddress}
+
+    # Set ICM Configuration
+    ${fields}=      Create Dictionary       DNS                         ${DNS}
+    # On HW, Expect Error message when attempting to Set DNS IpAddress value to an invalid value
+    Run Keyword If    '${DCS}'=='${False}'
+    ...    Run Keyword and Expect Error                ${Error Message}
+    ...                 Set and Update Expected Configuration   IPv4NetworkConfiguration    ${fields}
+    # On DCS, no error message is expected
+    Run Keyword If    '${DCS}'=='${True}'
+    ...                 Set and Update Expected Configuration   IPv4NetworkConfiguration    ${fields}
+
+Set IPv4 NTP to a invalid IP address
+    # Build Payload
+    # Should be a valid IP address
+    # "DNS": [ { "IpAddress": "0.0.0.0" } ],
+    ${IpAddress}=   Create Dictionary   IpAddress   256.255.255.255
+    ${NTP}=         Create List         ${IpAddress}
+
+    # Set ICM Configuration
+    ${fields}=      Create Dictionary       NTP                         ${NTP}
+    # On HW, Expect Error message when attempting to Set NTP IpAddress value to an invalid value
+    Run Keyword If    '${DCS}'=='${False}'
+    ...              Run Keyword and Expect Error                ${Error Message}
+    ...                 Set and Update Expected Configuration   IPv4NetworkConfiguration    ${fields}
+    # On DCS, no error message is expected
+    Run Keyword If    '${DCS}'=='${True}'
+    ...                 Set and Update Expected Configuration   IPv4NetworkConfiguration    ${fields}
+
+
+Get ICM Configuration for Empty Bay
+    ${Bay}=             Select Random Empty Interconnect Bay
+    Log To Console      \nTesting on Interconnect in Bay ${Bay}
+    # Error message is received due to the empty response when attempting to get information from an empty bay
+    Run Keyword and Expect Error                ${Error Message}
+    ...                 Get ICM Configuration   ${Bay}
+
+Get ICM Configuration for Invalid Bay
+    Log To Console      \nTesting on Interconnect in Bay ${Invalid Bay}
+    # Error message is received due to the empty response when attempting to get information from an invalid bay
+    Run Keyword and Expect Error                ${Error Message}
+    ...                 Get ICM Configuration   ${Invalid Bay}
+
+Set ICM Configuration for Empty Bay
+    ${Bay}=             Select Random Empty Interconnect Bay
+    Log To Console      \nTesting on Interconnect in Bay ${Bay}
+
+    # Build Payload
+    ${fields}=          Create Dictionary   DHCP                        ${True}
+    ${Properties}=      Create Dictionary   IPv4NetworkConfiguration    ${fields}
+
+    # Error message is received due to the empty response when attempting to set information on an empty bay
+    Run Keyword and Expect Error    ${Error Message}
+    ...     Set ICM Configuration   ${Bay}      ${Properties}
+
+Set ICM Configuration for Invalid Bay
+    Log To Console      \nTesting on Interconnect in Bay ${Invalid Bay}
+    # Build Payload
+    ${fields}=          Create Dictionary   DHCP                        ${True}
+    ${Properties}=      Create Dictionary   IPv4NetworkConfiguration    ${fields}
+
+    # Error message is received due to the empty response when attempting to set information on an invalid bay
+    Run Keyword and Expect Error    ${Error Message}
+    ...     Set ICM Configuration   ${Invalid Bay}      ${Properties}
+
+Set ICM Configuration with an Invalid Property
+    ${Bay}=             Select Random Empty Interconnect Bay
+    Log To Console      \nTesting on Interconnect in Bay ${Invalid Bay}
+
+    # Build Payload
+    ${fields}=          Create Dictionary   fakeField                   ${True}
+    ${Properties}=      Create Dictionary   IPv4NetworkConfiguration    ${fields}
+
+    # Error message is received due to the empty response when attempting to set information on an invalid bay
+    Run Keyword and Expect Error    ${Error Message}
+    ...     Set ICM Configuration   ${Invalid Bay}      ${Properties}
+
+*** Keywords ***
+#-----------------------------------------------------------------------
+# MODEL BASED TESTING KEYWORDS
+#-----------------------------------------------------------------------
+Verify ICM Configuration
+    [Documentation]     Verifies that the Current ICM Configuration
+    ...                 matches the Expected ICM Configuration.
+    # Get ICM Configuration information from HAL
+    ${Response}=        Get ICM Configuration   ${Bay}
+    ${Current ICM Configuration}=               Get From Dictionary     ${Response}     OperationResult
+
+    # Verify Current Configuration is as Expected
+    Log    Issue #AM57: On Hardware, fields are not updated. Therefore verify against initial configuration    level=WARN
+    ${Expected Config}=    Set Variable If    '${DCS}'=='${TRUE}'    ${Expected ICM Configuration}    ${Initial ICM Configuration}
+    Dictionaries Should Be Equal    ${Current ICM Configuration}    ${Expected Config}
+    ...     msg=Current Configuration does not match Expected configuration on ICM ${Bay}.
+    
+    
+
+Enable ICM IPV4 DHCP
+    # Set ICM Configuration
+    ${fields}=      Create Dictionary       DHCP                        ${True}
+    Set and Update Expected Configuration   IPv4NetworkConfiguration    ${fields}
+
+Disable ICM IPV4 DHCP
+    # Set ICM Configuration
+    ${fields}=      Create Dictionary       DHCP                        ${False}
+    Set and Update Expected Configuration   IPv4NetworkConfiguration    ${fields}
+
+Modify ICM IPv4 DNS
+    # Build Payload
+    # Should be a valid IP address
+    # "DNS": [ { "IpAddress": "0.0.0.0" } ],
+    ${IpAddress}=   Create Dictionary   IpAddress   123.255.255.255
+    ${DNS}=         Create List         ${IpAddress}
+
+    # Set ICM Configuration
+    ${fields}=      Create Dictionary       DNS                         ${DNS}
+    Set and Update Expected Configuration   IPv4NetworkConfiguration    ${fields}
+
+Modify ICM IPv4 Gateway
+    # Set ICM Configuration
+    # "Gateway": "",
+    ${fields}=      Create Dictionary       Gateway                     0.0.0.0
+    Set and Update Expected Configuration   IPv4NetworkConfiguration    ${fields}
+
+Modify ICM IPv4 IpAddress
+    # Set ICM Configuration
+    # "IpAddress": "172.18.8.191",
+    ${fields}=      Create Dictionary       IpAddress                   255.255.255.255
+    Set and Update Expected Configuration   IPv4NetworkConfiguration    ${fields}
+
+Modify ICM IPv4 DNSMax
+    # DNSMax is a read only variable
+    ${fields}=      Create Dictionary   DNSMax              10
+    # Error message is received due to the empty response when attempting to modify a read only setting
+    Run Keyword If    '${DCS}'=='${TRUE}'
+    ...             Run Keyword and Expect Error        ${Error Message}
+    ...             Set and Update Expected Configuration   IPv4NetworkConfiguration    ${fields}
+    Log    Issue #AM57: Even read only fields return successful update on HW    level=WARN
+    Run Keyword If    '${DCS}'=='${FALSE}'
+    ...             Set and Update Expected Configuration   IPv4NetworkConfiguration    ${fields}
+
+Modify ICM IPv4 NetMask
+    # Set ICM Configuration
+    # "NetMask": "255.255.255.0",
+    ${fields}=      Create Dictionary       NetMask                     0.0.0.0
+    Set and Update Expected Configuration   IPv4NetworkConfiguration    ${fields}
+
+Modify ICM IPv4 NTP
+    # Build Payload
+    # Should be a valid IP address
+    # "DNS": [ { "IpAddress": "0.0.0.0" } ],
+    ${IpAddress}=   Create Dictionary   IpAddress   123.255.255.255
+    ${NTP}=         Create List         ${IpAddress}
+
+    # Set ICM Configuration
+    ${fields}=      Create Dictionary       NTP                         ${NTP}
+    Set and Update Expected Configuration   IPv4NetworkConfiguration    ${fields}
+
+Modify ICM IPv4 NTPMax
+    # NTPMax is a read only variable
+    ${fields}=      Create Dictionary   NTPMax              10
+    # Error message is received due to the empty response when attempting to modify a read only setting
+    Run Keyword If    '${DCS}'=='${TRUE}'
+    ...             Run Keyword and Expect Error        ${Error Message}
+    ...             Set and Update Expected Configuration   IPv4NetworkConfiguration    ${fields}
+    Log    Issue #AM57: Even read only fields return successful update on HW    level=WARN
+    Run Keyword If    '${DCS}'=='${FALSE}'
+    ...             Set and Update Expected Configuration   IPv4NetworkConfiguration    ${fields}
+
+Modify ICM IPv6 AddressSource
+    # "AddressSource": null,
+    ${fields}=          Create Dictionary       AddressSource               abcd
+    Set and Update Expected Configuration       IPv6NetworkConfiguration    ${fields}
+
+Modify ICM IPv6 Address
+    # "Address": {
+    #                   "IpAddress": "::",
+    #                   "PrefixLength": 128,
+    #                   "AddressSource": "Static"   # DCS ONLY
+    # },
+    ${PrefixLength}=    Convert To Integer      128
+    ${Address}=         Create Dictionary       IpAddress=::
+    ...                 PrefixLength=${PrefixLength}
+    Run Keyword If      '${DCS}'=='${True}'    
+    ...                 Set To Dictionary    ${Address}    AddressSource    Static
+    ${fields}=          Create Dictionary       Address                     ${Address}
+    Set and Update Expected Configuration       IPv6NetworkConfiguration    ${fields}
+
+Modify ICM IPv6 DNS
+    # "DNS": [
+    #                   {
+    #                   "IpAddress": "::",
+    #                   "PrefixLength": 128
+    #                   }
+    # ],
+    ${PrefixLength}=    Convert To Integer      128
+    ${Address}=         Create Dictionary       IpAddress=::
+    ...                 PrefixLength=${PrefixLength}
+    ${DNS}=             Create List             ${Address}
+    ${fields}=          Create Dictionary       DNS                         ${DNS}
+    Set and Update Expected Configuration       IPv6NetworkConfiguration    ${fields}
+
+Modify ICM IPv6 DNSMax
+    # "DNSMax": 4,
+    # DNSMax is a read only variable
+    ${fields}=      Create Dictionary   DNSMax              10
+    # Error message is received due to the empty response when attempting to modify a read only setting
+    Run Keyword If    '${DCS}'=='${TRUE}'
+    ...             Run Keyword and Expect Error        ${Error Message}
+    ...             Set and Update Expected Configuration   IPv6NetworkConfiguration    ${fields}
+    Log    Issue #AM57: Even read only fields return successful update on HW    level=WARN
+    Run Keyword If    '${DCS}'=='${FALSE}'
+    ...             Set and Update Expected Configuration   IPv6NetworkConfiguration    ${fields}
+
+Modify ICM IPv6 Gateway
+    # "Gateway": "::",
+    ${fields}=      Create Dictionary       Gateway                     abc::
+    Set and Update Expected Configuration   IPv6NetworkConfiguration    ${fields}
+
+Modify ICM IPv6 NTP
+    # "NTP": [
+    #                   {
+    #                   "IpAddress": "::",
+    #                   "PrefixLength": 128
+    #                   }
+    # ],
+    ${PrefixLength}=    Convert To Integer      128
+    ${IpAddress}=       Create Dictionary       IpAddress=::
+    ...                 PrefixLength=${PrefixLength}
+    ${NTP}=             Create List             ${IpAddress}
+    ${fields}=          Create Dictionary       NTP                         ${NTP}
+    Set and Update Expected Configuration       IPv6NetworkConfiguration    ${fields}
+
+Modify ICM IPv6 NTPMax
+    # "NTPMax": 4,
+    # NTPMax is a read only variable
+    ${NTPMax}=      Convert To Integer    10
+    ${fields}=      Create Dictionary   NTPMax              ${NTPMax}
+    # Error message is received due to the empty response when attempting to modify a read only setting
+    Run Keyword If    '${DCS}'=='${TRUE}'
+    ...             Run Keyword and Expect Error        ${Error Message}
+    ...             Set and Update Expected Configuration   IPv6NetworkConfiguration    ${fields}
+    Log    Issue #AM57: Even read only fields return successful update on HW    level=WARN
+    Run Keyword If    '${DCS}'=='${FALSE}'
+    ...             Set and Update Expected Configuration   IPv6NetworkConfiguration    ${fields}
+
+Modify ICM IPv6 LinkLocalAddress
+    # "LinkLocalAddress": "::",
+    ${fields}=      Create Dictionary       LinkLocalAddress            abc::
+    Set and Update Expected Configuration   IPv6NetworkConfiguration    ${fields}
+
+Modify ICM IPv6 Disable
+    # "Disable": {
+    #               "DHCPv6": false,
+    #               "SLAAC": false,
+    #               "StaticIPv6": false
+    # }
+    ${Disabled}=    Create Dictionary       DHCPv6=${TRUE}
+    ...             SLAAC=${TRUE}
+    ...             StaticIPv6=${FALSE}
+    ${fields}=      Create Dictionary       Disable                     ${Disabled}
+    Set and Update Expected Configuration   IPv6NetworkConfiguration    ${fields}
+
+Modify ICM ClientAccess UserName
+	#        "ClientAccessCredentials": {
+    #        "Password": "Password", 
+    #        "UserName": "Administrator"
+    #    },
+    ${fields}=                     Create Dictionary    UserName    myUser
+    Set and Update Expected Configuration   ClientAccessCredentials    ${fields}
+
+Modify ICM ClientAccess Password
+	#        "ClientAccessCredentials": {
+    #        "Password": "Password", 
+    #        "UserName": "Administrator"
+    #    },
+    ${fields}=                     Create Dictionary    Password    myPass
+    Set and Update Expected Configuration   ClientAccessCredentials    ${fields}
+
+#-----------------------------------------------------------------------
+# SETUP/CLEANUP KEYWORDS
+#-----------------------------------------------------------------------
+Get Initial ICM Configuration
+	# Determine Configuration for Enclosure
+	Set Suite Variable    ${ICM Configs}    ${ICM Configs}
+
+    # Get ICM Configuration information from HAL
+    ${Response}=    Get ICM Configuration   ${Bay}
+    ${Result}=      Get From Dictionary     ${Response}     OperationResult
+    
+    # Verify Results are not None
+    : FOR    ${config}    IN    @{ICM Configs} 
+    \    ${Config Attributes}=       Get From Dictionary    ${Result}    ${config}
+    \    Should Not Be Equal As Strings    ${Config Attributes}    None    msg=No ${config} found on ICM ${Bay}
+    
+    # Save Intial configuration for cleanup
+    ${Initial ICM Configuration}=    Evaluate    copy.deepcopy(${Result})     copy
+    Set Suite Variable      ${Initial ICM Configuration}    ${Initial ICM Configuration}
+
+    # Save Current configuration as Expected for verifications
+    ${Expected ICM Configuration}=    Evaluate    copy.deepcopy(${Initial ICM Configuration})     copy
+    Set Suite Variable      ${Expected ICM Configuration}   ${Expected ICM Configuration}
+
+Restore Initial ICM Configuration
+    # Make a deep copy of the initial configuration to be used to restore initial configuration.
+    ${Restore ICM Configuration}=   Evaluate    copy.deepcopy(${Initial ICM Configuration})     copy
+    ${FormattedDictionary}    Evaluate    json.dumps(${Restore ICM Configuration}, indent=${4}, sort_keys=${True})    json
+    Log      ${FormattedDictionary}
+
+	# Remove read only attributes from Restore Dictionary.
+    Run Keyword If    '${DCS}'=='${True}'        Remove Readonly attributes
+
+    # Restore Configuration
+    ${Response}=    Set ICM Configuration   ${Bay}      ${Restore ICM Configuration}
+
+    # Get ICM Configuration information from HAL
+    ${Response}=                    Get ICM Configuration   ${Bay}
+    ${Current ICM Configuration}=   Get From Dictionary     ${Response}     OperationResult
+
+    # Verify Current Configuration is the Initial Config
+    Dictionaries Should Be Equal    ${Current ICM Configuration}    ${Initial ICM Configuration}
+    ...     msg=Current Configuration does not match Initial configuration on ICM ${Bay}.
+
+Remove Readonly attributes
+	[Documentation]    Removes read only attribtues from Restore Dictionary.
+	
+	# Remove unmodifyable fields for IPv4NetworkConfiguration
+    ${Ipv4NetworkConfig}=       Get From Dictionary             ${Restore ICM Configuration}    IPv4NetworkConfiguration
+    Remove From Dictionary      ${Ipv4NetworkConfig}            DNSMax                          NTPMax
+    Set To Dictionary           ${Restore ICM Configuration}    IPv4NetworkConfiguration        ${Ipv4NetworkConfig}
+
+    # Remove unmodifyable fields for IPv6NetworkConfiguration
+    ${Ipv6NetworkConfig}=       Get From Dictionary             ${Restore ICM Configuration}    IPv6NetworkConfiguration
+    Remove From Dictionary      ${Ipv6NetworkConfig}            DNSMax                          NTPMax
+    Set To Dictionary           ${Restore ICM Configuration}    IPv6NetworkConfiguration        ${Ipv6NetworkConfig}
+
+#-----------------------------------------------------------------------
+# RESOURCE KEYWORDS
+#-----------------------------------------------------------------------
+Select Random Populated ICM Bay
+	[Documentation]    Select Random Interconnect Bay Number and set as Suite variable.
+	# Interconnect Bay Number is selected based on INTERCONNECT_DATA information in variables.py
+    ${Bay}=                 Select Random Populated Interconnect Bay
+    Log To Console          Testing on Interconnect in Bay ${Bay}
+    Set Suite Variable      ${Bay}      ${Bay}
+
+Get ICM Configuration
+    [Documentation]     Returns ICM Network Configuration information from HAL Webapp
+    ...                 Example:
+    ...                 | ${Response}= | Get ICM Configuration | 1 |
+    [Arguments]         ${Bay}
+
+    # Build Parameters
+    ${Bay}=             Convert To Integer      ${Bay}
+    ${Parameters}=      Create Dictionary       BayNumber      ${Bay}
+    ...                                         Properties     ${ICM Configs}
+
+    # Get ICM Configuration
+    ${Response}=        HAL API Perform Post Action     ${FUSION_IP}    IcmManagerGetConfig     ${Parameters}
+    ${status}=          Get From Dictionary             ${Response}     CallStatus
+    ${FormattedDictionary}    Evaluate    json.dumps(${Response}, indent=${4}, sort_keys=${True})    json
+    Log      ${FormattedDictionary}
+    Should Be Equal as Strings                          ${Status}       SUCCESS
+    ...                 msg=Failed to get/set Icm Configuration information.
+
+    [Return]    ${Response}
+
+Set and Update Expected Configuration
+    [Arguments]             ${ConfigType}       ${fields}
+    # Set ICM Configuration
+    ${Properties}=          Create Dictionary   ${ConfigType}   ${fields}
+    Set ICM Configuration   ${Bay}              ${Properties}
+
+    # Update Expected Configuration
+    ${config data}=     Get From Dictionary             ${Expected ICM Configuration}   ${ConfigType}
+    ${items}=           Get Dictionary Items            ${fields}
+    Set To Dictionary   ${config data}                  ${items[0]}                     ${items[1]}
+    Set To Dictionary   ${Expected ICM Configuration}   ${ConfigType}                   ${config data}
+    
+    # DEBUG
+    ${FormattedDictionary}    Evaluate    json.dumps(${Initial ICM Configuration}, indent=${4}, sort_keys=${True})    json
+    Log      ${FormattedDictionary}
+
+Set ICM Configuration
+    [Documentation]     Sets ICM Network Configuration information via HAL Webapp
+    ...                 Example:
+    ...                 | ${Response}= | Set ICM Configuration | 1 | {"IPv4NetworkConfiguration":{"DHCP":true}} |
+    [Arguments]         ${Bay}      ${Properties}
+
+    # Build Parameters
+    ${Bay}=             Convert To Integer      ${Bay}
+    ${Parameters}=      Create Dictionary       BayNumber       ${Bay}
+    ...                 Properties              ${Properties}
+
+    # Get ICM Configuration
+    ${Response}=        HAL API Perform Post Action     ${FUSION_IP}    IcmManagerSetConfig     ${Parameters}
+    ${status}=          Get From Dictionary             ${Response}     CallStatus
+    ${FormattedDictionary}    Evaluate    json.dumps(${Response}, indent=${4}, sort_keys=${True})    json
+    Log      ${FormattedDictionary} 
+    Should Be Equal as Strings                          ${Status}       SUCCESS
+    ...                 msg=Failed to get/set Icm Configuration information.
+
+    [Return]    ${Response}

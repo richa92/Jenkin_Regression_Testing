@@ -1,0 +1,312 @@
+*** Settings ***
+Documentation    Deploy Fusion ISO onto CIM using Atlas USB Key
+...    = Usage =
+...    pybot |-v ENCLOSURE:tesla |-v ISO_URL:<Fusion ISO Image> Deploy_CIM_Fusion.txt
+...    = Variables =
+...    | ENCLOSURE | (required) Name of the enclosure to  Deploy upon. (values from variables.py) |
+...    | ISO_URL | (optional) URL of Fusion ISO Image To Install (defaulted) |
+
+Library           String
+Library           Collections
+Library           DateTime
+Library           SSHLibrary
+Library           robot.api.logger
+Library           RoboGalaxyLibrary
+Library           FusionLibrary
+Variables         variables.py    ${ENCLOSURE}
+Resource          em_api.txt
+Resource          fusion_api.txt
+Resource          defaults.txt
+Resource          fusion_ssh.txt
+Resource          ../../../../../Resources/api/common/common.txt
+
+*** Variables ***
+${ISO_URL}=                    http://10.0.0.5/Cosmos/HPEOneView-SSH-3.00.00-0238054-PASS51.zip
+${INSTALLATION_TIME}           110 minutes
+${ADMIN_PASSWORD_POLL}         60 seconds
+${ADMIN_PASSWORD_RETRIES}      40
+${FUSION_TIMEOUT}              40 minutes
+${DUMP_FILE}                   fusion_dump.sdmp
+${PRIMARY_JSON_PATH}    /mnt/usb/CIM1-cic-manager-setup-config-30004.json
+${STANDBY_JSON_PATH}    /mnt/usb/CIM2-cic-manager-setup-config-30004.json
+${SCRIPT_HOST_IP}       16.125.64.36
+${REMOTE_SCRIPT_PATH}   ftp://${SCRIPT_HOST_IP}/OneView/310-Scripts/DD-Reimage/remote_script.sh
+${REIMAGE_SCRIPT_PATH}
+...     ftp://${SCRIPT_HOST_IP}/OneView/310-Scripts/DD-Reimage/developer_usb_reimage_two_node.sh
+
+*** Keywords ***
+Get Firmware Versions
+    [Documentation]    Login to OV using SSH
+    ...                Get Firmware Versions
+    Login to Fusion via SSH
+    Get Fusion Version
+    Get iLO Version
+    Get NIC Version
+
+Verify Claimed Enclosure
+    [Documentation]    Login to OV using SSh
+    ...    Verify Claimed Enclosure
+    ${command}=    Set Variable    /ci/bin/tbird/appliance-hal.sh list-enclosures
+    ${stdout}    ${stderr}    ${rc}=    Execute Command    ${command}    return_stderr=True
+    ...          return_rc=True
+    Should Be Equal As Integers    ${rc}    0    msg=Failed to get claimed enclosures.
+    Should Not Be Equal As Strings    ${stdout}     ${empty}
+    ...    msg=Failed to get an enclosure name returned
+    Log    Found Claimed Enclosure: ${stdout}    console=True
+
+Initiate DD Image Update
+    [Documentation]   Initiate DD Image Update
+    [Arguments]                 ${IP}=${MAINTANENCE_IP}      ${USERNAME}=${FUSION_SSH_USERNAME}
+    ...                         ${PASSWORD}=${FUSION_SSH_PASSWORD}    ${PROMPT}=${FUSION_PROMPT}
+    ...                         ${TIMEOUT}=${FUSION_TIMEOUT}    ${ALIAS}=Fusion_SSH
+    Log Many                    ${IP}                   ${USERNAME}     ${PASSWORD}
+    ...    ${PROMPT}   ${TIMEOUT}
+    Set Default Configuration   prompt=${PROMPT}        timeout=${TIMEOUT}
+    ${Id}=                      Open Connection         ${IP}    alias=${ALIAS}
+    ${Output}=                  Login                   ${USERNAME}     ${PASSWORD}
+
+    ${OV_PATH}    ${LATEST_OV_IMAGE}=    Split String From Right    ${ISO_URL}    /    1
+    Console    Modfying permissions on developer_usb_reimage.sh
+    Execute Command    chmod a+x /ci/etc/usb-reimage/developer_usb_reimage.sh
+
+    # Initiate USB update
+    # Set Client Configuration    timeout=80 minutes
+    ${command}=    Set Variable    /ci/etc/usb-reimage/developer_usb_reimage.sh
+    ...    -u ${OV_PATH} -f ${LATEST_OV_IMAGE} -E
+    Console    Executing Command '${command}'.
+    SSHLibrary.Write    ${command}
+    Console    developer_usb_reimage.sh script is running...
+
+    # Wait for script messages
+    Wait Until Keyword Succeeds    20 minutes    2 minutes
+    ...    Read Until    Script succeeded
+    Console    developer_usb_reimage.sh script is succeeded. Waiting for reboot...
+    Run Keyword And Ignore Error
+    ...    Wait Until Keyword Succeeds    16 minutes    2 minutes
+    ...    Read Until    rebooting now
+    Console    Rebooting CIM now.
+
+Wait For Fusion Install and Startup
+    [Documentation]    Sleep for ${Installation_Time}.
+    ${DateTime}=    Get Current Date
+    Log    Time: ${DateTime}    console=True
+    Console    \nSleep for ${Installation_Time}.
+    Sleep    ${INSTALLATION_TIME}    reason=Waiting for installation, reboot and startup.
+
+Assign Administrator Password
+    [Documentation]    Assign Administrator Password for FTS
+    ${Creds}    Create Dictionary    newPassword    ${Fusion_Password}
+    ...                              oldPassword    ${Fusion_Factory_Password}
+    ...                              userName       ${Fusion_Username}
+    :FOR    ${INDEX}    IN RANGE    1    ${ADMIN_PASSWORD_RETRIES}
+    \    ${Status}    ${Response}    Run Keyword and Ignore Error
+    ...    Fusion Api Change Administrator Password    ${FUSION_IP}    ${Creds}
+    \    Run Keyword If    '${Status}'=='PASS'
+    ...    Log    Assigned Administrator password ${FUSION_PASSWORD}    console=True
+    \    Return From Keyword If    '${Status}'=='PASS'
+   # should be able to use status code, but that does not work, getting 500
+   # ...    Pass Execution If    ${Response['status_code']}==200
+    \    Console    \nIndex: ${INDEX}
+    \    Sleep    ${ADMIN_PASSWORD_POLL}
+    Fatal Error    msg=Error Assigning Administrator Password
+
+Appliance Login
+    [Documentation]    Login to appliance using API request
+    ${creds}    Create Dictionary    userName    ${Fusion_Username}
+    ...    password    ${Fusion_Password}
+    ${response}    ${sessionid}    Fusion Api Login Appliance
+    ...    ${FUSION_IP}    ${creds}
+    Run Keyword If    ${response['status_code']}==200    Log
+    ...    Successful first-time login    console=True
+    Return From Keyword If    ${response['status_code']}==200
+    Fail         msg=Error Login Administrator first-time ${response['message']}
+
+Write Fusion Properties
+    [Documentation]    Echo Fusion details
+    Run    echo \# %JOB_NAME% %DATE% %TIME% > C:\\Jenkins\\Fusion-CIM.properties
+    Run    echo FUSION_IP=${FUSION_IP} >> C:\\Jenkins\\Fusion-CIM.properties
+    Run    echo FUSION_URL=https://${FUSION_IP} >> C:\\Jenkins\\Fusion-CIM.properties
+    Run    echo FUSION_VERSION=${FUSION_VERSION} >> C:\\Jenkins\\Fusion-CIM.properties
+
+Generate Fusion Dump and Log After Network Initialization
+    [Documentation]    Generate Fusion Dump and Log After Network Initialization
+    Login to Fusion Via SSH
+    Run Keyword And Ignore Error
+    ...  SSHLibrary.Get File    /ci/logs/ciDebug.*
+    Logout of Fusion Via SSH
+    Login to Fusion Via REST
+    ${Status}  ${R}=   Run Keyword And Ignore Error
+    ...  Create And Download Support Dump    ${DUMP_FILE}
+    Run Keyword If   "${Status}" == "FAIL"
+    ...  Log    AM92: Fusion Dump Failed        level=Warn
+
+Stop cluster service on Standby CIM
+    [Documentation]    Stop cluster service on Standby CIM
+    [Arguments]    ${IP}=${STANDBY_CIM}    ${USERNAME}=${EM_LOGIN}
+    ...    ${PASSWORD}=${EM_PASSWORD}      ${PROMPT}=${FUSION_PROMPT}
+    ...    ${TIMEOUT}=${FUSION_TIMEOUT}
+    Log Many    ${IP}    ${USERNAME}    ${PASSWORD}    ${PROMPT}    ${TIMEOUT}
+    Set Default Configuration    prompt=${PROMPT}    timeout=${TIMEOUT}
+    ${Id}=    Open Connection    ${IP}
+    ${Output}=    Login    ${USERNAME}    ${PASSWORD}
+    ${Command} =     Set Variable    service cluster stop && service jetty-cluster stop
+    ${stdout}    ${stderr}    ${rc}=     Execute Command	${Command}
+    ...    return_stderr=True    return_rc=True
+    Log    ${stdout}
+    Should Be Equal As Integers     ${rc}     0     msg=non-zero return code ${rc}
+
+Stop cluster service on Active CIM
+    [Documentation]   Stop cluster service on Active CIM
+    [Arguments]    ${IP}=${ACTIVE_CIM}    ${USERNAME}=${EM_LOGIN}
+    ...    ${PASSWORD}=${EM_PASSWORD}     ${PROMPT}=${FUSION_PROMPT}
+    ...    ${TIMEOUT}=${FUSION_TIMEOUT}
+    Log Many    ${IP}    ${USERNAME}    ${PASSWORD}    ${PROMPT}    ${TIMEOUT}
+    Set Default Configuration    prompt=${PROMPT}    timeout=${TIMEOUT}
+    ${Id}=    Open Connection    ${IP}
+    ${Output}=    Login    ${USERNAME}    ${PASSWORD}
+    ${Command} =     Set Variable    service cluster stop && service jetty-cluster stop
+    ${stdout}    ${stderr}    ${rc}=     Execute Command    ${Command}
+    ...    return_stderr=True    return_rc=True
+    Log    ${stdout}
+    Should Be Equal As Integers     ${rc}     0     msg=non-zero return code ${rc}
+    Sleep     180
+
+Ping Ipv4 Address
+    [Documentation]    Ping the IP address and retun Unreachable or Pingable.
+    [Arguments]    ${ipv4address}
+    ${rc}    ${output} =    Run and return RC and Output    ping -n 4 ${ipv4address}
+    ${gottask}     ${response} =  Run Keyword and Ignore Error    Should be equal
+    ...    ${rc}    ${0}    \n${output}
+    ${value1}=    Evaluate    'Request timed out'
+    ${value2}=    Evaluate    'Destination host unreachable'
+    ${failStatus1}     ${response} =  Run Keyword and Ignore Error
+    ...    Should Contain    ${output}    ${value1}
+    ${failStatus2}     ${response} =  Run Keyword and Ignore Error
+    ...    Should Contain    ${output}    ${value2}
+    Run Keyword If    '${failStatus1}'=='PASS' or '${failStatus2}'=='PASS'
+    ...    Return From Keyword    Unreachable
+    ...    ELSE    Return From Keyword    Pingable
+
+Wait For Primary CIM To Reboot
+    [Documentation]    Ping and wait for primary CIM untill reboots
+    [Arguments]    ${ipv4address}    ${max_try}=20
+    Log    Waiting for CIM reboots to start Oneview installation  console=True
+
+    #Ping until IP becomes unreachable
+    :FOR  ${index}     in range  1  ${max_try}
+    \    ${res} =   Ping Ipv4 Address    ${ipv4address}
+    \    Exit For Loop If    '${res}'=='Unreachable'
+    \    Sleep    60s
+    Run Keyword If   ${index} == ${max_try}-1
+    ...  Fail   Failed to start DD reimage, plese check the /mnt/usb/reimage_logs
+
+Setup CIM USB Key Before Reimage
+    [Documentation]     First setup CIM USB Key for Cambridge.
+    ...      This test script is for Cambridge DD Re-Image only!
+    ...      For this to work, valid files, with the exact names of:
+    ...      CIM1-cic-manager-setup-config-300.json
+    ...      and CIM2-cic-manager-setup-config-300.json,
+    ...      must be on each of the respctive CIM's.
+    ...      first cleanup the reimage logs
+    ...      next, delete existing JSON file on USB key.
+    ...      next, copy Cambridge JSON file located on USB Key to the
+    ...      name of cic-manager-setup-config.json
+    ...      This has to be done for both CIM's
+
+    [Arguments]    ${IP}=${STANDBY_CIM}    ${USERNAME}=${EM_LOGIN}    ${PASSWORD}=${EM_PASSWORD}
+    ...            ${JSON}=${PRIMARY_JSON_PATH}    ${REIMAGE_SCRIPT_PATH}=${REIMAGE_SCRIPT_PATH}
+    ...           ${REMOTE_SCRIPT_PATH}=${REMOTE_SCRIPT_PATH}
+    ...            ${PROMPT}=${FUSION_PROMPT}    ${TIMEOUT}=${FUSION_TIMEOUT}
+    Login to Fusion via SSH    ${IP}    ${USERNAME}    ${PASSWORD}
+
+    #cleanup the reimage logs
+    Execute SSH Command    rm -rf /mnt/usb/reimage_logs/
+    ${list_directory} =    Execute SSH Command    ls /mnt/usb
+    Should Not Contain    ${list_directory}   reimage_logs
+
+    #Remove JSON File
+    Execute SSH Command    rm -rf /mnt/usb/cic-manager-setup-config.json
+    SSHLibrary.File Should Not Exist    /mnt/usb/cic-manager-setup-config.json
+
+    #Download DD Reimage Script
+    Execute SSH Command    wget -P /ci/etc/usb-reimage/ ${REIMAGE_SCRIPT_PATH}
+    SSHLibrary.File Should Exist    /ci/etc/usb-reimage/developer_usb_reimage_two_node.sh
+
+    #Change Mode oF DD Reimage Script
+    Execute SSH Command    chmod +x /ci/etc/usb-reimage/developer_usb_reimage_two_node.sh
+
+    #Download Remote Script
+    Execute SSH Command    wget -P /ci/etc/usb-reimage/ ${REMOTE_SCRIPT_PATH}
+    SSHLibrary.File Should Exist    /ci/etc/usb-reimage/remote_script.sh
+
+    #Change Mode oF DD Reimage Script
+    Execute SSH Command    chmod +x /ci/etc/usb-reimage/remote_script.sh
+
+    #Copy Release Respective JSON
+    Execute SSH Command    cp ${JSON} /mnt/usb/cic-manager-setup-config.json
+    SSHLibrary.File Should Exist    /mnt/usb/cic-manager-setup-config.json
+    Logout of Fusion Via SSH
+
+Initiate DD Reimage On Two Node HA
+    [Documentation]    SSH to Oneview appliance,
+    ...    factory reset EMs and execute DD Image installation.
+    ...    Installing OneView on both CiM's...
+    ...    It can only be executed for both CIM's if in a Highly Available state.
+    ...    Currently the two-node script is implemented without any options.
+    ...    Reimage command
+    ...    "/ci/etc/usb-reimage/developer_usb_reimage_two_node.sh -u $baseurl -f $ddimage"
+    ...    Wait for 10 Minutes inbetween DD Image installations.
+    ...    If no EM Reset has taken place prior to this or if the EM Reset was unsuccessful,
+    ...    then this time between image install kickoffs should be 10 minutes,
+    ...    in order to prevent connection loss due to CIM resetting the EM,
+    ...    which will also affect the other CIM.
+    ...    CIM reboots to start Oneview installation -
+    ...    Main IP Address for OneView should go offline in 20 minutes or less
+    ...    Ping host until OneView goes down to know when to start the re-image timer
+
+    [Arguments]                 ${IP}=${MAINTANENCE_IP}      ${USERNAME}=${FUSION_SSH_USERNAME}
+    ...                         ${PASSWORD}=${FUSION_SSH_PASSWORD}    ${PROMPT}=${FUSION_PROMPT}
+    ...                         ${TIMEOUT}=${FUSION_TIMEOUT}    ${ALIAS}=Fusion_SSH
+
+    Log Many                    ${IP}                   ${USERNAME}     ${PASSWORD}
+    ...    ${PROMPT}   ${TIMEOUT}
+    ${id}=                      Open Connection         ${IP}    alias=${ALIAS}
+    ${output}=                  Login                   ${USERNAME}     ${PASSWORD}
+
+    ${ov_path}    ${latest_ov_image}=    Split String From Right    ${ISO_URL}    /    1
+
+    # Initiate USB update
+    Set Client Configuration    timeout=20 minutes
+    ${command}=    Set Variable
+    ...    /ci/etc/usb-reimage/developer_usb_reimage_two_node.sh -u ${ov_path} -f ${latest_ov_image}
+
+    Console    Executing Command '${command}'
+    SSHLibrary.Write    ${command}
+    Wait Until Keyword Succeeds    60 minutes    2 minutes
+    ...    Read Until    Verifying USB is mounted.
+    Console    Verifying USB is mounted...
+
+    Wait Until Keyword Succeeds    10 minutes    2 minutes
+    ...    Read Until    Downloading dd-image file.
+    Console    Downloading dd-image file...
+
+    #Consumes and returns everything available on the server output
+    Log     Clearing std_output    console=True
+    :FOR  ${index}     in range  1  20
+    \    ${res} =   Read    delay=30s
+    \    Log    ${res}    console=True
+
+    Wait for Primary CIM To Reboot      ${IP}
+
+Set Fusion Version Metadata
+    [Documentation]    Set Suite Metadata
+    ...               Get Appliance Version
+    Set Suite Metadata     Deployed URL    ${ISO_URL}    top=True
+    Set Suite Metadata     Fusion URL:       https://${FUSION_IP}    top=True
+    Login to Fusion via REST    ${FUSION_IP}    ${FUSION_USERNAME}    ${FUSION_PASSWORD}
+    ${response}=    Fusion Api Get Appliance Version
+    Logout of Fusion Via REST
+    Log    ${response}
+    ${softwareversion}    Get from Dictionary    ${response}    softwareVersion
+    Set Suite Variable    ${FUSION_VERSION}    ${softwareversion}
+    Set Suite Metadata    Fusion Version    ${FUSION_VERSION}       top=True

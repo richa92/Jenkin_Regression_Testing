@@ -1,0 +1,283 @@
+*** Settings ***
+Documentation   Performing CHO tests to verify performance of product with basic operations(Create/Edit/Delete sequence with logical configurations)
+
+Suite Setup         Login to Fusion Via REST
+# Suite Teardown     Run Keyword If Any Critical Tests Failed    Fatal Error
+...                 msg=Critical test case failed so test suite can't continue
+Library             ../UserInputs/functions.py
+Resource            ../Resources/resources.txt
+Resource            ./../../../../Resources/api/fusion_api_resource.txt
+Variables           ../UserInputs/variablesforCHO.py
+
+
+*** Test Cases ***
+
+Running CHO iterations
+    [Documentation]     Asking user to give numbers of iterations for CHO Test
+    [Tags]              F176
+
+    ${N}=   set variable    3
+    :FOR    ${i}            IN RANGE        0   ${N}
+    \       Creation of LIG
+    \       Validating Attributes For LIG
+    \       EG creation for LE
+    \       Power off ALL servers
+    \       CREATE SP - For CHO
+    \       Edit ServerProfile For CHO      ${Edit_SP_global}
+    \       Delete ServerProfile
+    \       Deletion of LE
+    \       Delete EG
+    \       Deletion of LIG
+
+
+*** keywords ***
+
+Creation of LIG
+    [Documentation]     Creating combinations of logical interconnect groups from the list provided in the variables.py file \n
+    [Tags]              F176
+
+    Create LIG with bay combinations    ${LIG_Names}
+
+Validating Attributes For LIG
+    [Documentation]     Getting the Sas Logical interconnect and validating each UID for Status, State, Power, Model and Serial Number \n
+    [Tags]              F176
+
+    Set Log Level   TRACE
+    ${resp}         Fusion Api Get Resource     uri=/rest/sas-logical-interconnect-groups
+    Logger          \n Validating for /rest/sas-logical-interconnect-groups
+    Validate URI for the response               ${resp}
+    ${length} =     Get Length                  ${resp['members']}
+    :FOR            ${x}                        IN RANGE                0               ${length}
+    \               ${resp_uri}                 Get From Dictionary     ${resp['members'][${x}]}        uri
+    \               Logger                      \n Validating for ${resp_uri}
+    \               ${resp_uri1}                Fusion Api Get Resource                 uri=${resp_uri}
+    \               Validate resource attribute                         uri             ${resp_uri}     ${resp_uri1}
+    \               Validate resource attribute                         status_code     ${resp_uri}     ${resp_uri1}    200
+    \               Validate resource attribute                         state           ${resp_uri}     ${resp_uri1}
+    \               ...                         ${lig_state}
+    \               Validate resource attribute                         permittedInterconnectTypeUri    ${resp_uri}
+    \               ...                         ${resp_uri1['interconnectMapTemplate']['interconnectMapEntryTemplates'][0]}
+    \               ...                         ${permittedInterconnectTypeUri}
+
+EG creation for LE
+    [Documentation]     After Getting on encl ring topology creation of EG LE & LIs
+    [Tags]              F176
+
+    Set Log Level       TRACE
+    ${getENCL}=         Fusion Api Get Resource     uri=/rest/enclosures
+    ${count}=           get from dictionary         ${getENCL}      count
+    logger              Tota count of encl is ${count}
+    run Keyword if      '${count}' == '1'           creating logical enclosure if single enclosure found    ${count}
+    ...                 ${getENCL}
+
+creating logical enclosure if single enclosure found
+    [Documentation]     After Getting on encl ring if only one encl present then we can create LE by this
+    [Arguments]         ${length}                   ${resp}
+    ${getENCL}=         Fusion Api Get Resource     uri=/rest/enclosures
+    ${count}=           get from dictionary         ${getENCL}              count
+    logger              ${count}
+    Logger              $$$$$$$$ you reached
+    ${enc_list1}=       Create List
+    :For                ${x}                        IN RANGE                0               ${count}
+    \                   ${enc_uri_enc}=             get from dictionary     ${getENCL['members'][${x}]}         uri
+    \                   Append to List              ${enc_list1}            ${enc_uri_enc}
+    Logger              @@@@@i am here with ${enc_list1}
+    ${LIG_List}=        Create List
+    :FOR                ${x}                        IN RANGE                0               ${count}
+    \                   Append to List              ${LIG_List}             ${LIG_Names[0]}
+    Create Enclosure Group                          ${EGNAMENO}             ${LIG_List}
+    ${LEpayload}=       Build Logical Enclosure Payload For Scale           ${LENAMENO}     ${EGNAMENO}         ${enc_list1}
+    ${LEResp}=          Fusion Api Create Logical Enclosure                 ${LEpayload}
+    Logger              Creating Logical Enclosure                          ${LENAMENO}
+    Logger              Create LE responce for one encloser is ${LEResp}    DEBUG
+    Validate resource attribute                     status_code             ${LEResp['headers']['Location']}    ${LEResp}
+    ...                 200
+    ## Validate API response For Scale              ${LEResp['headers']['Location']}
+    Wait Until Keyword Succeeds                     10 min                  10 sec
+    ...                 Validate computedPercentCompleteForLE
+    ...                 ${LEResp['headers']}
+    ${LIResp}=          Fusion Api Get Resource     uri=/rest/sas-logical-interconnects
+    logger              Response of LI is ${LIResp}
+    ${Status}           Get From Dictionary         ${LIResp}               status_code
+    run keyword if      '${Status}' == 200          Pass                    msg=LI is fine
+    ${length} =         Get Length                  ${LIResp['members']}
+    :FOR                ${x}                        IN RANGE                0               ${length}
+    \                   Run Keyword And Continue On Failure                 Logical Interconnect Should Exist
+    \                   ...                         ${LIResp['members'][${x}]}
+    ${getLE}            Fusion Api Get Resource     uri=/rest/logical-enclosures
+    logger              ${getLE}
+    Verifying LE & LI creation through Rest         ${getLE}
+    #Pass Execution     All features available in this version tested
+
+Build Logical Enclosure Payload For Scale
+    [Documentation]         Build json payload to Add new Logical Enclosure
+    [Arguments]             ${Name}             ${EG_NAME}      ${enc_list}
+    ${EG_uri}=              Get Enclosure Group Uri for LE      ${EG_NAME}
+    ${LogicalEnclosure}     Create Dictionary   name=${Name}
+    ...                     enclosureGroupUri=${EG_uri}
+    ...                     enclosureUris=${enc_list}
+    Logger                  the build le payload is ${LogicalEnclosure}
+    [Return]                ${LogicalEnclosure}
+
+Validate computedPercentCompleteForLE
+    [Documentation]     Verify the URI of the resource and log message if the URI is not available
+    [Arguments]         ${response}     ${uri}=Location     ${task_uri}=None
+
+    ${task_resp_uri}=       Run Keyword If              '${task_uri}'=='None'       Get from dictionary     ${response}
+    ...                     ${uri}
+    ...                     ELSE                        Set Variable                ${task_uri}
+    ${task_resp}=           Fusion API get resource     ${task_resp_uri}
+    ${computePercent}=      Set Variable                ${task_resp['computedPercentComplete']}
+    Logger                  The percent complete of the task is ${computePercent}   DEBUG
+    Run Keyword If          ${task_resp['computedPercentComplete']} != 100          FAIL
+    ...                     msg=Failed as the computed percent complete of the task is not 100 after the timeout
+
+Logical Interconnect Should Exist
+    [Documentation]     Verify if Logical Interconnect is exist
+    [Arguments]         ${resp}
+    ${sasLogicalInterconnectGroupAttached} =    get from dictionary     ${resp}
+    ...                 sasLogicalInterconnectGroupUri
+    ${length}=          Get Length              ${sasLogicalInterconnectGroupAttached}
+    run keyword if      '${length}' == 0        Fail
+    ...                 msg=sasLogicalInterconnectGroupURI name is null
+    logger              Attached SAS LIG URIs are ${sasLogicalInterconnectGroupAttached}
+    ${sasInterconnectAttached} =                get from dictionary     ${resp}         sasInterconnectUris
+    ${length}=          Get Length              ${sasInterconnectAttached}
+    ${state1} =         get from dictionary     ${resp}                 state
+    run keyword if      '${length}' == 0        Fail                    msg=sasInterconnectURI name is null
+    run keyword if      '${length}' == '1'      Logical Interconnect State Should Be    ${state1}   NotRedundant
+    run keyword if      '${length}' > '1'       Logical Interconnect State Should Be    ${state1}   Redundant
+    logger              ${state1}
+    logger              Attached interconnect uris are ${sasInterconnectAttached}
+    ${driveEnclosureAttached} =                 get from dictionary     ${resp}         driveEnclosureUris
+    ${length}=          Get Length              ${driveEnclosureAttached}
+    run keyword if      '${length}' == 0        Fail                    msg=driveEnclosureURI name is null
+    logger              Attached drive enclosure URI is ${driveEnclosureAttached}
+
+Logical Interconnect State Should Be
+    [Documentation]     Verifying state of logical interconnect
+    [arguments]         ${state}                        ${expected}
+    logger              state is ${state}
+    logger              expected is ${expected}
+    run keyword if      '${state}' != '${expected}'     Fail    msg=state for my expected is ${expected} and actual is ${state}
+
+Verifying LE & LI creation through Rest
+    [Documentation]     Verify creation of LE and LI
+    [Arguments]     ${getLE}
+
+    Logger          \n Validating for ${logicalEnclosureUri}
+    Validate resource attribute                 status_code     ${logicalEnclosureUri}              ${getLE}    200
+    Validate resource attribute                 uri             ${logicalEnclosureUri}              ${getLE}
+    ${length} =     Get Length                  ${getLE['members'][0]['logicalInterconnectUris']}
+    :FOR            ${x}                        IN RANGE        0                   ${length}
+    \               ${resp1_uri}=               Set Variable    ${getLE['members'][0]['logicalInterconnectUris'][${x}]}
+    \               Logger                      \n Validating for ${resp1_uri}
+    \               ${resp1}=                   Fusion Api Get Resource             uri=${resp1_uri}
+    \               Validate resource attribute                 status_code         ${resp1_uri}    ${resp1}    200
+    \               Validate resource attribute                 consistencyStatus   ${resp1_uri}    ${resp1}    CONSISTENT
+    \               Validate resource attribute                 permittedInterconnectTypeUri        ${resp1_uri}
+    \               ...                         ${resp1['interconnectMap']['interconnectMapEntries'][0]}
+    \               ...                         ${permittedInterconnectTypeUri}
+    \               Verify sas_Interconnects    ${resp1['sasInterconnectUris']}
+
+CREATE SP - For CHO
+    [Documentation]     Creating SP for CHO using json in variableforCHO file
+    [Tags]              F177
+    ${responses}=       Add Server Profile      ${SPpayload1}
+    Wait For Task2      ${responses}            timeout=3000    interval=15
+    Sleep               20
+
+Edit ServerProfile For CHO
+    [Documentation]     Edit Server Profile With Local Storage
+    [Arguments]         ${profile}                          ${headers}=${None}      ${api}=${None}      ${newname}=${None}
+    ${name} =           Get from Dictionary                 ${profile}              name
+    Log                 \nEditing Server Profile ${name}    console=True
+    Log                 \nEditing Server Profile Name to ${newname}                 console=True
+    Log                 \nheaders ${headers}                console=True
+
+    ${payload} =        Create Server Profile Put Payload   ${Edit_SP_global}
+    ${profile_dto} =    Get Resource                        SP:${name}
+    ${profile_etag} =   Get From Dictionary                 ${profile_dto}      eTag
+    ${profile_uri} =    Get From Dictionary                 ${profile_dto}      uri
+    Set to dictionary   ${payload}                          eTag                ${profile_etag}
+
+    # sasLogical JBODs
+    ${localStorage} =   Get From Dictionary     ${payload}      localStorage
+
+    # new name if suuplied
+    run keyword if      '${newName}'!='None'    Set to Dictionary   ${payload}      name    ${newName}
+    run keyword if      '${newName}'!='None'    Log                 \nEditing Server Profile Name to ${newName}     console=True
+
+    ${resp} =   Fusion Api Edit Server Profile      body=${payload}     uri=${profile_uri}      api=${api}
+    ...         headers=${headers}
+    Sleep       300
+    [return]    ${resp}
+
+Delete ServerProfile
+    [Documentation]     Delete Server Profiles
+    [Tags]              F177                        Smoke
+    [setup]             Run Keywords
+    ${SPResp}=          Fusion Api Get Resource     uri=${serverProfileUri}
+    Logger              \n Validating for ${serverProfileUri}
+    Validate resource attribute                     status_code             ${serverProfileUri}     ${SPResp}   200
+    Validate resource attribute                     uri                     ${serverProfileUri}     ${SPResp}
+    ${length} =         Get Length                  ${SPResp['members']}
+    Run keyword If      '${length}' == '0'          Pass With Warnings      msg=No server profile available for deletion
+    :FOR                ${x}                        IN RANGE                0                       ${length}
+    \                   ${SPUri}=                   Set Variable            ${SPResp['members'][${x}]['uri']}
+    \                   Logger                      Deleting ${SPUri} Server Profile
+    \                   ${SPoutResp}=               Fusion Api delete Server Profile                uri=${SPUri}
+    \                   Logger                      ******${SPoutResp}      DEBUG
+    \                   Validate resource attribute                         status_code             ${SPUri}    ${SPoutResp}
+    \                   ...                         200
+    \                   Wait Until Keyword Succeeds                         10 min                  15 sec
+    \                   ...                         Validate computedPercentComplete
+    \                   ...                         ${SPoutResp}
+
+Deletion of LE
+    [Documentation]     Delete Logical Enclosure with three enclosures and verifies LE and LI deletion
+    [Tags]              F176                        Smoke
+    [setup]             Run Keywords
+    ${resp}             Fusion Api Get Resource     uri=${logicalEnclosureUri}
+    Logger              \n Validating for ${logicalEnclosureUri}
+    Validate resource attribute                     status_code             ${logicalEnclosureUri}          ${resp}     200
+    Validate resource attribute                     uri                     ${logicalEnclosureUri}          ${resp}
+    ${length} =         Get Length                  ${resp['members']}
+    Run keyword If      '${length}' == '0'          Pass With Warnings      msg=No LE available for deletion
+    :FOR                ${x}                        IN RANGE                0               ${length}
+    \                   ${resp1_uri}=               Set Variable            ${resp['members'][${x}]['uri']}
+    \                   Logger                      \n Deleting ${resp1_uri} Logical Enclosure
+    \                   ${resp1}=                   Fusion Api Delete Logical Enclosure     uri=${resp1_uri}
+    \                   Validate resource attribute                         status_code     ${resp1_uri}    ${resp1}    200
+    \                   Wait Until Keyword Succeeds                         10 min          1 sec
+    \                   ...                         Validate computedPercentCompleteForLE
+    \                   ...                         ${resp1['headers']}
+    Logger              LE and LI got successfully deleted
+
+Delete EG
+    [Documentation]     Delete Enclosure group and validate EG deletion
+    [Tags]              F176                        Smoke
+    [setup]             Run Keywords
+    ${resp}             Fusion Api Get Resource     uri=${enclosureGroupUri}
+    Logger              \n Validating for ${enclosureGroupUri}
+    Validate resource attribute                     status_code             ${enclosureGroupUri}    ${resp}         200
+    Validate resource attribute                     uri                     ${enclosureGroupUri}    ${resp}
+    ${length} =         Get Length                  ${resp['members']}
+    Run keyword If      '${length}' == '0'          Pass With Warnings      msg=No LE available for deletion
+    :FOR                ${x}                        IN RANGE                0                       ${length}
+    \                   ${resp1_uri}=               Set Variable            ${resp['members'][${x}]['uri']}
+    \                   Logger                      \n Deleting ${resp1_uri} Logical Enclosure
+    \                   ${resp1}=                   Fusion Api Delete Logical Enclosure             uri=${resp1_uri}
+    \                   Validate resource attribute                         status_code             ${resp1_uri}    ${resp1}
+    \                   ...                         204
+    \                   Wait Until Keyword Succeeds                         1 min                   1 sec
+    \                   ...                         Validate computedPercentCompleteForLE
+    \                   ...                         ${resp1['headers']}
+    Logger              EG got successfully deleted
+
+Deletion of LIG
+    [Documentation]     Deletes LIGS from a given list \n
+    [Tags]              F176    Smoke
+
+    Delete LIG from a list      ${LIG_Names}
+

@@ -1,0 +1,839 @@
+*** Settings ***
+Documentation   OVF586_Suite1
+Variables       data_variables_72.py
+Library         json
+Library         FusionLibrary
+Library         RoboGalaxyLibrary
+Library         Collections
+Library         SSHLibrary
+Library         String
+Resource        ../../../../resource/fusion_api_all_resource_files.txt
+Library         Telnet
+Library         data_variables_72
+Library         backping.py
+Library         Dialogs
+Suite Teardown  Clean OV
+
+
+*** Variables ***
+${number}    5
+${flag}    Windows
+${Ping_Lost}    Lost
+${ping_file0}    ping_serverip0.txt
+${ping_file1}    ping_serverip1.txt
+${ping_file2}    ping_serverip2.txt
+${ping_file3}    ping_serverip3.txt
+${ping_file4}    ping_serverip4.txt
+${ping_file5}    ping_serverip5.txt
+${ping_file6}    ping_serverip6.txt
+${ping_file7}    ping_serverip7.txt
+${team0}    ping_teamip0.txt
+${team1}    ping_teamip1.txt
+${team2}    ping_teamip2.txt
+${team3}    ping_teamip3.txt
+${server2file0}    server2file0.txt
+${server2file1}    server2file1.txt
+${server2file2}    server2file2.txt
+${server2file3}    server2file3.txt
+
+${ping_sp_without_network}    pingfile_sp_without_network.txt
+${ping_sp_with_network}    pingfile_sp_with_network.txt
+${ping_team_ip}    pingfile_team_ip.txt
+${eth}    Ethernet
+*** Test Cases ***
+
+Login to Appliance
+    [Documentation]    Login to Appliance
+    [Tags]  add   POSITIVE
+    Set Log Level    TRACE
+    Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+
+    Clean OV
+
+    ${resp}    Fusion Api Delete Alert
+    ${task}    Wait For Task     ${resp}    120s    20s
+
+
+
+Create ethernet network
+    [Documentation]    Create ethernet Networks
+    Log to console    \n-Creating Ethernet Networks
+    :FOR   ${ethnet}   IN   @{ethnets}
+    \   ${resp}        Fusion Api Create Ethernet Network   body=${ethnet}
+    \   Run Keyword If  '${resp['status_code']}' != '202'  Fail    ELSE  log to console  \nEthernet Network got created successfully
+
+Create Network Sets
+    [Documentation]    Create Network Sets
+    ${nw_sets_resp}    Add Network Sets from variable    ${network_sets}
+    Run Keyword If  '${nw_sets_resp['status_code']}' != '202'  Fail    ELSE  log to console  \nNetwork set got created successfully
+
+Create LIG, EG and LE
+    [Documentation]    Create LIG, EG and LE
+    Log to console  \n Creating LIG
+    ${lig_resp}    Add LIG from variable   ${LIGS_TB[0]}
+    Run Keyword If  '${lig_resp['status_code']}' != '200'   fail    ELSE    Log to Console  \n-LIG Got created successfully
+
+    Log to console  \n Creating EG
+    ${Resp}    Add Enclosure Group from variable        ${enc_group}
+    Log to console  \n Creating LE ${Resp}
+    Run Keyword If  '${Resp['status_code']}' != '201'  Fail    ELSE  log to console   \n-created EG successfully
+
+    Log to console  \n Creating LE
+    ${Resp}    Add Logical Enclosure from variable     ${les}
+    Run Keyword If  '${Resp['status_code']}' != '200'  Fail    ELSE  log to console   \n-created LE successfully
+
+
+
+##################### Verify all S-Channels on a downlink can pass user traffic as part of VP-LAG connections for a single pair of server downlink ports ##########################
+
+
+Creating Server Profile with 8 connections(4 VP-LAG) and Powering on server
+    [Documentation]    Creating Server Profile with 8 connections(4 VP-LAG) and Powering on server
+    Log to console  \n Creating Server Profile
+    Add Server Profiles from variable   ${sp_enc1_bay1}
+
+    Power on server     ${sp_enc1_bay1[0]['serverHardwareUri']}
+    Log to console and logfile      Waiting 10 minutes for server to boot...
+    Sleep   8min
+
+
+
+Verifying alert message on server profile page
+    [Documentation]    Verifying alert message on server profile page
+    ${Alert_msg}    Get Server profile Alerts
+    ${Count}=    Get Length    ${Alert_msg}
+    Run Keyword If  '${Count}' != '4'  Fail    ELSE  log to console   \n-Verified the alerts msg of server profiles
+
+
+
+Geting server ip's and checking if IP's are pinging
+    [Documentation]    Geting server ip's and checking if IP's are pinging
+    ${IP}    Get Server Ip Windows    ${ilo_details_1}
+    Set Global Variable    ${serverip_List1_global}    ${IP}
+    ${l} =    Get Length    ${serverip_List1_global}
+    Set Global Variable    ${iplength}    ${l}
+    Log to console    \n pinging started
+    :FOR    ${x}    IN RANGE    0   ${iplength}
+    \    startthread    ${number}    ${serverip_List1_global[${x}]}    ${ping_file${x}}    ${flag}
+    \    Sleep    30
+    \    ${contents}=    OperatingSystem.Get File    ${ping_file${x}}
+    \    ${Lines}=    Get Lines Containing String    ${contents}    ${Ping_Lost}
+    \    Log to Console    \ncontents are ${Lines}
+    \    ${match}   ${ret1}    Should Match Regexp    ${Lines}    Lost\\s+=\\s+\\d+\\s+\\((\\d+%)\\s+loss\\)
+    \    Log to Console     ${ret1}
+    \    Run Keyword If  '${ret1}' != '0%'  Fail    ELSE  Log to console  \n 0 percent packet loss is observed
+    Log to Console     All the IP's are reachable
+
+
+Get MAC Address of the server & Windows Teaming
+    [Documentation]    Get MAC Address of the server & Windows Teaming
+    ${IP}    Get Server Ip Windows    ${ilo_details_1}
+    Set Global Variable    ${serverip_List1_global}    ${IP}
+    ${resp} =    Fusion Api Get Server Profiles
+    ${mac_addr_list}=   Create List
+    ${mac} =    Get Profile Details    ${resp}    ${sp_enc1_bay1[0]['name']}
+    ${mac_length} =    Get Length    ${mac}
+    :FOR    ${x}    IN RANGE    ${mac_length}
+    \   ${mac_address} =    Replace String Using Regexp    ${mac[${x}]}    :    -
+    \   Append To List   ${mac_addr_list}    ${mac_address}
+    Log to Console    \n mac address ${mac_addr_list}
+
+    #Compare mac address with server
+    ${adapter_name_list}=   Create List
+    :FOR    ${x}    IN RANGE    ${mac_length}
+    \   ${replaced_cmd} =   Replace String Using Regexp    ${Powershell_get_mac}    pppppppp      ${mac_addr_list[${x}]}
+    \   #calling Get Mac Address from server
+    \   Log to console  \n the server details is ${server_details_enc1_bay1}
+    \   Log to console  \n the ip is ${serverip_List1_global[0]}
+    \   ${output}    Get Mac Address from server    ${server_details_enc1_bay1}    ${serverip_List1_global[0]}    ${replaced_cmd}
+    \   ${string}    Convert To String    ${output}
+    \   ${match}    ${port}     Should Match Regexp    ${string}    .*Ethernet\\s+(\\d+).*
+    \   ${adapter_name}    Catenate    ${eth}   ${port}
+    \   Append to List   ${adapter_name_list}   ${adapter_name}
+    Log to console  \nadapter names lsit${adapter_name_list}
+    Create Teaming windows     ${adapter_name_list[0]}    ${adapter_name_list[1]}   ${Powershell_get_mac1}    ${server_details_enc1_bay1}    ${serverip_List1_global[0]}
+    ${IP}    Get Server Ip Windows    ${ilo_details_1}
+    Create Teaming windows     ${adapter_name_list[2]}    ${adapter_name_list[3]}   ${Powershell_get_mac2}    ${server_details_enc1_bay1}    ${IP[0]}
+    ${IP}    Get Server Ip Windows    ${ilo_details_1}
+    Create Teaming windows     ${adapter_name_list[4]}    ${adapter_name_list[5]}   ${Powershell_get_mac3}    ${server_details_enc1_bay1}    ${IP[0]}
+    ${IP}    Get Server Ip Windows    ${ilo_details_1}
+    Create Teaming windows     ${adapter_name_list[6]}    ${adapter_name_list[7]}   ${Powershell_get_mac4}    ${server_details_enc1_bay1}    ${IP[0]}
+
+Verify IP is pinging after teaming
+    [Documentation]    Verify IP is pinging after teaming
+    ${ip_team}    Get Server Ip Windows    ${ilo_details_1}
+    Set Global Variable    ${Team_ip}    ${ip_team}
+    ${iplength} =    Get Length    ${Team_ip}
+    log to console  \n pinging started
+    :FOR    ${x}    IN RANGE    0   ${iplength}
+    \    startthread    ${number}    ${Team_ip[${x}]}    ${team${x}}    ${flag}
+    \    Sleep    30sec
+    \    ${contents}=    OperatingSystem.Get File    ${team${x}}
+    \    ${Lines}=    Get Lines Containing String    ${contents}    ${Ping_Lost}
+    \    Log to Console    \ncontents are ${Lines}
+    \    ${match}   ${ret1}    Should Match Regexp    ${Lines}    Lost\\s+=\\s+\\d+\\s+\\((\\d+%)\\s+loss\\)
+    \    Log to Console     ${ret1}
+    \    Run Keyword If  '${ret1}' != '0%'  Fail    ELSE  Log to console  \npinging happend with 0loss percentage
+    Log to Console     successfully pinged  ip's
+
+Verifying alert message on server profile page teaming
+    [Documentation]    Verifying alert message on server profile after teaming
+    ${Alert_msg}    Get Server profile Alerts
+    ${Count}    Get Length    ${Alert_msg}
+    Run Keyword If  '${Count}' != '0'  Fail    ELSE  log to console   \n-Verified the alerts msg of server profiles
+
+
+######################################### HappyPath ######################################################################
+
+Creating Server Profile with 4 connections(Non-LAG) and Powering on server
+    [Documentation]    Creating Server Profile with 4 connections(Non-LAG) and Powering on server
+    Add Server Profiles from variable    ${sp_enc2_bay6}
+    Log to console  \n Server profiles created successfully
+    ${lcon} =   Get Length   ${sp_enc2_bay6}
+    Log to console    ${lcon}
+    :FOR     ${x}   IN RANGE   0   ${lcon}
+    \    Power on server     ${sp_enc2_bay6[${x}]['serverHardwareUri']}
+    \    Log to console    \n Power on servers
+    \    Log to console    \n Waiting 10 minutes for the server to boot
+    \    Sleep   10min
+
+Geting server ip and checking if IP's are pingable
+    [Documentation]    Geting server ip and checking if IP's are pingable
+    ${IP}    Get Server Ip Windows    ${ilo_details_2}
+    Set Global Variable    ${serverip_List_global}    ${IP}
+    ${l} =    Get Length    ${serverip_List_global}
+    Set Global Variable    ${iplength1}    ${l}
+    log to console  \n pinging started ${serverip_List_global}
+    log to console  \n pinging started
+    :FOR    ${x}    IN RANGE    0   ${iplength1}
+    \    startthread    ${number}    ${serverip_List_global[${x}]}    ${server2file${x}}    ${flag}
+    \    Sleep    20
+    \    ${contents}=    OperatingSystem.Get File    ${server2file${x}}
+    \    ${Lines}=    Get Lines Containing String    ${contents}    ${Ping_Lost}
+    \    Log to Console    \ncontents are ${Lines}
+    \    ${match}   ${ret1}    Should Match Regexp    ${Lines}    Lost\\s+=\\s+\\d+\\s+\\((\\d+%)\\s+loss\\)
+    \    Log to Console     ${ret1}
+    \    Run Keyword If  '${ret1}' != '0%'  Fail    ELSE  Log to console  \n 0 percent packet loss is observed
+    Log to Console     All the IP's are reachable
+
+
+Server to server Ping
+    [Documentation]    Server to server Ping
+    Log to console    \n Pinging from MLAG server to Non-MLAG server
+    :FOR    ${x}    IN RANGE    0   ${iplength1}
+    \   ${Output}    Ping from windows server    ${Team_ip[${x}]}    ${server_details_enc2_bay6}    ${serverip_List_global[${x}]}
+    \   Should Contain    ${Output}    0% loss
+    \   Log to console    \n Successfully pinged
+    \   Log to console    \n Pinging from Non-MLAG server to MLAG server
+    \   ${Output}    Ping from windows server    ${serverip_List_global[${x}]}    ${server_details_enc1_bay1}    ${Team_ip[${x}]}
+    \   Should Contain    ${Output}     0% loss
+    \   Log to console    \n Successfully pinged
+
+Removing Teaming on server profile1 and deleting the profile
+    [Documentation]    Removing Teaming on server profile1 and deleting the profile
+    ${iplength} =    Get Length    ${Team_ip}
+    :FOR    ${x}    IN RANGE    0   ${iplength}
+    \   Log to console  \n deleting teaming${Team_ip[${x}]}
+    \   Delete Windows Teaming    ${Team_ip[${x}]}    ${server_details_enc2_bay6}    ${detlete_team_cmd${x}}
+    \   Sleep    120sec
+    \   ${output}    Verify Team Status    ${Team_ip[${x}]}    ${server_details_enc2_bay6}    ${team_status_cmd${x}}
+    \   Log to Console    \nstat is ${output}
+    \   ${match}   ${status}    Should Match Regexp    ${output}    (FullyQualifiedErrorId\\s+:\\s+CmdletizationQuery_NotFound_Name)
+
+################## Verify if existing non-LAG'd connections can be edited by PUT method to LAG the connections ################
+
+
+Verify if existing non-LAG'd connections can be edited by PUT method to LAG the connections
+    [Documentation]    Verify if existing non-LAG'd connections can be edited by PUT method to LAG the connections
+    Power off ALL Servers
+    Remove All Server Profiles
+    # Creating profile with non LAG connections
+    ${task}    Add Server Profiles from variable    ${SP_non_lag}
+
+    #Editing server profile and add LAG in connections
+    ${task}    Edit Server Profiles from variable    ${sp_lag}
+    Run Keyword If  '${task['status_code']}' == '200'    Log to console  \n Server profile updated successfully \nStatus Code: ${task['status_code']}
+    ...             ELSE    FAIL
+
+Power on server profile
+    [Documentation]    Power on server profile
+    Power on server     ${sp_lag[0]['serverHardwareUri']}
+    Log to console    \n Power on servers
+    Log to console    \n Waiting 10 minutes for the server to boot
+    Sleep   10min
+
+Verifying alert message on server profile
+    [Documentation]    Verifying alert message on server profile
+    ${Alert_msg}    Get Server profile Alerts
+    ${Count}=    Get Length    ${Alert_msg}
+    Run Keyword If  '${Count}' != '1'  Fail    ELSE  log to console   \n-Verified the alerts msg of server profiles
+
+Get server ip & verify if ip is pinging
+    [Documentation]    Get server ip & verify if ip is pinging
+    ${ip}    Get Server Ip Windows    ${ilo_details_1}
+    Set Global Variable    ${win_ip}    ${ip}
+
+    log to console  \n pinging started
+    ${ip_length} =    Get Length    ${win_ip}
+    :FOR    ${x}    IN RANGE    ${ip_length}
+    \    startthread    ${number}    ${win_ip[${x}]}    ${ping_file${x}}    ${flag}
+    \    Sleep    30
+
+    \    ${contents}    OperatingSystem.Get File    ${ping_file${x}}
+    \    ${Lines}    Get Lines Containing String    ${contents}    ${Ping_Lost}
+    \    Log to Console    \ncontents are ${Lines}
+    \    ${match}   ${ret1}    Should Match Regexp    ${Lines}    Lost\\s+=\\s+\\d+\\s+\\((\\d+%)\\s+loss\\)
+    \    Log to Console     ${ret1}
+    \    Run Keyword If  '${ret1}' != '0%'  Fail    ELSE  Log to console  \npinging happend with 0loss percentage
+    \    Log to Console     successfully pinged  ip
+
+
+Get Server Ip & Windows teaming
+    [Documentation]    Get Server Ip & Windows teaming
+    ${IP}    Get Server Ip Windows    ${ilo_details_1}
+    Log to Console    \n${IP}
+    ${resp} =    Fusion Api Get Server Profiles
+    ${mac_addr_list}=   Create List
+    ${mac} =    Get Profile Details    ${resp}    ${sp_lag[0]['name']}
+    ${mac_length} =    Get Length    ${mac}
+    :FOR    ${x}    IN RANGE    ${mac_length}
+    \   ${mac_address}    Replace String Using Regexp    ${mac[${x}]}    :    -
+    \   Append To List   ${mac_addr_list}    ${mac_address}
+    Log to Console    \n mac address ${mac_addr_list}
+
+    #Compare mac address with server
+    ${adapter_name_list}=   Create List
+    :FOR    ${x}    IN RANGE    ${mac_length}
+    \   ${replaced_cmd} =   Replace String Using Regexp    ${Powershell_get_mac}    pppppppp    ${mac_addr_list[${x}]}
+    \   Log to console  \n the string is step2 ${replaced_cmd}
+    \   #calling Get Mac Address from server
+    \   Log to console  \n the server details is ${server_details_enc1_bay1}
+    \   ${output}    Get Mac Address from server    ${server_details_enc1_bay1}    ${IP[0]}    ${replaced_cmd}
+    \   ${string}    Convert To String    ${output}
+    \   ${match}   ${adapter_name}  Should Match Regexp    ${string}   .*(Ethernet\\s+\\d+).*
+    \   Log to console  \nadapter names${adapter_name}
+    \   Append to List   ${adapter_name_list}   ${adapter_name}
+    Log to console  \nadapter names list ${adapter_name_list}
+    ${tmp}    Remove Whitespace    ${adapter_name_list[0]}
+    ${tmp1}    Remove Whitespace    ${adapter_name_list[1]}
+    ${replaced_cmd1} =  Replace String Using Regexp    ${Powershell_get_mac1}    pppp    ${tmp}
+    ${replaced_cmd2} =  Replace String Using Regexp    ${replaced_cmd1}    qqq    ${tmp1}
+    Log to Console  \nstr is${replaced_cmd2}
+    Create Windows Teaming   ${IP[0]}    ${server_details_enc1_bay1}    ${replaced_cmd2}
+    Sleep    2min
+
+Verifying alert message on server profile page after teaming
+    [Documentation]    Verifying alert message on server profile page after teaming
+    ${Alert_msg}    Get Server profile Alerts
+    ${Count}=    Get Length    ${Alert_msg}
+    Run Keyword If  '${Count}' != '0'  Fail    ELSE  log to console   \n-Verified the alerts msg of server profiles
+
+Verify if IP is pinging after teaming
+    [Documentation]    Verify if IP is pinging after teaming
+    ${ip}    Get Server Ip Windows    ${ilo_details_1}
+    Set Global Variable    ${Team_ip}    ${ip}
+    startthread    ${number}    ${Team_ip[0]}    ${ping_team_ip}    ${flag}
+    Sleep    30
+    ${contents}=    OperatingSystem.Get File    ${ping_team_ip}
+    ${Lines}=    Get Lines Containing String    ${contents}    ${Ping_Lost}
+    Log to Console    \ncontents are ${Lines}
+    ${match}   ${ret1}    Should Match Regexp    ${Lines}    Lost\\s+=\\s+\\d+\\s+\\((\\d+%)\\s+loss\\)
+    Log to Console     ${ret1}
+    Run Keyword If  '${ret1}' != '0%'  Fail ELSE  Log to console  \npinging happend with 0loss percentage
+    Log to Console     successfully pinged  ip
+
+
+####################### Edit the server profile and Delete/add the networks #########################
+
+Edit the server profile to Delete networks and verify traffic
+    [Documentation]    Edit the server profile to Delete networks and verify traffic
+
+    Remove ALL Ethernet Networks
+    Sleep    30sec
+
+    startthread    ${number}    ${Team_ip[0]}    ${ping_sp_without_network}    ${flag}
+    Log to console  \n pinging started
+    Sleep    30sec
+
+    ${contents}    OperatingSystem.Get File    ${ping_sp_without_network}
+    ${Lines}    Get Lines Containing String    ${contents}    ${Ping_Lost}
+    Log to Console    \ncontents are ${Lines}
+    ${match}   ${ret1}    Should Match Regexp    ${Lines}    Lost\\s+=\\s+\\d+\\s+\\((\\d+%)\\s+loss\\)
+    Log to Console     ${ret1}
+    Run Keyword If  '${ret1}' != '100%'  Fail   ELSE  Log to console  \n Ip is not pinging because network connections are not available in server profile
+
+Edit the server profile to add networks and verify traffic
+    [Documentation]    Edit the server profile to add networks and verify traffic
+    # Create network
+    ${enet_resp} =    Fusion Api Create Ethernet Network    body=${ethnets[0]}
+    Run Keyword If  '${enet_resp['status_code']}' != '202'  Fail    \n\nFailed to create ethernet network    ${enet_resp['message']}
+
+    ...             ELSE    Log to console  \nSuccessfully created the ethernet network
+
+    #Edit LIG and add network to the uplinkset
+    ${body} =   Build LIG body      ${LIGS_TB[0]}
+    ${lig_uri} =    Get LIG Uri     ${LIGS_TB[0]['name']}
+    ${resp} =   Fusion Api Edit LIG     body=${body}    uri=${lig_uri}
+    ${task} =   Wait For Task   ${resp}     120s    2s
+
+    #Update from group in LI
+    ${li_uri}    Get LI URI    ${les['name']}-${LIGS_TB[0]['name']}
+    Perform an Update From Group LI    ${li_uri}    15 min    15 s
+
+    #Edit profile and add networks
+    ${resp}    Edit Server Profiles from variable    ${sp_lag}
+    Run Keyword If  '${resp['status_code']}' == '200'    Log to console  \n Successfully added networks in server profile \nStatus Code: ${resp['status_code']}
+    ...             ELSE    FAIL
+
+    startthread    ${number}    ${Team_ip[0]}    ${ping_sp_with_network}    ${flag}
+    Log to console  \n pinging started
+    Sleep    30sec
+
+    ${contents}    OperatingSystem.Get File    ${ping_sp_with_network}
+    ${Lines}    Get Lines Containing String    ${contents}    ${Ping_Lost}
+    Log to Console    \ncontents are ${Lines}
+    ${match}   ${ret1}    Should Match Regexp    ${Lines}    Lost\\s+=\\s+\\d+\\s+\\((\\d+%)\\s+loss\\)
+    Log to Console     ${ret1}
+    Run Keyword If  '${ret1}' != '0%'  Fail ELSE  Log to console  \n Pinging happend with 0 loss percentage
+
+    Power off ALL Servers
+
+########################## Backup & Restore ########################
+
+Create Backup
+    [Documentation]    Create Backup
+
+    Log to console and logfile    \n-Creating the backup in OV
+    ${resp}=    Fusion Api Create Backup
+    Run Keyword If  ${resp['status_code']} !=202    fail    msg=\nBackup failed. \n ErrorCode:${resp['errorCode']}\n ${resp['message']}
+    ${task} =   Wait For Task   ${resp}     10 min    20s
+    Run Keyword If  '${task['taskState']}' !='Completed'   or   ${task['status_code']} !=200   fail    msg=\nBackup failed. \n ErrorCode:${task['taskErrors']}\n ${task['taskStatus']}
+    ...         ELSE    Log to console and logfile  \n\nBackup Created Succesfully !! \n ${task['taskStatus']}
+
+Delete Server Profile
+    [Documentation]    Delete Server Profile
+    Remove All Server Profiles
+
+Restore From backup
+    [Documentation]    Restore From backup
+    Log to console and logfile     \n\nRestoring from the backup in the appliance
+    Restore From Backup
+    Sleep   5 min
+
+Verify Server profile with LAG connections are displayed
+    [Documentation]    Verify Server profile with LAG connections are displayed
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+
+    ${uprofiles}=      Get Profiles
+    Unassign profiles      ${uprofiles}
+    Re-assign profiles     ${uprofiles}
+    Power on server     ${sp_lag[0]['serverHardwareUri']}
+    Log to console    Waiting 10 minutes for server to boot...
+    Sleep   8min
+    ${resp}    Login to OV & verify LAG is displayed under connections    ${sp_lag[0]['name']}
+    Log to console    ${resp}
+    Lists Should Be Equal    ${resp}    ${lag_list}
+
+Verify team ip is pinging after restore
+    [Documentation]    Verify if IP is pinging after teaming
+    ${ip}    Get Server Ip Windows    ${ilo_details_1}
+    Set Global Variable    ${Team_ip}    ${ip}
+
+    log to console  \n pinging started
+    startthread    ${number}    ${Team_ip[0]}    ${team0}    ${flag}
+    Sleep    30
+    ${contents}=    OperatingSystem.Get File    ${team0}
+    ${Lines}=    Get Lines Containing String    ${contents}    ${Ping_Lost}
+    Log to Console    \ncontents are ${Lines}
+    ${match}   ${ret1}    Should Match Regexp    ${Lines}    Lost\\s+=\\s+\\d+\\s+\\((\\d+%)\\s+loss\\)
+    Log to Console     ${ret1}
+    Run Keyword If  '${ret1}' != '0%'  Fail ELSE  Log to console  \npinging happend with 0loss percentage
+    Log to Console     successfully pinged  ip's
+
+Delete Teaming
+    [Documentation]    Delete Teaming
+    Delete Windows Teaming    ${Team_ip[0]}    ${windows_server_details}    ${detlete_team_cmd0}
+    Sleep    5min
+
+***Keywords***
+Get Server Ip Windows
+    [Documentation]    Gets the valid ip of the server.
+    [Arguments]         ${ilo_details}
+    Log to Console    \nstdout is ${ilo_details}
+    ${serverip_List}=   Create List
+    ${serverip_List1}=   Create List
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=20s
+    ${login}    SSHLibrary.Login               ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Read Until    SAC>
+    Sleep    5sec
+    SSHLibrary.Write    i
+    Sleep    5sec
+    ${stdout}    SSHLibrary.Read
+    Log to Console    \nstdout is ${stdout}
+    ${cmd_output}=    Get Regexp Matches    ${stdout}    Ip=10\\.\\d+\\.\\d+\\.\\d+
+    Log to Console    \nstdout is ${cmd_output}
+    ${ip_list_new}    Create List
+    ${len}    Get Length    ${cmd_output}
+    :FOR    ${x}    IN RANGE    ${len}
+    \    ${ip_lists}    Remove String    ${cmd_output[${x}]}    Ip=
+    \    Log to console    ip is ${ip_lists}
+    \    Append To List   ${ip_list_new}    ${ip_lists}
+    Log to Console    \n IP's are is ${ip_list_new}
+    SSHLibrary.Close All Connections
+    [Return]    ${ip_list_new}
+
+
+Get Profile Details
+    [Documentation]    Get Profile Details
+    [Arguments]                  ${resp}    ${profile_name}
+    ${profile_len} =    Get Length    ${resp['members']}
+    :FOR    ${x}    IN RANGE   ${profile_len}
+    \   ${y} =    Set Variable    ${resp['members'][${x}]['connectionSettings']}
+    \   ${mac_address} =    Run Keyword If  '${resp['members'][${x}]['name']}' == '${profile_name}'
+    \   ...    Get Mac address Of Server Profile    ${y['connections']}
+    \   ...    ELSE
+    \   ...    Continue For Loop
+    [return]            ${mac_address}
+
+Get Mac address Of Server Profile
+    [Documentation]    Get Mac address Of Server Profile
+    [Arguments]                  ${connections}
+    ${mac_address} =    Create List
+    ${connection_length} =    Get Length    ${connections}
+    :FOR    ${x}    IN RANGE    ${connection_length}
+    \   Append To List   ${mac_address}    ${connections[${x}]['mac']}
+    [return]            ${mac_address}
+
+
+Get Mac Address from server
+    [Documentation]    Get Mac Address from server
+    [Arguments]         ${server_details}    ${IP}    ${Powershell_get_mac}
+    Telnet.Open Connection     ${IP}     prompt=>     timeout=30s
+
+    Telnet.Write    a
+    ${login}    Telnet.Login               ${server_details['username']}    ${server_details['password']}    login_prompt=login:    password_prompt=password:
+    Log to console  \nLogged in to server
+    Sleep    10sec
+    ${out}    Telnet.Read
+
+    Telnet.Write    Powershell
+    Sleep    5sec
+    Telnet.Write    ${Powershell_get_mac}
+    Sleep    30sec
+    ${stdout} =  Telnet.Read
+    Sleep    30sec
+    Telnet.Close Connection
+    Telnet.Close All Connections
+    [Return]    ${stdout}
+
+Create Windows Teaming
+    [Documentation]    Create Windows Teaming
+    [Arguments]         ${server_ip}    ${server_details}    ${team_cmd}
+    Telnet.Open Connection     ${server_ip}     prompt=>     timeout=20s
+
+    Log to console  \nSuccessfully opened connection to the server
+    Telnet.Write    a
+
+    ${login}    Telnet.Login               ${server_details['username']}     ${server_details['password']}    login_prompt=login:    password_prompt=password:
+    Log to console  \nSuccessfully logged into the server
+    Sleep    10sec
+    Telnet.Write    powershell
+    Log to console  \n${team_cmd}
+    Telnet.Write    ${team_cmd}
+    Sleep    30sec
+    Telnet.Write    y
+    Sleep    30sec
+    Telnet.Close Connection
+    Telnet.Close All Connections
+    Log to Console    \nteaming completed
+
+Verify Team Status
+    [Documentation]    Verify Team Status
+    [Arguments]         ${team_ip}    ${server_details}    ${team_status_cmd}
+    Log to console  \nSuccessfully opened connection to the server ${team_ip}
+    Telnet.Open Connection     ${team_ip}     prompt=>     timeout=20s
+    Log to console  \nSuccessfully opened connection to the server
+    Telnet.Write    a
+    ${login}    Telnet.Login               ${server_details['username']}     ${server_details['password']}    login_prompt=login:    password_prompt=password:
+    Log to console  \nSuccessfully logged into the server
+    Sleep    10sec
+    Telnet.Write    powershell
+    Log to console  \n${team_status_cmd}
+    Telnet.Write    ${team_status_cmd}
+    Sleep    30sec
+    ${stdout} =  Telnet.Read
+    Log to Console   \nout is ${stdout}
+    Telnet.Close Connection
+    Telnet.Close All Connections
+    [Return]    ${stdout}
+
+Create Teaming windows
+    [Documentation]    Create Teaming windows
+    [Arguments]         ${adapter_name_1}   ${adapter_name_2}    ${Powershell_get_mac1}    ${server_details}    ${serverip_List1_global[0]}
+    ${tmp}    Remove Whitespace    ${adapter_name_1}
+    ${tmp1}    Remove Whitespace    ${adapter_name_2}
+    ${replaced_cmd1}    Replace String Using Regexp    ${Powershell_get_mac1}    pppp    ${tmp}
+    Log to Console  \nstrafter strip is${tmp}
+    Log to Console  \nreplaced_cmd1 is${replaced_cmd1}
+    ${replaced_cmd2}    Replace String Using Regexp    ${replaced_cmd1}    qqq    ${tmp1}
+    Log to Console  \nstr is${replaced_cmd2}
+    Create Windows Teaming   ${serverip_List1_global[0]}    ${server_details}    ${replaced_cmd2}
+
+Add ethernet Networks
+    [Documentation]    Add ethernet Networks
+    [Arguments]     @{enets}
+    Log to console and logfile    \n-Adding enet Networks
+    :FOR   ${enet}   IN   @{enets}
+    \       ${resp} =    fusion api create ethernet network   body=${enet}
+    \       ${task} =   Wait For Task   ${resp}     60s    2s
+
+Delete Windows Teaming
+    [Documentation]    Delete Windows Teaming
+    [Arguments]         ${team_ip}    ${server_details}    ${detlete_team_cmd}
+    Telnet.Open Connection     ${team_ip}     prompt=>     timeout=20s
+    Log to console  \nSuccessfully opened connection to the server
+    Telnet.Write    a
+    ${login}    Telnet.Login               ${server_details['username']}     ${server_details['password']}    login_prompt=login:    password_prompt=password:
+    Log to console  \nSuccessfully logged into the server
+    Sleep    10sec
+    Telnet.Write    powershell
+    Sleep    10sec
+    Telnet.Write    ${detlete_team_cmd}
+    Log to console  \n${detlete_team_cmd}
+    Sleep    30sec
+    Telnet.Write    y
+    Sleep    30sec
+    ${stdout} =  Telnet.Read
+    Log to Console   \nout is ${stdout}
+    Telnet.Close Connection
+    Telnet.Close All Connections
+    Log to Console    \nteaming deleted
+
+Get Server profile Alerts
+    [Documentation]    Get Server profile Alerts
+    ${y} =    Set Variable    0
+    ${Alert_msg} =    Create List
+    #${delete_alert_resp}    Fusion Api Delete Alert
+    ${resp} =    Fusion Api Get Alerts   /rest/alerts?filter="alertState EQ 'Active'"
+    ${mem_resp} =    Get From Dictionary    ${resp}    members
+    ${len} =     Get Length    ${mem_resp}
+    :FOR   ${x}    IN RANGE    0    ${len}
+    \   Run Keyword If  '${mem_resp[${x}]['alertTypeID']}' !='crm.connectionStateChange'    Continue For Loop
+    \   ${desc}=    Get From Dictionary    ${mem_resp[${x}]}    description
+    \   Log to console and logfile  description'${desc}'
+    \    ${match}   ${status}    Should Match Regexp    ${desc}    (Connection\\s+on\\s+downlink\\s+port\\s+\\d+\\,.*LAG\\d+.)
+    \  Append To List    ${Alert_msg}    ${desc}
+    \  ${y} =    Evaluate    ${y} + 1
+    \   Log to console    ${status}
+    Log to console and logfile   ${Alert_msg}
+    [Return]    ${Alert_msg}
+
+
+Ping from windows server
+    [Documentation]    Ping from windows server
+    [Arguments]    ${windows_server_ip}    ${windows_server_cred}    ${linux_server_ip}
+    Telnet.Open Connection    ${windows_server_ip}     prompt=>     timeout=20s
+    Log to console  \nSuccessfully opened connection to the server
+    sleep    10sec
+    Telnet.Write    a
+    Sleep    5sec
+    ${login}    Telnet.Login    ${windows_server_cred['username']}     ${windows_server_cred['password']}    login_prompt=login:    password_prompt=password:
+    Log to console  \nSuccessfully logged into the server
+    Sleep    15sec
+    Telnet.Write    ping ${linux_server_ip}
+    Sleep    15s
+    ${Output}=    Telnet.Read
+    Log to console and logfile    ${Output}
+    Telnet.Close Connection
+    Telnet.Close All Connections
+    [Return]    ${Output}
+
+Edit Server Profiles from variable
+    [Documentation]    Edits Server Profiles
+    [Arguments]     ${profiles}
+    Log to console and logfile      Adding SERVER PROFILES
+    :FOR    ${profile}  IN  @{profiles}
+    \   ${profile} =    Copy Dictionary     ${profile}
+    \   Log to console  \n${profile}
+    \   ${shuri} =  Get from Dictionary    ${profile}  serverHardwareUri
+    \   Log to console  \nshuri ${shuri}
+    \   ${uri_harware} =    Get Server Hardware URI     ${shuri}
+    \   Set to Dictionary   ${profile}  serverHardwareUri   ${uri_harware}
+    \   Log to console  \nuri_harware ${uri_harware}
+    \   Log to console  \nprofile ${profile}
+    \   ${eg} =     Get from Dictionary    ${profile}  enclosureGroupUri
+    \   @{words} =  Split String    ${eg}   :
+    \   ${type} =   Get From List   ${words}    0
+    \   ${eg} =     Get From List   ${words}    1
+    \   ${uri} =    Get Enclosure Group URI    ${eg}
+    \   Log to console  \neguri ${uri}
+    \   Set to Dictionary   ${profile}  enclosureGroupUri   ${uri}
+    \   ${enc} =    Get from Dictionary    ${profile}  enclosureUri
+    \   @{words} =  Split String    ${enc}  :
+    \   ${type} =   Get From List   ${words}    0
+    \   ${enc} =    Get From List   ${words}    1
+    \   ${uri} =    Get Enclosure URI   ${enc}
+    \   Set to Dictionary   ${profile}  enclosureUri    ${uri}
+    \   ${profile} =    Update connections in profile    ${profile}
+    \   ${profiles} =     Fusion Api Get Server Profiles    param=?filter="'name'=='${profile['name']}'"
+    \   ${uri}      Get From Dictionary      ${profiles['members'][0]}    uri
+    \   Set to Dictionary   ${profile}  uri     ${uri}
+    \   Log to console  \nprofile ${profiles}
+    \   ${etag} =   Get From Dictionary    ${profiles['members'][0]}   eTag
+    \   Log to console  \netag ${etag}
+    \   Set to Dictionary   ${profile}  eTag     ${etag}
+    \   Log to console  \nprof ${profile}
+    \   ${resp} =   Fusion Api Edit Server Profile      body=${profile}     uri=${uri}
+    \   Log to console and logfile  ${resp}
+    \   ${task} =   Wait For Task   ${resp}     timeout=13 mins     interval=10s
+    \   ${task_state} =     Get From dictionary     ${task}     taskState
+    \   Log to console and logfile  ${task}
+    \   Should Match Regexp    ${task_state}   ((?i)Warning|Completed|Error)
+    [Return]    ${task}
+
+Clean OV
+    [Documentation]         Cleans the appliance
+    Log to console and logfile    \nCleaning the OV
+    Power off ALL Servers
+    Remove All Server Profiles
+    Remove All Logical Enclosures
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove ALL Ethernet Networks
+    Remove ALL FC Networks
+    Remove ALL FCoE Networks
+    Remove ALL Network Sets
+
+Perform an Update From Group LI
+    [Documentation]    Perform an Update From Group LI
+    [Arguments]     ${liuri}    ${timeout}=5 min    ${interval}=15s
+    ${resp} =       Fusion Api Update From Group   uri=${li_uri}
+    Run Keyword If  ${resp['status_code']} !=202    fail    Update from group
+    ${task} =       Wait For Task   ${resp}     ${timeout}      ${interval}
+
+Create Tagging
+    [Documentation]    Create Tagging
+    [Arguments]         ${server_ip}    ${server_details}    ${tagging_cmd}
+    Telnet.Open Connection     ${server_ip}     prompt=>     timeout=20s
+    Log to console  \nSuccessfully opened connection to the server
+    Telnet.Write    a
+    ${login}    Telnet.Login               ${server_details['username']}     ${server_details['password']}    login_prompt=login:    password_prompt=password:
+    Log to console  \nSuccessfully logged into the server
+    Sleep    10sec
+    Telnet.Write    powershell
+    Log to console  \n${tagging_cmd}
+    Telnet.Write    ${tagging_cmd}
+    Sleep    30sec
+    Telnet.Write    y
+    Sleep    30sec
+    Telnet.Close Connection
+    Telnet.Close All Connections
+    Log to Console    \nteaming completed
+
+Restore From Backup
+    [Documentation]    Restore From Backup
+    ${status}=    Set Variable    ${EMPTY}
+    ${Response}=    Fusion Api Get Backup
+    Run keyword If    ${Response['status_code']} != 200    Fail     msg="Failed to Get the latest backup"
+    ${restore_body}=   Create Dictionary    type=RESTORE
+    ...                                     uriOfBackupToRestore=${Response['members'][0]['uri']}
+    ${output}=    Fusion Api Restore Backup    ${restore_body}
+    Run keyword If    ${output['status_code']} != 202    Fail      msg="Failed to perform the restore from backup operation"
+    Sleep    10min
+    ${restore_resp}=     Fusion Api Get Restore Status
+    Run keyword If    ${restore_resp['status_code']} != 200    fail    msg="Failed to get the restore details"
+    :FOR   ${index}   IN RANGE   ${restore_resp['count']}
+    \   Run Keyword If    '${restore_resp['members'][${index}]['backupIdToRestore']}' != '${Response['members'][0]['id']}'   Continue For Loop
+    \   ${restore_id} =    Set Variable    ${restore_resp['members'][${index}]['id']}
+    :FOR   ${index}   IN RANGE   75
+    \   sleep   30sec
+    \   Log to console and logfile      "Restoring is in Progress..."
+    \   ${resp}=    Fusion Api Get Restore Status    param=?filter="'id'=='${restore_id}'"
+    \   Run keyword If     ${resp['status_code']}!= 200     Fail      msg="Unable to get the restore id details"
+    \   Run Keyword If     '${resp['members'][0]['restorePhase']}' != 'COMPLETED'    Continue For Loop
+    \   ${status} =    Set Variable    ${resp['members'][0]['status']}
+    \   Run Keyword If   '${resp['members'][0]['restorePhase']}' == 'COMPLETED'    Exit For Loop
+    Should Be Equal    ${status}    SUCCEEDED
+    Log to console and logfile     \nRestore process got succeeded
+
+Login to OV & verify LAG is displayed under connections
+    [Documentation]    Login to OV & verify server profile connection is present with LAG
+    [Arguments]     ${Profile_name}
+    ${sp_resp}=      Fusion Api Get Server Profiles    param=?filter="'name'=='${Profile_name}'"
+    Log to console    ${sp_resp}
+    ${Lag_list}    Create List
+    ${con_resp}    Get From Dictionary     ${sp_resp['members'][0]}     connectionSettings
+    ${connection_resp}    Get From Dictionary     ${con_resp}     connections
+    Log to console    ${connection_resp}
+    ${len}    Get Length    ${connection_resp}
+    :FOR    ${x}    IN RANGE    0  ${len}
+    \    ${Lag} =     Get From Dictionary     ${connection_resp[${x}]}     lagName
+    \    Log to console    ${Lag}
+    \    Append To List   ${Lag_list}    ${Lag}
+    [Return]    ${Lag_list}
+
+Telnet And Ping External Host From Server
+    [Documentation]    Pinging the external host ip from server
+    [Arguments]         ${windows_server_details}    ${host_ip}
+    Telnet.Open Connection     ${windows_server_details['windows_ip']}     prompt=>     timeout=20s
+    ${login}    Telnet.Login    ${windows_server_details['username']}    ${windows_server_details['password']}    login_prompt=login:    password_prompt=password:
+    Telnet.Write    ping -t ${host_ip}
+    Sleep    10sec
+    ${out}    Telnet.Read
+    Log to Console    \nout is ${out}
+    Should Contain    ${out}    TTL=
+    Telnet.Close Connection
+    Telnet.Close All Connections
+
+Get Profiles
+    [Documentation]    Get Profiles
+    ${resp} =             fusion api get server profiles
+    ${profiles} =         Create List
+    ${profile_list} =     Get From Dictionary     ${resp}    members
+    ${l} =  Get Length  ${profile_list}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${profile} =     Get From List   ${profile_list}    ${x}
+    \   ${profile_details} =    Create Dictionary     name=${profile['name']}
+    \   ...                                           uri=${profile['uri']}
+    \   ...                                           state=${profile['state']}
+    \   ...                                           status=${profile['status']}
+    \   ...                                           serverHardwareUri=${profile['serverHardwareUri']}
+    \   append to list    ${profiles}   ${profile_details}
+    [Return]    ${profiles}
+
+Unassign profiles
+    [Documentation]    Unassign profiles
+    [Arguments]     ${profiles}
+    Set Log Level   TRACE
+    Log to console   \nUnassigning profiles....
+    :FOR    ${p}    IN    @{profiles}
+    \   ${profile} =    Fusion Api Get Resource    uri=${p['uri']}
+    \   set to dictionary    ${profile}   serverHardwareUri=${None}
+    \   set to dictionary    ${profile}   enclosureBay=${None}
+    \   set to dictionary    ${profile}   enclosureUri=${None}
+    \   remove from dictionary    ${profile}   status_code    headers
+    \   ${resp} =   fusion api edit server profile    uri=${p['uri']}   body=${profile}
+    \   ${task} =   Wait For Task   ${resp}     6m   15s
+    ${valDict} =        Create Dictionary   status_code=${200}
+    ...                                     taskState=Completed
+    Validate Response   ${task}    ${valDict}
+
+Re-assign profiles
+    [Documentation]    Re-assign profiles
+    [Arguments]     ${profiles}
+    Set Log Level   TRACE
+    Log to console   \nRe-assigning profiles....
+    :FOR    ${p}    IN    @{profiles}
+    \   ${profile} =    Fusion Api Get Resource    uri=${p['uri']}
+    \   set to dictionary    ${profile}   serverHardwareUri=${p['serverHardwareUri']}
+    \   remove from dictionary    ${profile}   status_code    headers
+    \   ${resp} =   fusion api edit server profile    uri=${p['uri']}   body=${profile}
+    \   ${task} =   Wait For Task   ${resp}     6m   15s
+    ${valDict} =        Create Dictionary   status_code=${200}
+    ...                                     taskState=Completed
+    Validate Response   ${task}    ${valDict}

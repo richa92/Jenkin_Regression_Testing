@@ -1,0 +1,733 @@
+*** Settings ***
+
+# FVT-CRM OVF3507: VC Carbon32 ICMs must support use of customer's CA-signed certificates via an OV REST API (Synergy)
+Documentation       OVF3507 - SuiteName : VC Carbon32 ICMs must support use of customer's CA-signed certificates via an OV REST API (Synergy)
+Library         json
+Library         FusionLibrary
+Library         RoboGalaxyLibrary
+Variables       cert_data_variables.py
+Library         Collections
+Library         OperatingSystem
+Library         SSHLibrary
+Library         DateTime
+Library         Process
+Library         ServerOperations
+
+Suite Setup               Suite Setup
+Suite Teardown            Suite Teardown
+
+Resource            ../../../../../Resources/api/fusion_api_resource.txt
+
+*** Variables ***
+${Input_File_Name}  certfile.csr.pem
+${Output_File_Name} certfile.cert.pem
+${module_file_path1}      ${CURDIR}\\PerformIO.py
+${module_file_path2}      ${CURDIR}\\FetchIO.py
+${ICM_Scripts}    ${CURDIR}\\ICM_Scripts
+*** Test Cases ***
+
+1_TC_API_Once we create LE, C32 modules will be in configured state
+    [Documentation]    Once we create LE, C32 modules will be in configured state.
+    Set Log Level   Trace
+    Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+    ${l}    Get Length    ${Interconnect_dto_all}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \   Verify Interconnect     ${Interconnect_dto_all[${x}]}     state=Configured
+
+2_TC_API_After creating the LE try to obtain certificate using GET operation
+    [Documentation]    After creating the LE try to obtain certificate using GET operation
+    ${IC_Uri}=  Get IC URI  ${INTERCONNECTS1[0]}
+    Set Global Variable ${IC_Uri}
+    ${resp}=    Fusion Api Get Certificate Info uri=${IC_Uri}
+    Should Match    ${resp['errorCode']}    ${No_request_get_error}
+
+3_TC_API_POST request to the rest/interconnects/ {id}/https/certificaterequests URI,One View will validate that all required fields are filled in
+    [Documentation]    POST request to the rest/interconnects/ {id}/https/certificaterequests URI. One View will validate that all required fields are filled in.
+    ${resp}=    Fusion Api Create Certificate Request   uri=${IC_Uri}   body=${Invalid_Request_Body}
+    Wait For Task2  ${resp} errorMessage=${Missing_Required_Field}  PASS=Error
+
+4,5_TC_API_Generating a certificate signing request shall be done via a POST operation, with the required data provided by the user, without optional parameters,Another POST request, with, currently pending CSR, should be rejected
+    [Documentation]    Generating a certificate signing request shall be done via a POST operation, with the required data provided by the user, without optional parameters.Another POST request, with, currently pending CSR, should be rejected.
+    ${temp} ${rdmstr}   set commonname
+    Set Global Variable ${Rdmstr}   ${rdmstr}
+    ${resp}=    Fusion Api Create Certificate Request   uri=${IC_Uri}   body=${temp}
+    ${resp1}=   Fusion Api Create Certificate Request   uri=${IC_Uri}   body=${temp}
+    Wait For Task2  ${resp}     timeout=10m interval=10 PASS=((?i)Completed)
+    Wait For Task2  ${resp1}    errorMessage=${Parallel_Post_Error} PASS=Error
+
+6_TC_API_Obtaining the certificate to sign shall be done via a GET operation
+    [Documentation]    Obtaining the certificate to sign shall be done via a GET operation.
+    ${resp}=    Fusion Api Get Certificate Info uri=${IC_Uri}
+    ${Certificate}= Get From Dictionary ${resp} base64Data
+    Set Global Variable ${CERTIFICATE}  ${Certificate}
+
+7_TC_API_Once the certificate is generated only one time get call will return the certificate second time it won't return the certificate
+    [Documentation]    Once the certificate is generated only one time get call will return the certificate second time it won't return the certificate
+    ${resp}=    Fusion Api Get Certificate Info uri=${IC_Uri}
+    Should Match    ${resp['errorCode']}    ${No_request_get_error}
+
+8_TC_API_Sign the certificate using the Linux CA
+    [Documentation]    Sign the certificate using the Linux CA
+    Create File ${Input_File_Name}  ${CERTIFICATE}
+    ${Signed_cert}  Sign Certificate    ${Input_File_Name}  ${Output_File_Name} ${Linux_command}
+    Set Global Variable ${SGN_CERT} ${Signed_cert}
+
+9_TC_API_One View will validate that all required fields are filled in for PUT request
+    [Documentation]    One View will validate that all required fields are filled in for PUT request.
+    ${resp}=    Fusion Api Upload Certificate Info  uri=${IC_Uri}   body=${Invalid_Upload_Body}
+    Wait For Task2  ${resp} errorMessage=${Missing_Required_Field}  PASS=Error
+
+10_TC_API_Uploading a signed certificate to Carbon32 shall be done via a PUT operation, with the signed certificate data provided by the user, without optional parameter
+    [Documentation]    Uploading a signed certificate to Carbon32 shall be done via a PUT operation, with the signed certificate data provided by the user, without optional parameter.
+    Set To Dictionary   ${Certificate_Upload_Body}  base64Data  ${SGN_CERT}
+    ${resp}=    Fusion Api Upload Certificate Info  uri=${IC_Uri}   body=${Certificate_Upload_Body}
+    Wait For Task2  ${resp} timeout=40m interval=10    PASS=((?i)Completed)
+    ${new_value}    verify commonname in module ${IC_Uri}
+    Should Match    ${new_value}    ${Rdmstr}
+
+11,12,13_TC_API_Send the post Call to initiate the CSR for 2 or more carbon 32 modules parallel Send one more post call parallel for 2 or more carbon 32 modules immediately Obtaining a generated Certificate via the GET operation if the initiated request has not yet completed
+    [Documentation]    Creating post request for certificate
+    ${IC_uri_list}    Create List
+    ${ICM_list}    Create List
+    ${Randomstr}    Create List
+    Set Suite Variable    ${ICM_list}
+    Set Suite Variable    ${IC_uri_list}
+    Set Suite Variable    ${Randomstr}
+    ${IC_list}    Get IC
+    ${l}    Get Length    ${IC_list}
+    :FOR     ${x}    IN RANGE    0    ${l}
+    \   Run Keyword IF  '${IC_list[${x}]['state']}' != 'Configured' Continue For Loop
+    \   ${IC_uri}    Get IC URI    ${IC_list[${x}]['name']}
+    \   ${IC_names}    Set Variable    ${IC_list[${x}]['name']}
+    \   Append To List    ${IC_uri_list}    ${IC_uri}
+    \   Append To List    ${ICM_list}    ${IC_names}
+    :FOR     ${x}    IN RANGE    0    ${l}
+    \   Run Keyword IF  '${IC_list[${x}]['state']}' != 'Monitored'  Continue For Loop
+    \   ${IC_uri_mon}    Get IC URI    ${IC_list[${x}]['name']}
+    \   ${MonICname}    Set Variable    ${IC_list[${x}]['name']}
+    \   Exit For Loop If    '${IC_uri_mon}' != 'None'
+    ${temp}     Copy Dictionary ${Certificate_Request_Body}
+    Set to Dictionary    ${temp}   locality Monitor
+    ${resp1}    Fusion Api Create Certificate Request    uri=${IC_uri_mon}    body=${temp}
+    ${Re_Monitored_Error}   Replace String  ${Monitored_Error}  ICNAME  ${MonICname}
+    ${task} Wait For Task   ${resp1}
+    Should Be Equal ${task['taskErrors'][0]['message']} ${Re_Monitored_Error}
+    ${l}    Get Length    ${IC_uri_list}
+    ${resp_list}    Create List
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    ${temp}    ${rdmstr4}  set commonname
+    \    ${resp1}    Fusion Api Create Certificate Request    uri=${IC_uri_list[${x}]}    body=${temp}
+    \    Append to List ${resp_list}    ${resp1}
+    \    Append to List ${Randomstr}    ${rdmstr4}
+####sending another certificate create request for carbon modules#####
+    \    ${task_uri}    Get From Dictionary    ${resp1['headers']}    Location
+    \    ${task} =    Fusion Api Get Task    uri=${task_uri}
+    \    ${task_state} =    Get From Dictionary    ${task}    taskState
+    \    Should Match Regexp    ${task_state}    ((?i)Running|Starting)
+    \    Run Keyword If    '${task_state}'!='Running'    FAIL    ELSE    Log    \n\ncorrect state    console=True
+    \    ${res}    Fusion Api Get Certificate Info    uri=${IC_uri_list[${x}]}
+    \    ${resp2}    Fusion Api Create Certificate Request    uri=${IC_uri_list[${x}]}    body=${temp}
+    \    Log    \n\n second post request ${resp2}    console=True
+    \    Run Keyword If    '${resp2['errorCode']}' != '${Parallel_Post_Error}'    FAIL
+    \    ...    ELSE    Log    \n\n Certificate create request can be issued only once    console=True
+    \    Log    \n\n cert get response :${res} \n\n    console=True
+    \    Run Keyword If    '${res['errorCode']}' != '${No_request_get_error}'     FAIL
+    \    ...    ELSE    Log    \n\nThe certificate could not be obtained    console=True
+    ${l}    Get Length    ${resp_list}
+    :FOR     ${x}    IN RANGE    0    ${l}
+    \   Wait For Task2    ${resp_list[${x}]}    360    40
+
+14_TC_API_Upload the certificates to multiple modules at same time
+    [Documentation]    Upload certificate to multiple modules at same time
+    ${resp_list_load}   Create List
+    ${sign_load}    Create List
+    ${l}    Get Length    ${IC_uri_list}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    ${resp}    Fusion Api Get Certificate Info    uri=${IC_uri_list[${x}]}
+    \    ${cert}    Get From Dictionary ${resp} base64Data
+    \    Create File    ${CURDIR}/file${x}${Input_File_Name}    ${cert}
+    \    ${Signed_cert} Sign Certificate    file${x}${Input_File_Name}  file${x}${Output_File_Name} ${Linux_command}
+    \    Append to List ${sign_load}    ${Signed_cert}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    Set To Dictionary    ${Certificate_Upload_Body}    base64Data    ${sign_load[${x}]}
+    \    ${res}    Fusion Api Upload Certificate Info    body=${Certificate_Upload_Body}    uri=${IC_uri_list[${x}]}
+    \    Append to List ${resp_list_load}   ${res}
+    :FOR     ${x}    IN RANGE    0    ${l}
+    \    Wait For Task2 ${resp_list_load[${x}]} timeout=5m  interval=10    PASS=((?i)Completed)
+    sleep   120s
+
+15_TC_API_Power off, power on, effuse, port enable / disable operations to be performed
+    [Documentation]    Power off, power on, effuse, port enable / disable operations to be performed.
+    Power Off Interconnects from list    ${Interconnect_dto_1}
+    Wait Until Keyword Succeeds    5min   15s     Verify Interconnects from list    ${Interconnect_dto_1}    state=Maintenance
+    Power On Interconnects from list    ${Interconnect_dto_1}
+    Wait Until Keyword Succeeds    8min   15s     Verify Interconnects from list    ${Interconnect_dto_1}    state=Configured
+    ${l}    Get Length    ${IC_uri_list}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    Inner For Loop    ${IC_uri_list[${x}]}    ${Interconnect_dto_1}    ${Randomstr[${x}]}
+
+    ${l}    Get Length    ${IC_uri_list}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    uplink port disable/enable    ${IC_uri_list[${x}]}    ${port_no}   ${ICM_list[${x}]}   false
+    Wait Until Keyword Succeeds    8min   15s     IC reached state    ${IC_uri_list[${x}]}    Configured
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    uplink port disable/enable    ${IC_uri_list[${x}]}     ${port_no}  ${ICM_list[${x}]}   true
+    Wait Until Keyword Succeeds    8min   15s     IC reached state    ${IC_uri_list[${x}]}    Configured
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    ${new_value}    verify commonname in module    ${IC_uri_list[${x}]}
+    \     Should Match  ${new_value}    ${Randomstr[${x}]}
+
+    ${l}    Get Length    ${Interconnect_dto_2enc}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \   Patch Interconnect     ${Interconnect_dto_2enc[${x}]}    op=replace  path=/efuseState  value=Reset  timeout=60  interval=10
+    \   ${Icname}   Get From Dictionary ${Interconnect_dto_2enc[${x}]}  name
+    \   ${Icuri}=   Get IC URI  ${Icname}
+    \   Wait Until Keyword Succeeds    8min   15s     IC reached state    ${Icuri}    Configured
+    ${l}    Get Length    ${IC_uri_list}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    Inner For Loop    ${IC_uri_list[${x}]}    ${Interconnect_dto_2enc}    ${Randomstr[${x}]}
+    sleep   100s
+
+16_TC_API_Once we delete the LE, the generated certificate should get removed After LE creation, create new request to generate the certificate
+    [Documentation]    Once we delete the LE, the generated certificate should get removed. After LE creation, create new request to generate the certificate
+    ${temp} ${rdmstr_newLE} set commonname
+    Generate Certificate    Request_body=${temp}    Input_File_Name=New_LE${Input_File_Name}    Output_File_Name=New_LE${Output_File_Name}  Command=${Linux_command}    action=Valid
+    Remove All LEs
+    sleep   120s
+    ${new_value}    verify commonname in module ${IC_Uri}
+    Should not Match    ${new_value}    ${rdmstr_newLE}
+    ${ic_ip}    ${enclosure}    Get interconnect ip    ${IC_Uri}
+    Should Match    ${new_value}    ${ic_ip}
+    Add Logical Enclosure from variable ${le_body}
+    ${temp} ${rdmstr_newLE1}    set commonname
+    Generate Certificate    Request_body=${temp}    Input_File_Name=New_LE1${Input_File_Name}   Output_File_Name=New_LE1${Output_File_Name} Command=${Linux_command}    action=Valid
+
+17_TC_API_Pass traffic and initiate CSR, download it, sign and then install the certificate Verify the behavior on certificate which is valid at installation, but expires after installation on the ICM
+    [Documentation]    Pass traffic and initiate CSR, download it, sign and then install the certificate. Verify the behavior on certificate which is valid at installation, but expires after installation on the ICM
+    #As previous TC fails as of now we need line no 212
+    #Add Logical Enclosure from variable    ${le_body}
+    ${resp}=   Add Server Profiles from variable   ${server_profiles}
+    ${task}     Wait For Task2     ${resp}     10m     10
+    Power on server     ${server_profiles[0]['serverHardwareUri']}
+    Log    \n Sleeping 100s for Poweron server    console=True
+    sleep   100s
+    ${IC_Uri1}= Get IC URI  ${INTERCONNECTS1[0]}
+    ${dict} =   Create Dictionary   name    ${INTERCONNECTS1[0]}
+    Log    \n ${dict}    console=True
+    ${time} Get Appliance Time
+    Log    \n ${time}   console=True
+    ${start_time}   Subtract Time From Date ${time} 00:10:00    exclude_millis=yes
+    ${end_time} Add Time To Date    ${time} 00:05:00    exclude_millis=yes
+    ${new_s_time}   Change 4-digit to 2-digit year  ${start_time}
+    ${new_e_time}   Change 4-digit to 2-digit year  ${end_time}
+    ${start_time}   Remove String Using Regexp  ${new_s_time}   (-|:|\\s)
+    ${end_time} Remove String Using Regexp  ${new_e_time}   (-|:|\\s)
+    ${startrepl}    Replace String  ${Expire10_command} starttime   ${start_time}
+    ${cmd_expire10} Replace String  ${startrepl}    endtime ${end_time}
+    Log    \n ${cmd_expire10}   console=True
+    Run IO Traffic
+    sleep   200s
+    ${temp}    ${rdmstr_expire10}   set commonname
+    ${Expire10} Generate Certificate    Request_body=${temp}    Input_File_Name=Expire10${Input_File_Name}  Output_File_Name=Expire10${Output_File_Name}    Command=${cmd_expire10} action=Valid    bypass=1    uri=${IC_Uri1}
+    Upload Certificate  ${Expire10} uri=${IC_Uri1}
+    ${new_value}    verify commonname in module ${IC_Uri1}
+    Should Match    ${new_value}    ${rdmstr_expire10}
+    sleep   300s
+    Patch Interconnect     ${dict}    op=replace  path=/powerState  value=Off  timeout=60  interval=10
+    Wait Until Keyword Succeeds    5min   15s     IC reached state    ${IC_Uri1}    Maintenance
+    Patch Interconnect     ${dict}    op=replace  path=/powerState  value=On  timeout=60  interval=10
+    Wait Until Keyword Succeeds    5min   15s     IC reached state    ${IC_Uri1}    AddedWithErrors
+    Verify IO Traffic
+    Cleanup for certificate issue   ${IC_Uri1}  ${dict}
+
+18_TC_API_ICM validates the certificate before installing
+    [Documentation]    ICM validates the certificate before installing
+    ${IC_Uri2}= Get IC URI  ${INTERCONNECTS1[1]}
+    ${temp} ${rdmstr_Invalid}   set commonname
+    Generate Certificate    Request_body=${temp}    Input_File_Name=Invalid${Input_File_Name}   Output_File_Name=Invalid${Output_File_Name} Command=${Linux_command}    action=Invalid  uri=${IC_Uri2}
+    ${temp} ${rdmstr_Expired}   set commonname
+    Generate Certificate    Request_body=${temp}    Input_File_Name=Expire${Input_File_Name}    Output_File_Name=Expire${Output_File_Name}  Command=${Expire_command}   action=Expired  uri=${IC_Uri2}
+
+19_TC_API_Generate two certificates properly download and signed it Then upload the older one instead of the latest one Verify the modules Now upload another certificate which generated as latest and verify the behaviour
+    [Documentation]    Generate two certificates properly download and signed it. Then upload the older one instead of the latest one.Verify the modules. Now upload another certificate which generated as latest and verify the behaviour
+    ${IC_Uri2}= Get IC URI  ${INTERCONNECTS1[1]}
+    ${temp} ${rdmstr_old}   set commonname
+    ${Old_Certificate}  Generate Certificate    Request_body=${temp}    Input_File_Name=old${Input_File_Name}   Output_File_Name=old${Output_File_Name} Command=${Linux_command}    action=Valid    bypass=1    uri=${IC_Uri2}
+    ${temp} ${rdmstr_new}   set commonname
+    ${New_Certificate}  Generate Certificate    Request_body=${temp}    Input_File_Name=New${Input_File_Name}   Output_File_Name=New${Output_File_Name} Command=${Linux_command}    action=Valid    bypass=1    uri=${IC_Uri2}
+    Upload Certificate  ${Old_Certificate}  invalid uri=${IC_Uri2}
+    ${temp} ${rdmstr_new1}  set commonname
+    Set Global Variable ${Rdmstr_new1}  ${rdmstr_new1}
+    ${New1Certificate}  Generate Certificate    Request_body=${temp}    Input_File_Name=New1${Input_File_Name}  Output_File_Name=New1${Output_File_Name}    Command=${Linux_command}    action=Valid    uri=${IC_Uri2}
+    Wait Until Keyword Succeeds    5min   15s     IC reached state    ${IC_Uri2}    Configured
+
+20_TC_API_Backup the configuration and restore it back after the certificate is generated
+    [Documentation]    Backup the configuration and restore it back after the certificate is generated.
+    Create Backup
+    Remove ALL FC Networks
+    Restore Appliance
+    Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+    ${Uri}  Get FC URI  ${FC_Network_Names[0]}
+    ${IC_Uri1}= Get IC URI  ${INTERCONNECTS1[1]}
+    ${new_value}    verify commonname in module ${IC_Uri1}
+    Should Match    ${new_value}    ${Rdmstr_new1}
+    ${l}    Get Length    ${Interconnect_dto_all}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \   ${Icname}   Get From Dictionary ${Interconnect_dto_all[${x}]}   name
+    \   ${Icuri}=   Get IC URI  ${Icname}
+    \   Wait Until Keyword Succeeds    5min   15s     IC reached state    ${Icuri}    Configured
+
+***Keywords***
+
+Sign Certificate
+    [Documentation]    Signs the certificate
+    [Arguments] ${Input_File_Name}  ${Output_File_Name} ${Command}
+    Login to Linux via SSH  ${snmp_host}    ${snmp_user}    ${snmp_pass}
+    SSHLibrary.Put File      ${CURDIR}/${Input_File_Name}       ${Path_for_unsigned_cert}
+    ${Input_replace}    Replace String  ${Command}  input_file  ${Input_File_Name}
+    ${cmd_file_replace} Replace String  ${Input_replace}    output_file ${Output_File_Name}
+    SSHLibrary.Write    cd ${Path_for_linux_exec}
+    SSHLibrary.Read Until   ca]#
+    SSHLibrary.Write    ${cmd_file_replace}
+    SSHLibrary.Read Until   :
+    SSHLibrary.Write    hpvse123
+    Sleep   2s
+    SSHLibrary.Read Until   [y/n]:
+    SSHLibrary.Write    y
+    Sleep   2s
+    SSHLibrary.Read Until   [y/n]
+    SSHLibrary.Write    y
+    Sleep   2s
+    SSHLibrary.Read Until   entries
+    SSHLibrary.Write    ${Permission_file_command}
+    Sleep   2s
+    SSHLibrary.Read Until   ca]#
+    SSHLibrary.Get File ${Path_for_signed_cert}/${Output_File_Name} C:\\
+    SSHLibrary.Get File ${Path_for_signed_cert}/ca-chain.cert.pem   C:\\
+    ${ca_chain_content} OperatingSystem.Get File    C:\\${Output_File_Name}
+    OperatingSystem.Append To File  C:\\ca-chain.cert.pem   ${ca_chain_content}
+    Move File   C:/ca-chain.cert.pem    ${CURDIR}
+    ${Signed_cert}= OperatingSystem.Get File    ${CURDIR}/ca-chain.cert.pem
+    SSHLibrary.Close Connection
+    [Return]    ${Signed_cert}
+
+Inner For Loop
+    [Documentation]    Inner For Loop
+    [Arguments]    ${ICuriout}    ${Icdto}    ${comval}
+    ${l}    Get Length    ${Icdto}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \   ${Icname}   Get From Dictionary ${Icdto[${x}]}  name
+    \   ${Icuri}=   Get IC URI  ${Icname}
+    \   ${new_value}    Run Keyword If    '${ICuriout}' == '${Icuri}'    verify commonname in module    ${Icuri}
+    \   Run Keyword If    '${ICuriout}' == '${Icuri}'    Should Match   ${new_value}    ${comval}
+
+Change 4-digit to 2-digit year
+    [Documentation]    Converts 4-digit to 2-digit year
+    [Arguments] ${time}
+    ${year} ${mon}  ${actual}   Split String    ${time} -
+    ${new_year} Remove String   ${year} 20
+    ${new_time} catenate    SEPARATOR=- ${new_year} ${mon}  ${actual}
+    [Return]    ${new_time}
+
+set commonname
+    [Documentation]    Set common name
+    ${temp}     Copy Dictionary ${Certificate_Request_Body}
+    ${rdmstr}   Generate Random String  8   [NUMBERS][LETTERS]
+    Set to Dictionary    ${temp}   commonName   ${rdmstr}
+    [Return]    ${temp}    ${rdmstr}
+
+Login to IC via SSH
+    [Documentation]             Connect to IC Bash via SSH
+    ...                         Example:\n| Login to Fusion Via SSH | 10.0.12.106 | Administrator | hpvse123 |
+    [Arguments]                 ${IP}   ${PASSWORD}   ${USERNAME}=${IC_SSH_USERNAME}
+    ...                             ${PROMPT}=${IC_PROMPT}
+    ...                         ${TIMEOUT}=${IC_TIMEOUT}    ${ALIAS}=Ic_SSH
+    Log Many                    ${IP}                   ${USERNAME}     ${PASSWORD}     ${PROMPT}   ${TIMEOUT}
+    Set Default Configuration   prompt=${PROMPT}        timeout=${TIMEOUT}
+    ${Id}=                      Open Connection         ${IP}    alias=${ALIAS}
+    ${Output}=                  Login                   ${USERNAME}     ${PASSWORD}    30s
+    [Return]                    ${Id}
+
+verify commonname in module
+    [Documentation]    verify commonname in module
+    [Arguments] ${icuri}
+    ${ic_ip}    ${enclosure}    Get interconnect ip    ${icuri}
+    ${ic_pass}= Run Keyword If  '${ic_ip}'!='${NONE}'   Get Token    ${enclosure}
+    Login to IC via SSH ${ic_ip}    ${ic_pass}
+    #SSHLibrary.Read Until  root>
+    SSHLibrary.Write    seccertmgmt show -cert https
+    Sleep   2s
+    ${output}   SSHLibrary.Read
+    Log    \n\n certificate in module:${output} \n\n    console=True
+    ${lines}    Get Lines Containing String    ${output}    commonName
+    ${x}    Split String    ${lines}    \n
+    ${name} ${value}    Split String From Right ${x[0]} =
+    ${new_value}    Strip String    ${value}
+    SSHLibrary.Close Connection
+    [Return]    ${new_value}
+
+Generate self-signed certificate in module
+    [Documentation]    Generate self-signed certificate in module
+    [Arguments] ${icuri}
+    ${ic_ip}    ${enclosure}    Get interconnect ip    ${icuri}
+    ${ic_pass}= Run Keyword If  '${ic_ip}'!='${NONE}'   Get Token    ${enclosure}
+    Login to IC via SSH ${ic_ip}    ${ic_pass}
+    SSHLibrary.Write    seccertmgmt generate -cert https
+    Sleep   10s
+    ${output}   SSHLibrary.Read
+    Log    \n\n output :${output} \n\n    console=True
+    ${lines}    Get Lines Containing String    ${output}    ${generate_self_signed_cert_message}
+    Log    \n\n Lines :${lines} \n\n    console=True
+    Should Contain  ${lines}    ${generate_self_signed_cert_message}
+    SSHLibrary.Close Connection
+
+Get Token
+    [Documentation]    Connect to Fusion VM Bash via SSH and get IC password
+    [Arguments] ${enclosure}
+    Log to console    \n\nLogging into OneView SSH session
+    Login to Fusion via SSH
+    Log to console  \n\n Verify files are exists in appliance
+    ${ls}=    Execute Command    ls
+    ${string}=    Split String    \n${ls}
+    ${len}=    Get Length    ${string}
+    Log to Console    \n-Length_is...${len}
+    Run Keyword If  ${len} >=2    Log to console    \n${len} Files already exist in appliance
+    ...         ELSE    Run Keywords
+    ... Put File      ${ICM_Scripts}/${File_Names[0]}       /root   mode=0744   AND
+    ... Put File      ${ICM_Scripts}/${File_Names[1]}       /root   mode=0744
+    ${read}=    write    ./${File_Names[0]} ${IC_bay} AQ==
+    SSHLibrary.Read Until    ]${FUSION_PROMPT}
+    ${write}=    write    ./${File_Names[1]} ${IC_bay} 191
+    ${b}=    SSHLibrary.Read Until    ]${FUSION_PROMPT}
+    Log to Console     ${b}
+    ${ENC}=    Get Regexp Matches    ${b}     Serial Number\\s+(.*)
+    ${PASSWORD}=    Get Regexp Matches    ${b}    is:\\s+(.*)
+    ${len}=    Get Length    ${ENC}
+    :FOR    ${x}    IN RANGE    0   ${len}
+    \   ${newENC}    Remove String  ${ENC[${x}]}    Serial Number
+    \   ${stripenc}   Strip String    ${newENC}
+    \   ${strippwd}   Strip String    ${PASSWORD[${x}]}
+    \   ${pwd}=     Run Keyword If    '${stripenc}' == '${enclosure}'    Fetch From Right    ${strippwd}    is:
+    \   Exit For Loop If    '${pwd}'!='${NONE}'
+    Log to Console     ${pwd}
+    ${Password}=   Remove String Using Regexp    ${pwd.strip()}    \t
+    Log to Console      \n The Interconnect password is: ${Password}
+    ${y}=     Get Length     ${Password}
+    Run Keyword If     '${y}' == '16'      Log to Console    \n!!..Valid Password..!!     ELSE     Fail
+    SSHLibrary.Close Connection
+    [Return]    ${Password}
+
+Get interconnect ip
+    [Documentation]    Fetch IC IPs
+    [Arguments]     ${uri}=${IC_Uri}
+    ${resp} Fusion Api Get Interconnect uri=${uri}
+    ${interconnectIP} =     Get From Dictionary     ${resp} ipAddressList
+    ${enclosure} =  Get From Dictionary     ${resp} enclosureName
+    :FOR    ${x}    IN RANGE    0   2
+    \   ${type}=    Get From Dictionary    ${resp['interconnectLocation']['locationEntries'][${x}]}    type
+    \   ${Bay}=    Run Keyword If  '${type}'=='Bay'    Get From Dictionary    ${resp['interconnectLocation']['locationEntries'][${x}]}    value
+    \   Exit For Loop If    ${Bay} != ${NONE}
+    Set Global Variable ${IC_bay}   ${Bay}
+    ${len}    Get Length    ${interconnectIP}
+    :For    ${x}    In Range    0    ${len}
+    \    ${value}    Run Keyword If   '${interconnectIP[${x}]['ipAddressType']}' == 'Ipv4Dhcp' or '${interconnectIP[${x}]['ipAddressType']}' == 'Ipv4'    Get Variable Value    ${interconnectIP[${x}]['ipAddress']}    ELSE    Continue For Loop
+    Log to console    \n the interconnect ip is :${value}\n
+    [Return]    ${value}    ${enclosure}
+
+verify ocsp certificate
+    [Documentation]    verify ocsp certificate
+    [Arguments] ${Output_File_Name}
+    Login to Linux via SSH  ${snmp_host}    ${snmp_user}    ${snmp_pass}
+    ${ocsp_verify_replace}  Replace String  ${ocsp_verify_command}  output_file ${Output_File_Name}
+    SSHLibrary.Write    cd ${Path_for_linux_exec}
+    SSHLibrary.Read Until   ca]#
+    SSHLibrary.Write    ${ocsp_verify_replace}
+    Sleep   2s
+    ${output}   SSHLibrary.Read
+    Log    \n\n ocsp response :${output} \n\n    console=True
+    ${lines}    Get Lines Containing String    ${output}    ${ocsp_sign_pattern}
+    Log    \n\n ocsp response :${lines} \n\n    console=True
+    SSHLibrary.Close Connection
+
+Revoke certificate
+    [Documentation]    Revoke certificate
+    [Arguments] ${Output_File_Name}
+    Login to Linux via SSH  ${snmp_host}    ${snmp_user}    ${snmp_pass}
+    ${revoke_cmd_replace}   Replace String  ${revoke_cmd}   output_file ${Output_File_Name}
+    SSHLibrary.Write    cd ${Path_for_linux_exec}
+    SSHLibrary.Read Until   ca]#
+    SSHLibrary.Write    ${revoke_cmd_replace}
+    SSHLibrary.Read Until   :
+    SSHLibrary.Write    hpvse123
+    Sleep   2s
+    ${output}   SSHLibrary.Read
+    Log    \n\n revoke response :${output} \n\n    console=True
+    Should Contain    ${output}   ${revoke_output}
+    SSHLibrary.Close Connection
+
+Upload Certificate
+    [Documentation]    Upload Certificate
+    [Arguments] ${input}    ${action}=valid ${uri}=${IC_Uri}
+    Set To Dictionary   ${Certificate_Upload_Body}  base64Data  ${input}
+    ${resp} Fusion Api Upload Certificate Info  uri=${uri}  body=${Certificate_Upload_Body}
+    Run Keyword IF  '${action}' != 'invalid'    Wait For Task2  ${resp} timeout=40m interval=10    PASS=((?i)Completed) ELSE    Wait For Task2  ${resp} timeout=40m interval=10    PASS=((?i)Error)
+
+Get Appliance Time
+    [Documentation]    Get Appliance Time
+    Login to Linux via SSH  ${APPLIANCE_IP} ${FUSION_SSH_USERNAME}  ${FUSION_SSH_PASSWORD}
+    SSHLibrary.Write    ${date_cmd}
+    ${output}   SSHLibrary.Read Until   \n
+    SSHLibrary.Close Connection
+    [Return]    ${output}
+
+Login to Linux via SSH
+    [Documentation]             Connect to Fusion VM Bash via SSH
+    ...                         Example:\n| Login to Fusion Via SSH | 10.0.12.106 | Administrator | hpvse123 |
+    [Arguments]                 ${IP}=${FUSION_IP}      ${USERNAME}=${FUSION_SSH_USERNAME}
+    ...                         ${PASSWORD}=${FUSION_SSH_PASSWORD}    ${PROMPT}=${FUSION_PROMPT}
+    ...                         ${TIMEOUT}=300s    ${ALIAS}=Fusion_SSH
+    Log Many                    ${IP}                   ${USERNAME}     ${PASSWORD}     ${PROMPT}   ${TIMEOUT}
+    Set Default Configuration   prompt=${PROMPT}        timeout=${TIMEOUT}
+    ${Id}=                      Open Connection         ${IP}    alias=${ALIAS}
+    ${Output}=                  Login                   ${USERNAME}     ${PASSWORD}
+    [Return]                    ${Id}
+
+Generate Certificate
+    [Documentation]    Generate Certificate
+    [Arguments] ${Request_body} ${Input_File_Name}  ${Output_File_Name} ${Command}  ${action}   ${bypass}=0 ${uri}=${IC_Uri}
+    ${resp}=    Fusion Api Create Certificate Request   uri=${uri}  body=${Request_Body}
+    Wait For Task2  ${resp}     timeout=10m interval=10 PASS=((?i)Completed)
+    ${resp}=    Fusion Api Get Certificate Info uri=${uri}
+    ${Certificate}= Get From Dictionary ${resp} base64Data
+    Create File ${Input_File_Name}  ${Certificate}
+    ${Signed_cert}  Sign Certificate    ${Input_File_Name}  ${Output_File_Name} ${Command}
+    ${Input_replace}=   Run Keyword If  '${action}' == 'Invalid'    Replace String  ${Signed_cert}  a   &#
+    ... ELSE    Set Variable    ${Signed_cert}
+    Set To Dictionary   ${Certificate_Upload_Body}  base64Data  ${Input_replace}
+    ${resp}=    Run Keyword If  ${bypass} != 1  Fusion Api Upload Certificate Info  uri=${uri}  body=${Certificate_Upload_Body}
+    Run Keyword If  ${bypass} != 1 and '${action}' == 'Valid'   Wait For Task2  ${resp} timeout=40m interval=10    PASS=((?i)Completed)
+    Run Keyword If  ${bypass} != 1 and '${action}' != 'Valid'   Validate error message  ${action}   ${resp}
+    [Return]    ${Signed_cert}
+
+Validate error message
+    [Documentation]    Validate error message
+    [Arguments]        ${action}    ${task}
+    ${message}  Get From Dictionary ${task} message
+    Run Keyword If  '${action}' == 'Invalid'    Should Be Equal ${message}  ${Invalid_message}
+    Run Keyword If  '${action}' == 'Expired'    Should Be Equal ${message}  ${Expired_message}
+
+Get IC Port
+    [Documentation]    Returns the port info of the named port of specified interconnect uri
+    [Arguments]        ${uri}    ${portName}
+    ${return} =    Create List
+    ${resp} =    fusion api get interconnect ports    uri=${uri}
+    ${ports} =    Get From Dictionary    ${resp}    members
+    :FOR    ${port}    IN    @{ports}
+    \    ${return} =    Run Keyword If    '${port['portName']}' == '${portName}'    set variable    ${port}
+    \    Exit for loop if    '${port['portName']}' == '${portName}'
+    [Return]    ${return}
+
+uplink port disable/enable
+    [Documentation]    Update port disable
+    [Arguments]    ${ic_uri}    ${port_no}    ${IC} ${enabled}
+    ${l}    Get Length    ${port_no}
+    :FOR    ${y}    IN RANGE    0    ${l}
+    \    ${resp}    Get IC Port    ${ic_uri}    ${port_no[${y}]}
+    \    Set To Dictionary    ${resp}    enabled    ${enabled}
+    \    ${res}    Update IC Port    ${IC}    ${port_no[${y}]}    ${resp}
+    \    sleep  180s
+    \    ${Resp_after_action}   Get IC Port    ${ic_uri}    ${port_no[${y}]}
+    \    Run Keyword If '${enabled}' == 'false' Should be Equal As Strings    ${Resp_after_action['portStatusReason']}    NotLoggedIn   ELSE    Should be Equal As Strings    ${Resp_after_action['portStatusReason']}    LoggedIn
+
+Run IO Traffic
+    [Documentation]    Get Tx Rx Bytes for a port
+
+    # Getting the ILO IP of the  server
+    ${length}=  Get Length  ${server_bay}
+    #:FOR    ${x}    IN RANGE    0    ${length}
+    :FOR    ${x}    IN RANGE    0    1
+    \   ${temp}     Copy Dictionary ${ilo_details}
+    \   ${iloip} =     Get Server Hardware ILO IP    ${server_bay[${x}]}
+    \   Log \nILO IP ${iloip}\n console=True
+    \   Set To Dictionary    ${temp}    ilo_ip   ${iloip}
+
+    # Starting the IO traffic for 60sec
+
+    \   Log \nStarting IO traffic\n console=True
+    \   ${cmd}    ${out_file}    ${msg}    execute_traffic    ${linux_details}    ${temp}    ${server_details}    ${module_file_path1}    "${diskspd_cmd_720s}"
+
+Verify IO Traffic
+    [Documentation]    verify Tx Rx Bytes for a port
+    ${length}=  Get Length  ${server_bay}
+    #:FOR    ${x}    IN RANGE    0    ${length}
+    :FOR    ${x}    IN RANGE    0    1
+    \   ${temp}     Copy Dictionary ${ilo_details}
+    \   ${iloip} =     Get Server Hardware ILO IP    ${server_bay[${x}]}
+    \   Log \nILO IP ${iloip}\n console=True
+    \   Set To Dictionary    ${temp}    ilo_ip   ${iloip}
+
+    \   Log \nVerifying IO traffic\n    console=True
+    \   ${cmd}    ${exeout}    ${msg}    ioresults    ${linux_details}    ${temp}    ${server_details}    ${module_file_path2}
+    \   Run keyword unless  '${msg}'== 'PASS'   Fail    "Unable to Finish the IO Traffic"   Log To Console   \nThe IO Traffic Details are as follows:\n
+    \   Log \nIO traffic Success!!\nCommand--${cmd}\nOutput--${exeout}\n    console=True
+
+Get Server Hardware ILO IP
+    [Documentation]    Get server hardware ILO IP
+    [Arguments]     ${server_name}
+    ${resp}    Fusion Api Get Server Hardware    param=?filter=name='${server_name}'
+    :FOR    ${x}    IN RANGE    0   3
+    \   ${ip}=  Run Keyword If  '${resp['members'][0]['mpHostInfo']['mpIpAddresses'][${x}]['type']}' == 'DHCP'     Get From Dictionary     ${resp['members'][0]['mpHostInfo']['mpIpAddresses'][${x}]}   address
+    \   Exit For Loop If    '${ip}' != 'None'
+    [Return]    ${ip}
+
+Cleanup for certificate issue
+    [Documentation]    Cleanup for certificate issue
+    [Arguments]     ${ic_uri}   ${icdict}
+    Power off ALL Servers
+    Remove All Server Profiles
+    Remove All LEs  force=${True}
+    Generate self-signed certificate in module  ${ic_uri}
+    sleep   120s
+    Patch Interconnect     ${icdict}    op=replace  path=/powerState  value=Off  timeout=60  interval=10
+    sleep   180s
+    Patch Interconnect     ${icdict}    op=replace  path=/powerState  value=On  timeout=60  interval=10
+    sleep   180s
+    Add Logical Enclosure from variable ${le_body}
+
+Clear ULS in LIG & LI
+    [Documentation]    This keyword will clear uplink sets in both LI and LIG
+    ${length}=  Get Length  ${LIG_ME}
+    #:FOR    ${x}    IN RANGE    0    ${length}
+    :FOR    ${x}    IN RANGE    0    1
+    \   ${resp}=    Get LIG member  ${LIG_ME[${x}]}
+    \   ${liguri} = Get LIG URI ${LIG_ME[${x}]}
+    \   ${empty_list}   Create List
+    \   Remove From Dictionary    ${resp}    headers
+    \   Remove From Dictionary    ${resp}    status_code
+    \   Set To Dictionary    ${resp}    uplinkSets    ${empty_list}
+    \   ${resp1}    Fusion Api Edit Lig    ${resp}    ${liguri}
+    \   ${task}    Wait For Task2    ${resp1}    20m    2
+
+Create Uplinkset
+    [Documentation]    This keyword will create uplink sets in both LI and LIG
+    ${length}=  Get Length  ${LIG_ME}
+    :FOR    ${x}    IN RANGE    0    ${length}
+    \   ${liguri} = Get LIG URI ${LIG_ME[${x}]}
+    \   ${body} =   Build LIG body      ${ligs_me[${x}]}
+    \   ${resp} =   Fusion Api Edit Lig     ${body}     ${liguri}
+    \   ${task}=    Wait For Task2  ${resp}   10m    10
+    \   Update Logical Interconnect from Group    ${LI_dto[${x}]}
+
+Suite Setup
+    [Documentation]    Suite Setup
+    Set Log Level    TRACE
+    ${Login_response}    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    Run keyword unless    ${Login_response[0]['status_code']}== 200    Fail    ${Login_response[0]['message']}
+    Log    Test Step-1 completed successfully    console=True
+    #Creating the FC networks through rest calls
+    ${FC_uris}    Create List
+    Set To Dictionary    ${Fc_body}    fabricType    FabricAttach
+    ${fc_count}    Get Length   ${FC_Network_Names}
+    :FOR    ${x}    IN RANGE    0    ${fc_count}
+    \    Set To Dictionary    ${Fc_body}    name    ${FC_Network_Names[${x}]}
+    \    ${resp}    Fusion Api Create Fc Network    ${Fc_body}
+    \    Run keyword unless    ${resp['status_code']}== 202    Fail    ${resp['message']}
+    \    ${uri}    Get From Dictionary    ${resp['associatedResource']}    resourceUri
+    \    Append To List    ${FC_uris}    ${uri}
+    Set Global Variable    ${FC_uris}    ${FC_uris}
+    #Creating the LIG,EG,LEthrough rest calls
+    Log    Creating LIG    console=True
+    ${Keys}    Get Dictionary Keys    ${Enc_bay_type}
+    ${Keys_length}    Get Length    ${Keys}
+    ${Values}    Get Dictionary Values    ${Enc_bay_type}
+    ${Values_length}    Get Length    ${Values}
+    ${LIG_name_list}    Create List
+    ${LIG_uri_list}    Create List
+    ${Current_position}    Set Variable    0
+    ${ictype_resp}    Fusion Api Get Interconnect Types    param=?filter="'name'=='${ICM_MODEL}'"
+    ${permittedInterconnectTypeUri}    Set Variable    ${ictype_resp['members'][0]['uri']}
+    Set To Dictionary    ${icmap_Redundant['interconnectMapEntryTemplates'][0]}    permittedInterconnectTypeUri    ${permittedInterconnectTypeUri}
+    Set To Dictionary    ${icmap_Redundant['interconnectMapEntryTemplates'][1]}    permittedInterconnectTypeUri    ${permittedInterconnectTypeUri}
+    Set To Dictionary    ${icmap_NonRedundantASide['interconnectMapEntryTemplates'][0]}    permittedInterconnectTypeUri    ${permittedInterconnectTypeUri}
+    Set To Dictionary    ${icmap_NonRedundantBSide['interconnectMapEntryTemplates'][0]}    permittedInterconnectTypeUri    ${permittedInterconnectTypeUri}
+
+    :FOR    ${x}    IN RANGE    0    ${Keys_length}
+    \    Set To Dictionary    ${icmap_Redundant['interconnectMapEntryTemplates'][0]['logicalLocation']['locationEntries'][0]}    relativeValue    ${IC_bay_set}
+    \    Run keyword if    '${Values[${x}]}' == 'Redundant'    Set To Dictionary    ${LIG_body}    interconnectMapTemplate    ${icmap_Redundant}
+    \    Run keyword if    '${Values[${x}]}' == 'NonRedundantASide'    Set To Dictionary    ${LIG_body}    interconnectMapTemplate    ${icmap_NonRedundantASide}
+    \    Run keyword if    '${Values[${x}]}' == 'NonRedundantBSide'    Set To Dictionary    ${LIG_body}    interconnectMapTemplate    ${icmap_NonRedundantBSide}
+    \    Set To Dictionary    ${LIG_body}    redundancyType    ${Values[${x}]}
+    \    Set To Dictionary    ${LIG_body}    name    ${LIG_ME[${x}]}
+    \    ${resp_lig}    Fusion Api Create LIG    ${LIG_body}
+    \    Run keyword unless    ${resp_lig['status_code']} == 202    Fail    ${resp_lig['message']}
+    \    ${task}    Wait For Task    ${resp_lig}    200s    2s
+    \    ${resource}    Get From Dictionary    ${task['associatedResource']}    resourceName
+    \    Append To List    ${LIG_name_list}    ${resource}
+    \    ${resource_uri}    Get From Dictionary    ${task['associatedResource']}    resourceUri
+    \    Append To List    ${LIG_uri_list}    ${resource_uri}
+    \    Log    ${resource} created successfully    console=True
+    \    ${Current_position}    Run keyword if    '${Values[${x}]}' == 'Redundant'    Steps for Redundant bay type    ${Current_position}    ${resource_uri}    ELSE    Set Variable    ${Current_position}
+    \    Log    Current_position is ${Current_position}    console=True
+    \    ${Current_position}    Run keyword if    '${Values[${x}]}' == 'NonRedundantASide'    Steps for NonRedundantASide bay type    ${Current_position}    ${resource_uri}    ELSE    Set Variable    ${Current_position}
+    \    Log    Current_position is ${Current_position}    console=True
+    \    ${Current_position}    Run keyword if    '${Values[${x}]}' == 'NonRedundantBSide'    Steps for NonRedundantBSide bay type    ${Current_position}    ${resource_uri}    ELSE    Set Variable    ${Current_position}
+    \    Log    Current_position is ${Current_position}     console=True
+    ${Current_position}    Evaluate    ${Current_position}-1
+    :FOR    ${y}    IN RANGE    9    ${Current_position}    -1
+    \    Remove from List    ${interconnectBayMappings}    ${y}
+    Set Global Variable    ${LIG_name_list}    ${LIG_name_list}
+    Set Global Variable    ${LIG_uri_list}    ${LIG_uri_list}
+    ${Length}=    Get Length    ${LIG_uri_list}
+    Log    Creating EG    console=True
+    Set To Dictionary    ${EG_body}    name    EG
+    ${eg_resp}    Fusion Api Create Enclosure Group    ${EG_body}
+    Run keyword unless    ${eg_resp['status_code']} == 201    Fail    ${eg_resp['message']}
+    Set Global Variable    ${EG_uri}    ${eg_resp['uri']}
+    Log    EG created successfully    console=True
+    ${ENC1_uri}    Create List
+    Log    Creating LE    console=True
+    Set To Dictionary    ${les[0]}    enclosureGroupUri    ${EG_uri}
+    :FOR    ${x}    IN RANGE    0    ${enclosureCount}
+    \    ${enc_resp}    Fusion Api Get Enclosures    param=?filter="'name'=='${Enclosure_Name[${x}]}'"
+    \    Set Global Variable    ${ENC_${x}_uri}    ${enc_resp['members'][0]['uri']}
+    \    Log    The enclosure uri is ${ENC_${x}_uri}    console=True
+    \    Append To List    ${les[0]['enclosureUris']}    ${ENC_${x}_uri}
+    ${le_resp}    Fusion Api Create Logical Enclosure    ${les[0]}
+    ${task}    Wait For Task    ${le_resp}    400s    30s
+    Create Uplinkset
+
+Steps for Redundant bay type    [Arguments]    ${Current_position_scope}    ${resource_uri}
+    [Documentation]    These steps are going to set icmap templates if the respective bay position is in Redundant bay type
+    Set To Dictionary    ${interconnectBayMappings[${Current_position_scope}]}    logicalInterconnectGroupUri    ${resource_uri}
+    ${Current_position_scope}    Evaluate    ${Current_position_scope}+1
+    Set To Dictionary    ${interconnectBayMappings[${Current_position_scope}]}    logicalInterconnectGroupUri    ${resource_uri}
+    ${Current_position_scope}    Evaluate    ${Current_position_scope}+1
+    [Return]    ${Current_position_scope}
+
+Steps for NonRedundantASide bay type    [Arguments]    ${Current_position_scope}    ${resource_uri}
+    [Documentation]    These steps are going to set icmap templates if the respective bay position is in NonRedundantASide bay type
+    Set To Dictionary    ${interconnectBayMappings[${Current_position_scope}]}    logicalInterconnectGroupUri    ${resource_uri}
+    ${Current_position_scope}    Evaluate    ${Current_position_scope}+1
+    [Return]    ${Current_position_scope}
+
+Steps for NonRedundantBSide bay type    [Arguments]    ${Current_position_scope}    ${resource_uri}
+    [Documentation]    These steps are going to set icmap templates if the respective bay position is in NonRedundantBSide bay type
+    Set To Dictionary    ${interconnectBayMappings[${Current_position_scope}]}    logicalInterconnectGroupUri    ${resource_uri}
+    ${Current_position_scope}    Evaluate    ${Current_position_scope}+1
+    [Return]    ${Current_position_scope}
+
+Suite Teardown
+    [Documentation]    Returns appliance to a 'clean' state by removing all resources\enclosures
+    Log to console and logfile  [TEARDOWN]
+    Run Keyword If All Tests Passed    Power off ALL Servers
+    Run Keyword If All Tests Passed    Remove All Server Profiles
+    Run Keyword If All Tests Passed    Remove All Logical Enclosures
+    Run Keyword If All Tests Passed    Remove ALL Enclosure Groups
+    Run Keyword If All Tests Passed    Remove ALL LIGs
+    Run Keyword If All Tests Passed    Remove ALL LS
+    Run Keyword If All Tests Passed    Remove ALL LSGs
+    Run Keyword If All Tests Passed    Remove ALL Ethernet Networks
+    Run Keyword If All Tests Passed    Remove ALL FC Networks
+    Run Keyword If All Tests Passed    Remove ALL FCoE Networks
+    Run Keyword If All Tests Passed    Remove ALL Network Sets
+    Run Keyword If All Tests Passed    Remove ALL Users

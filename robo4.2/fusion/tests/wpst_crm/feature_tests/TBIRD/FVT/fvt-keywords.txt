@@ -1,0 +1,377 @@
+*** Settings ***
+Library				FusionLibrary
+
+*** Keywords ***
+Get Uplink Set By Name
+    [Documentation]    Get LI uplink set by name
+	[Arguments]		${li_name}	${uname}
+	${ulist}	Fusion Api Get Uplink Set	param=?filter="'name'=='${uname}'"
+	${li} 	Fvt Api Get Logical Interconnect BY Name	${li_name}
+	Return From Keyword If	${li} == None	None
+	${l} = 	Get Length	${ulist['members']}
+	:FOR	${x}	IN RANGE	0	${l}
+	\	${uplinkset_li} = 	Get From Dictionary	${ulist['members'][${x}]}	logicalInterconnectUri
+	\	Return From Keyword If	'${li['uri']}' == '${uplinkset_li}'	${ulist['members'][${x}]}
+	[Return]	None
+
+Set Enclosure Uri
+    [Documentation]    Set uri of an Enclosure
+	[Arguments]		${lentries}
+	:FOR	${lentry}	IN	@{lentries}
+	\	Continue For Loop If	'${lentry['type']}' != 'Enclosure'
+	\	${resp}	Fvt Api Get Enclosure By Name	${lentry['value']}
+	\	${encuri} =	Set Variable if	${resp} != None	${resp['uri']}	'/${lentry['value']} does not exist'
+	\	Set to dictionary	${lentry}	value	${encuri}
+	\	Return From Keyword
+	
+Create Ethernet Networks
+	[Documentation]	Create Ethernet networks from a list of dicts with the entire payload
+	[Arguments]		${networks}
+	Log to console	\n Creating Ethernet Networks
+	:FOR	${net}	IN	@{networks}
+	\		${resp}	Fvt Api Get Ethernet Network By Name	${net['name']}
+	\		Continue For Loop If	${resp} != None		
+	\		${resp} = 	Fusion Api Create Ethernet Network		body=${net}
+	\		Should Be Equal As Integers	${resp['status_code']}	202
+	\		Wait For Task	${resp}	
+	\		${resp}	Fvt Api Get Ethernet Network By Name	${net['name']}
+	\		Should Be Equal As Strings	${resp['name']}	${net['name']}
+
+Create FC Networks
+    [Documentation]    Create FC networks from a list of dicts with the entire payload
+    [Arguments]    ${fcnetworks}
+    Log to console    \n Creating FC Networks
+    :FOR    ${net}    IN    @{fcnetworks}
+    \       ${resp}    Fvt Api Get FC Network By Name    ${net['name']}
+    \       Continue For Loop If    ${resp} != None
+    \       ${resp} =    Fusion Api Create FC Network    body=${net}
+    \       Should Be Equal As Integers    ${resp['status_code']}    202
+    \       Wait For Task    ${resp}
+    \       ${resp}    Fvt Api Get FC Network By Name    ${net['name']}
+    \       Should Be Equal As Strings    ${resp['name']}    ${net['name']}
+
+Network Set Base
+	[Documentation]	Network sets base function
+	[Arguments]	${networkset}	${op}=POST	${timeout}=0	${interval}=0
+	${networkUris} =	FVT Api Get Ethernet Networks Uris	${networkset['networkUris']}
+	Set To Dictionary	${networkset}	networkUris	${networkUris}
+	${native} =	Get Variable Value	${networkset['nativeNetworkUri']} 
+	${resp} =	Run Keyword If	'${native}' != 'None'	FVT Api Get Ethernet Network By Name	${native} 
+	Run Keyword If	'${native}' != 'None'	Set To Dictionary	${networkset}	nativeNetworkUri	${resp['uri']}
+	${resp} =	Run Keyword If	'${op}' == 'PUT'	Fvt Api Get Network Set By Name	${networkset['name']}
+	${task} =	Run Keyword If	'${op}' == 'POST'	Fusion Api Create Network Set	body=${networkset}	ELSE	Fusion Api Edit Network Set	body=${networkset}	uri=${resp['uri']}
+	Return From Keyword If	'${timeout}' == '0'	${task}
+	Should Be Equal As Integers	${task['status_code']}	202
+	${task} =	Wait For Task	${task}	${timeout}	${interval}	
+	[Return]	${task}
+
+Create Network Set
+	[Documentation]	Create a network set
+	[Arguments]		${networkset_in}	${timeout}=0	${interval}=0
+	Log to console	\n Creating Network Set ${networkset_in['name']}
+	${networkset}	FVT Copy Dictionary	${networkset_in}
+	${task} =	Network Set Base	${networkset}	POST	${timeout}	${interval}
+	[Return]	${task}
+	
+Edit Network Set
+	[Documentation]	Edit network sets
+	[Arguments]		${networkset_in}	${timeout}=0	${interval}=0
+	Log to console	\n Editing Network Set ${networkset_in['name']}
+	${networkset}	FVT Copy Dictionary	${networkset_in}
+	${resp} =	Fvt Api Get Network Set By Name	${networkset['name']}
+	Set To Dictionary	${networkset}	connectionTemplateUri	${resp['connectionTemplateUri']}
+	${task} =	Network Set Base	${networkset}	PUT	${timeout}	${interval}
+	[Return]	${task}
+	
+Logical Interconnect Group Base
+    [Documentation]    LIG Base function for Create and Edit LIG requests
+	[Arguments]		${lig_in}
+	${lig} =	Fvt Copy Dictionary	${lig_in}
+    ${name} =                       Get Variable Value  ${lig['name']}
+	${enclosureIndexes} =           Get Variable Value  ${lig['enclosureIndexes']}
+	${enclosureType} =              Get Variable Value  ${lig['enclosureType']}
+	${ethernetSettings} =           Get Variable Value  ${lig['ethernetSettings']}
+	${fcoeSettings} =               Get Variable Value  ${lig['fcoeSettings']}
+	${internalNetworkUris} =        Get Variable Value  ${lig['internalNetworkUris']}
+	${interconnectBaySet} =         Get Variable Value  ${lig['interconnectBaySet']}
+	${interconnectMapTemplate} =    Get Variable Value  ${lig['interconnectMapTemplate']}
+	${qosConfiguration} =           Get Variable Value  ${lig['qosConfiguration']}
+    ${redundancyType} =             Get Variable Value  ${lig['redundancyType']}
+	${stackingMode} =               Get Variable Value  ${lig['stackingMode']}
+	${telemetryConfiguration} =     Get Variable Value  ${lig['telemetryConfiguration']}
+	${snmpConfiguration} =          Get Variable Value  ${lig['snmpConfiguration']}
+	${uplinkSets} =                 Get Variable Value  ${lig['uplinkSets']}
+
+	${uplinkSets} =	Run Keyword If	${uplinkSets} is None	Create List	ELSE	Set Variable	${uplinkSets}
+	${l} = 	Get Length	${uplinkSets}
+
+	:FOR	${x}	IN RANGE	0	${l}
+	\	${networkType} = 	Get Variable Value	${uplinkSets[${x}]['networkType']}
+	\	${networks} = 		Get Variable Value	${uplinkSets[${x}]['networkUris']}
+	\ 	Continue For Loop If 	'${networkType}' == 'Ethernet'		
+	\	${networkUris} = 	Get FC Uris	${networks}
+	\	Set to dictionary	${uplinkSets[${x}]}	networkUris	${networkUris}
+
+	:FOR	${x}	IN RANGE	0	${l}
+	\	${networkType} = 	Get Variable Value	${uplinkSets[${x}]['networkType']}
+	\	${networks} = 		Get Variable Value	${uplinkSets[${x}]['networkUris']}
+	\   ${nativeNetworkUri} =   Get Variable Value     ${uplinkSets[${x}]['nativeNetworkUri']}
+	\ 	Continue For Loop If 	'${networkType}' == 'FibreChannel'	
+	\   ${networkUris} =   Run Keyword If	$networks != None	FVT Api Get Ethernet Networks Uris	${networks}	ELSE	Create List
+	\	Set to dictionary	${uplinkSets[${x}]}	networkUris	    ${networkUris}
+	\ 	${nativeNetworkUri} = 	Run Keyword If   $nativeNetworkUri != None    Get Ethernet Uri	${nativeNetworkUri}
+    \   Set to dictionary	${uplinkSets[${x}]}	nativeNetworkUri     ${nativeNetworkUri}
+	\	${networksets} = 		Get Variable Value		${uplinkSets[${x}]['networkSetUris']}
+	\	${networkSetUris} =   Run Keyword If	$networksets != None	FVT Api Get Network Set Uris   ${networksets}	ELSE	Create List
+	\	Set to dictionary	${uplinkSets[${x}]}	networkSetUris     ${networkSetUris}
+	
+    # Process Internal URIs
+	${internalNetworkUris} = 	Run Keyword If   ${internalNetworkUris} is not ${null}    FVT Api Get Ethernet Networks Uris	${internalNetworkUris}
+
+	${body} = 	Fusion Api Create LIG Payload	name=${name}
+	...                                         enclosureIndexes=${enclosureIndexes}
+	...                                         enclosureType=${enclosureType}
+	...                                         ethernetSettings=${ethernetSettings}
+	...                                         fcoeSettings=${fcoeSettings}
+	...                                         interconnectBaySet=${interconnectBaySet}
+	...											interconnectMapTemplate=${interconnectMapTemplate}
+	...                                         internalNetworkUris=${internalNetworkUris}
+	...                                         qosConfiguration=${qosConfiguration}
+	...                                         redundancyType=${redundancyType}
+	...                                         stackingMode=${stackingMode}
+	...                                         telemetryConfiguration=${telemetryConfiguration}
+	...                                         snmpConfiguration=${snmpConfiguration}
+	...											uplinkSets=${uplinkSets}
+	
+    ${downlinkSpeedMode} =	Get Variable Value  ${lig['downlinkSpeedMode']}
+	Run Keyword If	'${downlinkSpeedMode}' != 'None'	Set To Dictionary	${body}	downlinkSpeedMode	${downlinkSpeedMode}
+	Run Keyword If	${fcoeSettings} == None	Remove From Dictionary	${body}	fcoeSettings
+	Run Keyword If	${ethernetSettings} == None	Remove From Dictionary	${body}	ethernetSettings
+	Run Keyword If	${telemetryConfiguration} == None	Remove From Dictionary	${body}	telemetryConfiguration
+	Run Keyword If	${snmpConfiguration} == None	Remove From Dictionary	${body}	snmpConfiguration
+	${enclosure} =	Set Variable	Enclosure
+	Run Keyword If	'${body['stackingMode']}' == 'None'	Set To Dictionary	${body}	stackingMode	${enclosure}
+	[Return]	${body}
+	
+Add Logical Interconnect Group
+	[Documentation]	Create LIG
+	[Arguments]		${lig_in}	${timeout}=0	${interval}=0
+	Log To Console	\n Adding Logical Interconnect Group ${lig_in['name']}
+	${lig}	FVT Copy Dictionary	${lig_in}
+	${enc_type} =	Get Variable Value  ${lig['enclosureType']}
+	Run Keyword If	$enc_type == None	Set To Dictionary	${lig}	enclosureType	SY12000
+	${body} = 	Logical Interconnect Group Base	${lig}
+	Set To Dictionary	${body}	type	logical-interconnect-groupV7
+	${task} = 	Fusion Api Create LIG	${body}
+	Return From Keyword If	'${timeout}' == '0'	${task}
+	Should Be Equal As Integers	${task['status_code']}	202
+	${task} =	Wait For Task	${task}	${timeout}	${interval}	
+	[Return]	${task}
+	
+Edit Logical Interconnect Group	
+	[Documentation]	Edit LIG
+	[Arguments]		${lig_in}	${timeout}=0	${interval}=0
+	Log To Console	\n Editing Logical Interconnect Group ${lig_in['name']}
+	${lig}	FVT Copy Dictionary	${lig_in}
+	Set To Dictionary	${lig}	type	logical-interconnect-groupV400
+	${body} = 	Logical Interconnect Group Base	${lig}
+	${resp}	Fvt Api Get Logical Interconnect Group By Name	${lig['name']}
+	${task} = 	Fusion Api Edit LIG	${body}	${resp['uri']}
+	Return From Keyword If	'${timeout}' == '0'	${task}
+	Should Be Equal As Integers	${task['status_code']}	202
+	${task} =	Wait For Task	${task}	${timeout}	${interval}	
+	[Return]	${task}
+	
+Add Logical Enclosure
+	[Documentation]	Adds a Logical Enclosures to an appliance
+	[Arguments]		${le_in}	${timeout}=0	${interval}=0
+	Log To Console	\n Adding Logical Enclosure ${le_in['name']}
+	${le} =    Fvt Copy Dictionary     ${le_in}
+	${resp} = 	Fvt Api Get Enclosure Group By Name	${le['enclosureGroupUri']}
+	Set to dictionary	${le}	enclosureGroupUri		${resp['uri']}
+    ${encuris} =    Create List
+    :FOR    ${enc}   IN  @{le['enclosureUris']}
+	\       ${resp} = 	Fvt Api Get Enclosure By Name	${enc}
+	\       Append to List	${encuris}	${resp['uri']}
+	set to dictionary   ${le}  enclosureUris   ${encuris}
+	${task} =	Fusion Api Create Logical Enclosure 	${le}
+	Return From Keyword If	'${timeout}' == '0'	${task}
+	Should Be Equal As Integers	${task['status_code']}	202
+	${task} =	Wait For Task	${task}	${timeout}	${interval}	
+	[Return]	${task}
+
+Edit Logical Enclosure
+	[Documentation]	Update an existing Logical Enclosure
+	[Arguments]		${le}	${timeout}=0	${interval}=0
+	Log to console	\n Updating Logical Enclosure ${le['name']}
+	${dict} = 	Fvt Copy Dictionary	${le}
+	Set to dictionary	${dict}	type	LogicalEnclosureV4
+	${eg} = 	Get From Dictionary     ${dict}	enclosureGroupUri
+	${resp}  	Fvt Api Get Enclosure Group By Name	${eg}
+	${eguri} =	Set Variable if	${resp} != None	${resp['uri']}	'/${eg} does not exist'
+	Set to dictionary	${dict}	enclosureGroupUri		${eguri}
+    ${encs} =    Get From Dictionary     ${dict}  enclosureUris
+	${encuri_list} =    Create List
+    :FOR    ${enc}   IN  @{encs}
+	\ 	${resp} = 	Fvt Api Get Enclosure By Name	${enc}
+	\	${encuri} =	Set Variable if	${resp} != None	${resp['uri']}	'/${enc} does not exist'
+	\  	Append to List	${encuri_list}	${encuri}
+	set to dictionary   ${dict}  enclosureUris   ${encuri_list}
+	${lename} = 	Get From Dictionary	${dict}	name
+	${resp}  	Fvt Api Get Logical Enclosure By Name	${lename}
+	${leuri} =	Set Variable if	${resp} != None	${resp['uri']}	'/${lename} does not exist'
+	set to dictionary   ${dict}  uri   ${leuri}
+	set to dictionary	${dict}	logicalInterconnectUris	${resp['logicalInterconnectUris']}	
+	set to dictionary   ${dict}  eTag   ${resp['eTag']}
+	${task} =	Fusion Api Update Logical Enclosure 	${dict}	${leuri}
+	Return From Keyword If	'${timeout}' == '0'	${task}
+	Should Be Equal As Integers	${task['status_code']}	202
+	${task} =	Wait For Task	${task}	${timeout}	${interval}	
+	[Return]	${task}
+	
+Add Uplink Set
+	[Documentation]	Adds an uplink set to an existing logical interconnect
+	[Arguments]		${uplinkset_in}	${timeout}=0	${interval}=0
+	Log to console	\n Adding Uplink Set ${uplinkset_in['name']}
+	${uplinkset}	FVT Copy Dictionary	${uplinkset_in}
+	${networks} = 		Get Variable Value		${uplinkset['networkUris']}
+	${networksets} = 		Get Variable Value		${uplinkset['networkSetUris']}
+	${fcoenetworks} =	Get Variable Value		${uplinkset['fcoeNetworkUris']}
+	${fcnetworks} =		Get Variable Value		${uplinkset['fcNetworkUris']}
+	${networkUris} = 	Run Keyword if	$networks != None	FVT Api Get Ethernet Networks Uris	${networks}	ELSE	Create List
+	${networkSetUris} = 	Run Keyword if	$networksets != None	FVT Api Get Network Set Uris	${networksets}	ELSE	Create List
+	${fcoenetworkUris} =	Run Keyword If	${fcoenetworks} != None	Get FCOE Uris	${fcoenetworks}	ELSE	Create List
+	${fcnetworkUris} =	Run Keyword If	${fcnetworks} != None	Get FC Uris	${fcnetworks}	ELSE	Create List
+	Set To Dictionary	${uplinkset}	networkUris	${networkUris}
+	Set To Dictionary	${uplinkset}	networkSetUris	${networkSetUris}
+	Set to dictionary	${uplinkset}	fcoeNetworkUris	${fcoenetworkUris}
+	Set to dictionary	${uplinkset}	fcNetworkUris	${fcnetworkUris}
+
+	${nativeNetwork} =   Get Variable Value	${uplinkset['nativeNetworkUri']}
+	${resp} =	Run Keyword if	${nativeNetwork} != None	Fvt API Get Ethernet Network By Name	${nativeNetwork}
+	${nativeNetworkUri} =	Set Variable if	${resp} != None	${resp['uri']}	'/${nativeNetwork} does not exist'
+	Run Keyword If	${nativeNetwork} != None	Set To Dictionary	${uplinkset}	nativeNetworkUri	${nativeNetworkUri}	ELSE	Remove From Dictionary	${uplinkset}	nativeNetworkUri
+
+	${logicalInterconnect} =   Get Variable Value     ${uplinkset['logicalInterconnectUri']}
+	${resp}	Fvt Api Get Logical Interconnect BY Name	${logicalInterconnect}
+	${logicalInterconnectUri} =	Set Variable if	${resp} != None	${resp['uri']}	'/${logicalInterconnect} does not exist'
+    Set to dictionary   ${uplinkset}	logicalInterconnectUri     ${logicalInterconnectUri}
+
+	${portInfos} = 	Get From Dictionary		${uplinkset}	portConfigInfos
+	:FOR	${portInfo}	IN	@{portInfos}
+	\	${lentries}	Get From Dictionary	${portInfo['location']}	locationEntries
+	\	Set Enclosure Uri	${lentries}	
+
+	${task}	Fusion API Create Uplink Set	${uplinkset}
+	Return From Keyword If	'${timeout}' == '0'	${task}
+	Should Be Equal As Integers	${task['status_code']}	202
+	${task} =	Wait For Task	${task}	${timeout}	${interval}	
+	[Return]	${task}
+	
+Edit Uplink Set
+	[Documentation]	Updates an uplink set to an existing logical interconnect
+	[Arguments]		${uplinkset_in}	${timeout}=0	${interval}=0
+	Log to console	\n Updating Uplink Set ${uplinkset_in['name']}	
+	${uplinkset}	FVT Copy Dictionary	${uplinkset_in}
+	${resp} = 	Get Uplink Set By Name	${uplinkset['logicalInterconnectUri']}	${uplinkset['name']}
+	${u_uri} =	Get From Dictionary	${resp}	uri
+	${networks} = 		Get Variable Value		${uplinkset['networkUris']}
+	${fcoenetworks} =	Get Variable Value		${uplinkset['fcoeNetworkUris']}
+	${fcnetworks} =		Get Variable Value		${uplinkset['fcNetworkUris']}
+	${networkUris} = 	Run Keyword if	${networks} != None	FVT Api Get Ethernet Networks Uris	${networks}	ELSE	Create List
+	${fcoenetworkUris} =	Run Keyword If	${fcoenetworks} != None	Get FCOE Uris	${fcoenetworks}	ELSE	Create List
+	${fcnetworkUris} =	Run Keyword If	${fcnetworks} != None	Get FC Uris	${fcnetworks}	ELSE	Create List
+	Set To Dictionary	${uplinkset}	networkUris	${networkUris}
+	Set to dictionary	${uplinkset}	fcoeNetworkUris	${fcoenetworkUris}
+	Set to dictionary	${uplinkset}	fcNetworkUris	${fcnetworkUris}
+
+	${nativeNetwork} =   Get Variable Value     ${uplinkset['nativeNetworkUri']}
+	${resp}	Run Keyword if	${nativeNetwork} != None	Fvt API Get Ethernet Network By Name	${nativeNetwork}
+	${nativeNetworkUri} =	Set Variable if	${resp} != None	${resp['uri']}	'/${nativeNetwork} does not exist'
+	Run Keyword If	${nativeNetwork} != None	Set to dictionary	${uplinkset}	nativeNetworkUri	${nativeNetworkUri}
+
+	${logicalInterconnect} =   Get Variable Value     ${uplinkset['logicalInterconnectUri']}
+	${resp}	Fvt Api Get Logical Interconnect BY Name	${logicalInterconnect}
+	${logicalInterconnectUri} =	Set Variable if	${resp} != None	${resp['uri']}	'/${logicalInterconnect} does not exist'
+    Set to dictionary   ${uplinkset}	logicalInterconnectUri     ${logicalInterconnectUri}
+
+	${portInfos} = 	Get From Dictionary		${uplinkset}	portConfigInfos
+	:FOR	${portInfo}	IN	@{portInfos}
+	\	${lentries}	Get From Dictionary	${portInfo['location']}	locationEntries
+	\	Set Enclosure Uri	${lentries}	
+	
+	${task}	Fusion API Edit Uplink Set	${uplinkset}	${u_uri}
+	Return From Keyword If	'${timeout}' == '0'	${task}
+	Should Be Equal As Integers	${task['status_code']}	202
+	${task} =	Wait For Task	${task}	${timeout}	${interval}	
+	[Return]	${task}
+
+Add Server Profile
+	[Documentation]	Adds Server Profiles to an appliance
+	[Arguments]		${profile_in}	${timeout}=0	${interval}=0
+	Log To Console	\n Adding Server Profile ${profile_in['name']}
+	${profile} =    Fvt Copy Dictionary     ${profile_in}
+	${resp} = 	Fvt Api Get Server Hardware By Name		${profile['serverHardwareUri']}
+	Set to Dictionary	${profile}	serverHardwareUri	${resp['uri']}
+	${eg}	Fvt Api Get Enclosure Group By Name	${profile['enclosureGroupUri']}
+	Set to Dictionary	${profile}	enclosureGroupUri	${eg['uri']}
+	${enc}	Fvt Api Get Enclosure By Name	${profile['enclosureUri']}
+	Set to Dictionary	${profile}	enclosureUri	${enc['uri']}
+	:FOR	${connection}	IN	@{profile['connectionSettings']['connections']}
+	\	${functionType} =	Get from Dictionary	${connection}	functionType
+	\	${network} =	Get From Dictionary	${connection}	networkUri
+	\ 	${resp} =	Run Keyword If	'${functionType}' == 'Ethernet'	Fvt Api Get Ethernet Network By Name	${network}
+	\ 	...			ELSE IF	'${functionType}' == 'FibreChannel'	Fvt Api Get FC Network By Name	${network}
+	\	${resp} =	Run Keyword If	${resp} == None and '${functionType}' == 'Ethernet'	Fvt Api Get Network Set By Name	${network}	ELSE	Set Variable	${resp}
+	\	Set to Dictionary	${connection}	networkUri	${resp['uri']}
+	${type} =	Get Variable Value  ${profile['type']}
+	Run Keyword If	'${type}' == 'None'	Set To Dictionary	${profile}	type	ServerProfileV11
+	${task} = 	Fusion Api Create Server Profile		body=${profile}
+	Return From Keyword If	'${timeout}' == '0'	${task}
+	Should Be Equal As Integers	${task['status_code']}	202
+	${task} =	Wait For Task	${task}	${timeout}	${interval}	
+	[Return]	${task}
+
+Update From Group On Logical Enclosure
+	[Documentation]	LE Logical Enclosure Update from group
+	[Arguments]		${LE_URI}	${enclist}	${timeout}=0	${interval}=0
+	Log To Console	\n Update From Group On Logical Enclosure
+	${encs} = 		Get From Dictionary		${enclist}	enclosureUris
+	${urilist} = 	Create List
+	:FOR	${enc}	IN	@{encs}
+	\	${resp}	FVT Api Get Enclosure By Name	${enc}
+	\   ${encuri} =	Set Variable if	${resp} != None	${resp['uri']}	'/${enc} does not exist'
+	\	Append To List	${urilist}	${encuri}
+	Set to dictionary	${enclist}	enclosureUris		${urilist}
+	${task}	Fvt Api Update Logical Enclosure From Group	body=${enclist}	uri=${LE_URI}
+	Return From Keyword If	'${timeout}' == '0'	${task}
+	Should Be Equal As Integers	${task['status_code']}	202
+	${task} =	Wait For Task	${task}	${timeout}	${interval}	
+	[Return]	${task}
+
+Create Bulk Ethernet Networks
+	[Documentation]	Create Bulk Ethernet networks
+	[Arguments]		${networks}
+	Log to console	\n Creating Bulk Ethernet Networks
+	:FOR	${net}	IN	@{networks}
+	\		${resp} = 	Fusion Api Create Ethernet Bulk Networks		body=${net}
+	\		Should Be Equal As Integers	${resp['status_code']}	202
+	\		Wait For Task	${resp}
+
+Delete Ethernet Networks
+	[Documentation]	Removes Ethernet networks using the list of network names
+	[Arguments]		${networks}
+	Log to console and logfile  	Removing ETHERNET NETWORKS
+	:FOR	${net}	IN	@{networks}
+	\		${net_resp}	Fvt Api Get Ethernet Network By Name	${net}
+	\		${resp} = 	Fusion Api Delete Ethernet Network		uri=${net_resp['uri']}
+	\		${task} =	Wait For Task 	${resp} 	20s	2s
+
+Delete Ethernet Networks By PayLoad
+	[Documentation]	Removes Ethernet networks using the list of network DTO
+	[Arguments]		${networks}
+	Log to console and logfile  	Removing ETHERNET NETWORKS
+	:FOR	${net}	IN	@{networks}
+	\		${net_resp}	Fvt Api Get Ethernet Network By Name	${net['name']}
+	\		${resp} = 	Fusion Api Delete Ethernet Network		uri=${net_resp['uri']}
+	\		${task} =	Wait For Task 	${resp} 	20s	2s

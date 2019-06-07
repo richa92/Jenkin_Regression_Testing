@@ -1,0 +1,153 @@
+*** Settings ***
+Documentation     Create Support Dump
+Library         Sdumpfunctions
+Library         OperatingSystem
+Library         FusionLibrary
+Library         RoboGalaxyLibrary
+Library         SSHLibrary
+Library         data_variables
+Variables       data_variables.py
+Resource        ../../F137/resource.txt
+
+***variables***
+${LEuri}     /rest/logical-enclosures/
+${ENeturi}    /rest/ethernet-networks/
+${dump_file_path}       ${CURDIR}/support_dump
+${decryptor_path}       ${CURDIR}/Decryptor
+${decyrpt_file}     ${CURDIR}/support_dump/Decrypted/fusion_le_decrypted_supportdump.sdmp
+${content_path}    ${CURDIR}/support_dump/oneview/support-dump-temp/cidb.out
+${LE_DUMP_FILE}            ${CURDIR}/support_dump/fusion_le_supportdump.sdmp
+${LE_DUMP_RENAME}          ${CURDIR}/support_dump/fusion_le_supportdump.tar.gz
+${APP_DUMP_FILE}           ${CURDIR}/support_dump/Decrypted/fusion_le_decrypted_supportdump.sdmp
+${APP_DUMP_RENAME}         ${CURDIR}/support_dump/Decrypted/fusion_le_decrypted_supportdump.tar.gz
+
+*** Test cases ***
+###Pre-Conditions - Create LIG, EG, and import enclosure###
+1 Create SessionID through API
+    [Documentation]    Create SessionID through API
+    Set Log Level    TRACE
+    ${Login_response} =    Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+    Run keyword unless  ${Login_response[0]['status_code']}== 200   Fail    "Unable to Login"
+    Log to console and logfile    Test Step-1 completed successfully
+    #Initial Cleanup
+    Clean OV
+
+2 Create Network,LIG,EG and Import Enclosure
+    [Documentation]    Create Network,LIG,EG and Import Enclosure
+    :For    ${Enet} IN  @{Network}
+    \    ${net} =    Fusion Api Create Ethernet Network    ${Enet}
+    \    Run Keyword If    '${net['status_code']}' != '202'    Fail    ELSE    Log to console and logfile    \nNetwork Created successfully.
+    ${body} =   Build LIG body      ${lig_sd_2}
+    ${resp_lig} =   Fusion Api Create LIG   ${body}
+    Run keyword unless  ${resp_lig['status_code']}== 202    Fail    "Unable to Create LIG"
+    ${task} =   Wait For Task   ${resp_lig}     120s    2s
+    Log to console and logfile    LIG created successfully
+    ${uri} =    Get From Dictionary    ${task['associatedResource']}    resourceUri
+    Log to console and logfile    ${uri}
+    Set Global Variable    ${lig_uri}    ${uri}
+
+    ${Enc_Grp_Resp} =    Add Enclosure Group from variable      ${enc_group_sd_2}
+    Log to console and logfile    \n${Enc_Grp_Resp}
+    Run keyword unless  ${Enc_Grp_Resp['status_code']}== 201    Fail    "Unable to Create Enclosure Group"
+    Set Global Variable    ${Enc_Grp_uri}    ${Enc_Grp_Resp['uri']}
+    Log to console and logfile    \n\nEG created succesfully
+
+    Set To Dictionary    ${enc_body1_sd_3}    enclosureGroupUri    ${Enc_Grp_uri}
+    ${Enc_resp}=    Fusion Api Add Enclosure    ${enc_body1_sd_3}
+    Run keyword unless  ${Enc_resp['status_code']}== 202    Fail    ${resp_lig['message']}
+    ${task} =   Wait For Task1  ${Enc_resp}     500s    30s
+    Log to console and logfile    Enclosure imported successfully
+    Log to console and logfile    Test Step-2 completed successfully
+
+3 Create Logical Enclosure Support Dump
+    [Documentation]    Create Logical Enclosure Support Dump
+    Create Directory     ${dump_file_path}
+    Log to console and logfile     \n-Getting the LE id
+    ${LI_name}=     Get Variable Value    ${LI_76}
+    ${le_uri} =    Get LE URI      ${LE_76}
+    ${logicalEnclosureId}=    Fetch From Right        ${le_uri}      /
+
+    Log to console and logfile     \n-Creating support dump for the LE
+    ${Response}=    Fusion Api Get Logical Enclosure Support Dump   body=${LE_SupportDump_Payload}   id=${logicalEnclosureId}
+    Should Be Equal as Strings      ${Response['status_code']}       202       msg=Failed to initiate Create Enclosure Support Dump.
+    Log to console and logfile     \n-Waiting for dump creation task to complete
+    ${task} =                       Wait For Task1           ${Response}     15min    1min
+    Should Be Equal as Strings      ${task['status_code']}      200       msg=Failed to Create Enclosure Support Dump.
+    Log to console and logfile     \n-Support dump created successfully
+
+    Empty Directory     ${dump_file_path}
+    ${supportDumpUri}=          Get From Dictionary     ${task['associatedResource']}   resourceUri
+    ${Response1}=        Fusion Api Download Support Dump            uri=${supportDumpUri}   localfile=${LE_DUMP_FILE}
+    Should Be Equal as Strings      ${Response1['status_code']}      200           msg=Failed to Download Enclosure Support Dump.
+    Log to console and logfile      \n-Support Dump downloaded successfully
+    Log to console and logfile    Test Step-3 completed successfully
+
+4 Renaming File
+    [Documentation]    Renaming the File
+    rename    ${LE_DUMP_FILE}    ${LE_DUMP_RENAME}
+    rename    ${LE_DUMP_RENAME}    ${LE_DUMP_FILE}
+    Log to console and logfile    Test Step-4 completed successfully
+    Log to console and logfile      \n-Decrypting ,extracting the downloaded dump file
+    decrypt_and_extract_the_dump_file    ${dump_file_path}    ${decryptor_path}
+    Log to console and logfile    Test Step-4 completed successfully
+
+5 Reading the Contents of the file
+    [Documentation]    Reading the Contents of the file
+    ${sizeof} =    getSize    ${LE_DUMP_FILE}
+    Log to console and logfile    \n${sizeof}
+    Run Keyword If    '${sizeof}' == '0'    Fail    Else    Log to console and logfile    \nContents are available
+    readfile    ${LE_DUMP_FILE}
+    Log to console and logfile    \nThe file is readable..
+    Log to console and logfile    Test Step-5 completed successfully
+
+6 Downloading and validating decrypted support dump from Appliance settings page
+    [Documentation]    Create an appliance support dump, decrypt it, extract and validate for the existence of files
+
+    ${dump_file_path} =     Catenate    SEPARATOR=/     ${dump_file_path}       Decrypted
+    ${decryptor_path} =     Set Variable            #Making the path as null since encryption not required
+    logger      \n Location of Dump files : ${dump_file_path}
+    Create Directory     ${dump_file_path}
+    Empty Directory     ${dump_file_path}
+    ${resp}    Fusion Api Create Support Dump    ${sdmp_body}
+    Log to console and logfile    ${resp}
+    Logger      Appliance support dump response : ${resp}       DEBUG
+    ${uri}=     Get From Dictionary     ${resp}     uri
+    Logger      The downloadable dump file ${uri}
+    Empty Directory     ${dump_file_path}
+    ${resp}=    Fusion Api Download Support Dump    uri=${uri}          localfile=${decyrpt_file}
+    Log to console and Logfile    \nRenaming the File..
+    rename    ${APP_DUMP_FILE}    ${APP_DUMP_RENAME}
+    rename    ${APP_DUMP_RENAME}    ${APP_DUMP_FILE}
+    Log to console and logfile      \n-Decrypting ,extracting the downloaded dump file
+    decrypt_and_extract_the_dump_file    ${dump_file_path}    ${decryptor_path}
+    ${sizeof} =    getSize    ${LE_DUMP_FILE}
+    Log to console and logfile    \n${sizeof}
+    Run Keyword If    '${sizeof}' == '0'    Fail    Else    Log to console and logfile    \nContents are available
+    readfile    ${APP_DUMP_FILE}
+    Log to console and logfile    \nThe file is readable..
+    Log to console and logfile    Test Step-6 completed successfully
+
+7 Final Cleanup
+    [Documentation]    Final Cleanup
+    Clean OV
+
+****Keywords****
+Clean OV
+    [Documentation]    Cleans the appliance
+    Log to console    \nCleaning the OV
+    Power off ALL Servers
+    Remove All Server Profiles
+    Remove ALL Enclosures
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove ALL Ethernet Networks
+    Remove ALL FC Networks
+    Remove ALL FCoE Networks
+    Remove ALL Network Sets
+
+Get LE URI
+    [Documentation]    Get Logical Enclosure URI
+    [Arguments]     ${le}
+    ${resp} =   Fusion Api Get Logical Enclosure        param=?filter="'name'=='${le}'"
+    ${uri} =    Get From Dictionary     ${resp['members'][0]}   uri
+    [Return]    ${uri}

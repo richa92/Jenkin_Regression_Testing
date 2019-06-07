@@ -1,0 +1,344 @@
+#!/bin/bash
+LOG=$0.log
+IPADDR="ipaddr.conf"
+declare -a MACS
+IFCFG_DIR="/etc/sysconfig/network-scripts"
+IFCFG_WA_DIR="/root/ifcfg"
+SCRIPT="add_vlans"
+UDEV_RULES_DIR="/etc/udev/rules.d"
+PERSISTENT_RULES="70-persistent-net.rules"
+SYSCTL_CONF="/etc/sysctl.conf"
+SYS_ARP_IGNORE="net.ipv4.conf.all.arp_ignore"
+SYS_ARP_ANNOUNCE="net.ipv4.conf.all.arp_announce"
+
+#=============================================================================
+# usage 
+#=============================================================================
+usage()
+{
+        echo "usage: $0 -ip <Domain Server IP> -sn <Server Serial Number>" 
+	echo ""
+}
+
+#=============================================================================
+# check_log
+#=============================================================================
+check_log()
+{
+	local tmp_name
+
+	if [ -f $LOG ]; then
+        	tmp_name=$(mktemp $LOG.XXXXXXXXXX)
+        	mv $LOG $tmp_name
+	fi
+}
+
+#=============================================================================
+# get_macs_ipaddr 
+#
+# Summary:
+# gets all of the MAC addresses for a specified server based off of the server 
+# serial number
+#=============================================================================
+get_macs_ipaddr()
+{
+	MACS=`cat $IPADDR | grep "$SN" | grep -o -E '([[:xdigit:]]{1,2}:){5}[[:xdigit:]]{1,2}' | uniq`
+}
+
+#=============================================================================
+# verify_kernel_macs 
+#
+# Summary:
+# verifies that each MAC that VC has assigned for this server has been 
+# enumerated by the kernel.  
+#=============================================================================
+verify_kernel_macs()
+{
+	local discovered=0 
+
+	for mac in ${MACS[@]} 
+	do
+		ifconfig -a | grep "$mac" >/dev/null 2>&1
+		if [ $? -ne 0 ]; then
+			echo "`date`: WARNING - Failed to find MAC $mac" 2>&1 | tee -a $LOG
+			discovered=1
+		fi
+	done
+	if [ $discovered -eq 1 ]; then
+		exit -1
+	fi
+}
+
+#=============================================================================
+# create_default_ifcfg 
+#
+# Summary:
+# creates the default ifcfg for all MACs that have been enumerated which includes 
+# the "DEVICE=<ethx>" and "HWADDR=<mac> parameters.  This will allow the physical interface
+# to be brought up when networking is started.
+#=============================================================================
+create_default_ifcfg()
+{
+	local inf
+	local mgmt_inf=`ifconfig -a | grep -B 1 $IP | cut -d " " -f1`
+
+	for mac in ${MACS[@]} 
+	do
+		inf=`ifconfig -a | grep -m 1 $mac | cut -d " " -f1`
+		if [ "$inf" = "$mgmt_inf" ]; then 
+			echo "`date`: WARNING - Mgmt MAC matches MAC $mac" 2>&1 | tee -a $LOG
+			exit -1
+		else
+			echo -e "DEVICE=$inf" >> $IFCFG_DIR/ifcfg-$inf
+			echo -e "HWADDR=$mac" >> $IFCFG_DIR/ifcfg-$inf
+			ifconfig $inf up
+		fi
+		
+	done
+}
+
+#=============================================================================
+# update_ifcfg 
+#
+# Summary:
+# updates the default ifcfg file when an unshared network needs to be configured 
+#=============================================================================
+update_ifcfg()
+{
+	local inf=$1
+	local mac=$2
+	local ip=$3
+
+	if [ -f $IFCFG_DIR/ifcfg-$inf ]; then
+		echo -e "BOOTPROTO=none" >> $IFCFG_DIR/ifcfg-$inf
+		echo -e "IPADDR=$ip" >> $IFCFG_DIR/ifcfg-$inf
+		echo -e "ONBOOT=yes" >> $IFCFG_DIR/ifcfg-$inf
+		echo -e "VLAN=yes" >> $IFCFG_DIR/ifcfg-$inf
+		ifup $inf
+	else
+		echo "`date`: $IFCFG_DIR/ifcfg-$inf not found" 2>&1 | tee -a $LOG
+	fi
+
+}
+
+#=============================================================================
+# create_vlan_ifcfg 
+#
+# Summary:
+# creates the ifcfg file for each and every vlan interface which matches the
+# server serial number.  It will additional call update_ifcfg file if an 
+# unshared network needs to be configured.
+#=============================================================================
+create_vlan_ifcfg()
+{
+	local mac
+	local vlan
+	local ip
+	local results_file="tmp_results"
+
+	local mgmt_inf=`ifconfig -a | grep -B 1 $IP | cut -d " " -f1`
+	cat $IPADDR | grep "$SN" >> $results_file
+	mkdir -p $IFCFG_WA_DIR
+
+	while read line
+	do
+		mac=`echo "$line" | grep -o -E '([[:xdigit:]]{1,2}:){5}[[:xdigit:]]{1,2}'`
+		inf=`ifconfig -a | grep $mac | cut -d " " -f1`
+		if [ "$inf" = "$mgmt_inf" ]; then 
+			echo "`date`: WARNING - Mgmt MAC matches MAC $mac in $IPADDR" 2>&1 | tee -a $LOG
+			exit -1
+		fi
+
+		ip=`echo "$line" | grep -o -E '[[:digit:]]{1,3}\.[[:digit:]]{1,3}\.[[:digit:]]{1,3}\.[[:digit:]]{1,3}'`
+		vlan=`echo "$line" | grep -o -E ' [[:digit:]]{1,4} ' | tr -d ' '`
+		if [ ! -z "$vlan" ]; then
+			echo "`date`: INFO - inf is $inf, mac is $mac, ip is $ip, vlan is $vlan" 2>&1 | tee -a $LOG
+		
+			echo -e "DEVICE=$inf.$vlan" >> $IFCFG_WA_DIR/ifcfg-$inf.$vlan
+			echo -e "BOOTPROTO=none" >> $IFCFG_WA_DIR/ifcfg-$inf.$vlan
+			echo -e "IPADDR=$ip" >> $IFCFG_WA_DIR/ifcfg-$inf.$vlan
+			echo -e "ONBOOT=yes" >> $IFCFG_WA_DIR/ifcfg-$inf.$vlan
+			echo -e "HWADDR=$mac" >> $IFCFG_WA_DIR/ifcfg-$inf.$vlan
+			echo -e "VLAN=yes" >> $IFCFG_WA_DIR/ifcfg-$inf.$vlan
+		else
+			echo "`date`: INFO - inf is $inf, mac is $mac, ip is $ip" 2>&1 | tee -a $LOG
+			update_ifcfg $inf $mac $ip
+		fi
+		
+	done <$results_file
+	rm -f $results_file
+}
+
+#=============================================================================
+# apply_workaround
+#
+# Summary:
+# applies a workaround which updates rc.local to execute a script that adds
+# the vlans to the physical interfaces.  During VC3.30 and RHEL5.5 testing with
+# LVLAN we discovered that RH would fail to add the vlans to a a LVLAN OS configuration.
+#=============================================================================
+apply_workaround()
+{
+	cat /etc/rc.local | grep "^/root/add_vlans"
+	if [ $? -ne 0 ]; then
+		echo "/root/$SCRIPT $IFCFG_WA_DIR &" >> /etc/rc.local
+	fi
+	if [ -f $SCRIPT ]; then
+		rm -f $SCRIPT
+	fi
+	create_script
+	/etc/rc.local
+}
+
+#=============================================================================
+# create_script
+#
+# Summary:
+# creates a script to be called by rc.local that applies the workaround described
+# in apply_workaround.  
+#=============================================================================
+create_script()
+{
+
+	echo "#!/bin/bash" >> /root/$SCRIPT
+	echo "" >> /root/$SCRIPT
+	echo "if [ \$# -eq 1 ]; then" >> /root/$SCRIPT
+	echo "        IFCFG_DIR=\$1" >> /root/$SCRIPT
+	echo "else" >> /root/$SCRIPT
+	echo "        echo \"usage: \$0 <path/to/ifcfg>\"" >> /root/$SCRIPT
+	echo "        exit 1"  >> /root/$SCRIPT
+	echo "fi"  >> /root/$SCRIPT
+	echo "" >> /root/$SCRIPT
+	echo "IFCFG=(\`ls \$IFCFG_DIR | grep -e \"ifcfg-eth*\" | awk 'BEGIN{FS=\" \"} {print \$NF}'\`)" >> /root/$SCRIPT
+	echo "" >> /root/$SCRIPT
+	echo "for ifcfg in \${IFCFG[@]}" >> /root/$SCRIPT
+	echo "do" >> /root/$SCRIPT
+	echo "        IPADDR=(\`cat \$IFCFG_DIR/\$ifcfg | grep \"IPADDR\" | awk 'BEGIN{FS=\"=\"} {print \$NF}'\`)" >> /root/$SCRIPT
+	echo "        VLAN=(\`cat \$IFCFG_DIR/\$ifcfg | grep \"DEVICE\" | awk 'BEGIN{FS=\"=\"} {print \$NF}' | awk 'BEGIN{FS=\".\"} {print \$NF}'\`)" >> /root/$SCRIPT
+	echo "        IF=(\`cat \$IFCFG_DIR/\$ifcfg | grep \"DEVICE\" | awk 'BEGIN{FS=\"=\"} {print \$NF}'| cut -d\".\" -f 1\`)" >> /root/$SCRIPT
+	echo "        vconfig add \$IF \$VLAN" >> /root/$SCRIPT
+	echo "        ifconfig \$IF.\$VLAN \$IPADDR" >> /root/$SCRIPT
+	echo "done" >> /root/$SCRIPT
+	chmod +x /root/$SCRIPT
+
+}
+
+#=============================================================================
+# create_udev_rules
+#
+# Summary:
+# creates a persistent udev rule for interface to MAC address mappings.  This was
+# required on RHEL5 because we hit scenarios where RHEL would rename interfaces
+# for unknown reasons. 
+#=============================================================================
+create_udev_rules()
+{ 
+	local -a macs
+	local inf
+	local convert_mac
+
+	if [ -f $UDEV_RULES_DIR/$PERSISTENT_RULES ]; then
+		echo "`date`: INFO: $UDEV_RULES_DIR/$PERSISTENT_RULES already exists so continuing..." 2>&1 | tee -a $LOG
+		return
+	else
+		macs=(`ifconfig -a | grep HW | awk 'BEGIN{FS=" "} {print $NF}' | sort | uniq`)
+		for mac in ${macs[@]}
+		do
+        		inf=(`ifconfig -a | grep -e $mac | head -1 | cut -d" " -f1`)
+        		convert_mac=(`echo $mac | awk '{ print tolower($0) }'`)
+        		echo "ACTION==\"add\", SUBSYSTEM==\"net\", DRIVER==\"?*\", SYSFS{address}==\"$convert_mac\" NAME=\"$inf\"" >> $UDEV_RULES_DIR/$PERSISTENT_RULES
+		done		
+	fi
+}
+
+#=============================================================================
+# control_linux_arp_flux 
+#
+# Summary:
+# updates the kernel parameters to prevent the linux arp flux problem.  This is
+# required when there are multiple interfaces on the same subnet.  Both interfaces
+# may respond to an arp request which results in the switch getting confused with
+# the mac->ip mapping. 
+# Update: 4/4/2012 - bsuber - Discovered that this does not work with RHEL6.2.
+# With these parameters set then only one interface will respond to arp request
+# and the other interface will be unreachable. 
+#=============================================================================
+control_linux_arp_flux()
+{ 
+	local value
+	local ret
+	local tmp_file
+
+	value=`sysctl -n net.ipv4.conf.all.arp_ignore`
+	if [ $value -ne 1 ]; then
+		sysctl -w net.ipv4.conf.all.arp_ignore=1
+	fi
+
+	value=`sysctl -n net.ipv4.conf.all.arp_announce`
+	if [ $value -ne 2 ]; then
+		sysctl -w net.ipv4.conf.all.arp_announce=2
+	fi
+
+	cat $SYSCTL_CONF | grep "$SYS_ARP_IGNORE" >/dev/null 2>&1
+	ret=$?
+	if [ $ret -ne 0 ]; then
+		echo "$SYS_ARP_IGNORE = 1" >> $SYSCTL_CONF
+	else
+		value=`cat $SYSCTL_CONF | grep "$SYS_ARP_IGNORE" | awk 'BEGIN{FS=" = "} {print $NF}'`	
+		if [ $value -ne 1 ]; then
+			tmp_file=$(mktemp /tmp/sysctl.XXXXXXXXXX)
+        		sed /$SYS_ARP_IGNORE/d $SYSCTL_CONF >> $tmp_file 
+			rm -f $SYSCTL_CONF
+			echo "$SYS_ARP_IGNORE = 1" >> $SYSCTL_CONF
+			mv $tmp_file $SYSCTL_CONF
+		fi
+	fi
+
+	cat $SYSCTL_CONF | grep "$SYS_ARP_ANNOUNCE" >/dev/null 2>&1
+	ret=$?
+	if [ $ret -ne 0 ]; then
+		echo "$SYS_ARP_ANNOUNCE = 1" >> $SYSCTL_CONF
+	else
+		value=`cat $SYSCTL_CONF | grep "$SYS_ARP_ANNOUNCE" | awk 'BEGIN{FS=" = "} {print $NF}'`	
+		if [ $value -ne 2 ]; then
+			tmp_file=$(mktemp /tmp/sysctl.XXXXXXXXXX)
+        		sed /$SYS_ARP_ANNOUNCE/d $SYSCTL_CONF >> $tmp_file
+			rm -f $SYSCTL_CONF
+			echo "$SYS_ARP_ANNOUNCE = 1" >> $SYSCTL_CONF
+			mv $tmp_file $SYSCTL_CONF
+		fi
+	fi
+}
+
+  while [ -n "$(echo $1 | grep '-')" ]; do
+          case $1 in
+          -ip ) IP=$2
+                 shift ;;
+          -sn ) SN=$2
+                 shift ;;
+          * ) usage
+              exit 1
+          esac
+          shift
+  done
+
+  if [ -z "$IP" -o -z "$SN" ]; then
+          usage
+          exit 1
+  fi
+
+  if [ ! -f $IPADDR ]; then
+  	echo "`date`: IP address $ipaddr is NOT reachable for $SERVER" 2>&1 | tee -a $LOG 
+	exit -1
+  fi
+
+  check_log
+  get_macs_ipaddr
+  verify_kernel_macs
+  create_udev_rules
+  create_default_ifcfg
+  create_vlan_ifcfg
+  apply_workaround
+  
+
+

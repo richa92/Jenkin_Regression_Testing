@@ -1,0 +1,1833 @@
+*** Settings ***
+Resource            ../../../../Resources/api/fusion_api_resource.txt
+Variables           ./DATA_VARIABLES_PM_C7K.py
+Library             FusionLibrary
+Suite Setup         Fusion Api Login Appliance      ${FUSION_IP}    ${admin_credentials}
+Suite Teardown      Fusion Api Logout Appliance
+
+
+*** Variables ***
+${PROFILE_CREATE_TIMEOUT}   5000
+${SPP_LOCALPATH}            ./C7kSPP
+${THREADNUM}                3
+${SPP_LOCAL_FILE}           ${None}
+
+
+*** Keywords ***
+Get Server profile Name Exits in OV
+    [Documentation]     Verify server profile exists as per the name given
+    [Arguments]         ${profile_name}
+    ${resp} =           Fusion Api Get Server Profiles
+    ${profiles} =       Create List
+    ${total_count}=     Set Variable                0
+    ${profile_list} =   Get From Dictionary         ${resp}                     members
+    :FOR                ${p}                        IN                          @{profile_list}
+    \                   ${profile} =                Fusion Api Get Resource     uri=${p['uri']}
+    \                   Return From Keyword If      '${p['name']}'=='${profile_name}'   ${p['name']}
+    Log                 Server Profile '${profile_name}' not found              console=True
+    [Return]            ${None}
+
+Get Server profile Status in OV
+    [Documentation]     Checks the server profile status
+    [Arguments]         ${profile_name}
+    ${resp} =           Fusion Api Get Server Profiles
+    log                 ${resp}                     console=True
+    ${profiles} =       Create List
+    ${total_count}=     Set Variable                0
+    ${profile_list} =   Get From Dictionary         ${resp}                     members
+    :FOR                ${p}                        IN                          @{profile_list}
+    \                   ${profile} =                Fusion Api Get Resource     uri=${p['uri']}
+    \                   Return From Keyword If      '${p['name']}'=='${profile_name}'   ${p['status']}
+    Log                 Server Profile ${profile_name} not found                console=True
+    [Return]            ${None}
+
+Get serverHardwareUri from OV
+    [Documentation]     Checks the server hardware association for the given server profile
+    [Arguments]         ${profile_name}
+    ${resp} =           Fusion Api Get Server Profiles
+    log                 ${resp}                     console=True
+    ${profiles} =       Create List
+    ${total_count}=     Set Variable                0
+    ${profile_list} =   Get From Dictionary         ${resp}                     members
+    :FOR                ${p}                        IN                          @{profile_list}
+    \                   ${profile} =                Fusion Api Get Resource     uri=${p['uri']}
+    \                   Return From Keyword If      '${p['name']}'=='${profile_name}'   ${p['serverHardwareUri']}
+    Log                 Server Profile              ${profile_name} not found   console=True
+    [Return]            ${None}
+
+Get Firmware Install State from profile
+    [Arguments]                     ${profile}
+    [Documentation]                 Check if profile firmware Activation
+    Wait Until Keyword Succeeds     4000    20      Firmware Should Be Activated    ${profile}
+    ${state} =                      Get Server Profile Firmware Install State       ${profile}
+    [Return]                        ${state}
+
+Firmware Should Be Activated
+    [Documentation]     Validate firmware applied on server profile
+    [Arguments]         ${profile}
+    ${state} =          Get Server Profile Firmware Install State   ${profile}
+    Log                 ${state}    console= True
+    Should be equal     ${state}    Activated
+
+Get First SPP Firmware Bundle URI
+    [Documentation]     Get Firmware Bundle URI
+    ${resp} =           Fusion Api Get Firmware Driver
+    ${spp}=             Set Variable        ${resp['members'][0]}
+    ${uri} =            Set Variable If     '${spp['uri']}' != 'None'   ${spp['uri']}   No memeber in firmware driver
+    [Return]            ${uri}
+
+
+*** Test Cases ***
+
+Setup-: Add EG and import enclosure
+    [Documentation]     Create EG and Import Enclosure
+    ${resp}=            Add Enclosure Group from variable       ${enclosure_group}
+    Log                 ${resp['status_code']}
+    Run Keyword If      '${resp['status_code']}' != '201'       Fail    ELSE    log to console      \n-created EG successfully
+    ${resp1} =          Add Enclosures from variable            ${encss}
+    Log                 '${resp1[0]['status_code']}'
+    Run Keyword If      '${resp1[0]['status_code']}' != '200'   fail    ELSE    log to console
+    ...                 \n-Enclosure got imported successfully!
+
+Setup-Remove External repo only if it Exists
+    [Documentation]     Remove external repository if it exists
+    [Tags]              add_repo
+    ${repositories}=    Fusion Api Get Repository
+    Log                 ${repositories}         console= True
+    ${count}=           Get From Dictionary     ${repositories}         count
+    Log                 ${count}                console= True
+    :FOR                ${repo}                 IN                      @{repositories['members']}
+    \                   Log                     ${repo}                 console= True
+    \                   ${uri} =                Get From Dictionary     ${repo}                 uri
+    \                   ${repo_name} =          Get From Dictionary     ${repo}                 name
+    \                   Log                     ${repo_name}            console= True
+    \                   ${repositoryType} =     Get From Dictionary     ${repo}                 repositoryType
+    \                   ${response} =           run Keyword If          '${repositoryType}'=='FirmwareExternalRepo'
+    \                   ...                     Remove Repository By Name
+    \                   ...                     ${repo_name}
+    \                   run Keyword If          '${repositoryType}'=='FirmwareExternalRepo'     Wait For Task2      ${response}
+    \                   ...                     200
+    \                   ...                     5
+
+Setup-Remove Firmware Bundle one by one from One View and verify the Internal repository size cleared
+    [Documentation]                 Clear All Firmware Bundle and ignore error
+    [Tags]                          firmware
+    Run Keyword And Ignore Error    Remove All Firmware Bundles
+
+Setup: Download Firmware Bundle To Current Machine
+    [Tags]              DOWNLOAD_SPP
+    [Documentation]     Download SPP from http/ftp share latest file into current directory
+    Download Latest File From Web Folder    ${web_url}      WEB_USERNAME=${webdav_username}     WEB_PASSWORD=${webdav_password}
+
+Add Firmware Bundle
+    [Tags]                      UPLOAD_SPP
+    [Documentation]             Upload SPP bundle ${SPP_LOCAL_FILE} to OneView
+    ${status}                   ${message}          Run Keyword And Ignore Error
+    ...                         OperatingSystem.File Should Exist
+    ...                         ${SPP_LOCAL_FILE}
+    Run Keyword If              '${status}'=='FAIL'
+    ...                         Log                 SPP File is not download from HTTP Url.Pick up latest SPP file from local path
+    ...                         WARN
+    ...                         console=True
+    Create Folder If Not Exists                     ${SPP_LOCALPATH}
+    ${file}=                    Run Keyword If      '${status}'=='FAIL'         Get File From Local Path    ${SPP_LOCALPATH}
+    ${filestatus}               ${filemsg}          Run Keyword And Ignore Error
+    ...                         OperatingSystem.File Should Exist
+    ...                         ${file}
+    ${SPP_FILE}=                Set Variable If     '${filestatus}' == 'FAIL'   ${SPP_LOCAL_FILE}           ${file}
+    Log                         SPP to be Installed:${SPP_FILE}                 console=True
+    # Unset proxy environ variables
+    ${HTTP_PROXY}=              Get Environment Variable                        HTTP_PROXY                  default=${EMPTY}
+    ${HTTPS_PROXY}=             Get Environment Variable                        HTTPS_PROXY                 default=${EMPTY}
+    Set Environment Variable    HTTP_PROXY          ${EMPTY}
+    Set Environment Variable    HTTPS_PROXY         ${EMPTY}
+    Log                         SPP File to test:${SPP_FILE}                    console=True
+
+    Run Keyword If              '${SPP_FILE}' != '${None}'      Upload Firmware Bundle Async    ${SPP_FILE}
+    ...                         VERIFY=${TRUE}
+    ...                         ELSE            Log             No SPP Bundle available in local path to upload
+    ...                         WARN
+    ...                         console=True
+    # Set proxy environ variables back to its actual value
+    Set Environment Variable    HTTP_PROXY      ${HTTP_PROXY}
+    Set Environment Variable    HTTPS_PROXY     ${HTTPS_PROXY}
+
+Gen10-CREATE OFFLINE SP - Firmware Only with Force
+    [Documentation]     Create Offline Server Profile using Firmware Only Option with Force
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_force[0]['serverHardwareUri']}   console= True
+    Power off Server    ${server_profiles_force[0]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_force[0]['firmware']}     firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_force[0]}                 console= True
+
+    ${responses}=       Add Server Profile          ${server_profiles_force[0]}
+    ...                 param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen10_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'                         fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen10_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen10-EDIT OFFLINE SP - Firmware Only with Force
+    [Documentation]     Edit Offline Server Profile using Firmware Only Option
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_force[0]['serverHardwareUri']}   console= True
+    Power off Server    ${server_profiles_force[0]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_force[0]['firmware']}     firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_force[0]}                 console= True
+
+    ${responses}=       Edit Server Profile                 ${server_profiles_force[0]}
+    ...                 param=?force="ignoreServerHealth"
+    Log                 ${responses}                        console= True
+    Wait For Task2      ${responses}                        ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV         ${gen10_sp_name}
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'     fail    msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV     ${gen10_sp_name}
+    Run Keyword If      '${resp1}' == 'Critical'            fail    msg=Server Profile State is in Critical
+
+Gen10-Unassign Server Profile has Firmware Only with Force
+    [Documentation]     Query OneView for list of profiles then unassign server profiles from server hardware.
+    [Tags]              PROFILES                    SERVER_PROFILES             UNASSIGN_HARDWARE           MINIMAL
+    ${resp} =           Fusion Api Get Server Profiles
+    ${profiles} =       Create List
+    ${profile_list} =   Get From Dictionary         ${resp}                     members
+    Log                 ${profile_list}             console= True
+    :FOR                ${p}                        IN                          @{profile_list}
+    \                   ${profile} =                Fusion Api Get Resource     uri=${p['uri']}
+    \                   Log                         ${p['name']}                console= True
+    \                   set to dictionary           ${profile}                  serverHardwareUri=${None}
+    \                   set to dictionary           ${profile}                  enclosureBay=${None}
+    \                   set to dictionary           ${profile}                  enclosureUri=${None}
+    \                   remove from dictionary      ${profile}                  status_code                 headers
+    \                   ${resp} =                   run keyword if
+    \                   ...                         "${p['name']}"=="${server_profiles_force[0]['name']}"
+    \                   ...                         fusion api edit server profile
+    \                   ...                         uri=${p['uri']}
+    \                   ...                         body=${profile}
+    \                   Wait For Task2              ${resp}                     ${PROFILE_CREATE_TIMEOUT}   interval=15
+
+    ${resp}=            Get Server profile Name Exits in OV     ${gen10_sp_name}
+    log to console      ${resp}
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'         fail    msg=Server Profile Not Exists in OV
+    ${resp1}=           Get serverHardwareUri from OV           ${gen10_sp_name}
+    log to console      ${resp1}
+    Run Keyword If      '${resp1}' != 'None'                    fail    msg=Server Profile Not Unassigned
+
+Gen10-Reassign Gen10-OFFLINE SP - Firmware Only with Force
+    [Documentation]     Reassign Offline Server Profile using Firmware Only Option
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_force[0]['serverHardwareUri']}   console= True
+    Power off Server    ${server_profiles_force[0]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_force[0]['firmware']}     firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_force[0]}                 console= True
+
+    ${responses}=       Edit Server Profile                 ${server_profiles_force[0]}
+    ...                 param=?force="ignoreServerHealth"
+    Log                 ${responses}                        console= True
+    Wait For Task2      ${responses}                        ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV         ${gen10_sp_name}
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'     fail    msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV     ${gen10_sp_name}
+    Run Keyword If      '${resp1}' == 'Critical'            fail    msg=Server Profile State is in Critical
+
+Gen10-Remove Offline Server Profile has Firmware Only with Force
+    [Documentation]     Remove Offline Server Profile
+    [Tags]              sp_bay4
+    ${resp} =           Remove Server Profile   ${server_profiles_force[0]}     force=${True}
+    Wait For Task2      ${resp}                 ${PROFILE_CREATE_TIMEOUT}       interval=15
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen10_sp_name}
+    Run Keyword If      '${resp}' == '${gen10_sp_name}'                         fail    msg=Server Profile Still Exists in OV
+
+Gen10-CREATE ONLINE SP - Firmware and OS Drivers using Smart Update Tools with Force and Imediate
+    [Tags]              sp_gen10
+    [Documentation]     Create Online Server Profile using Smart Update Tools with Force and Imediate Option
+    Log                 Powering off the server ${\n}${server_profiles_force[1]['serverHardwareUri']}   console= True
+    Power off Server    ${server_profiles_force[1]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_force[1]['firmware']}     firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_force[1]}                 console= True
+
+    ${responses}=       Add Server Profile      ${server_profiles_force[1]}     param=?force="ignoreServerHealth"
+    Log                 ${responses}            console= True
+    Wait For Task2      ${responses}            ${PROFILE_CREATE_TIMEOUT}       interval=15
+    Power on server     ${server_profiles_force[1]['serverHardwareUri']}
+
+    ${resp}=            Get Server profile Name Exits in OV     ${gen10_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'         fail    msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV         ${gen10_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail        msg=Server Profile State is in Critical
+
+    Log                 Profile Created Successfully                console= True
+    ${resp2}=           Get Firmware Install State from profile     ${server_profiles_force[1]}
+    Run Keyword If      '${resp2}' != 'Activated'                   fail    msg=Server Profile State is i'${resp2}'
+
+Gen10-EDIT ONLINE SP - Firmware and OS Drivers using Smart Update Tools with Force and Imediate
+    [Tags]              sp_gen10
+    [Documentation]     Create Online Server Profile using Smart Update Tools with Force and Imediate Option
+    Log                 Powering off the server ${\n}${server_profiles_force[1]['serverHardwareUri']}   console= True
+    Power off Server    ${server_profiles_force[1]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_force[1]['firmware']}     firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_force[1]}                 console= True
+
+    ${responses}=       Edit Server Profile     ${server_profiles_force[1]}     param=?force="ignoreServerHealth"
+    Log                 ${responses}            console= True
+    Wait For Task2      ${responses}            ${PROFILE_CREATE_TIMEOUT}       interval=15
+    Power on server     ${server_profiles_force[1]['serverHardwareUri']}
+
+    ${resp}=            Get Server profile Name Exits in OV     ${gen10_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'         fail    msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV         ${gen10_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail        msg=Server Profile State is in Critical
+
+    Log                 Profile Created Successfully                console= True
+    ${resp2}=           Get Firmware Install State from profile     ${server_profiles_force[1]}
+    Run Keyword If      '${resp2}' != 'Activated'                   fail    msg=Server Profile State is i'${resp2}'
+
+Gen10-Unassign Server Profile - Firmware and OS Drivers using Smart Update Tools with Force and Imediate
+    [Documentation]     Query OneView for list of profiles then unassign server profiles from server hardware.
+    [Tags]              PROFILES                    SERVER_PROFILES     UNASSIGN_HARDWARE           MINIMAL
+    ${resp} =           Fusion Api Get Server Profiles
+    ${profiles} =       Create List
+    ${profile_list} =   Get From Dictionary         ${resp}             members
+    :FOR                ${p}                        IN                  @{profile_list}
+    \                   ${profile} =                Fusion Api Get Resource                         uri=${p['uri']}
+    \                   Log                         ${p['name']}        console= True
+    \                   set to dictionary           ${profile}          serverHardwareUri=${None}
+    \                   set to dictionary           ${profile}          enclosureBay=${None}
+    \                   set to dictionary           ${profile}          enclosureUri=${None}
+    \                   remove from dictionary      ${profile}          status_code                 headers
+    \                   ${resp} =                   run keyword if
+    \                   ...                         "${p['name']}"=="${server_profiles_force[1]['name']}"
+    \                   ...                         fusion api edit server profile
+    \                   ...                         uri=${p['uri']}
+    \                   ...                         body=${profile}
+    \                   Wait For Task2              ${resp}             ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV             ${gen10_sp_name}
+    log to console      ${resp}
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'                 fail
+    ...                 msg=Server Profile Not Exists in OV
+    ${resp1}=           Get serverHardwareUri from OV                   ${gen10_sp_name}
+    log to console      ${resp1}
+    Run Keyword If      '${resp1}' != 'None'        fail                msg=Server Profile Not Unassigned
+
+Gen10-Reassign Gen10-EDIT ONLINE SP - Firmware and OS Drivers using Smart Update Tools with Force and Imediate
+    [Tags]              sp_gen10
+    [Documentation]     Reassign Online Server Profile using Smart Update Tools with Force and Imediate Option
+    Log                 Powering off the server ${\n}${server_profiles_force[1]['serverHardwareUri']}   console= True
+    Power off Server    ${server_profiles_force[1]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_force[1]['firmware']}     firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_force[1]}                 console= True
+
+    ${responses}=       Edit Server Profile     ${server_profiles_force[1]}     param=?force="ignoreServerHealth"
+    Log                 ${responses}            console= True
+    Wait For Task2      ${responses}            ${PROFILE_CREATE_TIMEOUT}       interval=15
+    Power on server     ${server_profiles_force[1]['serverHardwareUri']}
+
+    ${resp}=            Get Server profile Name Exits in OV     ${gen10_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'         fail    msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV         ${gen10_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail        msg=Server Profile State is in Critical
+
+    Log                 Profile Created Successfully                console= True
+    ${resp2}=           Get Firmware Install State from profile     ${server_profiles_force[1]}
+    Run Keyword If      '${resp2}' != 'Activated'                   fail    msg=Server Profile State is i'${resp2}'
+
+Gen10-Remove Online Server Profile - Firmware and OS Drivers using Smart Update Tools with Force and Imediate
+    [Tags]              sp_gen10
+    [Documentation]     Remove Online Server Profile
+    ${resp} =           Remove Server Profile   ${server_profiles_force[1]}     force=${True}
+    Wait For Task2      ${resp}                 ${PROFILE_CREATE_TIMEOUT}       interval=15
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen10_sp_name}
+    Run Keyword If      '${resp}' == '${gen10_sp_name}'                         fail    msg=Server Profile Still Exists in OV
+
+Gen10-Gen10-CREATE ONLINE SP - Firmware and OS drivers using SUT with Force and Scheduled
+    [Documentation]     Create a Scheduled Firmware update server profile using Firmware and OS drivers using SUT
+    [Tags]              sp_gen10
+    Log                 Powering off the server ${\n}${server_profiles_force[2]['serverHardwareUri']}   console= True
+    Power off Server    ${server_profiles_force[2]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_force[2]['firmware']}     firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_force[2]}                 console= True
+
+    ${responses}=       Add Server Profile          ${server_profiles_force[2]}
+    ...                 param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_force[2]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen10_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'                         fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen10_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen10-Gen10-EDIT ONLINE SP - Firmware and OS drivers using SUT with Force and Scheduled
+    [Documentation]     Edit a Scheduled Firmware update server profile using Firmware and OS drivers using SUT
+    [Tags]              sp_gen10
+    Log                 Powering off the server ${\n}${server_profiles_force[2]['serverHardwareUri']}   console= True
+    Power off Server    ${server_profiles_force[2]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_force[2]['firmware']}     firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_force[2]}                 console= True
+
+    ${responses}=       Edit Server Profile         ${server_profiles_force[2]}
+    ...                 param=?force="ignoreServerHealth"
+    Log                 ${responses}
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_force[2]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen10_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'                         fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen10_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen10-Unassign Server Profile - Firmware and OS drivers using SUT with Force and Scheduled
+    [Documentation]     Query OneView for list of profiles then unassign server profiles from server hardware.
+    [Tags]              PROFILES                    SERVER_PROFILES     UNASSIGN_HARDWARE           MINIMAL
+    ${resp} =           Fusion Api Get Server Profiles
+    ${profiles} =       Create List
+    ${profile_list} =   Get From Dictionary         ${resp}             members
+    Log                 ${profile_list}             console= True
+    :FOR                ${p}                        IN                  @{profile_list}
+    \                   ${profile} =                Fusion Api Get Resource                         uri=${p['uri']}
+    \                   Log                         ${p['name']}        console= True
+    \                   set to dictionary           ${profile}          serverHardwareUri=${None}
+    \                   set to dictionary           ${profile}          enclosureBay=${None}
+    \                   set to dictionary           ${profile}          enclosureUri=${None}
+    \                   remove from dictionary      ${profile}          status_code                 headers
+    \                   ${resp} =                   run keyword if
+    \                   ...                         "${p['name']}"=="${server_profiles_force[2]['name']}"
+    \                   ...                         fusion api edit server profile
+    \                   ...                         uri=${p['uri']}
+    \                   ...                         body=${profile}
+    \                   Wait For Task2              ${resp}             ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV             ${gen10_sp_name}
+    log to console      ${resp}
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'                 fail
+    ...                 msg=Server Profile Not Exists in OV
+    ${resp1}=           Get serverHardwareUri from OV                   ${gen10_sp_name}
+    log to console      ${resp1}
+    Run Keyword If      '${resp1}' != 'None'        fail                msg=Server Profile Not Unassigned
+
+Gen10-Reassign Gen10-Online SP - Firmware and OS drivers using SUT with Force and Scheduled
+    [Documentation]     Reassign SP with Firmware and OS drivers using SUT with Force and Scheduled
+    [Tags]              sp_gen10
+    Log                 Powering off the server ${\n}${server_profiles_force[2]['serverHardwareUri']}   console= True
+    Power off Server    ${server_profiles_force[2]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_force[2]['firmware']}     firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_force[2]}                 console= True
+
+    ${responses}=       Edit Server Profile         ${server_profiles_force[2]}
+    ...                 param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_force[2]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen10_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'                         fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen10_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen10-Remove Online Server Profile - Firmware and OS drivers using SUT with Force and Scheduled
+    [Documentation]     Remove Onine Server Profile
+    [Tags]              sp_gen10
+    ${resp} =           Remove Server Profile   ${server_profiles_force[2]}     force=${True}
+    Wait For Task2      ${resp}                 ${PROFILE_CREATE_TIMEOUT}       interval=15
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen10_sp_name}
+    Run Keyword If      '${resp}' == '${gen10_sp_name}'                         fail    msg=Server Profile Still Exists in OV
+
+Gen10-CREATE ONLINE SP - Firmware and OS drivers using SUT with Force and Not Scheduled
+    [Documentation]     Create a SP with Firmware and OS drivers using SUT with Force and Not Scheduled
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_force[3]['serverHardwareUri']}   console= True
+    Power off Server    ${server_profiles_force[3]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_force[3]['firmware']}     firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_force[3]}                 console= True
+
+    ${responses}=       Add Server Profile      ${server_profiles_force[3]}     param=?force="ignoreServerHealth"
+    Log                 ${responses}            console= True
+    Wait For Task2      ${responses}            ${PROFILE_CREATE_TIMEOUT}       interval=15
+    Power on server     ${server_profiles_force[3]['serverHardwareUri']}
+
+    ${resp}=            Get Server profile Name Exits in OV     ${gen10_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'         fail    msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV         ${gen10_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail        msg=Server Profile State is in Critical
+
+Gen10-EDIT ONLINE SP - Firmware and OS drivers using SUT with Force and Not Scheduled
+    [Documentation]     Edit a SP Firmware and OS drivers using SUT with Force and Not Scheduled
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_force[3]['serverHardwareUri']}   console= True
+    Power off Server    ${server_profiles_force[3]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_force[3]['firmware']}     firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_force[3]}                 console= True
+
+    ${responses}=       Edit Server Profile         ${server_profiles_force[3]}
+    ...                 param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_force[3]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen10_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'                         fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen10_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen10-Unassign Server Profile - Firmware and OS drivers using SUT with Force and Not Scheduled
+    [Documentation]     Query OneView for list of profiles then unassign server profiles from server hardware.
+    [Tags]              PROFILES                    SERVER_PROFILES     UNASSIGN_HARDWARE           MINIMAL
+    ${resp} =           Fusion Api Get Server Profiles
+    ${profiles} =       Create List
+    ${profile_list} =   Get From Dictionary         ${resp}             members
+    Log                 ${profile_list}             console= True
+    :FOR                ${p}                        IN                  @{profile_list}
+    \                   ${profile} =                Fusion Api Get Resource                         uri=${p['uri']}
+    \                   Log                         ${p['name']}        console= True
+    \                   set to dictionary           ${profile}          serverHardwareUri=${None}
+    \                   set to dictionary           ${profile}          enclosureBay=${None}
+    \                   set to dictionary           ${profile}          enclosureUri=${None}
+    \                   remove from dictionary      ${profile}          status_code                 headers
+    \                   ${resp} =                   run keyword if
+    \                   ...                         "${p['name']}"=="${server_profiles_force[3]['name']}"
+    \                   ...                         fusion api edit server profile
+    \                   ...                         uri=${p['uri']}
+    \                   ...                         body=${profile}
+    \                   Wait For Task2              ${resp}             ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV             ${gen10_sp_name}
+    log to console      ${resp}
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'                 fail
+    ...                 msg=Server Profile Not Exists in OV
+    ${resp1}=           Get serverHardwareUri from OV                   ${gen10_sp_name}
+    log to console      ${resp1}
+    Run Keyword If      '${resp1}' != 'None'        fail                msg=Server Profile Not Unassigned
+
+Gen10-Reassign Gen10-ONLINE SP - Firmware and OS drivers using SUT with Force and Not Scheduled
+    [Documentation]     Reassign SP with Firmware and OS drivers using SUT with Force and Scheduled
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_force[3]['serverHardwareUri']}   console= True
+    Power off Server    ${server_profiles_force[3]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_force[3]['firmware']}     firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_force[3]}                 console= True
+
+    ${responses}=       Edit Server Profile         ${server_profiles_force[3]}
+    ...                 param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_force[3]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen10_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'                         fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen10_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen10-Remove Online Server Profile - Firmware and OS drivers using SUT with Force and Not Scheduled
+    [Documentation]     Remove Offline Server Profile
+    [Tags]              sp_bay4
+    ${resp} =           Remove Server Profile   ${server_profiles_force[3]}     force=${True}
+    Wait For Task2      ${resp}                 ${PROFILE_CREATE_TIMEOUT}       interval=15
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen10_sp_name}
+    Run Keyword If      '${resp}' == '${gen10_sp_name}'                         fail    msg=Server Profile Still Exists in OV
+
+Gen10-CREATE ONLINE SP - Firmware Only using SUT with Force and Imediate
+    [Documentation]     Create a SP with Firmware Only using SUT with Force and Imediate
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_force[4]['serverHardwareUri']}   console= True
+    Power off Server    ${server_profiles_force[4]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_force[4]['firmware']}     firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_force[4]}                 console= True
+
+    ${responses}=       Add Server Profile              ${server_profiles_force[4]}
+    ...                 param=?force="ignoreServerHealth"
+    Log                 ${responses}                    console= True
+    Wait For Task2      ${responses}                    ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_force[4]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV         ${gen10_sp_name}
+    Log                 ${resp}                         console= True
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'             fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV             ${gen10_sp_name}
+    Log                 ${resp1}                        console= True
+    Run Keyword If      '${resp1}' == 'Critical'        fail        msg=Server Profile State is in Critical
+    Log                 Profile Created Successfully    console= True
+    ${resp2}=           Get Firmware Install State from profile     ${server_profiles_force[4]}
+    Run Keyword If      '${resp2}' != 'Activated'       fail        msg=Server Profile State is i'${resp2}'
+
+Gen10-EDIT ONLINE SP - Firmware Only using SUT with Force and Imediate
+    [Documentation]     Edit a SP Firmware Only using SUT with Force and Imediate
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_force[4]['serverHardwareUri']}   console= True
+    Power off Server    ${server_profiles_force[4]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_force[4]['firmware']}     firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_force[4]}                 console= True
+
+    ${responses}=       Edit Server Profile             ${server_profiles_force[4]}
+    ...                 param=?force="ignoreServerHealth"
+    Log                 ${responses}                    console= True
+    Wait For Task2      ${responses}                    ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_force[4]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV         ${gen10_sp_name}
+    Log                 ${resp}                         console= True
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'             fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV             ${gen10_sp_name}
+    Log                 ${resp1}                        console= True
+    Run Keyword If      '${resp1}' == 'Critical'        fail        msg=Server Profile State is in Critical
+    Log                 Profile Created Successfully    console= True
+    ${resp2}=           Get Firmware Install State from profile     ${server_profiles_force[4]}
+    Run Keyword If      '${resp2}' != 'Activated'       fail        msg=Server Profile State is i'${resp2}'
+
+Gen10-Unassign Server Profile - Firmware Only using SUT with Force and Imediate
+    [Documentation]     Query OneView for list of profiles then unassign server profiles from server hardware.
+    [Tags]              PROFILES                    SERVER_PROFILES     UNASSIGN_HARDWARE           MINIMAL
+    ${resp} =           Fusion Api Get Server Profiles
+    ${profiles} =       Create List
+    ${profile_list} =   Get From Dictionary         ${resp}             members
+    Log                 ${profile_list}             console= True
+    :FOR                ${p}                        IN                  @{profile_list}
+    \                   ${profile} =                Fusion Api Get Resource                         uri=${p['uri']}
+    \                   Log                         ${p['name']}        console= True
+    \                   set to dictionary           ${profile}          serverHardwareUri=${None}
+    \                   set to dictionary           ${profile}          enclosureBay=${None}
+    \                   set to dictionary           ${profile}          enclosureUri=${None}
+    \                   remove from dictionary      ${profile}          status_code                 headers
+    \                   ${resp} =                   run keyword if
+    \                   ...                         "${p['name']}"=="${server_profiles_force[4]['name']}"
+    \                   ...                         fusion api edit server profile
+    \                   ...                         uri=${p['uri']}
+    \                   ...                         body=${profile}
+    \                   Wait For Task2              ${resp}             ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV             ${gen10_sp_name}
+    log to console      ${resp}
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'                 fail
+    ...                 msg=Server Profile Not Exists in OV
+    ${resp1}=           Get serverHardwareUri from OV                   ${gen10_sp_name}
+    log to console      ${resp1}
+    Run Keyword If      '${resp1}' != 'None'        fail                msg=Server Profile Not Unassigned
+
+Gen10-Reassign Gen10-ONLINE SP - Firmware Only using SUT with Force and Imediate
+    [Documentation]     Reassign SP with Firmware Only using SUT with Force and Imediate
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_force[4]['serverHardwareUri']}   console= True
+    Power off Server    ${server_profiles_force[4]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_force[4]['firmware']}     firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_force[4]}                 console= True
+
+    ${responses}=       Edit Server Profile             ${server_profiles_force[4]}
+    ...                 param=?force="ignoreServerHealth"
+    Log                 ${responses}                    console= True
+    Wait For Task2      ${responses}                    ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_force[4]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV         ${gen10_sp_name}
+    Log                 ${resp}                         console= True
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'             fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV             ${gen10_sp_name}
+    Log                 ${resp1}                        console= True
+    Run Keyword If      '${resp1}' == 'Critical'        fail        msg=Server Profile State is in Critical
+    Log                 Profile Created Successfully    console= True
+    ${resp2}=           Get Firmware Install State from profile     ${server_profiles_force[4]}
+    Run Keyword If      '${resp2}' != 'Activated'       fail        msg=Server Profile State is i'${resp2}'
+
+Gen10-Remove Online Server Profile - Firmware Only using SUT with Force and Imediate
+    [Documentation]     Remove Offline Server Profile
+    [Tags]              sp_bay4
+    ${resp} =           Remove Server Profile   ${server_profiles_force[4]}     force=${True}
+    Wait For Task2      ${resp}                 ${PROFILE_CREATE_TIMEOUT}       interval=15
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen10_sp_name}
+    Run Keyword If      '${resp}' == '${gen10_sp_name}'                         fail    msg=Server Profile Still Exists in OV
+
+Gen10-CREATE ONLINE SP - Firmware Only using SUT with Force and Scheduled
+    [Documentation]     Create a SP with Firmware Only using SUT with Force and Scheduled
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_force[5]['serverHardwareUri']}   console= True
+    Power off Server    ${server_profiles_force[5]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_force[5]['firmware']}     firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_force[5]}                 console= True
+
+    ${responses}=       Add Server Profile          ${server_profiles_force[5]}
+    ...                 param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_force[5]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen10_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'                         fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen10_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen10-EDIT ONLINE SP - Firmware Only using SUT with Force and Scheduled
+    [Documentation]     Edit a SP Firmware Only using SUT with Force and Scheduled
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_force[5]['serverHardwareUri']}   console= True
+    Power off Server    ${server_profiles_force[5]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_force[5]['firmware']}     firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_force[5]}                 console= True
+
+    ${responses}=       Edit Server Profile         ${server_profiles_force[5]}
+    ...                 param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_force[5]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen10_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'                         fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen10_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen10-Unassign Server Profile - Firmware Only using SUT with Force and Scheduled
+    [Documentation]     Query OneView for list of profiles then unassign server profiles from server hardware.
+    [Tags]              PROFILES                    SERVER_PROFILES     UNASSIGN_HARDWARE           MINIMAL
+    ${resp} =           Fusion Api Get Server Profiles
+    ${profiles} =       Create List
+    ${profile_list} =   Get From Dictionary         ${resp}             members
+    Log                 ${profile_list}             console= True
+    :FOR                ${p}                        IN                  @{profile_list}
+    \                   ${profile} =                Fusion Api Get Resource                         uri=${p['uri']}
+    \                   Log                         ${p['name']}        console= True
+    \                   set to dictionary           ${profile}          serverHardwareUri=${None}
+    \                   set to dictionary           ${profile}          enclosureBay=${None}
+    \                   set to dictionary           ${profile}          enclosureUri=${None}
+    \                   remove from dictionary      ${profile}          status_code                 headers
+    \                   ${resp} =                   run keyword if
+    \                   ...                         "${p['name']}"=="${server_profiles_force[5]['name']}"
+    \                   ...                         fusion api edit server profile
+    \                   ...                         uri=${p['uri']}
+    \                   ...                         body=${profile}
+    \                   Wait For Task2              ${resp}             ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV             ${gen10_sp_name}
+    log to console      ${resp}
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'                 fail
+    ...                 msg=Server Profile Not Exists in OV
+    ${resp1}=           Get serverHardwareUri from OV                   ${gen10_sp_name}
+    log to console      ${resp1}
+    Run Keyword If      '${resp1}' != 'None'        fail                msg=Server Profile Not Unassigned
+
+Gen10-Reassign Gen10-ONLINE SP - Firmware Only using SUT with Force and Scheduled
+    [Documentation]     Reassign SP with Firmware Only using SUT with Force and Scheduled
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_force[5]['serverHardwareUri']}   console= True
+    Power off Server    ${server_profiles_force[5]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_force[5]['firmware']}     firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_force[5]}                 console= True
+
+    ${responses}=       Edit Server Profile         ${server_profiles_force[5]}
+    ...                 param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_force[5]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen10_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'                         fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen10_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen10-Remove Online Server Profile - Firmware Only using SUT with Force and Scheduled
+    [Documentation]     Remove Offline Server Profile
+    [Tags]              sp_bay4
+    ${resp} =           Remove Server Profile   ${server_profiles_force[5]}     force=${True}
+    Wait For Task2      ${resp}                 ${PROFILE_CREATE_TIMEOUT}       interval=15
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen10_sp_name}
+    Run Keyword If      '${resp}' == '${gen10_sp_name}'                         fail    msg=Server Profile Still Exists in OV
+
+Gen10-CREATE ONLINE SP - Firmware Only using SUT with Force and Not Scheduled
+    [Documentation]     Create a SP with Firmware Only using SUT with Force and Not Scheduled
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_force[6]['serverHardwareUri']}   console= True
+    Power off Server    ${server_profiles_force[6]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_force[6]['firmware']}     firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_force[6]}                 console= True
+
+    ${responses}=       Add Server Profile          ${server_profiles_force[6]}
+    ...                 param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_force[6]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen10_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'                         fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen10_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen10-EDIT ONLINE SP - Firmware Only using SUT with Force and Not Scheduled
+    [Documentation]     Edit a SP Firmware Only using SUT with Force and Not Scheduled
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_force[6]['serverHardwareUri']}   console= True
+    Power off Server    ${server_profiles_force[6]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_force[6]['firmware']}     firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_force[6]}                 console= True
+
+    ${responses}=       Edit Server Profile         ${server_profiles_force[6]}
+    ...                 param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_force[6]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen10_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'                         fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen10_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen10-Unassign Server Profile - Firmware Only using SUT with Force and Not Scheduled
+    [Documentation]     Query OneView for list of profiles then unassign server profiles from server hardware.
+    [Tags]              PROFILES                    SERVER_PROFILES     UNASSIGN_HARDWARE           MINIMAL
+    ${resp} =           Fusion Api Get Server Profiles
+    ${profiles} =       Create List
+    Log                 ${profiles}                 console= True
+    ${profile_list} =   Get From Dictionary         ${resp}             members
+    Log                 ${profile_list}             console= True
+    :FOR                ${p}                        IN                  @{profile_list}
+    \                   ${profile} =                Fusion Api Get Resource                         uri=${p['uri']}
+    \                   Log                         ${p['name']}
+    \                   set to dictionary           ${profile}          serverHardwareUri=${None}
+    \                   set to dictionary           ${profile}          enclosureBay=${None}
+    \                   set to dictionary           ${profile}          enclosureUri=${None}
+    \                   remove from dictionary      ${profile}          status_code                 headers
+    \                   ${resp} =                   run keyword if
+    \                   ...                         "${p['name']}"=="${server_profiles_force[6]['name']}"
+    \                   ...                         fusion api edit server profile
+    \                   ...                         uri=${p['uri']}
+    \                   ...                         body=${profile}
+    \                   Wait For Task2              ${resp}             ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV             ${gen10_sp_name}
+    log to console      ${resp}
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'                 fail
+    ...                 msg=Server Profile Not Exists in OV
+    ${resp1}=           Get serverHardwareUri from OV                   ${gen10_sp_name}
+    log to console      ${resp1}
+    Run Keyword If      '${resp1}' != 'None'        fail                msg=Server Profile Not Unassigned
+
+Gen10-Reassign Gen10-ONLINE SP - Firmware Only using SUT with Force and Not Scheduled
+    [Documentation]     Reassign SP with Firmware Only using SUT with Force and Not Scheduled
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_force[6]['serverHardwareUri']}   console= True
+    Power off Server    ${server_profiles_force[6]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_force[6]['firmware']}     firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_force[6]}                 console= True
+
+    ${responses}=       Edit Server Profile         ${server_profiles_force[6]}
+    ...                 param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_force[6]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen10_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'                         fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen10_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen10-Remove Online Server Profile - Firmware Only using SUT with Force and Not Scheduled
+    [Documentation]     Remove Offline Server Profile
+    [Tags]              sp_bay4
+    ${resp} =           Remove Server Profile   ${server_profiles_force[6]}     force=${True}
+    Wait For Task2      ${resp}                 ${PROFILE_CREATE_TIMEOUT}       interval=15
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen10_sp_name}
+    Run Keyword If      '${resp}' == '${gen10_sp_name}'                         fail    msg=Server Profile Still Exists in OV
+
+Gen10-CREATE OFFLINE SP - Offline Profile without Force
+    [Documentation]     Create Offline SP without Force Firmware Only
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_no_force[0]['serverHardwareUri']}    console= True
+    Power off Server    ${server_profiles_no_force[0]['serverHardwareUri']}     powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_no_force[0]['firmware']}      firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_no_force[0]}                  console= True
+
+    ${responses}=       Add Server Profile          ${server_profiles_no_force[0]}
+    ...                 param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen10_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'                         fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen10_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen10-Remove Offline Server Profile - Offline Profile without Force
+    [Documentation]     Remove Offline Server Profile
+    [Tags]              sp_bay4
+    ${resp} =           Remove Server Profile   ${server_profiles_no_force[0]}      force=${True}
+    Wait For Task2      ${resp}                 ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV                 ${gen10_sp_name}
+    Run Keyword If      '${resp}' == '${gen10_sp_name}'                     fail    msg=Server Profile Still Exists in OV
+
+Gen10-CREATE ONLINE SP - Firmware and OS Drivers using Smart Update Tools without Force
+    [Documentation]     Create Online Profile using Firmware and OS Drivers using SUT
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_no_force[1]['serverHardwareUri']}    console= True
+    Power off Server    ${server_profiles_no_force[1]['serverHardwareUri']}     powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_no_force[1]['firmware']}      firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_no_force[1]}                  console= True
+
+    ${responses}=       Add Server Profile      ${server_profiles_no_force[1]}      param=?force="ignoreServerHealth"
+    Log                 ${responses}            console= True
+    Wait For Task2      ${responses}            ${PROFILE_CREATE_TIMEOUT}           interval=15
+    Power on server     ${server_profiles_no_force[1]['serverHardwareUri']}
+
+    ${resp}=            Get Server profile Name Exits in OV     ${gen10_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'         fail    msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV         ${gen10_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail        msg=Server Profile State is in Critical
+
+    Log                 Profile Created Successfully                console= True
+    ${resp2}=           Get Firmware Install State from profile     ${server_profiles_no_force[1]}
+    Run Keyword If      '${resp2}' != 'Activated'                   fail    msg=Server Profile State is i'${resp2}'
+
+Gen10-Remove Online Server Profile - Firmware and OS Drivers using Smart Update Tools without Force
+    [Documentation]     Remove Online Server Profile
+    [Tags]              sp_bay4
+    ${resp} =           Remove Server Profile   ${server_profiles_no_force[1]}      force=${True}
+    Wait For Task2      ${resp}                 ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV                 ${gen10_sp_name}
+    Run Keyword If      '${resp}' == '${gen10_sp_name}'                     fail    msg=Server Profile Still Exists in OV
+
+Gen10-CREATE ONLINE SP - Firmware Only using SUT without Force
+    [Documentation]     Create Online Profile using Firmware Only using SUT without Force
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_no_force[2]['serverHardwareUri']}    console= True
+    Power off Server    ${server_profiles_no_force[2]['serverHardwareUri']}     powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_no_force[2]['firmware']}      firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_no_force[2]}                  console= True
+
+    ${responses}=       Add Server Profile          ${server_profiles_no_force[2]}
+    ...                 param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_no_force[2]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen10_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen10_sp_name}'                         fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen10_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+    Log                 Profile Created Successfully                console= True
+    ${resp2}=           Get Firmware Install State from profile     ${server_profiles_no_force[2]}
+    Run Keyword If      '${resp2}' != 'Activated'                   fail    msg=Server Profile State is '${resp2}'
+
+Gen10-Remove Online Server Profile - Firmware Only using SUT without Force
+    [Documentation]     Remove Online Server Profile
+    [Tags]              sp_bay4
+    ${resp} =           Remove Server Profile   ${server_profiles_no_force[2]}      force=${True}
+    Wait For Task2      ${resp}                 ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV                 ${gen10_sp_name}
+    Run Keyword If      '${resp}' == '${gen10_sp_name}'                     fail    msg=Server Profile Still Exists in OV
+
+Gen9-CREATE OFFLINE SP - Firmware Only
+    [Documentation]     Create Offline Server Profile using Firmware Only Option
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_gen9_force[0]['serverHardwareUri']}      console= True
+    Power off Server    ${server_profiles_gen9_force[0]['serverHardwareUri']}   powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_gen9_force[0]['firmware']}    firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_gen9_force[0]}                console= True
+
+    ${responses}=       Add Server Profile          ${server_profiles_gen9_force[0]}    param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen9_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'                          fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen9_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen9-EDIT OFFLINE SP - Firmware Only
+    [Documentation]     Edit Offline Server Profile using Firmware Only Option
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_gen9_force[0]['serverHardwareUri']}      console= True
+    Power off Server    ${server_profiles_gen9_force[0]['serverHardwareUri']}   powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_gen9_force[0]['firmware']}    firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_gen9_force[0]}                console= True
+
+    ${responses}=       Edit Server Profile         ${server_profiles_gen9_force[0]}    param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen9_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'                          fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen9_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen9-Unassign Server Profile - Firmware Only
+    [Documentation]     Query OneView for list of profiles then unassign server profiles from server hardware.
+    [Tags]              PROFILES                    SERVER_PROFILES     UNASSIGN_HARDWARE           MINIMAL
+    ${resp} =           Fusion Api Get Server Profiles
+    ${profiles} =       Create List
+    Log                 ${profiles}                 console= True
+    ${profile_list} =   Get From Dictionary         ${resp}             members
+    Log                 ${profile_list}             console= True
+    :FOR                ${p}                        IN                  @{profile_list}
+    \                   ${profile} =                Fusion Api Get Resource                         uri=${p['uri']}
+    \                   Log                         ${p['name']}        console= True
+    \                   set to dictionary           ${profile}          serverHardwareUri=${None}
+    \                   set to dictionary           ${profile}          enclosureBay=${None}
+    \                   set to dictionary           ${profile}          enclosureUri=${None}
+    \                   remove from dictionary      ${profile}          status_code                 headers
+    \                   ${resp} =                   run keyword if
+    \                   ...                         "${p['name']}"=="${server_profiles_gen9_force[0]['name']}"
+    \                   ...                         fusion api edit server profile
+    \                   ...                         uri=${p['uri']}
+    \                   ...                         body=${profile}
+    \                   Wait For Task2              ${resp}             ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV             ${gen9_sp_name}
+    log to console      ${resp}
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'                  fail
+    ...                 msg=Server Profile Not Exists in OV
+    ${resp1}=           Get serverHardwareUri from OV                   ${gen9_sp_name}
+    log to console      ${resp1}
+    Run Keyword If      '${resp1}' != 'None'        fail                msg=Server Profile Not Unassigned
+
+Gen9-Reassign Gen9-OFFLINE SP - Firmware Only
+    [Documentation]     Reassign Offline Server Profile using Firmware Only Option
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_gen9_force[0]['serverHardwareUri']}      console= True
+    Power off Server    ${server_profiles_gen9_force[0]['serverHardwareUri']}   powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_gen9_force[0]['firmware']}    firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_gen9_force[0]}                console= True
+
+    ${responses}=       Edit Server Profile         ${server_profiles_gen9_force[0]}    param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen9_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'                          fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen9_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen9-Remove Online Server Profile - Firmware Only
+    [Documentation]     Remove Offline Server Profile
+    [Tags]              sp_bay4
+    ${resp} =           Remove Server Profile   ${server_profiles_gen9_force[0]}    force=${True}
+    Wait For Task2      ${resp}                 ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV                 ${gen9_sp_name}
+    Run Keyword If      '${resp}' == '${gen9_sp_name}'                      fail    msg=Server Profile Still Exists in OV
+
+Gen9-CREATE ONLINE SP - Firmware and OS Drivers using Smart Update Tools with Force and Imediate
+    [Documentation]     Create Online SP using Firmware and OS Drivers using SUT with Force Imediate
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_gen9_force[1]['serverHardwareUri']}      console= True
+    Power off Server    ${server_profiles_gen9_force[1]['serverHardwareUri']}   powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_gen9_force[1]['firmware']}    firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_gen9_force[1]}                console= True
+
+    ${responses}=       Add Server Profile              ${server_profiles_gen9_force[1]}    param=?force="ignoreServerHealth"
+    Log                 ${responses}                    console= True
+    Wait For Task2      ${responses}                    ${PROFILE_CREATE_TIMEOUT}           interval=15
+    Power on server     ${server_profiles_gen9_force[1]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV         ${gen9_sp_name}
+    Log                 ${resp}                         console= True
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'              fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV             ${gen9_sp_name}
+    Log                 ${resp1}                        console= True
+    Run Keyword If      '${resp1}' == 'Critical'        fail        msg=Server Profile State is in Critical
+    Log                 Profile Created Successfully    console= True
+    ${resp2}=           Get Firmware Install State from profile     ${server_profiles_gen9_force[1]}
+    Run Keyword If      '${resp2}' != 'Activated'       fail        msg=Server Profile State is in'${resp2}'
+
+Gen9-EDIT ONLINE SP - Firmware and OS Drivers using Smart Update Tools with Force and Imediate
+    [Documentation]     Edit Online SP using Firmware and OS Drivers using SUT with Force Imediate
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_gen9_force[1]['serverHardwareUri']}      console= True
+    Power off Server    ${server_profiles_gen9_force[1]['serverHardwareUri']}   powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_gen9_force[1]['firmware']}    firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_gen9_force[1]}                console= True
+
+    ${responses}=       Edit Server Profile             ${server_profiles_gen9_force[1]}    param=?force="ignoreServerHealth"
+    Log                 ${responses}                    console= True
+    Wait For Task2      ${responses}                    ${PROFILE_CREATE_TIMEOUT}           interval=15
+    Power on server     ${server_profiles_gen9_force[1]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV         ${gen9_sp_name}
+    Log                 ${resp}                         console= True
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'              fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV             ${gen9_sp_name}
+    Log                 ${resp1}                        console= True
+    Run Keyword If      '${resp1}' == 'Critical'        fail        msg=Server Profile State is in Critical
+    Log                 Profile Created Successfully    console= True
+    ${resp2}=           Get Firmware Install State from profile     ${server_profiles_gen9_force[1]}
+    Run Keyword If      '${resp2}' != 'Activated'       fail        msg=Server Profile State is in'${resp2}'
+
+Gen9-Unassign Server Profile - Firmware and OS Drivers using Smart Update Tools with Force and Imediate
+    [Documentation]     Query OneView for list of profiles then unassign server profiles from server hardware.
+    [Tags]              PROFILES                    SERVER_PROFILES     UNASSIGN_HARDWARE           MINIMAL
+    ${resp} =           Fusion Api Get Server Profiles
+    ${profiles} =       Create List
+    Log                 ${profiles}                 console= True
+    ${profile_list} =   Get From Dictionary         ${resp}             members
+    Log                 ${profile_list}             console= True
+    :FOR                ${p}                        IN                  @{profile_list}
+    \                   ${profile} =                Fusion Api Get Resource                         uri=${p['uri']}
+    \                   Log                         ${p['name']}        console= True
+    \                   set to dictionary           ${profile}          serverHardwareUri=${None}
+    \                   set to dictionary           ${profile}          enclosureBay=${None}
+    \                   set to dictionary           ${profile}          enclosureUri=${None}
+    \                   remove from dictionary      ${profile}          status_code                 headers
+    \                   ${resp} =                   run keyword if
+    \                   ...                         "${p['name']}"=="${server_profiles_gen9_force[1]['name']}"
+    \                   ...                         fusion api edit server profile
+    \                   ...                         uri=${p['uri']}
+    \                   ...                         body=${profile}
+    \                   Wait For Task2              ${resp}             ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV             ${gen9_sp_name}
+    log to console      ${resp}
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'                  fail
+    ...                 msg=Server Profile Not Exists in OV
+    ${resp1}=           Get serverHardwareUri from OV                   ${gen9_sp_name}
+    log to console      ${resp1}
+    Run Keyword If      '${resp1}' != 'None'        fail                msg=Server Profile Not Unassigned
+
+Gen9-Reassign EDIT ONLINE SP - Firmware and OS Drivers using Smart Update Tools with Force and Imediate
+    [Documentation]     Reassign Online SP using Firmware and OS Drivers using SUT with Force Imediate
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_gen9_force[1]['serverHardwareUri']}      console= True
+    Power off Server    ${server_profiles_gen9_force[1]['serverHardwareUri']}   powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_gen9_force[1]['firmware']}    firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_gen9_force[1]}                console= True
+
+    ${responses}=       Edit Server Profile             ${server_profiles_gen9_force[1]}    param=?force="ignoreServerHealth"
+    Log                 ${responses}                    console= True
+    Wait For Task2      ${responses}                    ${PROFILE_CREATE_TIMEOUT}           interval=15
+    Power on server     ${server_profiles_gen9_force[1]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV         ${gen9_sp_name}
+    Log                 ${resp}                         console= True
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'              fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV             ${gen9_sp_name}
+    Log                 ${resp1}                        console= True
+    Run Keyword If      '${resp1}' == 'Critical'        fail        msg=Server Profile State is in Critical
+    Log                 Profile Created Successfully    console= True
+    ${resp2}=           Get Firmware Install State from profile     ${server_profiles_gen9_force[1]}
+    Run Keyword If      '${resp2}' != 'Activated'       fail        msg=Server Profile State is in'${resp2}'
+
+Gen9-Remove Online Server Profile - Firmware and OS Drivers using Smart Update Tools with Force and Imediate
+    [Documentation]     Remove Online Server Profile
+    [Tags]              sp_bay1
+    ${resp} =           Remove Server Profile   ${server_profiles_gen9_force[1]}    force=${True}
+    Wait For Task2      ${resp}                 ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV                 ${gen9_sp_name}
+    Run Keyword If      '${resp}' == '${gen9_sp_name}'                      fail    msg=Server Profile Still Exists in OV}
+
+Gen9-CREATE ONLINE SP - Firmware and OS drivers using SUT with Force and Scheduled
+    [Documentation]     Create a Scheduled Firmware update server profile usinf Firmware and OS drivers using SUT
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_gen9_force[2]['serverHardwareUri']}      console= True
+    Power off Server    ${server_profiles_gen9_force[2]['serverHardwareUri']}   powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_gen9_force[2]['firmware']}    firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_gen9_force[2]}                console= True
+
+    ${responses}=       Add Server Profile          ${server_profiles_gen9_force[2]}    param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_gen9_force[2]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen9_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'                          fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen9_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen9-EDIT ONLINE SP - Firmware and OS drivers using SUT with Force and Scheduled
+    [Documentation]     Edit a Scheduled Firmware update server profile usinf Firmware and OS drivers using SUT
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_gen9_force[2]['serverHardwareUri']}      console= True
+    Power off Server    ${server_profiles_gen9_force[2]['serverHardwareUri']}   powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_gen9_force[2]['firmware']}    firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_gen9_force[2]}                console= True
+
+    ${responses}=       Edit Server Profile         ${server_profiles_gen9_force[2]}    param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_gen9_force[2]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen9_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'                          fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen9_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen9-Unassign Server Profile - Firmware and OS drivers using SUT with Force and Scheduled
+    [Documentation]     Query OneView for list of profiles then unassign server profiles from server hardware.
+    [Tags]              PROFILES                    SERVER_PROFILES     UNASSIGN_HARDWARE           MINIMAL
+    ${resp} =           Fusion Api Get Server Profiles
+    ${profiles} =       Create List
+    Log                 ${profiles}                 console= True
+    ${profile_list} =   Get From Dictionary         ${resp}             members
+    Log                 ${profile_list}             console= True
+    :FOR                ${p}                        IN                  @{profile_list}
+    \                   ${profile} =                Fusion Api Get Resource                         uri=${p['uri']}
+    \                   Log                         ${p['name']}        console= True
+    \                   set to dictionary           ${profile}          serverHardwareUri=${None}
+    \                   set to dictionary           ${profile}          enclosureBay=${None}
+    \                   set to dictionary           ${profile}          enclosureUri=${None}
+    \                   remove from dictionary      ${profile}          status_code                 headers
+    \                   ${resp} =                   run keyword if
+    \                   ...                         "${p['name']}"=="${server_profiles_gen9_force[2]['name']}"
+    \                   ...                         fusion api edit server profile
+    \                   ...                         uri=${p['uri']}
+    \                   ...                         body=${profile}
+    \                   Wait For Task2              ${resp}             ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV             ${gen9_sp_name}
+    log to console      ${resp}
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'                  fail
+    ...                 msg=Server Profile Not Exists in OV
+    ${resp1}=           Get serverHardwareUri from OV                   ${gen9_sp_name}
+    log to console      ${resp1}
+    Run Keyword If      '${resp1}' != 'None'        fail                msg=Server Profile Not Unassigned
+
+Gen9-Reassign Gen9-Online SP - Firmware and OS drivers using SUT with Force and Scheduled
+    [Documentation]     Reassign SP with Firmware and OS drivers using SUT with Force and Scheduled
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_gen9_force[2]['serverHardwareUri']}      console= True
+    Power off Server    ${server_profiles_gen9_force[2]['serverHardwareUri']}   powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_gen9_force[2]['firmware']}    firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_gen9_force[2]}                console= True
+
+    ${responses}=       Edit Server Profile         ${server_profiles_gen9_force[2]}    param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_gen9_force[2]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen9_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'                          fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen9_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen9-Remove Online Server Profile - Firmware and OS drivers using SUT with Force and Scheduled
+    [Documentation]     Remove Offline Server Profile
+    [Tags]              sp_bay4
+    ${resp} =           Remove Server Profile   ${server_profiles_gen9_force[2]}    force=${True}
+    Wait For Task2      ${resp}                 ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV                 ${gen9_sp_name}
+    Run Keyword If      '${resp}' == '${gen9_sp_name}'                      fail    msg=Server Profile Still Exists in OV
+
+Gen9-Gen9-CREATE ONLINE SP - Firmware and OS drivers using SUT with Force and Not Scheduled
+    [Documentation]     Create a SP with Firmware and OS drivers using SUT with Force and Not Scheduled
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_gen9_force[3]['serverHardwareUri']}      console= True
+    Power off Server    ${server_profiles_gen9_force[3]['serverHardwareUri']}   powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_gen9_force[3]['firmware']}    firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_gen9_force[3]}                console= True
+
+    ${responses}=       Add Server Profile          ${server_profiles_gen9_force[3]}    param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_gen9_force[3]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen9_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'                          fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen9_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen9-EDIT ONLINE SP - Firmware and OS drivers using SUT with Force and Not Scheduled
+    [Documentation]     Edit a SP Firmware and OS drivers using SUT with Force and Not Scheduled
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_gen9_force[3]['serverHardwareUri']}      console= True
+    Power off Server    ${server_profiles_gen9_force[3]['serverHardwareUri']}   powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_gen9_force[3]['firmware']}    firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_gen9_force[3]}                console= True
+
+    ${responses}=       Edit Server Profile         ${server_profiles_gen9_force[3]}    param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_gen9_force[3]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen9_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'                          fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen9_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen9-Unassign Server Profile - Firmware and OS drivers using SUT with Force and Not Scheduled
+    [Documentation]     Query OneView for list of profiles then unassign server profiles from server hardware.
+    [Tags]              PROFILES                    SERVER_PROFILES     UNASSIGN_HARDWARE           MINIMAL
+    ${resp} =           Fusion Api Get Server Profiles
+    ${profiles} =       Create List
+    Log                 ${profiles}                 console= True
+    ${profile_list} =   Get From Dictionary         ${resp}             members
+    Log                 ${profile_list}             console= True
+    :FOR                ${p}                        IN                  @{profile_list}
+    \                   ${profile} =                Fusion Api Get Resource                         uri=${p['uri']}
+    \                   Log                         ${p['name']}        console= True
+    \                   set to dictionary           ${profile}          serverHardwareUri=${None}
+    \                   set to dictionary           ${profile}          enclosureBay=${None}
+    \                   set to dictionary           ${profile}          enclosureUri=${None}
+    \                   remove from dictionary      ${profile}          status_code                 headers
+    \                   ${resp} =                   run keyword if
+    \                   ...                         "${p['name']}"=="${server_profiles_gen9_force[3]['name']}"
+    \                   ...                         fusion api edit server profile
+    \                   ...                         uri=${p['uri']}
+    \                   ...                         body=${profile}
+    \                   Wait For Task2              ${resp}             ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV             ${gen9_sp_name}
+    log to console      ${resp}
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'                  fail
+    ...                 msg=Server Profile Not Exists in OV
+    ${resp1}=           Get serverHardwareUri from OV                   ${gen9_sp_name}
+    log to console      ${resp1}
+    Run Keyword If      '${resp1}' != 'None'        fail                msg=Server Profile Not Unassigned
+
+Gen9-Reassign Gen9-ONLINE SP - Firmware and OS drivers using SUT with Force and Not Scheduled
+    [Documentation]     Reassign SP with Firmware and OS drivers using SUT with Force and Scheduled
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_gen9_force[3]['serverHardwareUri']}      console= True
+    Power off Server    ${server_profiles_gen9_force[3]['serverHardwareUri']}   powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_gen9_force[3]['firmware']}    firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_gen9_force[3]}                console= True
+
+    ${responses}=       Edit Server Profile         ${server_profiles_gen9_force[3]}    param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_gen9_force[3]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen9_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'                          fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen9_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen9-Remove Online Server Profile - Firmware and OS drivers using SUT with Force and Not Scheduled
+    [Documentation]     Remove Offline Server Profile
+    [Tags]              sp_bay4
+    ${resp} =           Remove Server Profile   ${server_profiles_gen9_force[3]}    force=${True}
+    Wait For Task2      ${resp}                 ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV                 ${gen9_sp_name}
+    Run Keyword If      '${resp}' == '${gen9_sp_name}'                      fail    msg=Server Profile Still Exists in OV
+
+Gen9-CREATE ONLINE SP - Firmware Only using SUT with Force and Imediate
+    [Documentation]     Create a SP with Firmware Only using SUT with Force and Imediate
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_gen9_force[4]['serverHardwareUri']}      console= True
+    Power off Server    ${server_profiles_gen9_force[4]['serverHardwareUri']}   powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_gen9_force[4]['firmware']}    firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_gen9_force[4]}                console= True
+
+    ${responses}=       Add Server Profile              ${server_profiles_gen9_force[4]}    param=?force="ignoreServerHealth"
+    Log                 ${responses}                    console= True
+    Wait For Task2      ${responses}                    ${PROFILE_CREATE_TIMEOUT}           interval=15
+    Power on server     ${server_profiles_gen9_force[4]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV         ${gen9_sp_name}
+    Log                 ${resp}                         console= True
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'              fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV             ${gen9_sp_name}
+    Log                 ${resp1}                        console= True
+    Run Keyword If      '${resp1}' == 'Critical'        fail        msg=Server Profile State is in Critical
+    Log                 Profile Created Successfully    console= True
+    ${resp2}=           Get Firmware Install State from profile     ${server_profiles_gen9_force[4]}
+    Run Keyword If      '${resp2}' != 'Activated'       fail        msg=Server Profile State is in'${resp2}'
+
+Gen9-EDIT ONLINE SP - Firmware Only using SUT with Force and Imediate
+    [Documentation]     Edit a SP Firmware Only using SUT with Force and Imediate
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_gen9_force[4]['serverHardwareUri']}      console= True
+    Power off Server    ${server_profiles_gen9_force[4]['serverHardwareUri']}   powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_gen9_force[4]['firmware']}    firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_gen9_force[4]}                console= True
+
+    ${responses}=       Edit Server Profile             ${server_profiles_gen9_force[4]}    param=?force="ignoreServerHealth"
+    Log                 ${responses}                    console= True
+    Wait For Task2      ${responses}                    ${PROFILE_CREATE_TIMEOUT}           interval=15
+    Power on server     ${server_profiles_gen9_force[4]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV         ${gen9_sp_name}
+    Log                 ${resp}                         console= True
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'              fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV             ${gen9_sp_name}
+    Log                 ${resp1}                        console= True
+    Run Keyword If      '${resp1}' == 'Critical'        fail        msg=Server Profile State is in Critical
+    Log                 Profile Created Successfully    console= True
+    ${resp2}=           Get Firmware Install State from profile     ${server_profiles_gen9_force[4]}
+    Run Keyword If      '${resp2}' != 'Activated'       fail        msg=Server Profile State is in'${resp2}'
+
+Gen9-Unassign Server Profile - Firmware Only using SUT with Force and Imediate
+    [Documentation]     Query OneView for list of profiles then unassign server profiles from server hardware.
+    [Tags]              PROFILES                    SERVER_PROFILES     UNASSIGN_HARDWARE           MINIMAL
+    ${resp} =           Fusion Api Get Server Profiles
+    ${profiles} =       Create List
+    Log                 ${profiles}                 console= True
+    ${profile_list} =   Get From Dictionary         ${resp}             members
+    Log                 ${profile_list}             console= True
+    :FOR                ${p}                        IN                  @{profile_list}
+    \                   ${profile} =                Fusion Api Get Resource                         uri=${p['uri']}
+    \                   Log                         ${p['name']}        console= True
+    \                   set to dictionary           ${profile}          serverHardwareUri=${None}
+    \                   set to dictionary           ${profile}          enclosureBay=${None}
+    \                   set to dictionary           ${profile}          enclosureUri=${None}
+    \                   remove from dictionary      ${profile}          status_code                 headers
+    \                   ${resp} =                   run keyword if
+    \                   ...                         "${p['name']}"=="${server_profiles_gen9_force[4]['name']}"
+    \                   ...                         fusion api edit server profile
+    \                   ...                         uri=${p['uri']}
+    \                   ...                         body=${profile}
+    \                   Wait For Task2              ${resp}             ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV             ${gen9_sp_name}
+    log to console      ${resp}
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'                  fail
+    ...                 msg=Server Profile Not Exists in OV
+    ${resp1}=           Get serverHardwareUri from OV                   ${gen9_sp_name}
+    log to console      ${resp1}
+    Run Keyword If      '${resp1}' != 'None'        fail                msg=Server Profile Not Unassigned
+
+Gen9-Reassign Gen9-ONLINE SP - Firmware Only using SUT with Force and Imediate
+    [Documentation]     Reassign SP with Firmware Only using SUT with Force and Imediate
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_gen9_force[4]['serverHardwareUri']}      console= True
+    Power off Server    ${server_profiles_gen9_force[4]['serverHardwareUri']}   powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_gen9_force[4]['firmware']}    firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_gen9_force[4]}                console= True
+
+    ${responses}=       Edit Server Profile             ${server_profiles_gen9_force[4]}    param=?force="ignoreServerHealth"
+    Log                 ${responses}                    console= True
+    Wait For Task2      ${responses}                    ${PROFILE_CREATE_TIMEOUT}           interval=15
+    Power on server     ${server_profiles_gen9_force[4]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV         ${gen9_sp_name}
+    Log                 ${resp}                         console= True
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'              fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV             ${gen9_sp_name}
+    Log                 ${resp1}                        console= True
+    Run Keyword If      '${resp1}' == 'Critical'        fail        msg=Server Profile State is in Critical
+    Log                 Profile Created Successfully    console= True
+    ${resp2}=           Get Firmware Install State from profile     ${server_profiles_gen9_force[4]}
+    Run Keyword If      '${resp2}' != 'Activated'       fail        msg=Server Profile State is in'${resp2}'
+
+Gen9-Remove Online Server Profile - Firmware Only using SUT with Force and Imediate
+    [Documentation]     Remove Offline Server Profile
+    [Tags]              sp_bay4
+    ${resp} =           Remove Server Profile   ${server_profiles_gen9_force[4]}    force=${True}
+    Wait For Task2      ${resp}                 ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV                 ${gen9_sp_name}
+    Run Keyword If      '${resp}' == '${gen9_sp_name}'                      fail    msg=Server Profile Still Exists in OV
+
+Gen9-CREATE ONLINE SP - Firmware Only using SUT with Force and Scheduled
+    [Documentation]     Create a SP with Firmware Only using SUT with Force and Scheduled
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_gen9_force[5]['serverHardwareUri']}      console= True
+    Power off Server    ${server_profiles_gen9_force[5]['serverHardwareUri']}   powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_gen9_force[5]['firmware']}    firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_gen9_force[5]}                console= True
+
+    ${responses}=       Add Server Profile          ${server_profiles_gen9_force[5]}    param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_gen9_force[5]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen9_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'                          fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen9_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen9-EDIT ONLINE SP - Firmware Only using SUT with Force and Scheduled
+    [Documentation]     Edit a SP Firmware Only using SUT with Force and Scheduled
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_gen9_force[5]['serverHardwareUri']}      console= True
+    Power off Server    ${server_profiles_gen9_force[5]['serverHardwareUri']}   powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_gen9_force[5]['firmware']}    firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_gen9_force[5]}                console= True
+
+    ${responses}=       Edit Server Profile         ${server_profiles_gen9_force[5]}    param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_gen9_force[5]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen9_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'                          fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen9_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen9-Unassign Server Profile - Firmware Only using SUT with Force and Scheduled
+    [Documentation]     Query OneView for list of profiles then unassign server profiles from server hardware.
+    [Tags]              PROFILES                    SERVER_PROFILES     UNASSIGN_HARDWARE           MINIMAL
+    ${resp} =           Fusion Api Get Server Profiles
+    ${profiles} =       Create List
+    Log                 ${profiles}                 console= True
+    ${profile_list} =   Get From Dictionary         ${resp}             members
+    Log                 ${profile_list}             console= True
+    :FOR                ${p}                        IN                  @{profile_list}
+    \                   ${profile} =                Fusion Api Get Resource                         uri=${p['uri']}
+    \                   Log                         ${p['name']}        console= True
+    \                   set to dictionary           ${profile}          serverHardwareUri=${None}
+    \                   set to dictionary           ${profile}          enclosureBay=${None}
+    \                   set to dictionary           ${profile}          enclosureUri=${None}
+    \                   remove from dictionary      ${profile}          status_code                 headers
+    \                   ${resp} =                   run keyword if
+    \                   ...                         "${p['name']}"=="${server_profiles_gen9_force[5]['name']}"
+    \                   ...                         fusion api edit server profile
+    \                   ...                         uri=${p['uri']}
+    \                   ...                         body=${profile}
+    \                   Wait For Task2              ${resp}             ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV             ${gen9_sp_name}
+    log to console      ${resp}
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'                  fail
+    ...                 msg=Server Profile Not Exists in OV
+    ${resp1}=           Get serverHardwareUri from OV                   ${gen9_sp_name}
+    log to console      ${resp1}
+    Run Keyword If      '${resp1}' != 'None'        fail                msg=Server Profile Not Unassigned
+
+Gen9-Reassign Gen9-ONLINE SP - Firmware Only using SUT with Force and Scheduled
+    [Documentation]     Reassign SP with Firmware Only using SUT with Force and Scheduled
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_gen9_force[5]['serverHardwareUri']}      console= True
+    Power off Server    ${server_profiles_gen9_force[5]['serverHardwareUri']}   powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_gen9_force[5]['firmware']}    firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_gen9_force[5]}                console= True
+
+    ${responses}=       Edit Server Profile         ${server_profiles_gen9_force[5]}    param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_gen9_force[5]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen9_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'                          fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen9_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen9-Remove Online Server Profile - Firmware Only using SUT with Force and Scheduled
+    [Documentation]     Remove Offline Server Profile
+    [Tags]              sp_bay4
+    ${resp} =           Remove Server Profile   ${server_profiles_gen9_force[5]}    force=${True}
+    Wait For Task2      ${resp}                 ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV                 ${gen9_sp_name}
+    Run Keyword If      '${resp}' == '${gen9_sp_name}'                      fail    msg=Server Profile Still Exists in OV
+
+Gen9-CREATE ONLINE SP - Firmware Only using SUT with Force and Not Scheduled
+    [Documentation]     Create a SP with Firmware Only using SUT with Force and Not Scheduled
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_gen9_force[6]['serverHardwareUri']}      console= True
+    Power off Server    ${server_profiles_gen9_force[6]['serverHardwareUri']}   powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_gen9_force[6]['firmware']}    firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_gen9_force[6]}                console= True
+
+    ${responses}=       Add Server Profile          ${server_profiles_gen9_force[6]}    param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_gen9_force[6]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen9_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'                          fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen9_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical}
+
+Gen9-EDIT ONLINE SP - Firmware Only using SUT with Force and Not Scheduled
+    [Documentation]     Edit a SP Firmware Only using SUT with Force and Not Scheduled
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_gen9_force[6]['serverHardwareUri']}      console= True
+    Power off Server    ${server_profiles_gen9_force[6]['serverHardwareUri']}   powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_gen9_force[6]['firmware']}    firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_gen9_force[6]}                console= True
+
+    ${responses}=       Edit Server Profile         ${server_profiles_gen9_force[6]}    param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_gen9_force[6]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen9_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'                          fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen9_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen9-Unassign Server Profile14
+    [Documentation]     Query OneView for list of profiles then unassign server profiles from server hardware.
+    [Tags]              PROFILES                    SERVER_PROFILES     UNASSIGN_HARDWARE           MINIMAL
+    ${resp} =           Fusion Api Get Server Profiles
+    ${profiles} =       Create List
+    Log                 ${profiles}                 console= True
+    ${profile_list} =   Get From Dictionary         ${resp}             members
+    Log                 ${profile_list}             console= True
+    :FOR                ${p}                        IN                  @{profile_list}
+    \                   ${profile} =                Fusion Api Get Resource                         uri=${p['uri']}
+    \                   Log                         ${p['name']}        console= True
+    \                   set to dictionary           ${profile}          serverHardwareUri=${None}
+    \                   set to dictionary           ${profile}          enclosureBay=${None}
+    \                   set to dictionary           ${profile}          enclosureUri=${None}
+    \                   remove from dictionary      ${profile}          status_code                 headers
+    \                   ${resp} =                   run keyword if
+    \                   ...                         "${p['name']}"=="${server_profiles_gen9_force[6]['name']}"
+    \                   ...                         fusion api edit server profile
+    \                   ...                         uri=${p['uri']}
+    \                   ...                         body=${profile}
+    \                   Wait For Task2              ${resp}             ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV             ${gen9_sp_name}
+    log to console      ${resp}
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'                  fail
+    ...                 msg=Server Profile Not Exists in OV
+    ${resp1}=           Get serverHardwareUri from OV                   ${gen9_sp_name}
+    log to console      ${resp1}
+    Run Keyword If      '${resp1}' != 'None'        fail                msg=Server Profile Not Unassigned
+
+Gen9-Reassign ONLINE SP - Firmware Only using SUT with Force and Not Scheduled
+    [Documentation]     Reassign SP with Firmware Only using SUT with Force and Not Scheduled
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_gen9_force[6]['serverHardwareUri']}      console= True
+    Power off Server    ${server_profiles_gen9_force[6]['serverHardwareUri']}   powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_gen9_force[6]['firmware']}    firmwareBaselineUri     ${firmware_baseline_uri}
+    Log                         ${server_profiles_gen9_force[6]}                console= True
+
+    ${responses}=       Edit Server Profile         ${server_profiles_gen9_force[6]}    param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_gen9_force[6]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen9_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'                          fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen9_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen9-Remove Online Server Profile- Firmware Only using SUT with Force and Not Scheduled
+    [Documentation]     Remove Offline Server Profile
+    [Tags]              sp_bay4
+    ${resp} =           Remove Server Profile   ${server_profiles_gen9_force[6]}    force=${True}
+    Wait For Task2      ${resp}                 ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV                 ${gen9_sp_name}
+    Run Keyword If      '${resp}' == '${gen9_sp_name}'                      fail    msg=Server Profile Still Exists in OV
+
+Gen9-CREATE OFFLINE SP - Firmware only option without Force
+    [Documentation]     Create Offline SP using Firmware only option without Force
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_gen9_no_force[0]['serverHardwareUri']}   console= True
+    Power off Server    ${server_profiles_gen9_no_force[0]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_gen9_no_force[0]['firmware']}     firmwareBaselineUri
+    ...                         ${firmware_baseline_uri}
+    Log                         ${server_profiles_gen9_no_force[0]}                 console= True
+
+    ${responses}=       Add Server Profile          ${server_profiles_gen9_no_force[0]}
+    ...                 param=?force="ignoreServerHealth"
+    Log                 ${responses}                console= True
+    Wait For Task2      ${responses}                ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV                     ${gen9_sp_name}
+    Log                 ${resp}                     console= True
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'                          fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV                         ${gen9_sp_name}
+    Log                 ${resp1}                    console= True
+    Run Keyword If      '${resp1}' == 'Critical'    fail                        msg=Server Profile State is in Critical
+
+Gen9-Remove Offline Server Profile3
+    [Documentation]     Remove Offline Server Profile
+    [Tags]              sp_bay4
+    ${resp} =           Remove Server Profile   ${server_profiles_gen9_no_force[0]}     force=${True}
+    Wait For Task2      ${resp}                 ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV                 ${gen9_sp_name}
+    Run Keyword If      '${resp}' == '${gen9_sp_name}'                      fail        msg=Server Profile Still Exists in OV
+
+Gen9-CREATE ONLINE SP - Firmware and OS Drivers using Smart Update Tools without Force
+    [Documentation]     Create Offline SP using Firmware and OS Drivers using Smart Update Tools without Force
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_gen9_no_force[1]['serverHardwareUri']}   console= True
+    Power off Server    ${server_profiles_gen9_no_force[1]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_gen9_no_force[1]['firmware']}     firmwareBaselineUri
+    ...                         ${firmware_baseline_uri}
+    Log                         ${server_profiles_gen9_no_force[1]}                 console= True
+
+    ${responses}=       Add Server Profile              ${server_profiles_gen9_no_force[1]}
+    ...                 param=?force="ignoreServerHealth"
+    Log                 ${responses}                    console= True
+    Wait For Task2      ${responses}                    ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_gen9_no_force[1]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV         ${gen9_sp_name}
+    Log                 ${resp}                         console= True
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'              fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV             ${gen9_sp_name}
+    Log                 ${resp1}                        console= True
+    Run Keyword If      '${resp1}' == 'Critical'        fail        msg=Server Profile State is in Critical
+    Log                 Profile Created Successfully    console= True
+    ${resp2}=           Get Firmware Install State from profile     ${server_profiles_gen9_no_force[1]}
+    Run Keyword If      '${resp2}' != 'Activated'       fail        msg=Server Profile State is in'${resp2}'
+
+Gen9-Remove Online Server Profile- Firmware and OS Drivers using Smart Update Tools without Force
+    [Documentation]     Remove Online Server Profile
+    [Tags]              sp_bay4
+    ${resp} =           Remove Server Profile   ${server_profiles_gen9_no_force[1]}     force=${True}
+    Wait For Task2      ${resp}                 ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV                 ${gen9_sp_name}
+    Run Keyword If      '${resp}' == '${gen9_sp_name}'                      fail        msg=Server Profile Still Exists in OV
+
+Gen9-CREATE ONLINE SP - Firmware Only using SUT without Force
+    [Documentation]     Create Online SP using Firmware Only using SUT without Force
+    [Tags]              sp_bay1
+    Log                 Powering off the server ${\n}${server_profiles_gen9_no_force[2]['serverHardwareUri']}   console= True
+    Power off Server    ${server_profiles_gen9_no_force[2]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    Set to Dictionary           ${server_profiles_gen9_no_force[2]['firmware']}     firmwareBaselineUri
+    ...                         ${firmware_baseline_uri}
+    Log                         ${server_profiles_gen9_no_force[2]}                 console= True
+
+    ${responses}=       Add Server Profile              ${server_profiles_gen9_no_force[2]}
+    ...                 param=?force="ignoreServerHealth"
+    Log                 ${responses}                    console= True
+    Wait For Task2      ${responses}                    ${PROFILE_CREATE_TIMEOUT}   interval=15
+    Power on server     ${server_profiles_gen9_no_force[2]['serverHardwareUri']}
+    ${resp}=            Get Server profile Name Exits in OV         ${gen9_sp_name}
+    Log                 ${resp}                         console= True
+    Run Keyword If      '${resp}' != '${gen9_sp_name}'              fail
+    ...                 msg=Server Profile Not Exists in OV Successfully
+    ${resp1}=           Get Server profile Status in OV             ${gen9_sp_name}
+    Log                 ${resp1}                        console= True
+    Run Keyword If      '${resp1}' == 'Critical'        fail        msg=Server Profile State is in Critical
+    Log                 Profile Created Successfully    console= True
+    ${resp2}=           Get Firmware Install State from profile     ${server_profiles_gen9_no_force[2]}
+    Run Keyword If      '${resp2}' != 'Activated'       fail        msg=Server Profile State is in'${resp2}'
+
+Gen9-Remove Online Server Profile- Firmware Only using SUT without Force
+    [Documentation]     Remove Online Server Profile
+    [Tags]              sp_bay4
+    ${resp} =           Remove Server Profile   ${server_profiles_gen9_no_force[2]}     force=${True}
+    Wait For Task2      ${resp}                 ${PROFILE_CREATE_TIMEOUT}   interval=15
+    ${resp}=            Get Server profile Name Exits in OV                 ${gen9_sp_name}
+    Run Keyword If      '${resp}' == '${gen9_sp_name}'                      fail        msg=Server Profile Still Exists in OV
+

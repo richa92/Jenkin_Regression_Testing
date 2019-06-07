@@ -1,0 +1,500 @@
+#!/bin/bash
+#
+# Copyright 2011 Hewlett-Packard Development Company, L.P.
+#
+# Permission to use, copy, modify, and distribute this software and its
+# documentation under the terms of the GNU General Public License is hereby
+# granted. No representations are made about the suitability of this software
+# for any purpose. It is provided "as is" without express or implied warranty.
+# See the GNU General Public License for more details.
+#
+# Author: Bobby Suber - 4/28/2011 
+# 
+# Description:
+# This script is used to read the VC domain config and determine the VLANs that are assigned 
+# to each connection so that ifcfg files can be created and applied to the servers
+#
+# Preconditions:
+# 1. The ssh public key must be copied to the remote host(s) so that the script is 
+#    able to login to the hosts without providing a password - see command below
+#
+#    ssh-copy-id -i ~/.ssh/id_rsa.pub <remote host IP> 
+#
+# 2. The VC Domain must configured.  This script calls vccli commands and determines
+#    the VLAN -> MAC address mappings.
+#
+# 3. The server.conf file must contain a valid IP address for each server in the 
+#    domain.  The script will ssh into each server to determine how the kernel
+#    enumerated the interfaces so that it can create the IFCFG -> MAC address
+#    mappings for each interface.
+#
+# 4. An ssh public key must be applied to the VC domain 
+
+NETWORK1=192.168
+NETWORK2=192.169
+NETWORK3=192.170
+NETWORK4=192.171
+NETWORK5=192.172
+NETWORK6=192.173
+NETWORK7=192.174
+NETWORK8=192.175
+NETWORK9=192.176
+NETWORK10=192.177
+NETWORK11=192.178
+NETWORK12=192.179
+NETWORK13=192.180
+NETWORK14=192.181
+NETWORK15=192.182
+NETWORK16=192.183
+NETWORK17=192.184
+CONF="../conf/ipaddr.conf"
+LOG=$0.log
+MGMT_NET="enet-server-mgmt"
+OA_FUNCTIONS="../lib/OA_functions"
+VC_FUNCTIONS="../lib/VC_functions"
+set -o pipefail
+
+#=============================================================================
+# usage 
+#=============================================================================
+usage()
+{
+        echo "usage: $0 -vcu <VCM User> -vcip <VCM IP>" 
+	echo ""
+}
+
+#=============================================================================
+# init_host_ipaddr 
+# TODO: Had to use a tmp file as the host ip data structure to store the 
+#       values of the host ip address for each vlan because of a interesting
+#       issue with global arrays.  Writing and reading from a global array
+#       between functions worked fine until there was a nested function that
+#       updated the array.  
+#=============================================================================
+init_host_ipaddr()
+{
+	HOSTIPADDR_FILE=$(mktemp /tmp/$DOMAIN_NAME/HOSTIPADDR.XXXXXXXXXX)
+	for((i=0; $i<=4096; i++)); do
+		HOSTIPADDR[$i]=254
+		echo "${HOSTIPADDR[$i]}" >> $HOSTIPADDR_FILE
+	done
+}
+
+#============================================================================= 
+# calculate_ipaddr 
+# TODO:  See init_host_ipaddr. Would like to remove the tmp file usage for storing
+#        the contents of the host ip data 
+#=============================================================================
+calculate_ipaddr()
+{
+	local vlan=$1
+	local network_ip
+	local vlan_offset
+	local host_addr
+	local ipaddr
+	local hostipaddr=(`cat $HOSTIPADDR_FILE`)	
+
+
+	if [ $vlan -eq 0 ]; then
+		network_ip=$NETWORK1
+		vlan_offset=$vlan
+	fi
+	if [ $vlan -ge 1 -a $vlan -le 250 ]; then
+		network_ip=$NETWORK1
+		vlan_offset=$vlan
+	fi
+	if [ $vlan -ge 251 -a $vlan -le 500 ]; then
+		network_ip=$NETWORK2
+		let vlan_offset=$vlan-250
+	fi
+	if [ $vlan -ge 501 -a $vlan -le 750 ]; then
+		network_ip=$NETWORK3
+		let vlan_offset=$vlan-500
+	fi
+	if [ $vlan -ge 751 -a $vlan -le 1000 ]; then
+ 		network_ip=$NETWORK4
+		let vlan_offset=$vlan-750
+	fi
+	if [ $vlan -ge 1001 -a $vlan -le 1250 ]; then
+		network_ip=$NETWORK5
+		let vlan_offset=$vlan-1000
+	fi
+	if [ $vlan -ge 1251 -a $vlan -le 1500 ]; then
+		network_ip=$NETWORK6
+		let vlan_offset=$vlan-1250
+	fi
+	if [ $vlan -ge 1501 -a $vlan -le 1750 ]; then
+		network_ip=$NETWORK7
+		let vlan_offset=$vlan-1500
+	fi
+	if [ $vlan -ge 1751 -a $vlan -le 2000 ]; then
+		network_ip=$NETWORK8
+		let vlan_offset=$vlan-1750
+	fi
+	if [ $vlan -ge 2001 -a $vlan -le 2250 ]; then
+		network_ip=$NETWORK9
+		let vlan_offset=$vlan-2000
+	fi
+	if [ $vlan -ge 2251 -a $vlan -le 2500 ]; then
+		network_ip=$NETWORK10
+		let vlan_offset=$vlan-2250
+	fi
+	if [ $vlan -ge 2501 -a $vlan -le 2750 ]; then
+		network_ip=$NETWORK11
+		let vlan_offset=$vlan-2500
+	fi
+	if [ $vlan -ge 2751 -a $vlan -le 3000 ]; then
+		network_ip=$NETWORK12
+		let vlan_offset=$vlan-2750
+	fi
+	if [ $vlan -ge 3001 -a $vlan -le 3250 ]; then
+		network_ip=$NETWORK13
+		let vlan_offset=$vlan-3000
+	fi
+	if [ $vlan -ge 3251 -a $vlan -le 3500 ]; then
+		network_ip=$NETWORK14
+		let vlan_offset=$vlan-3250
+	fi
+	if [ $vlan -ge 3501 -a $vlan -le 3750 ]; then
+		network_ip=$NETWORK15
+		let vlan_offset=$vlan-3500
+	fi
+	if [ $vlan -ge 3751 -a $vlan -le 4000 ]; then
+		network_ip=$NETWORK16
+		let vlan_offset=$vlan-3750
+	fi
+	if [ $vlan -ge 4001 -a $vlan -le 4096 ]; then
+		network_ip=$NETWORK17
+		let vlan_offset=$vlan-4000
+	fi
+	host_addr=${hostipaddr[$vlan]}
+	ipaddr=$network_ip.$vlan_offset.$host_addr
+	let host_addr=host_addr-1
+	hostipaddr[$vlan]=$host_addr
+
+	rm -f $HOSTIPADDR_FILE
+	for((i=0; $i<=4096; i++)); do
+		echo "${hostipaddr[$i]}" >> $HOSTIPADDR_FILE
+	done
+
+	echo "$ipaddr"
+return
+}
+
+#=============================================================================
+# check_for_conf
+#=============================================================================
+check_for_conf()
+{
+	if [ -f $CONF ]; then
+		TMP_FILE=$(mktemp ipaddr.XXXXXXXXXX)
+		mv $CONF $TMP_FILE
+	fi
+}
+	
+#=============================================================================
+# get_vc_domain_name
+#=============================================================================
+get_vc_domain_name()
+{
+
+	DOMAIN_NAME=$(get_domain_name $VCM_IP)
+
+	if [ -z "$DOMAIN_NAME" ]; then
+		echo "`date`: Failed to get the domain name so exiting..." 2>&1 | tee -a $LOG 
+		exit 1
+	fi
+
+	if [ -d /tmp/$DOMAIN_NAME ]; then
+		rm -rf /tmp/$DOMAIN_NAME; mkdir -p /tmp/$DOMAIN_NAME
+	else
+		mkdir -p /tmp/$DOMAIN_NAME	
+	fi
+}
+
+#=============================================================================
+# get_profiles
+#=============================================================================
+get_profiles()
+{
+	local profile
+
+	PROFILE_FILE=$(mktemp /tmp/$DOMAIN_NAME/profile.XXXXXXXXXX)
+	show_profile $VCM_IP | tee $PROFILE_FILE
+	PROFILES=(`grep Name $PROFILE_FILE | awk 'BEGIN{FS="="} {print $NF}'`)
+
+	for profile in "${PROFILES[@]}"
+	do
+		mkdir -p /tmp/$DOMAIN_NAME/$profile
+	done
+}
+#=============================================================================
+# get_profile_connections
+#=============================================================================
+get_profile_connections()
+{
+	local profile
+
+	for profile in "${PROFILES[@]}"
+	do
+		PROFILE_CONNECT_FILE=$(mktemp /tmp/$DOMAIN_NAME/$profile/profile_conn.XXXXXXXXXX)
+		show_profile $VCM_IP $profile | tee $PROFILE_CONNECT_FILE
+	done
+}
+#=============================================================================
+# get_server_port_map
+# Call show server-port-map to determine the server profile:port to network mappings.
+# ID=Server_01:1
+# Network=net_001,net_002,net_003, 
+#=============================================================================
+get_server_port_map()
+{
+	local profile
+	local profile_port
+
+	SERVER_PORT_MAP_FILE=$(mktemp /tmp/$DOMAIN_NAME/server_port_map.XXXXXXXXXX)
+	show_server_port_map $VCM_IP | tee $SERVER_PORT_MAP_FILE
+
+	PROFILES_PORTS=(`grep ID $SERVER_PORT_MAP_FILE | awk 'BEGIN{FS="="} {print $NF}'`)
+
+	for profile_port in "${PROFILES_PORTS[@]}"
+	do
+		##############################################################################
+		# For each profile:port connection call show enet connection to determine the 
+		# profile to MAC address mappings.
+		# 
+		# Profile=Server_01
+		# Port=1
+		# Server=enc0:1
+		# Name=Multiple Network
+		# PXE=UseBIOS
+		# MAC Address=00-17-A4-77-C4-00
+		##############################################################################
+
+		for profile in "${PROFILES[@]}"
+		do
+			if echo "$profile_port" | grep "$profile"; then
+				ENET_CONNECTIONS_FILE=$(mktemp /tmp/$DOMAIN_NAME/$profile/enet.XXXXXXXXXX)
+				show_enet-connection $VCM_IP $profile_port | tee $ENET_CONNECTIONS_FILE
+			fi
+		done
+	done
+}
+
+#=============================================================================
+# get_networks
+# Call show network to get the network to VLAN ID mappings.
+# Name=net_001
+# Status=OK
+# Shared Uplink Set=BigPipe_01
+# VLAN ID=1
+#=============================================================================
+get_networks()
+{
+	NETWORK_FILE=$(mktemp /tmp/$DOMAIN_NAME/network.XXXXXXXXXX)
+	show_network $VCM_IP | tee $NETWORK_FILE
+}
+
+#=============================================================================
+# get_serial_number 
+#=============================================================================
+get_serial_number()
+{
+	local profile=$1
+
+	serial_number=`ssh $VCM_USER@$VCM_IP show profile $profile | grep "Serial Number (Logical)" | awk 'BEGIN{FS=": "} {print $NF}'`
+	if [ -z "$serial_number" ]; then
+		echo "`date`: Failed to get serial number for profile $profile so exiting..." 2>&1 | tee -a $LOG 
+		exit -1
+	else
+		echo "$serial_number"
+	fi
+}
+
+#=============================================================================
+# write_ipaddr
+#=============================================================================
+write_ipaddr()
+{
+	local profile
+	local serial_number
+	local mac
+	local network
+	local -a ports
+	local -a server_port_map_nets
+	local vlan
+	local ipaddr
+
+	for profile in ${PROFILES[@]}
+	do
+		serial_number=$(get_serial_number $profile)
+		ports=`cat /tmp/$DOMAIN_NAME/$profile/profile_conn* | grep -A 2 "Connection Type=Ethernet" | grep "Port" | awk 'BEGIN{FS="="} {print $NF}'`
+		for port in ${ports[@]}
+		do
+			network=`ssh $VCM_USER@$VCM_IP show enet-connection $profile:$port -output=script1 | grep "Network Name" | awk 'BEGIN{FS="="} {print $NF}'`
+			#-------------------------------------------------------------------------
+			# Unassigned and $MGMT_NET network
+			#-------------------------------------------------------------------------
+			if [ "$network" == "<Unassigned>" -o "$network" == "$MGMT_NET" ];then
+				continue
+			fi
+
+			#-------------------------------------------------------------------------
+			# Multiple Networks
+			#-------------------------------------------------------------------------
+			if [ "$network" == "Multiple Network" ]; then
+				mac=$(getMAC $port)
+				server_port_map_nets=(`grep -A 1 -w $profile:$port $SERVER_PORT_MAP_FILE | grep Network | awk 'BEGIN{FS="="} {print $NF}' |  sed 's/,/ /g'`)
+				for server_port_map_net in "${server_port_map_nets[@]}"
+				do
+					vlan=$(getVLAN $server_port_map_net)
+					ipaddr=$(calculate_ipaddr $vlan)
+		   			echo "$profile:$port $vlan $mac $ipaddr $serial_number" 2>&1 | tee -a $CONF 	
+				done
+				continue
+			fi
+
+			#-------------------------------------------------------------------------
+			# Tunnel Networks
+			#-------------------------------------------------------------------------
+			ret=$(iSvlanTunnel $network)
+			if [ "$ret" == "Yes" ]; then
+				mac=$(getMAC $port)
+				vlan=$(getVLANforTunnel $profile)
+				ipaddr=$(calculate_ipaddr $vlan)
+		   		echo "$profile:$port $vlan $mac $ipaddr $serial_number" 2>&1 | tee -a $CONF 	
+				continue	
+			fi
+	
+			#-------------------------------------------------------------------------
+			# Unshared and Single VLAN Networks
+			#-------------------------------------------------------------------------
+			vlan=$(getVLAN $network)
+			mac=$(getMAC $port)
+			if [ "$vlan" == "None" ]; then
+				vlan=0
+			fi
+			ipaddr=$(calculate_ipaddr $vlan)
+		   	echo "$profile:$port $mac $ipaddr $serial_number" 2>&1 | tee -a $CONF 	
+			continue	
+
+		done
+	done
+}
+
+#=============================================================================
+# getVLANforTunnel
+#=============================================================================
+getVLANforTunnel()
+{
+	local profile=$1
+	local bay 
+	local vlan
+
+	bay=`cat $PROFILE_FILE | grep -A 1 "$profile" | grep "Device Bay" | cut -d ":" -f 2`
+
+	if [ "$bay" == "1" -o "$bay" == "2" -o "$bay" == "9" -o "$bay" == "10" ]; then
+		vlan="1001"
+	elif [ "$bay" == "3" -o "$bay" == "4" -o "$bay" == "11" -o "$bay" == "12" ]; then
+		vlan="1000"
+	elif [ "$bay" == "5" -o "$bay" == "6" -o "$bay" == "13" -o "$bay" == "14" ]; then
+		vlan="999"
+	elif [ "$bay" == "7" -o "$bay" == "8" -o "$bay" == "15" -o "$bay" == "16" ]; then
+		vlan="998"
+	else
+		vlan="UNKNOWN"
+	fi
+
+	echo "$vlan"
+
+}
+
+#=============================================================================
+# getVLAN 
+#=============================================================================
+getVLAN()
+{
+	local network=$1
+	local vlan
+
+	vlan=`cat /tmp/$DOMAIN_NAME/network* | grep -A 3 -m 1 $network | grep "VLAN ID" | awk 'BEGIN{FS="="} {print $NF}'`
+	if [ "$vlan" == "-- --" ]; then
+		vlan="None"
+	fi
+	echo "$vlan"
+}
+
+#=============================================================================
+# getMAC
+#=============================================================================
+getMAC()
+{
+	local port=$1
+	local mac
+
+	mac=`cat /tmp/$DOMAIN_NAME/$profile/profile_conn* | grep -A 4 "Port=$port" | grep "MAC Address" | awk 'BEGIN{FS="="} {print $NF}'`
+	mac=(`echo $mac | sed 's/-/:/g'`)
+
+	echo "$mac"
+}
+
+#=============================================================================
+# iSvlanTunnel
+#=============================================================================
+iSvlanTunnel()
+{
+	local network=$1
+	local ret=1
+
+	ssh $VCM_USER@$VCM_IP show network $network -output=script1 | grep "VLAN Tunnel=Enabled" &>/dev/null
+	ret=$?
+	if [ $ret -eq 0 ]; then
+		echo "Yes"
+	else
+		echo "No"
+	fi
+}
+
+
+
+####################################################################################
+# Get the VCM username and IP address from the command line.  There is not any error
+# checking so the user should ensure that the VCM username name and IP are correct.  
+####################################################################################
+
+while [ -n "$(echo $1 | grep '-')" ]; do
+	case $1 in
+	-vcu ) VCM_USER=$2
+	       shift ;;
+	-vcip ) VCM_IP=$2
+	       shift ;;
+        * ) usage 
+	    exit 1
+	esac
+	shift
+done
+
+if [ -z "$VCM_USER" -o -z "$VCM_IP" ]; then 
+	usage
+	exit 1
+fi
+
+# Load the OA and VC and IP functions
+if [ -f $OA_functions ] && [ -f $VC_functions ]; then
+	. $OA_functions
+	. $VC_functions
+else
+	echo "`date`: Library functions not found so exiting..." 2>&1 | tee -a $LOG 
+	exit 1
+fi
+
+check_for_conf
+get_vc_domain_name 
+init_host_ipaddr
+get_profiles
+get_profile_connections
+get_server_port_map
+get_networks
+write_ipaddr
+
+

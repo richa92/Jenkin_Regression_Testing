@@ -1,0 +1,61 @@
+*** Settings ***
+Documentation    Copy latest BTI DD to Jenkins and update latest softlink
+...              (Omit the copy if latest version already present).
+...              = USAGE =
+...              | pybot | cache_bti_ov_dd.txt |
+Library          SSHLibrary
+Library          robot.api.logger
+Library          RoboGalaxyLibrary
+
+*** Variables ***
+${FUSION_DEPOT}            http://ci-nexus.vse.adapps.hp.com/Fusion/master/DDImage/SSH/
+${FUSION_FILE_PREFIX}      HPOneView-SSH-2.00.00
+${DESTINATION_HOSTNAME}    jenkins.rsn.hp.com
+${DESTINATION_USERNAME}    userContent
+${DESTINATION_PASSWORD}    hpvse123
+${DESTINATION_LOCATION}    /var/lib/jenkins/userContent/builds/dd-image
+${LATEST_DD_FILENAME}      latest-ov-dd.zip
+
+*** Test Cases ***
+Get latest DD
+    # Look for DD Image in zip or gz format
+    ${IS_DD_ZIP}=    Run Keyword and Return Status    Get LatestBuild Name        ${FUSION_DEPOT}    ${Empty}    zip
+    ${DD}=    Run Keyword If    ${IS_DD_ZIP}    Get LatestBuild Name        ${FUSION_DEPOT}    ${Empty}    zip
+    ...    ELSE    Get LatestBuild Name        ${FUSION_DEPOT}    ${Empty}    gz
+
+    # Get the name of the latest DD file at the BTI OV DD Depot
+    Console    \nLatest BTI OV DD ${DD}
+    Set Suite Variable    ${DD_URL}    ${FUSION_DEPOT}${DD}
+    ${Match}    ${SOURCE_BUILD}    ${FORMAT}=    Should Match Regexp    ${DD}    ${FUSION_FILE_PREFIX}-(\\d+)\-.*\.(zip|gz)$
+
+    # Open a connection to Jenkins (the destination) and retrieve the last build Id
+    Set Default Configuration   prompt=\$        timeout=30
+    Open Connection    ${DESTINATION_HOSTNAME}
+    Login    ${DESTINATION_USERNAME}    ${DESTINATION_PASSWORD}
+
+    # Determine the latest DD file present on the destination
+    ${STDOUT}    Execute Command
+    ...    cd ${Destination_Location} ; ls -l ${FUSION_FILE_PREFIX}-* | tr -s " " | cut -d " " -f6-9
+    ${MATCH}    ${FILE}    ${DESTINATION_BUILD}    ${FORMAT}=    Should Match Regexp    ${STDOUT}    (${FUSION_FILE_PREFIX}-(\\d+)\-.*\.(zip|gz))$
+    Console    \nLatest Present (on ${DESTINATION_HOSTNAME}): ${FILE}
+
+    # No need to copy if DD is already present
+    ${SOURCE_BUILD}=         Convert To Integer    ${SOURCE_BUILD}
+    ${DESTINATION_BUILD}=    Convert To Integer    ${DESTINATION_BUILD}
+    Run Keyword if    ${SOURCE_BUILD} <= ${DESTINATION_BUILD}
+    ...    Fail    No need to copy ${DD} because it's older than or already present on ${DESTINATION_HOSTNAME}
+
+    # Get a copy of the file onto the destination machine
+    Console    \nCopying ${DD} .....
+    ${STDOUT}    ${STDERR}=    Execute Command
+    ...    cd ${DESTINATION_LOCATION} ; wget ${DD_URL}
+    ...    return_stderr=yes
+    Should Contain    ${STDERR}    100%    msg=Couldnt transfer ${DD}
+
+    # Create/update a symbolic link named 'latest-ov-dd.gz'
+    Console    \nCreating symlink: ${LATEST_DD_FILENAME} .....
+    ${STDOUT}    ${STDERR}=    Execute Command
+    ...    rm ${LATEST_DD_FILENAME} ; ln -sf ${DESTINATION_LOCATION}/${DD} ${LATEST_DD_FILENAME}
+    ...    return_stderr=yes
+    Should Not Contain    ${STDERR}    Failure    msg=Couldnt symlink ${File}
+    Close Connection

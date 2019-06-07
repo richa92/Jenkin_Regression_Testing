@@ -1,0 +1,757 @@
+*** Settings ***
+Documentation    FC on Nitro User Story Keyword file
+
+Resource         ../../../../../Resources/api/fusion_api_resource.txt
+Resource         ../FVT/fvt-keywords.txt
+Resource         ../FVT/Resources/fvt_resource.txt
+
+Library          FusionLibrary
+Library          ../FVT/fvt_api.py
+
+
+*** Keywords ***
+Verify ErrorCode in taskError
+    [Documentation]    Verify taskErrors contain specified errorCode
+    [Arguments]    ${taskErrors}    ${expected_errorcode}
+
+    :FOR    ${taskerror}    IN    @{taskErrors}
+    \    ${errorCode} =    Get From Dictionary    ${taskError}    errorCode
+    \    Exit For Loop If    '${errorCode}' == '${expected_errorcode}'
+
+    Should Be Equal As Strings    ${errorCode}    ${expected_errorcode}
+
+Verify Task Error
+    [Documentation]    Verify input task taskState to be Error and erroCode match expected one
+    [Arguments]    ${task}    ${expected_errorcode}
+
+    Should Be Equal As Strings    ${task['taskState']}    Error
+    Verify ErrorCode in taskError    ${task['taskErrors']}    ${expected_errorcode}
+
+Verify ErrorMessage in taskError
+    [Documentation]    Verify task error message matches regex expected error message
+    [Arguments]    ${taskErrors}    ${expected_regex_errmsg}
+
+    :FOR    ${taskerror}    IN    @{taskErrors}
+    \    ${errorMsg} =    Get From Dictionary    ${taskError}    message
+    \    ${retString} =    Remove String Using Regexp    ${errorMsg}
+    \    ...                   ${expected_regex_errmsg}
+    \    Exit For Loop If    '${retString}' == '${EMPTY}'
+
+    Should Match Regexp     ${errorMsg}    ${expected_regex_errmsg}
+
+Verify Port loginsCount
+    [Documentation]    verify loginsCount from port response body matches expected
+    [Arguments]    ${port_resp}    ${expected_logins}
+
+    ${fcPortProperties} =    Get From Dictionary    ${port_resp}    fcPortProperties
+    Should Not Be Empty    ${fcPortProperties}
+
+    Should be Equal As Integers    ${fcPortProperties['loginsCount']}    ${expected_logins}
+
+Verify Port connectedTo
+    [Documentation]    verify loginsCount from port response matches expected
+    [Arguments]    ${port_resp}    ${expected_value}
+
+    ${fcPortProperties} =    Get From Dictionary    ${port_resp}    fcPortProperties
+    Should Not Be Empty    ${fcPortProperties}
+
+    Should be Equal    ${fcPortProperties['principleInterconnectName']}    ${expected_value}
+
+Verify Port
+    [Documentation]    Verify the named port of named interconnect has the expected attribute values
+    ...                through the kwargs attribute-value pair
+    ...                Do not handle nested attributes except for loginsCount and principleInterconnectName
+    ...                of fcPortProperties
+    ...                Use ${True} or ${False} for boolean value
+    ...                Example: Verify Port    CN7545061V, interconnect 3    d3    portStatus=Linked   enabled=${True}
+    [Arguments]    ${icm_name}    ${port_name}    &{kwargs}
+
+    ${resp} =    Fvt Api Get Interconnect Port By Name    ${icm_name}    ${port_name}
+    Should Not Be Empty    ${resp}
+
+    :FOR    ${key}    IN    @{kwargs.keys()}
+    \    Run Keyword If    '${key}' == 'loginsCount'   Verify Port loginsCount   ${resp}   ${kwargs['${key}']}
+    \    ...    ELSE IF    '${key}' == 'connectedTo'    Verify Port connectedTo   ${resp}   ${kwargs['${key}']}
+    \    ...    ELSE    Should be Equal    ${resp['${key}']}    ${kwargs['${key}']}
+
+
+Verify Uplink lagStates
+    [Documentation]   Verify named uplink ative LagStates
+    [Arguments]    ${icm_name}    ${port_name}    ${expected_lagStates}
+
+    Log     ${\n}Verify lsgStates of Uplink ${icm_name} ${port_name}    console=True
+    Verify Port     ${icm_name}    ${port_name}    portType=Uplink
+    ...    portStatus=Linked    portStatusReason=Active    lagStates=${expected_lagStates}
+
+
+Verify Downlink Subports Status
+    [Documentation]    Compares subports of given downlink against expected subports
+    [Arguments]     ${icm_name}    ${port_name}   ${expected_subports}
+    # ${dlink} =    Fvt Api Get Interconnect Port By Name    ${icm_name}    ${port_name}
+    # Lists Should Be Equal    ${dlink['subports']}   ${expected_subports}
+    Verify Port    ${icm_name}    ${port_name}    portType=Downlink    subports=${expected_subports}
+
+Verify Named Interconnect
+    [Documentation]    Verify the named interconenct properties based on the kwargs key value pairs
+    [Arguments]    ${icm_name}    &{kwargs}
+
+    ${resp} =    Fvt Api Get Interconnect By Name    ${icm_name}
+    Should Not Be Empty    ${resp}
+
+    :FOR    ${key}    IN    @{kwargs.keys()}
+    \    Should be Equal    ${resp['${key}']}    ${kwargs['${key}']}
+
+
+Verify Logical Interconnect
+    [Documentation]    Verify the named logical interconenct properties based on the kwargs key value pairs
+    [Arguments]    ${li_name}    &{kwargs}
+
+    ${resp} =    Fvt Api Get Logical Interconnect By Name    ${li_name}
+    Should Not Be Empty    ${resp}
+
+    :FOR    ${key}    IN    @{kwargs.keys()}
+    \    Run Keyword IF    '${key}' == 'status'
+    \    ...             Should Match Regexp    ${resp['${key}']}   ${kwargs['${key}']}
+    \    ...         ELSE
+    \    ...             Should be Equal    ${resp['${key}']}    ${kwargs['${key}']}
+
+Verify Named Logical Enclosure
+    [Documentation]    Verify the named logical enclosure properties based on the kwargs key value pairs
+    [Arguments]    ${le_name}    &{kwargs}
+
+    ${resp} =    Fvt Api Get Logical Enclosure By Name    ${le_name}
+    Should Not Be Empty    ${resp}
+
+    :FOR    ${key}    IN    @{kwargs.keys()}
+    \    Should be Equal    ${resp['${key}']}    ${kwargs['${key}']}
+
+
+Verify Uplinkset Status
+    [Documentation]    Verify the named uplinkset has the expected status
+    [Arguments]    ${li_name}    ${us_name}    ${status}
+
+    ${resp} =    fvt-keywords.Get Uplink Set By Name    ${li_name}    ${us_name}
+    Should be Equal As Strings    ${resp['status']}    ${status}
+
+
+Efuse IC and Wait
+    [Documentation]    Remove/Insert named interconnect based on input action EFuseOn/EFuseOff
+    ...                Wait for the IC to reach the expected state based on the action
+    [Arguments]     ${ic_name}    ${action}
+
+    Set Log Level    TRACE
+    ${enc} =    Fetch from left    ${ic_name}    ,
+    ${bay} =    Fetch from right    ${ic_name}    ${SPACE}
+    ${ic_uri} =    Get IC URI    ${ic_name}
+    ${expected_state} =    Set Variable if    '${action}' == 'EFuseOn'    Absent    Configured
+
+    Log    ${\n}[Efuse ${ic_name} with ${action}]    console=True
+
+    Get EM IP       ${enc}
+    Get EM Token    ${enc}
+    Efuse ICM    ${action}    ${bay}
+
+    Log    ${\n}Waiting for ${ic_name} to reach state: ${expected_state}    console=True
+    ${interval} =    Set Variable If    '${expected_state}' == 'Configured'    2m    30s
+    ${timeout} =    Set Variable If    '${expected_state}' == 'Configured'    15m    5m
+    Wait Until Keyword Succeeds    ${timeout}    ${interval}    IC reached state    ${ic_uri}    ${expected_state}
+
+
+Power IC and Wait
+    [Documentation]    Power off/on of the interconnect based on the input interconnect uri and action
+    ...                Wait for the interconnect to reach the expected state based on the action
+    [Arguments]     ${ic_name}    ${action}
+
+    ${ic_uri} =    Get IC URI    ${ic_name}
+
+    ${data} =    Create Dictionary    op=replace
+    ...                               path=/powerState
+    ...                               value=${action}
+    ${body} =    Create List     ${data}
+    ${expected_state} =    Set Variable if    '${action}' == 'Off'   Maintenance    Configured
+
+    Log    ${\n}Powering ${action}: ${ic_uri}    console=True
+
+    # sometime took more than 2min to invoke add and more than 3min to finish adding
+    # PB102 took 2min to invoke and 9min to add
+    ${resp} =    fusion api patch interconnect    body=${body}    uri=${ic_uri}
+    ${task} =    Wait for Task    ${resp}    10m    10s
+    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+    Log    ${\n}Waiting for ${ic_uri} to reach ${expected_state}    console=True
+    ${interval} =    Set Variable If    '${expected_state}' == 'Configured'    1m    30s
+    ${timeout} =    Set Variable If    '${expected_state}' == 'Configured'    20m    5m
+    Wait Until Keyword Succeeds    ${timeout}    ${interval}    IC reached state    ${ic_uri}    ${expected_state}
+
+Create Server Profile
+    [Documentation]    Create server profile using keyword Add Server Profile from server_profile
+    ...                If 'serverProfileTemplateUri' is specified, the profile is create base on SPT.
+    ...                Server is powered off if it is on before creating the profile.
+    ...                If timeout not provided or 0, will return resp for caller to wait and check
+    ...                otherwise will wait for task and expect taskState to be Completed
+    [Arguments]    ${sp}    ${timeout}=0    ${interval}=0
+
+    # Power of server if it is on
+    ${sh} =    Fvt Api Get Server Hardware By Name    ${sp['serverHardwareUri']}
+    Run Keyword If    '${sh['powerState']}' == 'On'    Power off Server    ${sp['serverHardwareUri']}    PressAndHold
+
+    # clean up if exist
+    Delete Profile    ${sp['name']}
+
+    ${resp} =    server_profile.Add Server Profile    ${sp}
+    Should Be Equal As Integers    ${resp['status_code']}    202
+    Return From Keyword If    '${timeout}' == '0'    ${resp}
+
+    ${task} =    Wait For Task    ${resp}    ${timeout}    ${interval}
+    Should Be Equal As Strings    ${task['taskState']}    Completed
+    [Return]    ${task}
+
+Verify Server Profile Status
+    [Documentation]    Verify the named profile has the expected status
+    [Arguments]    ${sp}    ${expected_status}
+
+    ${sp_resp} =    Fvt Api Get Server Profile By Name    ${sp}
+    Should Be Equal As Strings    ${sp_resp['status']}    ${expected_status}
+
+Verify Server Profiles Status
+    [Documentation]    Verify the named profiles have the expected status
+    [Arguments]    ${sp_names}    ${expected_status}
+
+    Log    ${\n}Verify Server Profiles status    console=True
+
+    :FOR    ${sp}    IN    @{sp_names}
+    \    Verify Server Profile Status    ${sp}    ${expected_status}
+
+Verify Server Profile Template Status
+    [Documentation]    Verify the named profile template has the expected status
+    [Arguments]    ${spt}    ${expected_status}
+
+    ${resp} =    Fvt Api Get Server Profile Template By Name    ${spt}
+    Should Be Equal As Strings    ${resp['status']}    ${expected_status}
+
+Delete Profile
+    [Documentation]    delete the specified profile if exist
+    [Arguments]        ${sp_name}    ${timeout}=10min    ${interval}=30s
+
+    Log    ${\n}Delete Server Profile ${sp_name}    console=True
+    ${resp} =    Fvt Api Get Server Profile By Name    ${sp_name}
+    Return From Keyword If     ${resp} == ${None}
+    ${resp} =    Fusion Api Delete Server Profile    uri=${resp['uri']}
+    ${task} =    Wait For Task   ${resp}    ${timeout}    ${interval}
+    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+Delete SPT
+    [Documentation]    delete the specified profile template if exists
+    [Arguments]        ${spt_name}    ${timeout}=5min    ${interval}=10s
+
+    ${resp} =    Fvt Api Get Server Profile Template By Name    ${spt_name}
+    Return From Keyword If     ${resp} == ${None}
+    ${resp} =    Fusion Api Delete Server Profile Template   uri=${resp['uri']}
+    ${task} =    Wait For Task   ${resp}    ${timeout}    ${interval}
+    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+Disable Enable Ports
+    [Documentation]    Disable or Enable the port in the portname list of the specified interconnect name
+    ...                action values - 'enable' or 'disable'
+    ...                It waits until expected portStatus and enabled values are reached or time out
+    [Arguments]    ${ic_name}    ${portnames}    ${timeout}    ${action}
+
+    ${body} =    Create List
+    ${enabled_value} =    Set Variable If    '${action}' == 'enable'    ${true}    ${false}
+    ${expected_portStatus} =    Set Variable If    '${action}' == 'enable'    Linked    Unlinked
+
+    :FOR    ${portname}    IN    @{portnames}
+    \    ${resp} =     Fvt Api Get Interconnect Port By Name    ${ic_name}    ${portname}
+    \    Set to Dictionary   ${resp}   enabled    ${enabled_value}
+    \    Append to list    ${body}    ${resp}
+
+    ${ic_uri} =    Get IC URI    ${ic_name}
+    ${resp} =    fusion api edit interconnect ports    uri=${ic_uri}   body=${body}
+    ${task} =    Wait For Task    ${resp}    5 min    20s
+    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+    Log    ${\n}Wait for ports to reach expected portStatus and enabled values    console=True
+    :FOR    ${portname}    IN    @{portnames}
+    \    Wait Until Keyword Succeeds    ${timeout}    20s
+    \    ...     Verify Port    ${ic_name}    ${portname}    portStatus=${expected_portStatus}
+    \    ...                     enabled=${enabled_value}
+
+Disable Ports
+    [Documentation]    Disable the ports in the portname list of the specified interconnect uri
+    [Arguments]    ${ic_name}    ${portnames}    ${timeout}
+
+    Run Keyword And Continue On Failure    Disable Enable Ports    ${ic_name}    ${portnames}    ${timeout}
+    ...                                    disable
+
+Enable Ports
+    [Documentation]    Enable the ports in the portname list of the specified interconnect uri
+    [Arguments]    ${ic_name}    ${portnames}    ${timeout}
+
+    Run Keyword And Continue On Failure    Disable Enable Ports    ${ic_name}    ${portnames}    ${timeout}
+    ...                                    enable
+
+
+Start Ping Process
+    [Documentation]    Start Ping process to the specified target ip, and direct stdout to specified output file
+    ...                Return process handle
+    [Arguments]    ${ip}    ${output}
+
+    ${handle} =    Run keyword if    os.name == "nt"    Start Process    ping   -t   ${ip}    stdout=${output}
+    ...    ELSE    Start Process    ping    ${ip}    stdout=${output}    shell=True
+
+    OperatingSystem.File Should Exist    ${output}
+    [Return]    ${handle}
+
+Stop Ping Process
+    [Documentation]    Stop Ping Process for the provided handle
+    [Arguments]    ${handle}
+
+    # on Linux testhead, use SIGINT for stopping ping session (similar to ctrl + c)
+    Return From Keyword If    ${handle} == ${None}
+
+    Run keyword If    os.name == "nt"    Terminate Process    ${handle}
+    ...    ELSE    Send Signal To Process    SIGINT    ${handle}    shell=True
+    Wait For Process    ${handle}    timeout=1m
+
+    Process Should Be Stopped    ${handle}
+
+Verify Traffic
+    [Documentation]    Verify from Ping process output file that lost packet count is
+    ...                no more than the specified max allowed count.
+    ...                Note that 0% percent loss is not used. If overall transmitted packets
+    ...                are small, even 1 packet loss may be over 0%, and if transmitted packets
+    ...                is large, even unaccepted packet loss may still show as 0% loss
+    ...                When the traffic verification passes, the output file is removed
+    [Arguments]    ${outfile}    ${max_allowed_lost_packet}
+
+    Log    ${\n}Verify traffic in ${outfile} with max allowed lost packet as
+    ... ${max_allowed_lost_packet}    console=True
+
+    # ${pattern} =    Set Variable If   os.name == "nt"    ${data_common.NT_ZERO_PERCENT_LOSS}
+    # ...    ${data_common.LINUX_ZERO_PERCENT_LOSS}
+
+    ${line} =    Grep File    ${outfile}    [pP]ackets
+    Should Not Be Empty    ${line}
+
+    # For Linux, no Lost packet count, % packet loss does not gurantee no packet drops,
+    # need furthur check
+    # e.g. 10000 packets transmitted, 9999 received, 0% packet loss, time 8999ms
+    # Windows has lost packed count, but use the same routine to check count
+    # Packets: Sent = 1000, Received = 999, Lost = 1 (0% loss)
+
+    ${pattern} =     Set Variable If
+    ...    os.name == "nt"    \\s*Packets:\\s+Sent\\s+=\\s+(\\d+),\\s+Received\\s+=\\s+(\\d+),\\.*
+    ...                       \\s*(\\d+)\\s+packets transmitted,\\s+(\\d+)\\s+received,\\s+\\.*
+    ${match}    ${transmitted}    ${received}    Should Match Regexp    ${line}    ${pattern}
+
+    Should Not Be Empty    ${match}
+
+    ${packet_loss} =    Evaluate    ${transmitted} - ${received}
+    Should Be True    ${packet_loss} <= ${max_allowed_lost_packet}
+    ...     ${\n}${outfile}: Lost ${packet_loss} packets which exceeds max allowed ${max_allowed_lost_packet} packets
+
+
+    Log    \tLost ${packet_loss} packets within max allowed    console=True
+
+    # If traffic verification passed, remove the file
+    Remove File    ${outfile}
+
+# FC specific
+Get IC NameServers
+    [Documentation]    Returns DirectAttach nameServers info of the named interconnect
+    [Arguments]    ${ic_name}
+
+    ${ic_uri} =    Get IC URI    ${ic_name}
+    ${resp} =     fusion api get interconnect nameservers    ${ic_uri}
+    Should Be Equal As Integers    ${resp['status_code']}    ${200}
+
+    # workaround FusionLibrary request problem that it does not return proper format when response is not a dict
+    # Get the response from key _content
+    ${json_string} =    Set Variable    ${resp['_content']}
+    #log to console     ${\n}The returned name server string: ${json_string}
+
+    ${nameservers} =    evaluate    json.loads('''${json_string}''')    json
+
+    [Return]  ${nameservers}
+
+Verify Server DA Connection
+    [Documentation]    Verify server connections through input server downlink and expected connected ports
+    [Arguments]    ${nameservers}    ${dl}    ${expected_conn_map}
+
+    ${conn_map_from_ns} =     Create List
+    :FOR    ${ns}    IN     @{nameservers}
+    \    ${conn_map_from_ns} =    Set Variable IF    '${ns['portName']}' == '${dl}'    ${ns['connectionMap']}
+    \    Exit for loop if    '${ns['portName']}' == '${dl}'
+
+    # The order is not guaranteed
+    Sort List     ${conn_map_from_ns}
+    Sort List     ${expected_conn_map}
+    Lists Should Be Equal    ${conn_map_from_ns}    ${expected_conn_map}
+
+
+Verify Servers DA Connections
+    [Documentation]    Verify servers DA connections through OneView ICM nameServers connection map
+    [Arguments]    ${ic_name}    ${da_uplinks}    ${server_downlinks}    ${expected_conn_map}
+
+    # Log to Console    ${\n}Verify servers DA connections through OneView IC nameServer connection map
+    ${nameservers} =    Get IC NameServers    ${ic_name}
+
+    # There is situation that there are extra staled downlink entries in nameServers, check that
+    ${ns_entries} =     Get Length     ${nameservers}
+    ${expecte_uplinks} =    Get Length   ${da_uplinks}
+    ${expecte_downlinks} =    Get Length   ${server_downlinks}
+    ${expected_entries} =    Evaluate    ${expecte_uplinks}+${expecte_downlinks}
+
+    Run Keyword And Continue On Failure    Should Be Equal As Integers    ${ns_entries}    ${expected_entries}
+
+    # In happy path, nameServers should not be Empty
+    # Should Not Be Empty    ${nameservers}
+
+    :FOR    ${dl}    IN    @{server_downlinks}
+    \    Run Keyword And Continue On Failure    Verify Server DA Connection
+    \    ...    ${nameservers}    ${dl}    ${expected_conn_map}
+
+
+Verify Uplink DA Port
+    [Documentation]    Verify DA uplinkport connected storage wwpn through the nameServer entries
+    ...                argument ul_da is a dictionary of uplink name and its expected storage portWwn
+    [Arguments]     ${nameservers}    ${ul_da}
+
+    # Go through nameServers list and check against the input uplink and its expected da portww
+    :FOR    ${ns}    IN    @{nameservers}
+    \    ${ns_da_portwwn} =    Set Variable IF    '${ns['portName']}' == '${ul_da['uplink']}'
+    \    ...                ${ns['portWwn']}    ${EMPTY}
+    \    Exit For Loop If    '${ns['portName']}' == '${ul_da['uplink']}'
+
+    # ul_da contains uplink to be checked in nameservers, this check ensures nameservers not missing uplinks
+    Should Be Equal As Strings    ${ns_da_portwwn}    ${ul_da['da_portwwn']}
+
+
+Verify Port Not In nameServers
+    [Documentation]    Verify there is no nameServer entry for the named port
+    ...                When a port is disabled, there is no entry in the nameServers
+    [Arguments]	    ${nameservers}    ${portName}
+
+    :FOR    ${ns}    IN    @{nameservers}
+    \    Should Not Be Equal As Strings    ${ns['portName']}    ${portName}
+
+Get Port loginsCount
+    [Documentation]    return the loginsCount of specified FC uplinkport
+    [Arguments]    ${icm_name}    ${port_name}
+
+    ${resp} =    Fvt Api Get Interconnect Port By Name    ${icm_name}    ${port_name}
+    Should Not Be Empty    ${resp}
+
+    ${fcPortProperties} =    Get From Dictionary    ${resp}    fcPortProperties
+    Should Not Be Empty    ${fcPortProperties}
+
+    [Return]    ${fcPortProperties['loginsCount']}
+
+My Open Connection And Log In
+    [Documentation]    Opens an SSH session to an appliance and logs in
+    [Arguments]        ${host}=localhost   ${user}=root   ${pass}=hpvse1    ${prompt}=#
+    # ...                ${prompt_is_regex}=False
+
+    # The ssh prompt may be set by other Fusion keywords through Set Default Configuration
+    # set the expected ssh prompt for this connection
+    # Open Connection    ${host}    timeout=120s    prompt=${prompt}    prompt_is_regexp=${prompt_is_regex}
+    Open Connection    ${host}    timeout=180s    prompt=${prompt}
+    Login               ${user}    ${pass}
+
+SSH to host and ping others
+    [Documentation]    SSH's to a given Linux host, then pings from the host to other target servers IPs
+    [Arguments]        ${source}    ${targets}    ${source_user}    ${source_pwd}    ${prompt}
+
+
+    My Open Connection And Log In    ${source}    ${source_user}    ${source_pwd}    ${prompt}
+
+    :FOR    ${target}    IN     @{targets}
+    \    ${Output}=    Execute Command    ping -c 4 ${target}    return_stdout=True    return_rc=False
+    \    Log    ${Output}    console=True
+    \    Should Contain    ${Output}    ttl=
+
+    Close All Connections
+
+
+SSH to Source and execute command
+    [Documentation]    SSH's to a given appliance, then execute command
+    [Arguments]        ${source}    ${source_user}    ${source_pwd}    ${prompt}    ${cmd}
+
+    My Open Connection And Log In    ${source}    ${source_user}    ${source_pwd}    ${prompt}
+
+    # ${rc} =    Execute Command    ${cmd}    return_rc=True
+    ${output}    ${rc} =    Execute Command    ${cmd}    return_stdout=True    return_rc=True
+
+    Close All Connections
+
+    [Return]  ${rc}
+
+
+Update LI DownlinkSpeedMode
+    [Documentation]    Change LI downlinkSpeedMode
+    ...                If timeout not provided or 0, will return resp for caller to wait and check
+    ...                otherwise will wait for task and expect taskState to be Completed
+    ...                Wait for the LI speedmode becoming specified mode
+    [Arguments]     ${li_name}    ${speedMode}    ${timeout}=0    ${interval}=0
+
+    Log    ${\n}update LI downlinkSpeedMode to ${speedMode}    console=True
+
+    ${li_uri} =    Get LI URI    ${li_name}
+
+    ${data} =    Create Dictionary    op=replace
+    ...                               path=/downlinkSpeedMode
+    ...                               value=${speedMode}
+
+    ${body} =    Create List     ${data}
+
+    ${resp} =    Fusion Api Patch LI    ${body}   ${li_uri}
+    Should Be Equal As Integers    ${resp['status_code']}    202
+    Return From Keyword If    '${timeout}' == '0'    ${resp}
+
+    ${task} =    Wait For Task    ${resp}    ${timeout}    ${interval}
+    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+    Wait Until Keyword Succeeds    ${data_common.HA_SYNC_WAIT}    10s
+    ...    Verify Logical Interconnect     ${li_name}    downlinkSpeedMode=${speedMode}
+
+    [Return]    ${task}
+
+
+SSH to Source and save command output
+    [Documentation]    SSH's to a give source IP, save the give cmd output to a file
+    ...                to a file
+    [Arguments]        ${source}    ${source_user}    ${source_pwd}    ${prompt}    ${cmd}   ${ofile}
+
+    My Open Connection And Log In    ${source}    ${source_user}    ${source_pwd}    ${prompt}
+
+    ${output}=    Execute Command    ${cmd}    return_stdout=True    return_rc=False
+    # Log    ${output}    console=True
+
+    Remove File    ${ofile}
+    Create File    ${ofile}    ${output}
+
+    Close All Connections
+
+
+Verify 3par DA AttachedDev
+    [Documentation]    Verify from output of 3par command 'showportdev ns <3parport>' command
+    ...                should contain expected_count of the device for specified ${portwwn}
+    ...                including itself
+    ...                Verification only ensures expected attacheddevice count
+    ...  Sample output:
+    ...   PtId LpID Hadr ----Node_WWN---- ----Port_WWN----   ftrs   svpm   bbct   flen -----vp_WWN----- ----------------SNN----------------
+    ...   0x30300 0x00 0x00 10001402ECD16DC8 20001402ECD16DC8 0x0000 0x0000 0x0000 0x0000 20210002AC01D4DB      n/a
+    ...   0x30a00 0x00 0x00 10001402ECD1EF5E 20001402ECD1EF5E 0x0000 0x0000 0x0000 0x0000 20210002AC01D4DB      n/a
+    ...   0x31c00 0x00 0x00 10001402ECD16F66 20001402ECD16F66 0x0000 0x0000 0x0000 0x0000 20210002AC01D4DB      n/a
+    ...   0x31e00 0x00 0x00 10001402ECD1F34E 20001402ECD1F34E 0x0000 0x0000 0x0000 0x0000 20210002AC01D4DB      n/a
+    ...   0x37c00 0x00 0x00 2FF70002AC01D4DB 20210002AC01D4DB 0x8800 0x0012    n/a 0x0800 20210002AC01D4DB HP_3PAR 8200 - 2M
+    [Arguments]    ${outfile}    ${portwwn}    ${expected_count}
+
+    Log    ${\n}Verify attacheddev for specified 3par port ${portwwn}    console=True
+
+    ${attached_devices_info} =    Grep File    ${outfile}    ${portwwn}
+    Run Keyword And Continue On Failure    Should Not Be Empty    ${attached_devices_info}
+    ...    ${\n}there is no attached devices
+
+    # The matched output are concatenated with newline, split the string to multiple lines
+    @{lines} =     Split To Lines    ${attached_devices_info}
+
+    ${entry_count} =    Get Length    ${lines}
+    Run Keyword And Continue On Failure    Should Be Equal As Integers
+    ...    ${entry_count}    ${expected_count}
+
+    #Remove File    ${data_common.SAN_NPIV_OUT_FILE}
+
+
+Verify Nimble DA AttachedDev
+    [Documentation]    Verify DA attached devices based on Nimble fc info command
+    ...                connected initiators info and expected initiator alias pattern
+    ...                and expected count
+    ...  Sample output:
+    ...    Connected Initiators:
+    ...    -------------------------+-------------------------+-------------------------
+    ...    Alias                            WWNN                    WWPN
+    ...    -------------------------+-------------------------+-------------------------
+    ...    eagle159-enc1-bay1-mz1-1b  10:00:94:f1:28:9b:93:d1   20:00:94:f1:28:9b:93:d1
+    ...    eagle159-enc2-bay1-mz1-1b  10:00:d0:67:26:c0:40:91   20:00:d0:67:26:c0:40:91
+    ...
+    [Arguments]    ${outfile}    ${initiators_alias_pattern}    ${expected_count}
+
+    # Log    ${\n}Verify attacheddev for specified alias pattern    console=True
+
+    ${attached_devices_info} =    Grep File    ${outfile}    ${initiators_alias_pattern}
+    Run Keyword And Continue On Failure    Should Not Be Empty    ${attached_devices_info}
+    ...    ${\n}there is no attached devices
+
+    # The matched output are concatenated with newline, split the string to multiple lines
+    @{lines} =     Split To Lines    ${attached_devices_info}
+
+    ${entry_count} =    Get Length    ${lines}
+    Run Keyword And Continue On Failure    Should Be Equal As Integers
+    ...    ${entry_count}    ${expected_count}
+
+
+SSH to SAN and get switchshow info
+    [Documentation]    SSH's to a give SAN switch, save the 'switchshow' output to a file
+    [Arguments]        ${source}    ${source_user}    ${source_pwd}    ${prompt}
+#    ...                ${prompt_is_regex}=True
+
+    #My Open Connection And Log In    ${source}    ${source_user}    ${source_pwd}    ${prompt}    ${prompt_is_regex}
+
+    My Open Connection And Log In    ${source}    ${source_user}    ${source_pwd}    ${prompt}
+
+    ${output}=    Execute Command    switchshow    return_stdout=True    return_rc=False
+    Log    ${output}    console=True
+
+    Remove File    ${data_common.SAN_NPIV_OUT_FILE}
+    Create File    ${data_common.SAN_NPIV_OUT_FILE}    ${output}
+
+    Close All Connections
+
+
+Verify FA uplinks SAN ports NPIV
+    [Documentation]    Verify from output of SAN switch 'switchshow' command
+    ...                gather port with NPIV info and verify the expected count
+    ...                expected_ports_npivs
+    [Arguments]    ${outfile}    ${expected_port_npiv_dict}
+
+    Log    ${\n}Verify specified port/NPIV values from outfile    console=True
+
+    ${all_npivs_string} =    Grep File    ${data_common.SAN_NPIV_OUT_FILE}    NPIV
+    Should Not Be Empty    ${all_npivs_string}    ${\n}there is no port with server logins
+
+    # The matched output are concatenated with newline, split the string to multiple lines
+    @{lines} =     Split To Lines    ${all_npivs_string}
+
+    # split the string with whitespace then extract port and NPIV count
+    # 12  12   010c00   id    N16     Online      FC  F-Port  1 N Port + 2 NPIV public
+    &{result_dict} =    Create Dictionary
+    :For    ${line}    IN     @{lines}
+    \    @{words} =    Split String    ${line}
+    \    ${port} =    Set Variable    ${words[1]}
+    \    ${npiv_count} =    Set Variable    ${words[12]}
+    \    Set to Dictionary    ${result_dict}    ${port}=${npiv_count}
+
+    :FOR    ${key}    IN    @{expected_port_npiv_dict.keys()}
+    \    Should be Equal    ${result_dict['${key}']}    ${expected_port_npiv_dict['${key}']}
+
+    #Remove File    ${data_common.SAN_NPIV_OUT_FILE}
+
+
+Edit Network Bandwidth
+    [Documentation]    Update the bandwidth of the named typed network
+    ...                type:   ethernet, fc, fcoe
+    [Arguments]        ${name}    ${type}    ${typical_bw}    ${max_bw}
+
+    Log    ${\n}Updating network ${name} bandwidth    console=yes
+
+    # Get network connection template and update the specified typical and max bandwidth
+
+    ${connTempUri} =    Get connectionTemplateUri    ${name}    ${type}
+
+    ${ct} =    Fusion Api Get Connection Templates    ${connTempUri}
+
+    # Need to remove status_code
+    Remove From Dictionary   ${ct}   headers   status   created   state   status_code   modified
+
+    Set To Dictionary    ${ct['bandwidth']}    maximumBandwidth    ${max_bw}
+    Set To Dictionary    ${ct['bandwidth']}    typicalBandwidth    ${typical_bw}
+
+    ${resp} =    Fusion Api Update Connection Template    ${ct}    ${connTempUri}
+
+    Should Be Equal As Integers    ${resp['status_code']}    200
+
+Get SP connection rbw
+    [Documentation]    Get the rbw of the named connection from the connections array
+    ...               connections is array of dictionary of connection name and rbw
+    [Arguments]        ${conn_name}    ${connections}
+
+    ${rbw} =    Set Variable    ${None}
+    ${len} =    Get Length    ${connections}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    ${rbw} =    Set Variable if     '${connections[${x}]['conn_name']}' == '${conn_name}'
+    \    ...         ${connections[${x}]['requestedMbps']}
+    \    Exit For Loop If    '${connections[${x}]['conn_name']}' == '${conn_name}'
+
+    [Return]    ${rbw}
+
+
+Edit Profile RBW
+    [Documentation]    Update the requested bandwidth of the named profile
+    ...                from input connections, which is an array of dictionary of connection name
+    ...                and requested bandwidth (in Mbps) to be updated to.
+    [Arguments]        ${sp_name}    ${connections}
+
+    Log    ${\n}Updating profile ${sp_name} requested bandwidth    console=yes
+    ${resp} =    Fvt Api Get Server Profile By Name    ${sp_name}
+    ${len} =    Get Length    ${resp['connectionSettings']['connections']}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    ${conn_name} =    Get From Dictionary
+    \    ...          ${resp['connectionSettings']['connections'][${x}]}    name
+    \    ${rbw} =    Get SP connection rbw    ${conn_name}   ${connections}
+    \    Run Keyword If    ${rbw} != ${None}
+    \    ...   Set To Dictionary    ${resp['connectionSettings']['connections'][${x}]}
+    \    ...                        requestedMbps    ${rbw}
+
+    ${task} =    Fusion Api Edit Server Profile    body=${resp}    uri=${resp['uri']}
+    Should Be Equal As Integers    ${task['status_code']}    202
+    ${task} =    Wait For Task    ${task}    10m   20s
+    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+
+Perform LI Update From Group
+    [Documentation]    perform LI update from group for input LI and wait for task complete
+    [Arguments]        ${li_name}    ${timeout}=15m    ${interval}=30s
+
+    Log    ${\n}Perform LI update from group for ${li_name}    console=True
+
+    ${li_uri} =    Get LI URI    ${li_name}
+    ${resp} =    Fusion Api Update from group    ${li_uri}
+    Should Be Equal As Integers    ${resp['status_code']}    ${202}
+
+    ${task} =    Wait For Task    ${resp}    ${timeout}    ${interval}
+    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+
+Perform Edit LI UplinkSet
+    [Documentation]    perform Edit LI Uplinkset and wait for task complete
+    [Arguments]        ${us_name}    ${request}    ${li_name}
+
+    Log    ${\n}Edit LI uplinkset ${us_name}    console=True
+    ${resp} =    uplink_set.Edit uplinkset    ${us_name}    ${request}    ${li_name}
+    ${task} =    Wait For Task    ${resp}    5min    15s
+    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+
+Verify Fabric State
+    [Documentation]    Verify the named Fabric state
+    [Arguments]    ${fabric_name}    ${expected_state}
+
+    ${fb_resp} =    Fvt Api Get Fabric By Name    ${fabric_name}
+    Should Be Equal As Strings    ${fb_resp['state']}    ${expected_state}
+
+
+Wait For Fabric State
+    [Documentation]    Wait for the named Fabric state
+    [Arguments]    ${fabric_name}    ${expected_state}    ${timeout}=3m    ${interval}=20s
+
+    Wait Until Keyword Succeeds    ${timeout}    ${interval}
+    ...    Verify Fabric state    ${Fabric_name}    ${expected_state}
+
+
+Remove OneView Config From CFM
+    [Documentation]   Remove the OneView that matches specified OV IP from Plexxi Connect
+    ...               Do nothing if there is no specified OneView Config in CFM
+    [Arguments]    ${ov_ip}    ${cfm_ip}    ${cfm_credentials}
+
+    Log    ${\n}Remove OneView Config ${ov_ip} From CFM    console=True
+
+    Plexxi Api Login    ${cfm_ip}    ${cfm_credentials['userName']}    ${cfm_credentials['password']}
+
+    ${resp} =   Plexxi Api Get OneView Configuration
+    Should Be Equal As Integers    ${resp['status_code']}    200
+
+    :FOR    ${ov}    IN    @{resp['result']}
+    \    Run Keyword If    '${ov['host']}' == '${ov_ip}'
+    \    ...    Plexxi Api Delete OneView Configuration   ${ov['uuid']}
+    \    Exit For Loop If    '${ov['host']}' == '${ov_ip}'

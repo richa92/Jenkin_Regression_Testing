@@ -1,0 +1,549 @@
+*** Settings ***
+Documentation   OVF414
+Variables       data_variables.py
+Library         json
+Library         FusionLibrary
+Library         RoboGalaxyLibrary
+Library         Collections
+Library         SSHLibrary
+Library         String
+Resource        ../../../../resource/fusion_api_all_resource_files.txt
+Resource        OVF414_keywords.txt
+Library         Telnet
+Library         background_ping.py
+Library         data_variables
+
+*** Variables ***
+${APPLIANCE_IP}     15.245.131.62
+${Host}    15.245.131.62
+${stat}    statistics
+${eth}    Ethernet
+${name}    sample.txt
+${Ping_Lost}    Lost
+*** Test Cases ***
+
+Login to Appliance
+    [Documentation]    Login to Appliance
+    [Tags]  add   POSITIVE
+    Set Log Level    TRACE
+    Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+
+Initial OV cleanup
+    [Documentation]    Performs Initial Cleanup
+    [Tags]    InitialCleanup
+    Set Log Level    TRACE
+    Cleanup
+
+Create ethernet network
+    [Documentation]    Create ethernet Networks
+    [Tags]    setup
+    Set Log Level    TRACE
+    :FOR   ${ethnet}   IN   @{ethernet_networks}
+    \    Log to console    \n-Creating Ethernet Networks
+    \    ${resp}    Fusion Api Create Ethernet Network    ${ethnet}
+    \    Run Keyword If  '${resp['status_code']}' != '202'  Fail    ELSE  log to console  \nEthernet Network created successfully
+    \    ${uri} =    Get From Dictionary    ${resp['associatedResource']}    resourceUri
+    \    Set Global Variable    ${enet_uri}    ${uri}
+
+Create Network Sets
+    [Documentation]    Create Network Sets
+    [Tags]    setup
+    Set Log Level    TRACE
+    ${nw_sets_resp}    Add Network Sets from variable    ${network_sets}
+    Run Keyword If  '${nw_sets_resp['status_code']}' != '202'  Fail    ELSE  log to console  \nNetwork set got created successfully
+
+Creating LIG
+    [Documentation]    Creating LIG through rest calls
+    [Tags]    setup
+    Set Log Level    TRACE
+
+    Log to console and logfile  Creating LIG
+
+    ${task}    Add LIG from variable    ${ligs[1]}    3min    10s
+    Run Keyword If  '${task['taskState']}' !='Completed'    fail    msg=\nUnable to create LIG ${task['taskErrors'][0]['errorCode']}
+    ...         ELSE    Log to Console    \nsuccessfully created LIG - ${ligs[1]['name']}
+
+Creating EG
+    [Documentation]    Creating EG through rest calls
+    [Tags]  EG    setup
+    Set Log Level    TRACE
+
+    Log to console and logfile  Creating EG
+    ${resp} =    Add Enclosure Group from variable    ${enc_group['EG']}
+    Run Keyword If  ${resp['status_code']} != 201    fail    msg=\nUnable to create EG
+     ...         ELSE    Log to Console    \nsuccessfully created EG
+
+Creating LE
+    [Documentation]    Creating LE through rest calls
+    [Tags]  LE    setup
+    Set Log Level    TRACE
+
+    ${Resp}    Add Logical Enclosure from variable    ${LE_Potash['LE']}
+    Run Keyword If  '${Resp['taskState']}' !='Completed'    fail    msg=\nUnable to Create LE with Error Message
+    ...         ELSE    Log to console and logfile  \n\Successfully Created LE !!
+    Sleep    2min
+
+Creating Server Profile
+    [Documentation]    Creating Server Profile
+    [Tags]  ServerProfile    setup
+    Set Log Level    TRACE
+
+    Add Server Profiles from variable    ${SP_2}
+    Log to console  \n Server profiles created successfully
+    Power on server     ${SP_2[0]['serverHardwareUri']}
+    Log to console    \n Power on servers
+    Log to console    \n Waiting 10 minutes for the server to boot
+    Sleep   10min
+
+    ${IP}    ${gate_ip}    Get Server Ip Windows    ${ilo_details_enc2_bay1}
+    Set Global Variable    ${server_ip}    ${IP[0]}
+    Set Global Variable    ${gateway_ip}    ${gate_ip}
+
+Get gateway ip of server and passing traffic
+    [Documentation]    Get gateway ip of the server and passing traffic
+    [Tags]  Traffic    setup
+    Set Log Level    TRACE
+
+    Clear Port Counters    ${IC[0]}
+    Get gateway ip of the server and passing traffic    ${gateway_ip}    ${server_ip}    ${ping_cmd1}    ${server_details}    ${name}
+    Verifying Subport Common Statistics vaules    ${IC[0]}    ${stat}    ${downlink_ports[0]}    ${time_interval_2min}    ${min_octets}    ${min_pkts}    ${sub_port_number[0]}
+    Wait Until Keyword Succeeds    12 min    1 min    Verifying sample count in subport Advanced statistics    ${IC[0]}    ${stat}    ${downlink_ports[0]}    ${sub_port_number[0]}    ${ligs[1]['telemetryConfiguration']['sampleCount']}
+
+Verify that the egress counter values are not available in S-channel statistics through API call
+    [Documentation]    Verify that the egress counter values are not available in S-channel statistics through API call
+    [Tags]  EgressCounter
+    Set Log Level    TRACE
+
+    ${subportStatistics}    ${subport_commonstat}    ${subport_advancedstat}    Get s-channel statistics    ${IC[1]}    ${stat}    ${downlink_ports[1]}    ${sub_port_number[0]}
+    ${len} =   Get Length   ${subportCommon_egress_counters}
+    :FOR     ${x}   IN RANGE   0   ${len}
+    \    ${subport_commonstats}    Get From Dictionary    ${subport_commonstat}    ${subportCommon_egress_counters[${x}]}
+    \    Run Keyword If  '${subport_commonstats}' != 'None'    Fail    ELSE    Log to console  \n Egress counter values are not available.
+
+############################################## Test Case 1 - Disable/Enable Uplink port & Verfy S-Channel statistics ##################################################
+TC_1_1_Disable Uplink port - Verify s-channel statistics and historic data
+    [Documentation]    Disable Uplink port - Verify s-channel statistics and historic data
+    [Tags]  DisableUplink
+    Set Log Level    TRACE
+
+    set to dictionary    ${ic_disable_body[0]}    portType    Uplink
+    ${resp}    Enable Disable uplink/downlink ports    ${IC[0]}    ${uplink_ports[0]}    ${ic_disable_body}
+    Run keyword unless  ${resp['status_code']}== 202    Fail    ${resp['message']}
+    Wait Until Keyword Succeeds   10 min    10s    Get Port Status    ${IC[0]}    ${uplink_ports[0]}    ${disable_status}
+    Log to console    \nUplink port is disabled.
+    Sleep    30sec
+
+    Verifying Subport Common Statistics vaules    ${IC[0]}    ${stat}    ${downlink_ports[0]}    ${time_interval_2min}    ${min_octets}    ${min_pkts}    ${sub_port_number[0]}
+    Wait Until Keyword Succeeds    12 min    1 min    Verifying sample count in subport Advanced statistics    ${IC[0]}    ${stat}    ${downlink_ports[0]}    ${sub_port_number[0]}    ${ligs[1]['telemetryConfiguration']['sampleCount']}
+
+TC_1_2_Enable Uplink port - Verify s-channel statistics and historic data
+    [Documentation]    Enable Uplink port - Verify s-channel statistics and historic data
+    [Tags]  EnableUplink
+    Set Log Level    TRACE
+
+    set to dictionary    ${ic_enable_body[0]}    portType    Uplink
+    ${resp}    Enable Disable uplink/downlink ports    ${IC[0]}    ${uplink_ports[0]}    ${ic_enable_body}
+    Run keyword unless  ${resp['status_code']}== 202    Fail    ${resp['message']}
+    Wait Until Keyword Succeeds   10 min    10s    Get Port Status    ${IC[0]}    ${uplink_ports[0]}    ${enable_status}
+    Log to console    \nUplink port is enabled.
+
+    Verifying Subport Common Statistics vaules    ${IC[0]}    ${stat}    ${downlink_ports[0]}    ${time_interval_2min}    ${min_octets}    ${min_pkts}    ${sub_port_number[0]}
+    Wait Until Keyword Succeeds    12 min    1 min    Verifying sample count in subport Advanced statistics    ${IC[0]}    ${stat}    ${downlink_ports[0]}    ${sub_port_number[0]}    ${ligs[1]['telemetryConfiguration']['sampleCount']}
+
+    ${out}    execute_traffic    ${server_ip}    ${server_details['username']}    ${server_details['password']}    ${kill_cmd}
+    Clear Port Counters    ${IC[0]}
+
+############################################## Test Case 2 - Disable/Enable Downlink port & Verfy S-Channel statistics ##################################################
+
+TC_2_1_Disable downlink port - Verify s-channel statistics and historic data
+    [Documentation]    Enable / Disable s-channel port and verify that the statistics and historical data are not available after disable.
+    [Tags]  DisableDownlink
+    Set Log Level    TRACE
+
+    ${IP}    ${gate_ip}    Get Server Ip Windows    ${ilo_details_enc2_bay1}
+    Set Global Variable    ${server_ip}    ${IP[0]}
+    Set Global Variable    ${gateway_ip}    ${gate_ip}
+    Get gateway ip of the server and passing traffic    ${gateway_ip}    ${server_ip}    ${ping_cmd1}    ${server_details}    ${name}
+    Verifying Subport Common Statistics vaules    ${IC[0]}    ${stat}    ${downlink_ports[0]}    ${time_interval_2min}    ${min_octets}    ${min_pkts}    ${sub_port_number[0]}
+    set to dictionary    ${ic_disable_body[0]}    portType    Downlink
+    ${resp}    Enable Disable uplink/downlink ports    ${IC[0]}    ${downlink_ports[0]}    ${ic_disable_body}
+    Run keyword unless  ${resp['status_code']}== 202    Fail    ${resp['message']}
+    Wait Until Keyword Succeeds   10 min    10s    Get Port Status    ${IC[0]}    ${downlink_ports[0]}    ${disable_status}
+    Log to console    \n Downlink port is disabled
+    Sleep    60sec
+
+    :FOR    ${x}    IN RANGE    0    2
+    \    ${subport_commonstat_octets_initial}    ${subport_commonstat_pkts_initial}    Get s-channel Common Statistics    ${IC[0]}    ${stat}    ${downlink_ports[0]}    ${sub_port_number[0]}
+    \    Sleep    ${time_interval_2min}
+    \    ${subport_commonstat_octets}    ${subport_commonstat_pkts}    Get s-channel Common Statistics    ${IC[0]}    ${stat}    ${downlink_ports[0]}    ${sub_port_number[0]}
+    \    Run Keyword If  ${subport_commonstat_octets} == ${subport_commonstat_octets_initial}    Log to console  \n octets value remains same beacause downlink port is disabled
+    ...    ELSE    Fail
+
+    \    Run Keyword If  ${subport_commonstat_pkts} == ${subport_commonstat_pkts_initial}    Log to console  \n pkts value remains same beacause downlink port is disabled
+    ...    ELSE    Fail
+
+TC_2_2_After disabling downlink port statistics data flows through another ICM- failover check
+    [Documentation]    Verfiying statistics in another ICM
+    [Tags]  GetStatistics
+    Set Log Level    TRACE
+
+    Verifying Subport Common Statistics vaules    ${IC[1]}    ${stat}    ${downlink_ports[1]}    ${time_interval_2min}    ${min_octets}    ${min_pkts}    ${sub_port_number[0]}
+    Wait Until Keyword Succeeds    12 min    1 min    Verifying sample count in subport Advanced statistics    ${IC[1]}    ${stat}    ${downlink_ports[1]}    ${sub_port_number[0]}    ${ligs[1]['telemetryConfiguration']['sampleCount']}
+
+TC_2_3_Enable downlink port - Verify s-channel statistics and historic data
+    [Documentation]    Enable s-channel port and verify that the statistics and historical data.
+    [Tags]  EnableDownlink
+    Set Log Level    TRACE
+
+    set to dictionary    ${ic_enable_body[0]}    portType    Downlink
+    ${resp}    Enable Disable uplink/downlink ports    ${IC[0]}    ${downlink_ports[0]}    ${ic_enable_body}
+    Run keyword unless  ${resp['status_code']}== 202    Fail    ${resp['message']}
+    Wait Until Keyword Succeeds   10 min    10s    Get Port Status    ${IC[0]}    ${downlink_ports[0]}    ${enable_status}
+    Log to console    \n Downlink port is enabled.
+    Sleep    5min
+
+
+    Verifying Subport Common Statistics vaules    ${IC[0]}    ${stat}    ${downlink_ports[0]}    ${time_interval_2min}    ${min_octets}    ${min_pkts}    ${sub_port_number[0]}
+    Wait Until Keyword Succeeds    12 min    1 min    Verifying sample count in subport Advanced statistics    ${IC[0]}    ${stat}    ${downlink_ports[0]}    ${sub_port_number[0]}    ${ligs[1]['telemetryConfiguration']['sampleCount']}
+
+    ${out}    execute_traffic    ${server_ip}    ${server_details['username']}    ${server_details['password']}    ${kill_cmd}
+    Clear Port Counters    ${IC[0]}
+
+################################################ Test Case 3 - ICM Reset & Verfy S-Channel statistics ##################################################
+
+TC_3_1_ICM Reset
+    [Documentation]     Verify ICM is able to save and restore the configurations related to statistics collection on the s-channel interface.
+    [Tags]  ICMReset
+    Set Log Level    TRACE
+
+    ${IP}    ${gate_ip}    Get Server Ip Windows    ${ilo_details_enc2_bay1}
+    Set Global Variable    ${server_ip}    ${IP[0]}
+    Set Global Variable    ${gateway_ip}    ${gate_ip}
+
+    Get gateway ip of the server and passing traffic    ${gateway_ip}    ${server_ip}    ${ping_cmd1}    ${server_details}    ${name}
+    Verifying Subport Common Statistics vaules    ${IC[0]}    ${stat}    ${downlink_ports[0]}    ${time_interval_2min}    ${min_octets}    ${min_pkts}    ${sub_port_number[0]}
+    Log to console and logfile  -Issue Reset
+
+    ${IC_uri}    Get IC URI    ${IC[0]}
+    Log to console and logfile      ${IC_uri}
+    ${body} =   Create Dictionary   op=replace
+    ...                             path=/deviceResetState
+    ...                             value=Reset
+    ${body} =   Create list     ${body}
+    ${resp} =   fusion api patch interconnect   body=${body}    uri=${IC_uri}
+    Sleep    1min
+
+TC_3_2_During reset ICM statistics data flows through another ICM- failover check
+    [Documentation]    During reset ICM statistics data flows through another ICM- failover check
+    [Tags]  ICMReset
+    Set Log Level    TRACE
+
+    ${subport_commonstat_octets_initial}    ${subport_commonstat_pkts_initial}    Get s-channel Common Statistics    ${IC[1]}    ${stat}    ${downlink_ports[1]}    ${sub_port_number[0]}
+    Sleep    ${time_interval_2min}
+    ${subport_commonstat_octets}    ${subport_commonstat_pkts}    Get s-channel Common Statistics    ${IC[1]}    ${stat}    ${downlink_ports[1]}    ${sub_port_number[0]}
+    ${diff}    Evaluate    ${subport_commonstat_octets} - ${subport_commonstat_octets_initial}
+    Run Keyword If  ${diff} >= 80000    Log to console  \n octets values are increasing
+    ...    ELSE    Fail
+
+    ${diff}    Evaluate    ${subport_commonstat_pkts} - ${subport_commonstat_pkts_initial}
+    Run Keyword If  ${diff} >= 80    Log to console  \n pkts values are increasing
+    ...    ELSE    Fail
+    Sleep    2min
+
+TC_3_3_After Reset,statistics data regain back to the Master ICM
+    [Documentation]    After Reset,statistics data regain back to the ICM
+    [Tags]  ICMReset
+    Set Log Level    TRACE
+
+    Verifying Subport Common Statistics vaules    ${IC[0]}    ${stat}    ${downlink_ports[0]}    ${time_interval_2min}    ${min_octets}    ${min_pkts}    ${sub_port_number[0]}
+    Wait Until Keyword Succeeds    12 min    1 min    Verifying sample count in subport Advanced statistics    ${IC[0]}    ${stat}    ${downlink_ports[0]}    ${sub_port_number[0]}    ${ligs[1]['telemetryConfiguration']['sampleCount']}
+
+    ${out}    execute_traffic    ${server_ip}    ${server_details['username']}    ${server_details['password']}    ${kill_cmd}
+    Clear Port Counters    ${IC[0]}
+
+    ${IC_uri}    Get IC URI    ${IC[1]}
+    Log to console and logfile      ${IC_uri}
+    ${body} =   Create Dictionary   op=replace
+    ...                             path=/deviceResetState
+    ...                             value=Reset
+    ${body} =   Create list     ${body}
+    ${resp} =   fusion api patch interconnect   body=${body}    uri=${IC_uri}
+    Sleep    5min
+
+
+
+################################################ Test Case 4 - Create profile with VPLAG & verify S-channel statistics ####################################################
+TC_4_1_Creating Server with LAG connections
+    [Documentation]  Creating Server profile through rest calls
+    [Tags]  Profile_VPLAG
+    Set Log Level    TRACE
+
+    Add Server Profiles from variable    ${sp_lag}
+    Power on server     ${sp_lag[0]['serverHardwareUri']}
+    Log to console    \n Power on servers
+    Log to console    \n Waiting 10 minutes for the server to boot
+    Sleep   10min
+
+TC_4_2_Get MAC Address of the server & Windows Teaming
+    [Documentation]    Get MAC Address of the server & Windows Teaming
+    [Tags]  Teaming_VPLAG
+    Set Log Level    TRACE
+
+    # Get MAC Address of the server & Windows Teaming
+
+    ${IP}    ${gateway_ip}    Get Server Ip Windows    ${ilo_details_enc2_bay1}
+    Set Global Variable    ${serverip_List1_global}    ${IP}
+
+    ${mac_addr_list}    ${mac_length}    Get Mac Address     ${sp_lag[0]['name']}    ${serverip_List1_global}
+    Log to Console    \n mac address ${mac_addr_list}
+
+    ${adapter_name_list}    Compare Mac Address With Server    ${mac_length}    ${Powershell_get_mac}    ${mac_addr_list}    ${serverip_List1_global}    ${windows_server_details}
+    Log to console  \nadapter names list${adapter_name_list}
+
+    Create Teaming windows     ${adapter_name_list[0]}    ${adapter_name_list[1]}   ${Powershell_get_mac1}    ${windows_server_details}    ${serverip_List1_global[1]}
+    ${IP}    ${gate_ip}    Get Server Ip Windows    ${ilo_details_enc2_bay1}
+    Set Global Variable    ${server_ip}    ${IP[0]}
+    Set Global Variable    ${gateway_ip}    ${gate_ip}
+
+    Get gateway ip of the server and passing traffic    ${gateway_ip}    ${server_ip}    ${ping_cmd1}    ${server_details}    ${name}
+    Verifying Subport Common Statistics vaules    ${IC[0]}    ${stat}    ${downlink_ports[0]}    ${time_interval_2min}    ${min_octets}    ${min_pkts}    ${sub_port_number[0]}
+    Wait Until Keyword Succeeds    12 min    1 min    Verifying sample count in subport Advanced statistics    ${IC[0]}    ${stat}    ${downlink_ports[0]}    ${sub_port_number[0]}    ${ligs[1]['telemetryConfiguration']['sampleCount']}
+
+
+TC_4_3_Edit LIG for diff sampling interval & update from group in LI
+    [Documentation]    Edit LIG for diff sampling interval & update from group in LI
+    [Tags]  Profile_VPLAG    Getstatistics
+    Set Log Level    TRACE
+
+    ${len}    Get Length    ${diff_sample_interval_lag}
+    :FOR    ${x}    IN RANGE    ${len}
+
+    \    Edit LIG with Different Sampling Interval and Update From Group in LI    ${ligs[1]['name']}    ${diff_sample_interval_lag[${x}]}    ${LI}
+    \    Verifying Subport Common Statistics vaules    ${IC[0]}    ${stat}    ${downlink_ports[0]}    ${time_interval_lag[${x}]}    ${min_octets}    ${min_pkts}    ${sub_port_number[0]}
+    \    Wait Until Keyword Succeeds    ${max_time[${x}]}    ${min_time[${x}]}    Verifying sample count in subport Advanced statistics    ${IC[0]}    ${stat}    ${downlink_ports[0]}    ${sub_port_number[0]}    ${ligs[1]['telemetryConfiguration']['sampleCount']}
+    \    Clear Port Counters    ${IC[0]}
+
+    ${sampleInterval_lig}    Get From Dictionary    ${ligs[1]['telemetryConfiguration']}    sampleInterval
+    Edit LIG with Different Sampling Interval and Update From Group in LI    ${ligs[1]['name']}    ${sampleInterval_lig}    ${LI}
+
+    ${out}    execute_traffic    ${server_ip}    ${server_details['username']}    ${server_details['password']}    ${kill_cmd}
+    Log to console    \n Pinging terminated Successfully ${out}
+    Clear Port Counters    ${IC[0]}
+
+################################################ Test Case 5 - Efuse ICM - Verify S-Channel statistics ####################################################
+TC_5_Efuse ICM - Verfy S-Channel statistics
+    [Documentation]    Effuse on (Remove) the master ICM.Verify that the s-channel port of standby ICM collects the statistics and historical collections(Create profile with VPLAG)
+    [Tags]  EfuseICM
+    Set Log Level    TRACE
+
+    ${IP}    ${gate_ip}    Get Server Ip Windows    ${ilo_details_enc2_bay1}
+    Set Global Variable    ${server_ip}    ${IP[0]}
+    Set Global Variable    ${gateway_ip}    ${gate_ip}
+
+    Get gateway ip of the server and passing traffic    ${gateway_ip}    ${server_ip}    ${ping_cmd1}    ${server_details}    ${name}
+    Verifying Subport Common Statistics vaules    ${IC[0]}    ${stat}    ${downlink_ports[0]}    ${time_interval_2min}    ${min_octets}    ${min_pkts}    ${sub_port_number[0]}
+    ${len}    Get Length    ${Action}
+    :FOR    ${x}    IN RANGE    ${len}
+    \    Efuse ICMS    ${ENC[0]}    ${icbays[0]}    ${Action[${x}]}    ${IC[0]}    ${state[${x}]}
+    \    Verifying Subport Common Statistics vaules    ${ICM[${x}]}    ${stat}    ${downlink_port[${x}]}    ${time_interval_2min}    ${min_octets}    ${min_pkts}    ${sub_port_number[0]}
+    \    Wait Until Keyword Succeeds    12 min    1 min    Verifying sample count in subport Advanced statistics    ${ICM[${x}]}    ${stat}    ${downlink_port[${x}]}    ${sub_port_number[0]}    ${ligs[1]['telemetryConfiguration']['sampleCount']}
+    ${out}    execute_traffic    ${server_ip}    ${server_details['username']}    ${server_details['password']}    ${kill_cmd}
+    Log to console    \n Pinging terminated Successfully ${out}
+
+    # Reverting back the MASTER ICM to Original state
+    Log to console    \n Reverting back the MASTER ICM
+    :FOR    ${x}    IN RANGE    ${len}
+    \    Efuse ICMS    ${ENC[1]}    ${icbays[1]}    ${Action[${x}]}    ${IC[1]}    ${state[${x}]}
+    \    Sleep    2min
+
+    Clear Port Counters    ${IC[0]}
+
+################################################ Test Case 6 - Power off /On ICM & verify S-channel statistics ####################################################
+TC_6_1_Power off /On ICM
+    [Documentation]    Power off / on ICM - Verify s-channel statistics and historic data by creating teaming with VPLAG
+    [Tags]  PowerICM
+    Set Log Level    TRACE
+
+    ${IP}    ${gate_ip}    Get Server Ip Windows    ${ilo_details_enc2_bay1}
+    Set Global Variable    ${server_ip}    ${IP[0]}
+    Set Global Variable    ${gateway_ip}    ${gate_ip}
+
+    Get gateway ip of the server and passing traffic    ${gateway_ip}    ${server_ip}    ${ping_cmd1}    ${server_details}    ${name}
+    Verifying Subport Common Statistics vaules    ${IC[0]}    ${stat}    ${downlink_ports[0]}    ${time_interval_2min}    ${min_octets}    ${min_pkts}    ${sub_port_number[0]}
+
+    Power Off Interconnect    ${IC[0]}    ${interconnect_poweroff}    ${IC_state[0]}
+    Verifying Subport Common Statistics vaules    ${IC[1]}    ${stat}    ${downlink_ports[1]}    ${time_interval_2min}    ${min_octets}    ${min_pkts}    ${sub_port_number[0]}
+    Wait Until Keyword Succeeds    12 min    1 min    Verifying sample count in subport Advanced statistics    ${IC[1]}    ${stat}    ${downlink_ports[1]}    ${sub_port_number[0]}    ${ligs[1]['telemetryConfiguration']['sampleCount']}
+
+    Power On Interconnect    ${IC[0]}    ${interconnect_poweron}    ${IC_state[1]}
+    Verifying Subport Common Statistics vaules    ${IC[0]}    ${stat}    ${downlink_ports[0]}    ${time_interval_2min}    ${min_octets}    ${min_pkts}    ${sub_port_number[0]}
+    Wait Until Keyword Succeeds    12 min    1 min    Verifying sample count in subport Advanced statistics    ${IC[0]}    ${stat}    ${downlink_ports[0]}    ${sub_port_number[0]}    ${ligs[1]['telemetryConfiguration']['sampleCount']}
+
+    ${out}    execute_traffic    ${server_ip}    ${server_details['username']}    ${server_details['password']}    ${kill_cmd}
+    Log to console    \n Pinging terminated Successfully ${out}
+
+    # Reverting back the MASTER ICM to Original state
+    Log to console    \n Reverting back the MASTER ICM
+    Power Off Interconnect    ${IC[1]}    ${interconnect_poweroff}    ${IC_state[0]}
+    Power On Interconnect    ${IC[1]}    ${interconnect_poweron}    ${IC_state[1]}
+
+    Clear Port Counters    ${IC[0]}
+
+TC_6_2_Delete Teaming
+    [Documentation]    Delete Teaming
+    [Tags]  DeleteTeaming
+    Set Log Level    TRACE
+
+    ${IP}    ${gate_ip}    Get Server Ip Windows    ${ilo_details_enc2_bay1}
+    Set Global Variable    ${server_ip}    ${IP[0]}
+
+    Execute Powershell Command    ${server_ip}    ${windows_server_details}    ${detlete_team_cmd0}
+    Sleep    5min
+
+################################################ Test Case 7 - Verify S-channel statistics for network set connection ##################################################
+TC_7_1_Creating Server Profile with network set connections
+    [Documentation]    Creating Server Profile with network set connections
+    [Tags]  NetworkSet
+    Set Log Level    TRACE
+
+    Power off ALL Servers
+    Remove All Server Profiles
+
+    Add Server Profiles from variable    ${SP_NS}
+    Log to console  \n Server profiles created successfully
+    Power on server     ${SP_NS[0]['serverHardwareUri']}
+    Log to console    \n Power on servers
+    Log to console    \n Waiting 10 minutes for the server to boot
+    Sleep   10min
+
+TC_7_2_Create Tagging inside server
+    [Documentation]    Create Tagging inside server
+    [Tags]  NetworkSet
+    Set Log Level    TRACE
+
+    ${IP}    ${gateway_ip}    Get Server Ip Windows    ${ilo_details_enc2_bay1}
+    Set Global Variable    ${server_ip}    ${IP[0]}
+    ${adapter}    Get Adapter Name    ${port[0]}    ${server_ip}    ${Powershell_get_mac}    ${windows_server_details}
+    Log to console    \nAdapter name is ${adapter}
+
+    ${replaced_cmd}    Replace String Using Regexp    ${tagging_cmd}    adapter_name    ${adapter}
+    ${tagging_cmd1}    Replace String Using Regexp    ${replaced_cmd}    vlan_id    401
+    ${output}    Execute Powershell Command    ${server_ip}    ${windows_server_details}    ${tagging_cmd1}
+    Log to Console    \n${output}
+    Log to console    \nTagging completed successfully
+
+TC_7_3_Edit server profile and remove ethernet connection
+    [Documentation]    Edit server profile and remove ethernet connection
+    [Tags]  NetworkSet
+    Set Log Level    TRACE
+
+    Power off ALL Servers
+    ${task}    Edit Server Profiles from variable    ${SP_NS1}
+    Run Keyword If  '${task['status_code']}' == '200'    Log to console  \n Server profile updated successfully    ELSE    FAIL
+    Power on server     ${SP_NS1[0]['serverHardwareUri']}
+    Log to console    \n Waiting 10 minutes for the server to boot
+    Sleep   10min
+
+TC_7_4_Get gateway ip of server and passing traffic
+    [Documentation]    Get gateway ip of the server and passing traffic
+    [Tags]  NetworkSet
+    Set Log Level    TRACE
+
+    ${IP}    ${gate_ip}    Get Server Ip Windows    ${ilo_details_enc2_bay1}
+    Set Global Variable    ${server_ip}    ${IP[0]}
+    Set Global Variable    ${gateway_ip}    ${gate_ip}
+
+    Get gateway ip of the server and passing traffic    ${gateway_ip}    ${server_ip}    ${ping_cmd1}    ${server_details}    ${name}
+    Verifying Subport Common Statistics vaules    ${IC[1]}    ${stat}    ${downlink_ports[1]}    ${time_interval_2min}    ${min_octets}    ${min_pkts}    ${sub_port_number[0]}
+    Wait Until Keyword Succeeds    12 min    1 min    Verifying sample count in subport Advanced statistics    ${IC[1]}    ${stat}    ${downlink_ports[1]}    ${sub_port_number[0]}    ${ligs[1]['telemetryConfiguration']['sampleCount']}
+    Log to console    \n Successfully validated S-channel statistics for networkset connection
+
+    ${out}    execute_traffic    ${server_ip}    ${server_details['username']}    ${server_details['password']}    ${kill_cmd}
+    Clear Port Counters    ${IC[1]}
+
+TC_7_5_Remove Tagging inside the server
+    [Documentation]    Create Tagging inside server
+    [Tags]  NetworkSet
+    Set Log Level    TRACE
+
+    ${IP}    ${gateway_ip}    Get Server Ip Windows    ${ilo_details_enc2_bay1}
+    Set Global Variable    ${server_ip}    ${IP[0]}
+    ${adapter}    Get Adapter Name    ${port[0]}    ${server_ip}    ${Powershell_get_mac}    ${windows_server_details}
+    Log to console    \nAdapter name is ${adapter}
+
+    ${replaced_cmd}    Replace String Using Regexp    ${tagging_cmd}    adapter_name    ${adapter}
+    ${tagging_cmd1}    Replace String Using Regexp    ${replaced_cmd}    vlan_id    0
+    ${output}    Execute Powershell Command    ${server_ip}    ${windows_server_details}    ${tagging_cmd1}
+    Log to Console    \n${output}
+    Log to console    \nTagging completed successfully
+
+########################################### Test Case 8 - Verify S-channel statistics for untagged & tunnel network connections #####################################################
+TC_8_1_Create server profile with untagged network connections
+    [Documentation]    Create Server profile with untagged and tunnel Ethernet connection
+    [Tags]  ServerProfile
+    Set Log Level    TRACE
+
+    Power off ALL Servers
+    Remove All Server Profiles
+
+    ### Edit LIG with tunnel, untagged uplink sets
+    ${lig_uri}    Get LIG URI    ${ligs[2]['name']}
+    ${body}    Build LIG body    ${ligs[2]}
+    ${resp} =   Fusion Api Edit LIG     body=${body}    uri=${lig_uri}
+    Run Keyword If    ${resp['status_code']} != 202    Fail    ELSE    Log to Console    \nSuccessfully edited LIG
+
+    ${li_uri}    Get LI URI    ${LI}
+    Perform an Update From Group LI    ${li_uri}    15 min    15 s
+
+    Add Server Profiles from variable    ${SP_4}
+    Log to console  \n Server profiles created successfully
+    ${len}    Get Length    ${SP_4}
+    :FOR    ${x}    IN RANGE    ${len}
+    \    Power on server     ${SP_4[${x}]['serverHardwareUri']}
+    \    Log to console    \n Power on servers
+    \    Log to console    \n Waiting 10 minutes for the server to boot
+    \    Sleep   10min
+
+TC_8_2_Verifying s-channel common and advanced statistics - Untagged network connection
+    [Documentation]    Verifying s-channel common and advanced statistics - Untagged network connection
+    [Tags]  GetStatistics    UntaggedNetwork
+    Set Log Level    TRACE
+
+    Clear Port Counters    ${IC[1]}
+    ${IP}    ${gate_ip}    Get Server Ip Windows    ${ilo_details_enc2_bay1}
+    Set Global Variable    ${server_ip}    ${IP[0]}
+    Set Global Variable    ${gateway_ip}    ${gate_ip}
+
+    Get gateway ip of the server and passing traffic    ${gateway_ip}    ${server_ip}    ${ping_cmd1}    ${server_details}    ${name}
+    Verifying Subport Common Statistics vaules    ${IC[1]}    ${stat}    ${downlink_ports[1]}    ${time_interval_2min}    ${min_octets}    ${min_pkts}    ${sub_port_number[0]}
+    Wait Until Keyword Succeeds    12 min    1 min    Verifying sample count in subport Advanced statistics    ${IC[1]}    ${stat}    ${downlink_ports[1]}    ${sub_port_number[0]}    ${ligs[1]['telemetryConfiguration']['sampleCount']}
+    Log to console    \n Successfully validated S-channel statistics for untagged network connection
+
+    ${out}    execute_traffic    ${server_ip}    ${server_details['username']}    ${server_details['password']}    ${kill_cmd}
+    Log to console    \n Pinging terminated Successfully ${out}
+    Clear Port Counters    ${IC[1]}
+
+TC_8_3_Verifying s-channel common and advanced statistics - Tunnel network connection
+    [Documentation]    Verifying s-channel common and advanced statistics - Tunnel network connection
+    [Tags]  GetStatistics    TunnelNetwork
+    Set Log Level    TRACE
+
+    Clear Port Counters    ${IC[0]}
+    ${IP}    ${gate_ip}    Get Server Ip Windows    ${ilo_details_enc1_bay6}
+    Set Global Variable    ${server_ip}    ${IP[0]}
+    Set Global Variable    ${gateway_ip}    ${gate_ip}
+
+    Get gateway ip of the server and passing traffic    ${gateway_ip}    ${server_ip}    ${ping_cmd1}    ${server_details}    ${name}
+    Verifying Subport Common Statistics vaules    ${IC[0]}    ${stat}    ${downlink_bay6[0]}    ${time_interval_2min}    ${min_octets}    ${min_pkts}    ${sub_port_number[0]}
+    Wait Until Keyword Succeeds    12 min    1 min    Verifying sample count in subport Advanced statistics    ${IC[0]}    ${stat}    ${downlink_bay6[0]}    ${sub_port_number[0]}    ${ligs[1]['telemetryConfiguration']['sampleCount']}
+    Log to console    \n Successfully validated S-channel statistics for tunnel network connection
+
+    ${out}    execute_traffic    ${server_ip}    ${server_details['username']}    ${server_details['password']}    ${kill_cmd}
+    Log to console    \n Pinging terminated Successfully ${out}
+    Clear Port Counters    ${IC[0]}
+
+Final OV cleanup
+    [Documentation]    Performs a final cleanup
+    [Tags]  cleanup    setup
+    Set Log Level    TRACE
+    Cleanup

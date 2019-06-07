@@ -1,0 +1,161 @@
+*** Settings ***
+Documentation    Test suite to validate CI related events on OneView and FLM
+...    It covers testing of:
+...      CIManagerFruContentFault
+...      CIManagerFruManufacturedForInvalidFault
+...      CIManagerFruManufacturedForMismatchFault
+
+...    = GENERIC USAGE =
+...    | pybot | -v ENC_SERIAL_NO:[enclosure serial #] | -v APPLIANCE_IP:<ipv4> | -v CIM_Linux_IP:<ipv4> |-v GIT_REPO_ROOT: | CI_fru_event_test.txt |
+...    = Variables =
+...    | GIT_REPO_ROOT |      Required: Repo root path if NOT defined in environment variable this is mgmtfw root location|
+...    | ENC_SERIAL_NO |      Optional: If omitted, will use the 1st enclosure detected in OV |
+...    | APPLIANCE_IP |       Required: OneView IPv4 address |
+...    | CIM_Linux_IP |       Required:CI Manager ipv4 under test |
+
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Library           RoboGalaxyLibrary
+Library           MgmtFWLibrary
+Library           json
+
+Suite Setup       Configure Events Test Environment
+Suite Teardown    Run Keywords  Logout of EM RIS   AND    Logout of Fusion Via REST
+
+***Variables***
+${cim_bay}     2     #Use the second CI Manager bay
+
+*** Test Case ***
+TC 01: Verify CIManagerFrucontent Fault Event For CIManager Device
+    [Documentation]    This test is to verify CiManager Fru Fault for CIManagerFruContentFault
+    [Tags]    CIM    Alert    Events    FLM2.00    OV3.10    Automated1
+    Set Log Level    NONE
+    ${present_list}=    Get List of Occupied CIManager Bays
+    Should Not Be Empty    ${present_list}    msg=No CIManager present in the enlcosure  
+    ${CI count}=    Get Length    ${present_list}
+    Should Be Equal as Strings    ${CI count}    2    msg=2 CIs are required for this test script.
+    ${last_fusion_event_id}=    get last fusion event ID
+    Log    message=Injecting CIManager fru fault for bay:${cim_bay} and verify failed status/alert event in diags audit log    console=True
+    # Flash invalid FRU for CIManager    
+    Flash CIManager Fru    ${cim_bay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\${fpfru_hpe}
+    RIS EM Efuse CIM    ${cim_bay}    10
+    Sleep    15
+    ${status}=    Wait for Device Critical    ${CIM_Device}    ${cim_bay}
+    Should Be True      ${status}   ${CIM_Device} Critical Status not detected
+    ${CIManager_Health}=    Get CIManager Health    ${cim_bay}
+    Should Be Equal As Strings    ${CIManager_Health}    ${HEALTH_CRITICAL}
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_CIM_FruContent_Fault}    ${CIM_Device}    ${cim_bay}    250
+    # Verify Fusion Event including event description and resolution
+    Verify Fusion Event Sent By EM    ${EL_CIM_FruContent_Fault}    ${last_fusion_event_id}
+    # Flash the Good Fru
+    Log    message=Flash Good Fru CIManager for bay:${cim_bay} and verify OK status/alert event in diags audit log    console=True
+    Log To Console    Flash Good Fru to bay: ${cim_bay}
+    Flash CIManager Fru    ${cim_bay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Good_FRU_Path}\\${cimfru_hpe}
+    RIS EM Efuse CIM    ${cim_bay}    10
+    Sleep    15
+    Wait for Device OK    ${CIM_Device}    ${cim_bay}
+    ${CIManager_Health}=    Get CIManager Health    ${cim_bay}
+    Should Be Equal As Strings    ${CIManager_Health}    ${HEALTH_OK}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Flash CIManager Fru    ${cim_bay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Good_FRU_Path}\\${cimfru_hpe}    AND    RIS EM Efuse On CIM    ${cim_bay}    AND    Sleep    10    AND    RIS EM Efuse Off CIM    ${cim_bay}
+
+TC 02: Verify CIManager FRU Fault ManufacturedForInvalid For CIManager Device
+    [Documentation]    This test is to verify CiManager Fru Fault for CIManagerFruManufacturedForInvalidFault
+    [Tags]    CIM    Alert    Events    FLM1.01     FLM2.00    OV3.10    Automated
+    ${present_list}=    Get List of Occupied CIManager Bays
+    ${CI count}=    Get Length    ${present_list}
+    Should Be Equal as Strings    ${CI count}    2    msg=2 CIs are required for this test script.
+    ${last_fusion_event_id}=    get last fusion event ID
+    #Flash InCompatible Fru
+    Flash CIManager Fru    ${cim_bay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\${cimfru_foo}
+    RIS EM Efuse CIM    ${cim_bay}    10
+    Sleep     15
+    ${status}=    Wait for Device Critical    ${CIM_Device}    ${cim_bay}
+    Should Be True      ${status}   ${CIM_Device} Critical Status not detected
+    ${CIManager_Health}=    Get CIManager Health    ${cim_bay}
+    Should Be Equal As Strings    ${CIManager_Health}    ${HEALTH_CRITICAL}
+    ${CIManager_Fault_Status}=    Get CIManager Fault Status    ${cim_bay}    FRUManufacturedForInvalid
+    Should Be Equal As Strings    ${CIManager_Fault_Status}    ${STATUS_CRITICAL}
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Status Change MessageID Event    ${EL_CIM_Critical}    ${CIM_Device}    ${cim_bay}    250
+    Verify Audit Log Alert Event    ${EL_CIM_FruInvalid}    ${CIM_Device}    ${cim_bay}    250
+    # Verify Fusion Event including event description and resolution
+    Verify Fusion Event Sent By EM    ${EL_CIM_FruInvalid}    ${last_fusion_event_id} 
+    # Flash the Good Fru
+    Log To Console    Flash Good Fru to bay: ${cim_bay}
+    Flash CIManager Fru    ${cim_bay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Good_FRU_Path}\\${cimfru_hpe}
+    RIS EM Efuse CIM    ${cim_bay}    10
+    Sleep    15
+    Wait for Device OK    ${CIM_Device}    ${cim_bay}
+    ${CIManager_Health}=    Get CIManager Health    ${cim_bay}
+    Should Be Equal As Strings    ${CIManager_Health}    ${HEALTH_OK}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Flash CIManager Fru    ${cim_bay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Good_FRU_Path}\\${cimfru_hpe}    AND    RIS EM Efuse On CIM    ${cim_bay}    AND    Sleep    10    AND    RIS EM Efuse Off CIM    ${cim_bay}
+
+TC 03: Verify CIManager Fru Fault ManufacturedForMismatchFault For CIManager Device  
+    [Documentation]    This test is to verify CiManager Fru Fault for CIManagerFruManufacturedForMismatch -NEC
+    [Tags]    CIM    Alert    Events    FLM1.01     FLM2.00    OV3.10    Automated
+    ${present_list}=    Get List of Occupied CIManager Bays
+    ${CI count}=    Get Length    ${present_list}
+    Should Be Equal as Strings    ${CI count}    2    msg=2 CIs are required for this test script.
+    ${last_fusion_event_id}=    get last fusion event ID
+    #Flash InCompatible Fru
+    Flash CIManager Fru    ${cim_bay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\${cimfru_nec}
+    RIS EM Efuse CIM    ${cim_bay}    10
+    Sleep     15
+    ${status}=    Wait for Device Critical    ${CIM_Device}    ${cim_bay}
+    Should Be True      ${status}   ${CIM_Device} Critical Status not detected
+    ${CIManager_Health}=    Get CIManager Health    ${cim_bay}
+    Should Be Equal As Strings    ${CIManager_Health}    ${HEALTH_CRITICAL}
+    ${CIManager_Fault_Status}=    Get CIManager Fault Status    ${cim_bay}    FRUManufacturedForMismatch
+    Should Be Equal As Strings    ${CIManager_Fault_Status}    ${STATUS_CRITICAL}
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Status Change MessageID Event    ${EL_CIM_Critical}    ${CIM_Device}    ${cim_bay}    250
+    Verify Audit Log Alert Event    ${EL_CIM_FruMismatch}    ${CIM_Device}    ${cim_bay}    250
+    # Verify Fusion Event including event description and resolution
+    Verify Fusion Event Sent By EM    ${EL_CIM_FruMismatch}    ${last_fusion_event_id} 
+    # Flash the Good Fru
+    Log To Console    Flash Good Fru to bay: ${cim_bay}
+    Flash CIManager Fru    ${cim_bay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Good_FRU_Path}\\${cimfru_hpe}
+    RIS EM Efuse CIM    ${cim_bay}    10
+    Sleep    15
+    Wait for Device OK    ${CIM_Device}    ${cim_bay}
+    ${CIManager_Health}=    Get CIManager Health    ${cim_bay}
+    Should Be Equal As Strings    ${CIManager_Health}    ${HEALTH_OK}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Flash CIManager Fru    ${cim_bay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Good_FRU_Path}\\${cimfru_hpe}    AND    RIS EM Efuse On CIM    ${cim_bay}    AND    Sleep    10    AND    RIS EM Efuse Off CIM    ${cim_bay}
+
+TC 04: Verify that CIManager FruFaultInjection Events show up in OV UI
+    [Documentation]    This test is to verify CIManagerFruFault event using FruFaultInjection
+    [Tags]    CIM    Alert    Events     FLM2.00    OV3.10    Automated
+    ${present_cim_list}=    Get List of Occupied CIManager Bays
+    ${CI count}=    Get Length    ${present_cim_list}
+    Should Be Equal as Strings    ${CI count}    2    msg=2 CIs are required for this test script.
+    ${last_fusion_event_id}=    get last fusion event ID
+    ${CIM_Fault_Status}=    Set EM RIS Faults    FruFaultInjection    ${CIM_Device}    true
+    Should Be Equal As Strings    ${CIM_Fault_Status}    <Response [200]>
+    RIS EM Efuse On CIM    ${cim_bay}
+    Sleep    8
+    RIS EM Efuse Off CIM without Healthcheck      ${cim_bay}
+    Wait for Device Critical    ${CIM_Device}    ${cim_bay}
+    #Verifying alert event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_CIM_FruFault}    ${CIM_Device}    ${cim_bay}    250
+    Verify Fusion Event Sent By EM    ${EL_CIM_FruFault}    ${last_fusion_event_id}
+    ${CIM_Fault_Status}=    Set EM RIS Faults    FruFaultInjection    ${CIM_Device}    false
+    Should Be Equal As Strings    ${CIM_Fault_Status}    <Response [200]>
+    RIS EM Efuse On CIM    ${cim_bay}
+    Sleep    8
+    RIS EM Efuse Off CIM    ${cim_bay}
+    Wait for Device OK    ${CIM_Device}    ${cim_bay}
+    ${CIManager_Health}=    Get CIManager Health    ${cim_bay}
+    Should Be Equal As Strings    ${CIManager_Health}    ${HEALTH_OK}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Set EM RIS Faults    FruFaultInjection    ${CIM_Device}   false   AND
+    ...    EM Clear CIM Status    ${cim_bay}

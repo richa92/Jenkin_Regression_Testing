@@ -1,0 +1,190 @@
+*** Settings ***
+Documentation        Feature Tests: firmware Suite
+Library                   FusionLibrary
+Library                   RoboGalaxyLibrary
+Library                   Collections
+Variables                 data_variables.py
+Suite Setup               Suite Setup Tasks
+#Suite Teardown            Suite Teardown Tasks
+Resource            ../../../../resource/fusion_api_all_resource_files.txt
+
+*** Variables ***
+
+${SPP_Path_downgrade}             ${CURDIR}/${old_SPP_bundle}
+${SPP_Path_upgrade}             ${CURDIR}/${latest_SPP_bundle}
+
+*** Test Cases ***
+
+F119_FW1_20496 - downgrade carbon to lower version via LI page
+    [Documentation]    Downgrades firmware of carbon to lower version
+    Set Log Level      TRACE
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+
+    Remove Environment Variable     https_proxy    http_proxy
+    Log to console and logfile    \nUploading spp bundle for Update"
+    ${resp} =     Fusion Api Upload Firmware Bundle      localfile=${SPP_Path_downgrade}
+    Log to Console    Uploadsppdetails ${resp}
+    ${resp}=   Fusion Api Get Firmware Driver    param=?filter="name='${old_SPP_bundle}'"
+    Run Keyword If   ${resp['count']} == 0   Fail    msg=\n No SPP bundle found!!.Please upload the correct SPP bundle
+    ${fw_uri}=   Get From Dictionary  ${resp['members'][0]}    uri
+    Log to Console and logfile    \nFound ${old_SPP_bundle}SPP bundle
+
+    Log to console and logfile    \nValidating the interconnect firmware before LE update
+    :FOR     ${IC}     IN   @{INTERCONNECTS}
+    \     ${resp} =   Fusion Api Get Interconnect    param=?filter="'name' = '${IC}'"
+    \     ${current_ic_fw_version} =  Get From Dictionary  ${resp['members'][0]}    firmwareVersion
+    \    Log to console and logfile    \n FIrmware version of Interconnect ${IC} is :${current_ic_fw_version}
+    \     Run keyword unless    '${current_ic_fw_version}' == '${ic_firmwareVersion_new}'    Fail    "Firmware version mismatch"
+    \     ...   ELSE     Log to console and logfile    \nFirmware version is verified for ${IC}
+
+    Log to console and logfile     \nDowngrading firmware through LI page
+    ${li_uri} =     Get LI URI   ${LI}
+    Set to dictionary     ${liupdate_body}     sppUri    ${fw_uri}
+    ${response}=    Fusion Api Li Upgrade Firmware    ${liupdate_body}    ${li_uri}
+    Log to console  \n The response is:${response}
+    Run Keyword If  ${response['status_code']} !=202    fail    msg=\nLI Firmware update Failed. \n ErrorCode:${response['errorCode']}\nMessage:${response['message']}
+    ${task} =     Wait For Task        ${response}   100min    1min
+    Run Keyword If  '${task['taskState']}' !='Completed'  or  ${task['status_code']} !=200   fail    msg=\nLI Firmware update Failed. \n ErrorCode:${task['taskErrors'][0][errorCode]}\n :Message ${task['taskErrors'][0][errorCode]}
+    ...         ELSE    Log to console and logfile  \n\nLI FW Upgrade completed successfully !!
+
+    Log to console and logfile   \nValidating the interconnects firmware version after LI update
+    :FOR     ${IC}    IN    @{INTERCONNECTS}
+    \    ${resp} =  Fusion Api Get Interconnect     param=?filter="'name' = '${IC}'"
+    \    ${current_ic_fw_version} =  Get From Dictionary  ${resp['members'][0]}    firmwareVersion
+    \    Log to console and logfile    \n FIrmware version of Interconnect ${IC} is :${current_ic_fw_version}
+    \    Run keyword unless    '${current_ic_fw_version}' == '${ic_firmwareVersion_old}'    Fail    "Firmware version mismatch"
+    \     ...   ELSE     Log to console and logfile    \nFirmware version is verified for ${IC}
+
+    Log to console and logfile     \nRemoving the uploaded FW bundle
+    ${resp}=   Fusion Api Remove Firmware Driver     param=?filter="name='${old_SPP_bundle}
+    Sleep    900s
+    Log to console and logfile     \n Carbon Firmware Downgraded successfully
+
+
+F119_FW3_20501 - F119_Firmware_Upgrade via LE page
+    [Documentation]    Downgrades firmware of carbon to higher version
+
+    Set Log Level      TRACE
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+
+
+    Remove Environment Variable     https_proxy    http_proxy
+    Log to console and logfile    \nUploading spp bundle for Upgrade"
+    ${resp} =     Fusion Api Upload Firmware Bundle      localfile=${SPP_Path_upgrade}
+    Log to Console    Uploadsppdetails ${resp}
+    ${resp}=   Fusion Api Get Firmware Driver    param=?filter="name='${latest_SPP_bundle}'"
+    Run Keyword If   ${resp['count']} == 0   Fail    msg=\n No SPP bundle found!!.Please upload the correct SPP bundle
+    ${fw_uri}=   Get From Dictionary  ${resp['members'][0]}    uri
+    Log to Console and logfile    \nFound ${latest_SPP_bundle} SPP bundle
+
+    Log to console and logfile       \nValidating interconnects firmware version
+    :FOR   ${IC}      IN    @{INTERCONNECTS}
+    \     ${resp} =     Fusion Api Get Interconnect         param=?filter="'name' = '${IC}'"
+    \     ${current_ic_fw_version} =  Get From Dictionary  ${resp['members'][0]}    firmwareVersion
+    \     Log to console and logfile    \n Firmware version of Interconnect ${IC} is :${current_ic_fw_version}
+    \     Run keyword unless    '${current_ic_fw_version}' == '${ic_firmwareVersion_old}'   Fail    "Firmware version mismatch"
+    \     ...   ELSE     Log to console and logfile    \nFirmware version is verified for ${IC}
+
+    Log to console  \nUpgrading the firmware via LE page using ${latest_SPP_bundle}
+    ${resp} =    Fusion Api Get Logical Enclosure
+    ${uri} =    Get From Dictionary    ${resp['members'][0]}    uri
+    ${etag}=    Get From Dictionary    ${resp['members'][0]}    eTag
+    ${headers} =   Get From Dictionary     ${resp}  headers
+    Set To Dictionary    ${headers}    If-Match    ${etag}
+    Set to dictionary     ${leupdate_body[0]['value']}    firmwareBaselineUri    ${fw_uri}
+    ${response}=    Fusion Api Le Firmware Update    ${leupdate_body}    ${uri}    headers=${headers}
+    Log to console  \n The response is:${response}
+    Sleep   1800s
+    Run Keyword If  ${response['status_code']} !=202    fail    msg=\nLE Firmware update Failed. \n ErrorCode:${response['errorCode']}\nMessage:${response['message']}
+    ${task} =     Wait For Task        ${response}   180min    1min
+    Run Keyword If  '${task['taskState']}' !='Completed'  or  ${task['status_code']} !=200   fail    msg=\nLE Firmware update Failed. \n ErrorCode:${task['taskErrors'][0][errorCode]}\n :Message ${task['taskErrors'][0][errorCode]}
+    ...         ELSE    Log to console and logfile  \n\nLE FW Upgrade completed successfully !!
+
+    Log to console and logfile        \nValidating the interconnect firmware version after LE update
+    :FOR     ${IC}    IN    @{INTERCONNECTS}
+    \    ${resp} =  Fusion Api Get Interconnect         param=?filter="'name' = '${IC}'"
+    \    ${current_ic_fw_version} =  Get From Dictionary  ${resp['members'][0]}    firmwareVersion
+    \    Log to console and logfile    \n FIrmware version of Interconnect ${IC} is :${current_ic_fw_version}
+    \    Run keyword unless    '${current_ic_fw_version}' == '${ic_firmwareVersion_new}'    Fail    "Firmware version mismatch"
+    \     ...   ELSE     Log to console and logfile    \nFirmware version is verified for ${IC}
+
+    Log to console and logfile     \nRemoving the uploaded FW bundle
+    #${resp}=   Fusion Api Remove Firmware Driver     param=?filter="name='${latest_SPP_bundle}
+    #Log to console and logfile     \n Carbon Firmware Upgraded successfully
+
+
+*** Keywords ***
+Suite Setup Tasks
+    [Documentation]    Suite Setup tasks
+    Set Log Level      TRACE
+    ${TEST_NAME} =      Set Variable    TEST-SPECIFIC SETUP
+    Run Keyword and Ignore Error    Write To ciDebug Log
+    Log to console and logfile  [TEST-SPECIFIC SETUP]
+
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+    Clean OV
+    ${fc_networks} =    Get Variable Value  ${fcnets}
+    Run Keyword If  ${fc_networks} is not ${null}    Add FC Networks from variable      ${fc_networks}
+    ${body} =   Build LIG body      ${ligs['lig1']}
+    Log to console and logfile    \n-Creating LIG ${LIG1}
+    ${resp} =   Fusion Api Create LIG   ${body}
+    ${task} =   Wait For Task   ${resp}    60s  2s
+    Sleep    10s
+    Add Enclosure Group from variable   ${enc_groups['enc_group1']}
+    Sleep   10s
+    Add Logical Enclosure from variable   ${les['le1']}
+  :FOR     ${IC}   IN   @{INTERCONNECTS}
+    \   ${ic_uri} =    Get IC URI    ${IC}
+    \   Wait Until Keyword Succeeds   10 min    10s    IC reached state    ${ic_uri}    Configured
+    \    Sleep    2min
+     \   ${resp}=    Fusion Api Get Interconnect    param=?filter="'name'=='${IC}'"
+     \  ${state}=     Get From Dictionary     ${resp['members'][0]}   state
+     \  Run Keyword If    '${state}' != 'Configured'      fail      msg="The IC module ${IC} is not in configured state"
+     \   ...     ELSE   Log to console and logfile    \n The IC module ${IC} is in configured state
+
+Clean OV
+    [Documentation]    Cleans the appliance
+    Log to console and logfile  \nCleaning the OV
+    Power off ALL Servers
+    Remove All Server Profiles
+    Remove All Logical Enclosures
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove ALL Ethernet Networks
+    Remove ALL FC Networks
+    Remove ALL FCoE Networks
+    Remove ALL Network Sets
+    Remove ALL Users
+
+Clear Profile Configurations
+    [Documentation]    Cleans Server Profile configurations
+    Log To Console  \nCleaning the Server Profile configurations
+    Power off ALL Servers
+    Remove All Server Profiles
+
+Delete LE
+    [Documentation]    Delete LE
+    ${resp}    Fusion Api Get Logical Enclosure
+    Run Keyword If   '${resp['members'][0]['uri']}!' != 'None'     Fusion Api Delete Logical Enclosure    uri=${resp['members'][0]['uri']}
+    Sleep    1200s
+    log to console    \n LE Deleted Successfully !! \n
+
+Refresh Enclosures
+    [Documentation]    Refresh Enclosures
+    ${res}    fusion_api_get_enclosures    param=?filter=name=${Enclosure}
+    ${uri}    Get Variable Value    ${res['members'][0]['uri']}
+    ${resp}    Fusion Api Refresh Enclosure    uri=${uri}
+    Sleep    500s
+
+
+Suite Teardown Tasks
+    [Documentation]    Returns appliance to a 'clean' state by removing all resources\enclosures
+    Log to console and logfile  [TEARDOWN]
+    Fusion Api Logout Appliance
+
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+    Refresh Enclosures
+    Run Keyword If All Tests Passed    Power off ALL Servers
+    Run Keyword If All Tests Passed    Remove All Server Profiles
+    Run Keyword If All Tests Passed    Delete LE
+    Run Keyword If All Tests Passed    Clean OV

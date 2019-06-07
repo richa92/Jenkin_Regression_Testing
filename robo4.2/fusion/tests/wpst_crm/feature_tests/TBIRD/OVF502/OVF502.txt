@@ -1,0 +1,230 @@
+*** Settings ***
+Documentation       OVF502
+Variables       data_variables.py
+Library         json
+Library         FusionLibrary
+Library         RoboGalaxyLibrary
+Library         Collections
+Library         String
+Library         SSHLibrary
+Library         validate
+Resource        ../F943/resource.txt
+
+*** Variables ***
+${APPLIANCE_IP}     15.245.131.222
+
+*** Test Cases ***
+
+STEP 00: LOGIN TO APPLIANCE
+    [Tags]  add   POSITIVE
+    Set Log Level    TRACE
+    Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+
+Suite Setup Tasks
+    [Documentation] Cleans the appliance
+    Log to console and logfile  \nCleaning the OV
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+    Power off ALL Servers
+    Remove All Server Profiles
+    Remove All Logical Enclosures
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove ALL FC Networks
+
+PRECONDITION REQUIRED:
+    #CREATE FC NETWORK
+    [Tags]  add   POSITIVE
+    Set Log Level    TRACE
+
+    Log to console    \n-Creating FC Networks
+    ${uriList} =   Create List
+    :FOR   ${ethnet}   IN   @{fc_networks}
+    \   ${resp}        Fusion Api Create Fc Network   body=${ethnet}
+    \   ${eth_name_info}        Fusion Api Get Fc Networks    param=?filter="'name'=='${ethnet['name']}'"
+    \   Append To List   ${uriList}   ${eth_name_info['members'][0]['uri']}
+    \   Run Keyword If  '${resp['status_code']}' != '202'  Fail    ELSE  log to console  \nFC Network got created successfully
+
+    #CREATE LIG
+    ${body} =   Build LIG body     ${LIGS_TB}
+    Log To Console    body is ${body}
+    ${resp} =   Fusion Api Create LIG   ${body}
+    ${task} =   Wait For Task    ${resp}    400s    2s
+    log to console      response is:${resp}
+    Run Keyword If  '${resp['status_code']}' != '202'   fail    ELSE    Log to Console  \n-LIG  created successfully
+
+    #CREATE EG
+    Log to console  \n Creating EG
+    ${Resp} =   Add Enclosure Group from variable       ${enc_group}
+    Run Keyword If  '${Resp['status_code']}' != '201'  Fail    ELSE  log to console   \n-EG created successfully
+
+    #CREATE LE
+    Log to console  \n Creating LE
+    ${Resp} =   Add Logical Enclosure from variable     ${Logical_Enclosure[0]}
+    Run Keyword If  '${Resp['status_code']}' != '202'  Fail    ELSE  log to console   \n-LE created successfully
+
+STEP 01:VERIFY DIGITAL DIAGNOSTIC INFO FOR SUPPORTED TRANSRECEVIER
+
+    #GET INTERCONNECT DETAILS
+    Log to console    \n Get Interconnect details
+    ${resp} =    Fusion Api Get Interconnect    param=?filter="'name'=='${INTERCONNECTS[0]}'"
+
+    #SPLIT THE RESPONSE CONTENT
+    ${response} =    Split String     ${resp['members'][0]['uri']}    /
+
+    #GET PLUGGABLE MODULE INFORMATION
+    ${diagnostic} =    Fusion Api Get Interconnect    param=/${response[-1]}/pluggableModuleInformation
+    Log To Console    "Digital Diagnostic Informations are ${diagnostic}"
+    Set Global Variable    ${diagnostics}   ${diagnostic}
+
+    #VALIDATE DIGITAL DIAGNOSTIC INFORMATION FOR SUPPORTED TRANSRECEIVER
+    ${flag}     ${msg}      validate_digital_diagnostic_information     ${Supported_transreceiver_SFP}    ${diagnostics['_content']}
+    Log to Console      "The return Flag value of the output is ${flag}"
+    Run Keyword If  ${flag} != True    fail    ELSE    Log to Console    ${msg}
+
+STEP 02:VERIFY DIGITAL DIAGNOSTIC INFO FOR UNSUPPORTED TRANSRECEVIER
+
+    #VALIDATE DIGITAL DIAGNOSTIC INFORMATION FOR UNSUPPORTED TRANSRECEIVER
+    ${flag}     ${msg}      validate_digital_diagnostic_information     ${unsupported_transreceiver}    ${diagnostics['_content']}
+    Log to Console      "The return Flag value of the output is ${flag}"
+    Run Keyword If  ${flag} != False    fail    ELSE    Log to Console    ${msg}
+
+STEP 03:PRECISION VALIDATION FOR RXPOWER AND TXPOWER BOTH IN dBW AND mW
+
+    #VALIDATE PRECISION FOR RXPOWER AND TXPOWER BOTH IN dBW AND mW
+    ${flag}     ${msg}      validate_precision_values    ${diagnostics['_content']}
+    Log to Console      "The return Flag value of the output is ${flag}"
+    Run Keyword If  ${flag} != True    fail    ELSE    Log to Console    ${msg}
+
+STEP 04:DIGITAL DIAGNOSTIC INFORMATION RANGE VALIDATION
+
+    #VALIDATE RANGE OF DIGITAL DIAGNOSTIC INFORMATION
+    ${flag}     ${msg}      validate_digital_diagnostic_info_range    ${diagnostics['_content']}
+    Log to Console      "The return Flag value of the output is ${flag}"
+    Run Keyword If  ${flag} != True    fail    ELSE    Log to Console    ${msg}
+
+STEP 05:VALIDATION CONNECTOR INFORMATION IN SUPPORTED TRANRECEIVER
+
+    # CONNECTOR INFORMATION IN SUPPORTED TRANRECEIVER
+    ${flag}    ${msg}    validate_connector_information    ${Supported_transreceiver_SFP}    ${diagnostics['_content']}
+    Log to Console      "The return Flag value of the output is ${flag}"
+    Run Keyword If  ${flag} != True    fail    ELSE    Log to Console    ${msg}
+
+STEP 06:ENABLE/DISABLE UPLINK PORT AND VERIFY DIGITAL DIAGNOSTIC INFORMATION IN SUPPORTED TRANSRECEIVER
+
+    #DISABLE UPLINK PORT
+    ${uri} =    Get IC URI    ${GET_INTERCONNECTS_URI[0]}
+    @{id} =    Split String    ${uri}    /
+    ${port_id} =    Get From List    ${id}    3
+    ${portid}    catenate    ${port_id}:${uplink_ports}
+    Log to console  \nport id ${portid}
+    Set to Dictionary    ${Disable_Port}    portId    ${portid}
+    Log to console  \nport id after set ${Disable_Port}
+    ${temp_list} =    Create List    ${Disable_Port}
+    ${Resp}    Fusion Api Edit Interconnect Ports    ${temp_list}    ${uri}
+    Log to console  \nresp after update is ${Resp}
+    Run Keyword If  '${Resp['status_code']}' != '202'  Fail    ELSE  log to console   \n-Successfully Disabled the uplink port
+    Sleep   4min
+
+    #GET INTERCONNECT DETAILS
+    Log to console    \n Get Interconnect details
+    ${resp} =    Fusion Api Get Interconnect    param=?filter="'name'=='${INTERCONNECTS[0]}'"
+    Log To Console     uplink port state after it is disabled ${resp['members'][0]['state']}
+
+    #SPIT THE RESPONSE CONTENT
+    ${response} =    Split String     ${resp['members'][0]['uri']}    /
+
+    #GET PLUGGABLE MODULE INFORMATION
+    ${diagnostic} =    Fusion Api Get Interconnect    param=/${response[-1]}/pluggableModuleInformation
+    Log To Console    digital diagnostic information after uplink port is disabled ${diagnostic}
+
+    #VALIDATE DIGITAL DIAGNOSTIC INFORMATION
+    ${flag}     ${msg}      validate_digital_diagnostic_information     ${Supported_transreceiver_SFP}    ${diagnostic['_content']}
+    Log to Console      "The return Flag value of the output is ${flag}"
+    Run Keyword If  ${flag} != True    fail    ELSE    Log to Console    ${msg}
+
+    #ENABLE UPLINK PORT
+    ${uri} =    Get IC URI    ${GET_INTERCONNECTS_URI[0]}
+    @{id} =    Split String    ${uri}    /
+    ${port_id} =    Get From List    ${id}    3
+    ${portid}    catenate    ${port_id}:${uplink_ports}
+    Log to console  \nport id ${portid}
+    Set to Dictionary    ${Enable_port}    portId    ${portid}
+    Log to console  \nport id after set ${Enable_port}
+    ${temp_list} =    Create List    ${Enable_port}
+    ${Resp}    Fusion Api Edit Interconnect Ports    ${temp_list}    ${uri}
+    Log to console  \nresp after update is ${Resp}
+    Run Keyword If  '${Resp['status_code']}' != '202'  Fail    ELSE  log to console   \n-Successfully Enabled the uplink port
+    Sleep   4min
+
+    #GET INTERCONNECT DETAILS
+    Log to console    \n Get Interconnect details
+    ${resp} =    Fusion Api Get Interconnect    param=?filter="'name'=='${INTERCONNECTS[0]}'"
+    Log To Console     uplink port state after it is Enabled ${resp['members'][0]['state']}
+
+    #SPIT THE RESPONSE CONTENT
+    ${response} =    Split String     ${resp['members'][0]['uri']}    /
+
+    #GET PLUGGABLE MODULE INFORMATION
+    ${diagnostic} =    Fusion Api Get Interconnect    param=/${response[-1]}/pluggableModuleInformation
+    Log To Console    digital diagnostic information after uplink port is enabled ${diagnostic}
+
+    #VALIDATE DIGITAL DIAGNOSTIC INFORMATION
+    ${flag}     ${msg}      validate_digital_diagnostic_information     ${Supported_transreceiver_SFP}    ${diagnostic['_content']}
+    Log to Console      "The return Flag value of the output is ${flag}"
+    Run Keyword If  ${flag} != True    fail    ELSE    Log to Console    ${msg}
+
+STEP 07:POWER ON/OFF INTERCONNECT AND VALIDATE THE DIGITAL DIAGNOSTIC INFORMATION IN SUPPORTED TRANSRECEIVER
+
+    #GET INTERCONNECT DETAILS
+    Log to console    \n Get Interconnect details
+    ${resp} =    Fusion Api Get Interconnect    param=?filter="'name'=='${INTERCONNECTS[0]}'"
+
+    #POWER OFF INTERCONNECT
+    ${uri} =    Set Variable    ${resp['members'][0]['uri']}
+    ${resp} =   fusion api patch interconnect   body=${interconnect_poweroff}    uri=${uri}
+    Run Keyword If  '${resp['status_code']}' != '202'  Fail    ELSE  log to console   \n-Successfully Powered OFF the Interconnect
+    Sleep    300
+
+    #GET INTERCONNECT DETAILS
+    Log to console    \n Get Interconnect details
+    ${resp} =    Fusion Api Get Interconnect    param=?filter="'name'=='${INTERCONNECTS[0]}'"
+
+    #VERIFY THE INTERCONNECT IS POWERED OFF
+    Log To Console    ${resp['members'][0]['state']}
+    Run Keyword If  "${resp['members'][0]['state']}" != "Maintenance"    Fail    The Interconnect module ${INTERCONNECTS[0]} is in Maintenance state Since it is powered OFF!!
+
+    #SPIT THE RESPONSE CONTENT
+    ${response} =    Split String     ${resp['members'][0]['uri']}    /
+
+    #GET PLUGGABLE MODULE INFORMATION
+    ${diagnostic} =    Fusion Api Get Interconnect    param=/${response[-1]}/pluggableModuleInformation
+    Log To Console    Digital diagnostic Information after Interconnect powered off ${diagnostic}
+
+    #VALIDATE DIGITAL DIAGNOSTIC INFORMATION
+    ${flag}     ${msg}      validate_digital_diagnostic_information     ${Supported_transreceiver_SFP}    ${diagnostic['_content']}
+    Log to Console      "The return Flag value of the output is ${flag}"
+    Run Keyword If  ${flag} != False    fail    ELSE    Log to Console    ${msg}
+
+    #POWER ON INTERCONNECT
+    ${uri} =    Set Variable    ${resp['members'][0]['uri']}
+    ${resp} =   fusion api patch interconnect   body=${interconnect_poweron}    uri=${uri}
+    Run Keyword If  '${resp['status_code']}' != '202'  Fail    ELSE  log to console   \n-Successfully Powered ON the Interconnect
+    Sleep    300
+
+    #GET INTERCONNECT DETAILS
+    Log to console    \n Get Interconnect details
+    ${resp} =    Fusion Api Get Interconnect    param=?filter="'name'=='${INTERCONNECTS[0]}'"
+    Run Keyword If  "${resp['members'][0]['state']}" != "Configured"    Fail    The Interconnect module ${INTERCONNECTS[0]} is in Configured state Since it is powered ON!!
+
+    #SPLIT THE RESPONSE CONTENT
+    ${response} =    Split String     ${resp['members'][0]['uri']}    /
+
+    #GET PLUGGABLE MODULE INFORMATION
+    ${diagnostic} =    Fusion Api Get Interconnect    param=/${response[-1]}/pluggableModuleInformation
+    Log To Console    Digital diagnostic Information after Interconnect powered on ${diagnostic}
+
+    #VALIDATE DIGITAL DIAGNOSTIC INFORMATION
+    ${flag}     ${msg}      validate_digital_diagnostic_information     ${Supported_transreceiver_SFP}    ${diagnostic['_content']}
+    Log to Console      "The return Flag value of the output is ${flag}"
+    Run Keyword If  ${flag} != True    fail    ELSE    Log to Console    ${msg}
+    Log To Console    ALL TESTCASE STEPS COMPLETED SUCCESSFULLY

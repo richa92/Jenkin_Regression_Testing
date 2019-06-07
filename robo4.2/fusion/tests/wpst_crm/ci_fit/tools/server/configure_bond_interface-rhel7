@@ -1,0 +1,625 @@
+#!/bin/bash
+LOG=$0.log
+IPADDR="HA_ipaddr.conf"
+declare -a MACS
+IFCFG_DIR="/etc/sysconfig/network-scripts"
+WA_DIR="/root/tools/scripts"
+SCRIPT="add_bonds"
+UDEV_RULES_DIR="/etc/udev/rules.d"
+PERSISTENT_RULES="70-persistent-net.rules"
+BOND_CONF="bond_ipaddr.conf"
+MIIMON=1000
+MODE=1
+set -x
+#=============================================================================
+# usage 
+#=============================================================================
+usage()
+{
+        echo "usage: $0 -ip <Domain Server IP> -sn <Server Serial Number> [ --miimon <miimon value> --mode <mode value> ]" 
+	echo ""
+}
+
+#=============================================================================
+# check_log
+#=============================================================================
+check_log()
+{
+	local tmp_name
+
+	if [ -f $LOG ]; then
+        	tmp_name=$(mktemp $LOG.XXXXXXXXXX)
+        	mv $LOG $tmp_name
+	fi
+
+	if [ -f $BOND_CONF ]; then
+        	tmp_name=$(mktemp $BOND_CONF.XXXXXXXXXX)
+        	mv $BOND_CONF $tmp_name
+	fi
+}
+
+#=============================================================================
+# get_OS_version 
+#=============================================================================
+get_OS_version()
+{
+	local os_type
+	local version
+
+	if [ ! -f /etc/redhat-release ]; then
+		echo "`date`: ERROR - Running on an unsupported OS so exiting..." 2>&1 | tee -a $LOG	
+		exit -3
+	else
+		os_type=`cat /etc/redhat-release | awk 'END{FS=" "} {print $NF}'`
+		if [ "$os_type" = "(Maipo)" ]; then
+			OS_VERSION="RHEL7"
+			#MODPROBE_CONF="/etc/modprobe.d/bonding.conf"
+		elif [ "$os_type" = "(Santiago)" ]; then
+			OS_VERSION="RHEL6"
+			MODPROBE_CONF="/etc/modprobe.d/bonding.conf"
+		elif [ "$os_type" = "(Tikanga)" ]; then
+			OS_VERSION="RHEL5" 
+			MODPROBE_CONF="/etc/modprobe.conf"
+		else
+			echo "`date`: ERROR - Running on an unsupported Red Hat version so exiting..." 2>&1 | tee -a $LOG
+			exit -3
+		fi
+	fi
+}
+
+
+#=============================================================================
+# verify_serial_number 
+#
+# Summary:
+# Verify that the serial number is listed in the $IPADDR file 
+# 
+#=============================================================================
+verify_serial_number()
+{
+	cat $IPADDR | grep "$SN" 
+	if [ $? -ne 0 ]; then
+		echo "`date`: ERROR - Serial number $SN not found in $IPADDR" 2>&1 | tee -a $LOG	
+		exit -2
+	fi
+}
+#=============================================================================
+# get_macs_ipaddr 
+#
+# Summary:
+# gets all of the MAC addresses for a specified server based off of the server 
+# serial number
+#=============================================================================
+get_macs_ipaddr()
+{
+	MACS=`cat $IPADDR | grep "$SN" | grep -o -E '([[:xdigit:]]{1,2}:){5}[[:xdigit:]]{1,2}' | sort | uniq`
+}
+
+#=============================================================================
+# verify_kernel_macs 
+#
+# Summary:
+# verifies that each MAC that VC has assigned for this server has been 
+# enumerated by the kernel.  
+#=============================================================================
+verify_kernel_macs()
+{
+	local discovered=0 
+	#> DEBUG CODE:
+	echo "OS_VERSION: $OS_VERSION"
+	for mac in ${MACS[@]} 
+	do
+		# RHEL 7:
+		if [ $OS_VERSION == "RHEL7" ]
+		then
+			# Convert MAC to lower case
+			mac=${mac,,}
+			ip a | grep "$mac" >/dev/null 2>&1
+			if [ $? -ne 0 ]; then
+				echo "`date`: WARNING - Failed to find MAC $mac" 2>&1 | tee -a $LOG
+				discovered=1
+			fi
+		else			
+		# RHEL 5/6:
+			ifconfig -a | grep "$mac" >/dev/null 2>&1
+			if [ $? -ne 0 ]; then
+				echo "`date`: WARNING - Failed to find MAC $mac" 2>&1 | tee -a $LOG
+				discovered=1
+			fi
+		fi
+	done
+	if [ $discovered -eq 1 ]; then
+		exit -1
+	fi
+}
+
+#=============================================================================
+# create_default_ifcfg 
+#
+# Summary:
+# creates the default ifcfg for all MACs that have been enumerated which includes 
+# the "DEVICE=<ethx>" and "HWADDR=<mac> parameters.  This will allow the physical interface
+# to be brought up when networking is started.
+#=============================================================================
+create_default_ifcfg()
+{
+	local inf
+	if [ $OS_VERSION == "RHEL7" ]; then
+		local mgmt_inf=`ip a |grep $IP |sed -e 's/^[ \t]*//' |cut -d" " -f8`
+		echo "Mgmt INF: $mgmt_inf"
+	else
+		local mgmt_inf=`ifconfig -a | grep -B 1 $IP | cut -d " " -f1`
+	fi
+
+	for mac in ${MACS[@]} 
+	do
+		if [ $OS_VERSION == "RHEL7" ]; then
+			mac=${mac,,}
+			inf=`ip a |grep -B1 $mac |cut -d" " -f2 |cut -d: -f1`
+		else
+			inf=`ifconfig -a | grep -m 1 $mac | cut -d " " -f1`
+		fi
+		if [ "$inf" = "$mgmt_inf" ]; then 
+			echo "`date`: WARNING - Mgmt MAC matches MAC $mac" 2>&1 | tee -a $LOG
+			exit -1
+		# Add interface name and MAC to RHEL 7 conf
+		elif [ $OS_VERSION == "RHEL7" ]; then
+			# Check if HWADDR is alread in file:
+			grep 'HWADDR' $IFCFG_DIR/ifcfg-$inf >/dev/null 2>&1
+			if [ $? -eq 0 ]; then
+				echo "MAC already set in ifcfg-$inf" 2>&1 | tee -a $LOG
+			else
+				echo "Setting MAC and Device in ifcfg-$inf" 2>&1 | tee -a $LOG
+				echo -e "DEVICE=$inf" >> $IFCFG_DIR/ifcfg-$inf
+				echo -e "HWADDR=$mac" >> $IFCFG_DIR/ifcfg-$inf
+			fi
+		else
+			if [ ! -f $IFCFG_DIR/ifcfg-$inf ]; then
+				echo -e "DEVICE=$inf" >> $IFCFG_DIR/ifcfg-$inf
+				echo -e "HWADDR=$mac" >> $IFCFG_DIR/ifcfg-$inf
+				ifconfig $inf up
+			fi
+		fi
+		
+	done
+}
+
+#=============================================================================
+# create_bonds_7 
+#
+# Summary:
+# creates the bond<x> file and binds each ifcfg file to the bond.  It also
+# creates the $BOND_CONF file which contains the bond to IP address mappings
+# RHEL 7.x does not require the bonding module to be explicitly loaded.
+# The bonding module is loaded as soon as a bonded interface is started.
+#=============================================================================
+create_bonds_7()
+{
+	local tmp_file
+	local bond_idx=0
+	local value
+	local mac1=""
+	local mac1lower=""
+	local mac2
+	local inf
+	local vlan
+	local ip
+
+	tmp_file=$(mktemp /tmp/ha_ipaddr.XXXXXX)
+	cat $IPADDR | grep "$SN" | sort -k4 >> $tmp_file
+	while read line
+	do
+		ip=`echo "$line" | grep -o -E '[[:digit:]]{1,3}\.[[:digit:]]{1,3}\.[[:digit:]]{1,3}\.[[:digit:]]{1,3}'`
+		if [ "$mac1" != "" ]; then
+			value=`echo $line | awk '{print $4}'`
+			if [ "$value" != "$mac1" ]; then
+				let bond_idx=bond_idx+1
+				mac1=$value
+			fi
+		else
+			mac1=`echo $line | awk '{print $4}'`
+		fi	
+	        if [ "$ip" = "" ]; then continue; fi
+		
+		create_bond_ifcfg_7 $bond_idx
+		mac1lower=${mac1,,}
+		inf=`ip a | grep -B1 $mac1lower |cut -d " " -f2 |cut -d: -f1`
+		
+		bind_ifcfg_7 $inf $bond_idx
+		
+		mac2=`echo $line | awk '{print $6}'`
+		mac2lower=${mac2,,}
+		inf=`ip a | grep -B1 $mac2lower |cut -d " " -f2 |cut -d: -f1`
+		bind_ifcfg_7 $inf $bond_idx
+		
+                num_fields=`echo "$line" | awk '{ total = total + NF }; END {print total}'`
+                if [ "$num_fields" = "9" ]; then
+                	vlan=`echo "$line" | awk '{print $7}' | grep -o -E '[[:digit:]]{1,4}' | tr -d ' '`
+		else
+                	vlan=""
+	 	fi
+
+		if [ "$vlan" = "" ]; then
+			echo "bond$bond_idx=$ip" >>  $WA_DIR/$BOND_CONF
+		#elif [ "$vlan" = "X" ]; then
+		#	echo "bond$bond_idx=$ip" >>  $WA_DIR/$BOND_CONF
+		else
+			echo "bond$bond_idx.$vlan=$ip" >> $WA_DIR/$BOND_CONF
+		fi
+
+
+	done<$tmp_file
+	rm -f $tmp_file
+
+}
+
+#=============================================================================
+# create_bonds 
+#
+# Summary:
+# creates the bond<x> file and binds each ifcfg file to the bond.  It also
+# creates the $BOND_CONF file which contains the bond to IP address mappings
+#=============================================================================
+create_bonds()
+{
+	local tmp_file
+	local bond_idx=0
+	local value
+	local mac1=""
+	local mac2
+	local inf
+	local vlan
+	local ip
+
+	tmp_file=$(mktemp /tmp/ha_ipaddr.XXXXXX)
+	cat $IPADDR | grep "$SN" | sort -k4 >> $tmp_file
+
+	while read line
+	do
+		if [ "$mac1" != "" ]; then
+			value=`echo $line | awk '{print $4}'`
+			if [ "$value" != "$mac1" ]; then
+				let bond_idx=bond_idx+1
+				mac1=$value
+			fi
+		else
+			mac1=`echo $line | awk '{print $4}'`
+
+		fi
+
+		create_bond_ifcfg $bond_idx
+
+		inf=`ifconfig -a | grep -m  1 $mac1 | cut -d " " -f1`
+		bind_ifcfg $inf $bond_idx
+
+		mac2=`echo $line | awk '{print $6}'`
+		inf=`ifconfig -a | grep -m  1 $mac2 | cut -d " " -f1`
+		bind_ifcfg $inf $bond_idx
+
+		ip=`echo "$line" | grep -o -E '[[:digit:]]{1,3}\.[[:digit:]]{1,3}\.[[:digit:]]{1,3}\.[[:digit:]]{1,3}'`
+                num_fields=`echo "$line" | awk '{ total = total + NF }; END {print total}'`
+                if [ "$num_fields" = "9" ]; then
+                	vlan=`echo "$line" | awk '{print $7}' | grep -o -E '[[:digit:]]{1,4}' | tr -d ' '`
+		else
+                	vlan=""
+	 	fi
+
+		if [ "$vlan" = "" ]; then
+			echo "bond$bond_idx=$ip" >>  $WA_DIR/$BOND_CONF
+		else
+			echo "bond$bond_idx.$vlan=$ip" >> $WA_DIR/$BOND_CONF
+		fi
+
+	done<$tmp_file
+	rm -f $tmp_file
+
+}
+
+#=============================================================================
+# create_bond_ifcfg_7 
+#
+# Summary:
+# called by create_bonds to create the ifcfg-bond<x> file in the network 
+# scripts directory.  
+#=============================================================================
+create_bond_ifcfg_7()
+{
+	bond=$1
+	
+	if [ ! -f $IFCFG_DIR/ifcfg-bond$bond ]; then
+		touch $IFCFG_DIR/ifcfg-bond$bond
+		echo "DEVICE=bond$bond" >> $IFCFG_DIR/ifcfg-bond$bond
+		echo 'BONDING_OPTS="mode='$MODE' miimon='$MIIMON' num_grat_arp=20"' >> $IFCFG_DIR/ifcfg-bond$bond
+		echo "BOOTPROTO=none" >> $IFCFG_DIR/ifcfg-bond$bond
+		echo "ONBOOT=yes" >> $IFCFG_DIR/ifcfg-bond$bond
+		echo "TYPE=BOND" >> $IFCFG_DIR/ifcfg-bond$bond
+		echo "USERCTL=no" >> $IFCFG_DIR/ifcfg-bond$bond
+		echo "NM_CONTROLLED=no" >> $IFCFG_DIR/ifcfg-bond$bond
+	fi
+
+}
+
+
+#=============================================================================
+# create_bond_ifcfg 
+#
+# Summary:
+# called by create_bonds to create the ifcfg-bond<x> file in the network 
+# scripts directory.  It also updates the modprobe file with the alias bonding
+# mappings
+#=============================================================================
+create_bond_ifcfg()
+{
+	bond=$1
+	
+	if [ ! -f $IFCFG_DIR/ifcfg-bond$bond ]; then
+		touch $IFCFG_DIR/ifcfg-bond$bond
+		echo "DEVICE=bond$bond" >> $IFCFG_DIR/ifcfg-bond$bond
+		echo 'BONDING_OPTS="mode='$MODE' miimon='$MIIMON' num_grat_arp=20"' >> $IFCFG_DIR/ifcfg-bond$bond
+		echo "BOOTPROTO=none" >> $IFCFG_DIR/ifcfg-bond$bond
+		echo "ONBOOT=yes" >> $IFCFG_DIR/ifcfg-bond$bond
+		echo "USERCTL=no" >> $IFCFG_DIR/ifcfg-bond$bond
+		echo "NM_CONTROLLED=no" >> $IFCFG_DIR/ifcfg-bond$bond
+		echo "TYPE=BOND" >> $IFCFG_DIR/ifcfg-bond$bond
+		if [ ! -f $MODPROBE_CONF ]; then
+			touch $MODPROBE_CONF 
+		fi
+		cat $MODPROBE_CONF | grep "alias bond$bond bonding" &>/dev/null
+		ret=$?
+                if [ $ret -ne 0 ]; then
+			echo "alias bond$bond bonding" >> $MODPROBE_CONF 
+		fi
+	fi
+
+}
+
+#=============================================================================
+# bind_ifcfg_7 
+#
+# Summary:
+# called by create_bonds to update the ifcfg-eth file to bind the interface 
+# to the specified bond.
+#=============================================================================
+bind_ifcfg_7()
+{
+	local inf=$1
+	local bond=$2
+	local ret=$3
+
+	cat $IFCFG_DIR/ifcfg-$inf | grep "MASTER=bond$bond" &>/dev/null
+	ret=$?
+	if [ $ret -ne 0 ]; then
+		echo "MASTER=bond$bond" >> $IFCFG_DIR/ifcfg-$inf
+		echo "SLAVE=yes" >> $IFCFG_DIR/ifcfg-$inf
+		#echo "BOOTPROTO=none" >> $IFCFG_DIR/ifcfg-$inf
+		#echo "ONBOOT=yes" >> $IFCFG_DIR/ifcfg-$inf
+		#echo "USERCTL=no" >> $IFCFG_DIR/ifcfg-$inf
+		#echo "TYPE=Ethernet" >> $IFCFG_DIR/ifcfg-$inf
+	fi
+
+}
+
+#=============================================================================
+# bind_ifcfg 
+#
+# Summary:
+# called by create_bonds to update the ifcfg-eth file to bind the interface 
+# to the specified bond.
+#=============================================================================
+bind_ifcfg()
+{
+	local inf=$1
+	local bond=$2
+	local ret=$3
+
+	cat $IFCFG_DIR/ifcfg-$inf | grep "MASTER=bond$bond" &>/dev/null
+	ret=$?
+	if [ $ret -ne 0 ]; then
+		echo "MASTER=bond$bond" >> $IFCFG_DIR/ifcfg-$inf
+		echo "SLAVE=yes" >> $IFCFG_DIR/ifcfg-$inf
+		#echo "BOOTPROTO=none" >> $IFCFG_DIR/ifcfg-$inf
+		#echo "ONBOOT=yes" >> $IFCFG_DIR/ifcfg-$inf
+		#echo "USERCTL=no" >> $IFCFG_DIR/ifcfg-$inf
+		#echo "TYPE=Ethernet" >> $IFCFG_DIR/ifcfg-$inf
+	fi
+
+}
+
+#=============================================================================
+# Summary:
+#
+# Removes existing BOOTPROTO, ONBOOT, USERCTRL and TYEP entries from the ifcfg
+# files and write new entries.
+#=============================================================================
+update_ifcfgs()
+{
+        local inf=$1
+
+        cd $IFCFG_DIR
+        netDevices=`ls ifcfg-* |grep -v ifcfg-lo |grep -v $inf`
+        for nic in ${netDevices[@]}
+        do
+            echo "Remove entries here! nic: $nic"
+            cat $nic  |grep -v ONBOOT |grep -v USERCTL |grep -v TYPE | grep -v BOOTPROTO > /tmp/$nic
+            echo "BOOTPROTO=none" >> /tmp/$nic
+            echo "ONBOOT=yes" >> /tmp/$nic
+            echo "USERCTL=yes" >> /tmp/$nic
+            echo "TYPE=Ethernet" >> /tmp/$nic
+            cp -f /tmp/$nic /etc/sysconfig/network-scripts/
+        done
+
+}
+
+
+
+#=============================================================================
+# apply_workaround
+#
+# Summary:
+# applies a workaround which updates rc.local to execute a script that adds
+# the vlans to the physical interfaces.  During VC3.30 and RHEL5.5 testing with
+# LVLAN we discovered that RH would fail to add the vlans to a LVLAN OS configuration.
+#=============================================================================
+apply_workaround()
+{
+	cat /etc/rc.local | grep "^$WA_DIR/$SCRIPT"
+	if [ $? -ne 0 ]; then
+		echo "$WA_DIR/$SCRIPT $WA_DIR/$BOND_CONF &" >> /etc/rc.local
+	fi
+	if [ -f $WA_DIR/$SCRIPT ]; then
+		rm -f $WA_DIR/$SCRIPT
+	fi
+	if [ $OS_VERSION == "RHEL7" ]; then
+		create_script_7
+		chmod +x /etc/rc.local
+	else
+		create_script
+	fi
+}
+#=============================================================================
+# create_script_7
+#
+# Summary:
+# creates a script to be called by rc.local that applies the workaround described
+# in apply_workaround.  
+#=============================================================================
+create_script_7()
+{
+
+	echo "#!/bin/bash" >> $WA_DIR/$SCRIPT
+        echo "" >> $WA_DIR/$SCRIPT
+        echo "if [ \$# -eq 1 ]; then" >> $WA_DIR/$SCRIPT
+        echo "        BOND_IPADDR_PATHNAME=\$1" >> $WA_DIR/$SCRIPT
+        echo "else" >> $WA_DIR/$SCRIPT
+        echo "        echo \"usage: \$0 <path/to/bond_ipaddr.conf>\"" >> $WA_DIR/$SCRIPT
+        echo "        exit 1"  >> $WA_DIR/$SCRIPT
+        echo "fi"  >> $WA_DIR/$SCRIPT
+        echo "" >> $WA_DIR/$SCRIPT
+        echo "BONDIPADDRS=(\`cat \$BOND_IPADDR_PATHNAME | grep -o -E '[[:digit:]]{1,3}\.[[:digit:]]{1,3}\.[[:digit:]]{1,3}\.[[:digit:]]{1,3}'\`)" >> $WA_DIR/$SCRIPT
+        echo "for bip in \${BONDIPADDRS[@]}" >> $WA_DIR/$SCRIPT
+        echo "do" >> $WA_DIR/$SCRIPT
+        echo "        bond=(\`cat \$BOND_IPADDR_PATHNAME | grep -F \"\$bip\" | awk 'BEGIN{FS=\"=\"} {print \$NR}' | awk 'BEGIN{FS=\".\"} {print \$NR}'\`)" >> $WA_DIR/$SCRIPT
+        echo "        vlan=(\`cat \$BOND_IPADDR_PATHNAME | grep -F \"\$bip\" | awk 'BEGIN{FS=\"=\"} {print \$NR}' | sed \"s/\$bond//\" | tr -d \".\"\`)" >> $WA_DIR/$SCRIPT
+        echo "        if [ \"\$vlan\" = \"\" ]; then" >> $WA_DIR/$SCRIPT
+        echo "              ip addr add \$bip/255.255.255.0 brd + dev \$bond" >> $WA_DIR/$SCRIPT
+        echo "              ip link set dev \$bond up" >> $WA_DIR/$SCRIPT
+        echo "        else" >> $WA_DIR/$SCRIPT
+        echo "              ip link add link \$bond name \$bond.\$vlan type vlan id \$vlan" >> $WA_DIR/$SCRIPT
+        echo "              ip link" >> $WA_DIR/$SCRIPT
+        echo "              ip addr add \$bip/255.255.255.0 brd + dev \$bond.\$vlan" >> $WA_DIR/$SCRIPT
+        echo "              ip link set dev \$bond.\$vlan up" >> $WA_DIR/$SCRIPT
+        echo "        fi" >> $WA_DIR/$SCRIPT
+        echo "done" >> $WA_DIR/$SCRIPT
+	chmod +x $WA_DIR/$SCRIPT
+
+}
+
+
+#=============================================================================
+# create_script
+#
+# Summary:
+# creates a script to be called by rc.local that applies the workaround described
+# in apply_workaround.  
+#=============================================================================
+create_script()
+{
+
+	echo "#!/bin/bash" >> $WA_DIR/$SCRIPT
+        echo "" >> $WA_DIR/$SCRIPT
+        echo "if [ \$# -eq 1 ]; then" >> $WA_DIR/$SCRIPT
+        echo "        BOND_IPADDR_PATHNAME=\$1" >> $WA_DIR/$SCRIPT
+        echo "else" >> $WA_DIR/$SCRIPT
+        echo "        echo \"usage: \$0 <path/to/bond_ipaddr.conf>\"" >> $WA_DIR/$SCRIPT
+        echo "        exit 1"  >> $WA_DIR/$SCRIPT
+        echo "fi"  >> $WA_DIR/$SCRIPT
+        echo "" >> $WA_DIR/$SCRIPT
+        echo "BONDIPADDRS=(\`cat \$BOND_IPADDR_PATHNAME | grep -o -E '[[:digit:]]{1,3}\.[[:digit:]]{1,3}\.[[:digit:]]{1,3}\.[[:digit:]]{1,3}'\`)" >> $WA_DIR/$SCRIPT
+        echo "for bip in \${BONDIPADDRS[@]}" >> $WA_DIR/$SCRIPT
+        echo "do" >> $WA_DIR/$SCRIPT
+        echo "        bond=(\`cat \$BOND_IPADDR_PATHNAME | grep -F \"\$bip\" | awk 'BEGIN{FS=\"=\"} {print \$NR}' | awk 'BEGIN{FS=\".\"} {print \$NR}'\`)" >> $WA_DIR/$SCRIPT
+        echo "        vlan=(\`cat \$BOND_IPADDR_PATHNAME | grep -F \"\$bip\" | awk 'BEGIN{FS=\"=\"} {print \$NR}' | sed \"s/\$bond//\" | tr -d \".\"\`)" >> $WA_DIR/$SCRIPT
+        echo "        if [ \"\$vlan\" = \"\" ]; then" >> $WA_DIR/$SCRIPT
+        echo "              ifconfig \$bond \$bip netmask 255.255.255.0 up" >> $WA_DIR/$SCRIPT
+        echo "        else" >> $WA_DIR/$SCRIPT
+        echo "              vconfig add \$bond \$vlan" >> $WA_DIR/$SCRIPT
+        echo "              ifconfig \$bond.\$vlan \$bip netmask 255.255.255.0 up" >> $WA_DIR/$SCRIPT
+        echo "        fi" >> $WA_DIR/$SCRIPT
+        echo "done" >> $WA_DIR/$SCRIPT
+	chmod +x $WA_DIR/$SCRIPT
+
+}
+
+#=============================================================================
+# create_udev_rules
+#
+# Summary:
+# creates a persistent udev rule for interface to MAC address mappings.  This was
+# required on RHEL5 because we hit scenarios where RHEL would rename interfaces
+# for unknown reasons. 
+#=============================================================================
+create_udev_rules()
+{ 
+	local -a macs
+	local inf
+	local convert_mac
+	# Check OS
+	if [ $OS_VERSION == "RHEL7" ]; then
+		echo "RHEL7 Does not need $PERSISTENT_RULES" 2>&1 |tee -a $LOG
+		return
+	else	
+		if [ -f $UDEV_RULES_DIR/$PERSISTENT_RULES ]; then
+			echo "`date`: INFO: $UDEV_RULES_DIR/$PERSISTENT_RULES already exists so continuing..." 2>&1 | tee -a $LOG
+			return
+		else
+			macs=(`ifconfig -a | grep HW | awk 'BEGIN{FS=" "} {print $NF}' | sort | uniq`)
+			for mac in ${macs[@]}
+			do
+        			inf=(`ifconfig -a | grep -e $mac | head -1 | cut -d" " -f1`)
+        			convert_mac=(`echo $mac | awk '{ print tolower($0) }'`)
+        			echo "ACTION==\"add\", SUBSYSTEM==\"net\", DRIVER==\"?*\", SYSFS{address}==\"$convert_mac\" NAME=\"$inf\"" >> $UDEV_RULES_DIR/$PERSISTENT_RULES
+			done		
+		fi
+	fi
+}
+
+
+  while [ -n "$(echo $1 | grep '-')" ]; do
+          case $1 in
+          -ip ) IP=$2
+                 shift ;;
+          -sn ) SN=$2
+                 shift ;;
+	  --miimon ) MIIMON=${2:-$MIIMON}
+	         shift ;;
+	  --mode ) MODE=${2:-$MODE}
+	         shift ;;
+          * ) usage
+              exit 1
+          esac
+          shift
+  done
+
+  if [ -z "$IP" -o -z "$SN" ]; then
+          usage
+          exit 1
+  fi
+
+  if [ ! -f $IPADDR ]; then
+  	echo "`date`: IP address $ipaddr is NOT reachable for $SERVER" 2>&1 | tee -a $LOG 
+	exit -1
+  fi
+
+  check_log
+  get_OS_version
+  verify_serial_number
+  get_macs_ipaddr
+  verify_kernel_macs
+  create_udev_rules
+  create_default_ifcfg
+  create_bonds_7
+  update_ifcfgs $inf
+  apply_workaround
+  
+
+

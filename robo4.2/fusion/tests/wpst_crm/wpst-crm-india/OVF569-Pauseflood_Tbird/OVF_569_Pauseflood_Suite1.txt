@@ -1,0 +1,1406 @@
+*** Settings ***
+Documentation       OVF569 Pauseflood detection and protection using FusionLibrary API keywords
+Variables       OVF_569_data_variables.py
+Library     OVF_569_data_variables
+Library         json
+Library         FusionLibrary
+Library         RoboGalaxyLibrary
+Library         Collections
+Library         SSHLibrary
+Library            SSHLibrary
+Library            Telnet
+Library             Dialogs
+Library             back_ping.py
+#Library            ServerOperations
+Resource            ../../../resource/fusion_api_all_resource_files.txt
+
+*** Variables ***
+${number}    5
+${flag}    Windows
+${APPLIANCE_IP}     192.168.144.171
+#For SPP update need to place the SPP bundles in the following folder structure
+${SPP_Path_old}             ${CURDIR}/SPP/HF_supported/${old_SPP_bundle}
+${SPP_Path_new}             ${CURDIR}/SPP/HF_supported/${latest_SPP_bundle}
+${unsupported_SPP_path}             ${CURDIR}/SPP/HF_unsupported/${unsupported_SPP_bundle}
+${name}    pingServerIP.txt
+${Enet_switch_ip}    192.168.144.119
+${file_path}    ${CURDIR}/pingServerIP.txt
+${stat}     statistics
+${name}    serverip.txt
+${time_out}    Request timed out
+${Dest_unreachable}    Destination host unreachable.
+
+*** Test Cases ***
+1 Login to Appliance and cleanup
+    [Tags]  add   POSITIVE
+    Set Log Level    TRACE
+    Log to console and logfile  logging in appliance
+    Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+
+
+2 Initial Setup
+    ${l} =  Get Length  ${ethnets}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${enet_resp} =    Fusion Api Create Ethernet Network    body=${ethnets[${x}]}
+    \   Run Keyword If  '${enet_resp['status_code']}' != '202'  Fail    ELSE    Log to console and logfile  \n-Networks created successfully
+    Log to console and logfile  \n Creating LIG
+    ${task} =   Add LIG from variable    ${ligs['lig1']}
+    Run Keyword If  '${task['status_code']}' != '200'   fail    ELSE    Log to console and logfile  \n-LIG created successfully
+#Create EG
+    ${Resp} =   Add Enclosure Group from variable       ${enc_group_SE}
+    Run Keyword If  '${Resp['status_code']}' != '201'  Fail    ELSE  Log to console and logfile   \n-created EG successfully
+#Creating LE
+    ${task} =   Add Logical Enclosure from variable     ${LE[0]}
+    Run Keyword If  '${task['status_code']}' != '200'  Fail    ELSE  Log to console and logfile   \n-created LE successfully
+#Create Server Profile
+    Add Server Profiles from variable   ${server_profiles}
+    Power on server     ${server_profiles[0]['serverHardwareUri']}
+    Log to console and logfile    Waiting 5 minutes for server to boot
+    Sleep   5min
+
+#Fetching ICM IP
+    ${ICM_IP}   Get ICM IP   ${ICM_1}
+    Set Global Variable    ${IC_IP}    ${ICM_IP}
+    Log to console and logfile    \nIP is ${IC_IP}
+    ${ip_list}    Get Valid Server IP list    ${ilo1_details}    ${server1_details}    ${up_interface}    ${down_interface}    ${get_interface}
+    Log to console and logfile    \nIPlist is ${ip_list}
+    Set Global Variable    ${server_ip}    ${ip_list[0]}
+    Log to console and logfile    \nserverlist is ${server_ip}
+    Verify Server Ping Successful        ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+
+TC01_OVF569_API_6 Verify the default attribute value of pause Flood protection in Interconnect settings of LIG page
+    Log to console and logfile    \nVerify the Default value of Pause flood protection after LIG creation
+
+    ValidateLIG Pause Flood Protect     ${LIGname}   ${PFPtrue}
+
+TC02_OVF569_API_4 Generate pause flood, Disable pause flood in LI and enable pause flood in LI
+
+#generating pauseflood condition in uplink and downlink ports
+    Edit Pauseflood Condition   ${IC_IP}   ${uplink_interface}   ${ic_set_pf}
+    Edit Pauseflood Condition   ${IC_IP}   ${downlink_interface}   ${ic_set_pf}
+#verifying pauseflood alert messages are available in SP and interconnects page, also verifying the uplink and downlink port status
+    Wait Until Keyword Succeeds    5 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${UL_PORT_NAME[0]}     ${PORT_STATUS_LINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds    10 min   15s    Validate SubPortStatus And SubPortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${UPLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG1}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG1}    ${varTrue}    ${Alert[1]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG}    ${varTrue}    ${Alert[1]}
+#Verifying server ping fails on pauseflood condition
+    Verify Server Ping Fails    ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+#Disabling pause flood in LI and Verifying pause flood alert cleared in uplink and downlink port and server ping is successful
+    Edit LI        ${li}    ${li_disable}        ${varFalse}
+    Log to console and logfile    \nLI update successfully completed
+#verifying LIG LI compliance
+    Validate LIG LI Consistency    ${Consistency_State[1]}
+    Log to console and logfile    \nalert is ${COMPLAINCE_ALERT_1}
+    Wait Until Keyword Succeeds     60s    5s      Validate Alert Message      ${COMPLAINCE_ALERT_1}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${UL_PORT_NAME[0]}     ${PORT_STATUS_LINK}   ${PORT_STATUS_REASON_ACTIVE}
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}      ${DL_PORT_NAME[0]}     ${PORT_STATUS_LINK}      ${PORT_STATUS_REASON_OK}
+    Wait Until Keyword Succeeds    10 min   15s    Validate SubPortStatus And SubPortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_LINK}   ${PORT_STATUS_REASON_OK}
+#Verifying compliance alert in LI and verifying pause flood alerts are not available
+    ${count}     Get Alert count   ${Alert[0]}
+    Run Keyword If    ${count}!=0    Wait Until Keyword Succeeds     20s   15s      Validate Alert Message      ${UPLINK_MSG}    ${varTrue}    ${Alert[2]}
+    Run Keyword If    ${count}!=0     Wait Until Keyword Succeeds     1 min   15s      Validate Alert Message      ${UPLINK_MSG}    ${varTrue}    ${Alert[2]}
+    Run Keyword If    ${count}!=0     Wait Until Keyword Succeeds     1 min   15s      Validate Alert Message      ${DOWNLINK_MSG}    ${varTrue}    ${Alert[2]}
+    Run Keyword If    ${count}!=0     Wait Until Keyword Succeeds     1 min   15s      Validate Alert Message      ${DOWNLINK_MSG1}    ${varTrue}    ${Alert[2]}
+    Run Keyword If    ${count}!=0     Wait Until Keyword Succeeds     1 min   15s      Validate Alert Message      ${SERVER_PROF_MSG1}    ${varTrue}    ${Alert[1]}
+    Run Keyword If    ${count}!=0     Wait Until Keyword Succeeds     1 min   15s      Validate Alert Message      ${SERVER_PROF_MSG}    ${varTrue}    ${Alert[1]}
+    Verify Server Ping Successful    ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+#Enabling pause flood in LI and verifying pauseflood alerts are available in SP and interconnect page
+    Edit LI        ${li}    ${li_enable}        ${varTrue}
+    Validate Interconnect state    ${INTERCONNECTS}    ${IC_CONFIG_STATE}
+#verifying LIG LI compliance
+    Validate LIG LI Consistency    ${Consistency_State[0]}
+    Wait Until Keyword Succeeds     60s    5s      Validate Alert Message      ${COMPLAINCE_ALERT_1}    ${varFalse}    ${Alert[0]}
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${UL_PORT_NAME[0]}     ${PORT_STATUS_LINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds    10 min   15s    Validate SubPortStatus And SubPortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${UPLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG1}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG1}    ${varTrue}    ${Alert[1]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG}    ${varTrue}    ${Alert[1]}
+#Verifying server ping fails on pauseflood condition
+    Verify Server Ping Fails        ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+#clearing the pauseflood condition and performing reset port protection
+    Clear Pause Flood condition    ${IC_IP}   ${uplink_interface}   ${ic_off_pf}    ${downlink_interface}    ${UL_PORT_NAME[0]}    ${PORT_STATUS_LINK}    ${PORT_STATUS_REASON_ACTIVE}    ${DL_PORT_NAME[0]}   ${PORT_STATUS_REASON_OK}    ${UPLINK_MSG}    ${DOWNLINK_MSG}    ${SERVER_PROF_MSG}
+#Verifying server ping successful after clearing pauseflood condition
+    Verify Server Ping Successful    ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+
+TC03_OVF569_API_5 Generate pause flood, Disable pause flood in LI and update from group in LI
+#generating pauseflood condition in uplink and downlink ports
+    Edit Pauseflood Condition   ${IC_IP}   ${uplink_interface}   ${ic_set_pf}
+    Edit Pauseflood Condition   ${IC_IP}   ${downlink_interface}   ${ic_set_pf}
+#verifying pauseflood alert messages are available in SP and interconnects page, also verifying the uplink and downlink port status
+    Wait Until Keyword Succeeds    5 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${UL_PORT_NAME[0]}     ${PORT_STATUS_LINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds    10 min   15s    Validate SubPortStatus And SubPortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${UPLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG1}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG1}    ${varTrue}    ${Alert[1]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG}    ${varTrue}    ${Alert[1]}
+#verifying server ping fails on pauseflood condition
+    Verify Server Ping Fails        ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+#Disabling pause flood in LI and verifying pause flood alert cleared and uplink downlink port status
+    Edit LI        ${li}    ${li_disable}        ${varFalse}
+#Verify LIG LI compliance
+    Wait Until Keyword Succeeds     60s    5s      Validate Alert Message      ${COMPLAINCE_ALERT}    ${varTrue}    ${Alert[0]}
+    Validate LIG LI Consistency    ${Consistency_State[1]}
+    Wait Until Keyword Succeeds    5 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${UL_PORT_NAME[0]}     ${PORT_STATUS_LINK}   ${PORT_STATUS_REASON_ACTIVE}
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}      ${DL_PORT_NAME[0]}     ${PORT_STATUS_LINK}      ${PORT_STATUS_REASON_OK}
+    Wait Until Keyword Succeeds    10 min   15s    Validate SubPortStatus And SubPortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_LINK}   ${PORT_STATUS_REASON_OK}
+   #Verifying complaince alert in LI
+    ${count}     Get Alert count   ${Alert[0]}
+    Run Keyword If    ${count}!=0    Wait Until Keyword Succeeds     20s   15s      Validate Alert Message      ${UPLINK_MSG}    ${varFalse}    ${Alert[0]}
+    Run Keyword If    ${count}!=0     Wait Until Keyword Succeeds     1 min   15s      Validate Alert Message      ${UPLINK_MSG}    ${varFalse}    ${Alert[0]}
+    Run Keyword If    ${count}!=0     Wait Until Keyword Succeeds     1 min   15s      Validate Alert Message      ${DOWNLINK_MSG}    ${varFalse}    ${Alert[0]}
+    Run Keyword If    ${count}!=0     Wait Until Keyword Succeeds     1 min   15s      Validate Alert Message      ${DOWNLINK_MSG1}    ${varFalse}    ${Alert[0]}
+    Run Keyword If    ${count}!=0     Wait Until Keyword Succeeds     1 min   15s      Validate Alert Message      ${SERVER_PROF_MSG1}    ${varFalse}    ${Alert[1]}
+    Run Keyword If    ${count}!=0     Wait Until Keyword Succeeds     1 min   15s      Validate Alert Message      ${SERVER_PROF_MSG}    ${varFalse}    ${Alert[1]}
+
+#Verifying server ping successful on clearing pauseflood condition
+    Verify Server Ping Successful    ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+#Perform update from Group verifying pause flood alert available and uplink downlink port status
+    Perform an Update From Group    ${li}    120 min        1 min
+    Validate Interconnect state    ${INTERCONNECTS}    ${IC_CONFIG_STATE}
+#Verify LIG LI compliance
+    #Wait Until Keyword Succeeds     60s    5s      Validate Alert Message      ${COMPLAINCE_ALERT}    ${varFalse}    ${Alert[0]}
+    Validate LIG LI Consistency    ${Consistency_State[0]}
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${UL_PORT_NAME[0]}     ${PORT_STATUS_LINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds    10 min   15s    Validate SubPortStatus And SubPortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${UPLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG1}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG1}    ${varTrue}    ${Alert[1]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG}    ${varTrue}    ${Alert[1]}
+#Verifying server ping fails on pauseflood condition
+    Verify Server Ping Fails        ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+#Clear pauseflood condition reset port protection and verify server ping is successful
+    Clear Pause Flood condition    ${IC_IP}   ${uplink_interface}   ${ic_off_pf}    ${downlink_interface}    ${UL_PORT_NAME[0]}    ${PORT_STATUS_LINK}    ${PORT_STATUS_REASON_ACTIVE}    ${DL_PORT_NAME[0]}   ${PORT_STATUS_REASON_OK}    ${UPLINK_MSG}    ${DOWNLINK_MSG}    ${SERVER_PROF_MSG}
+    Verify Server Ping Successful    ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+
+TC04_OVF569_API_7 Network Administrator can disable pause flood protection
+#Create network Administrator
+    ${resp}    Fusion Api Add User      body=${users[0]}
+    Run Keyword If  '${resp['status_code']}' != '200'  Fail    ELSE  Log to console and logfile   \n-Created ${users[0]['userName']} user successfully
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${usercred[0]}
+    Log to console and logfile  \n Logged in successfully as ${usercred[0]['userName']}
+#Edit LIG to disable pause flood protection
+    ${resp}    Edit LIG    ${ligs['lig2']}
+    ${task} =   Wait For Task    ${resp}    400s    2s
+    ${valDict} =    Create Dictionary   status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response   ${task}  ${valDict}
+    ValidateLIG Pause Flood Protect     ${LIGname}   ${PFPFalse}
+#enable the pause flood protection
+    ${resp}    Edit LIG    ${ligs['lig3']}
+    ${task} =   Wait For Task    ${resp}    400s    2s
+    ValidateLIG Pause Flood Protect     ${LIGname}   ${PFPTrue}
+    Fusion Api Logout Appliance
+
+TC05_OVF569_API_8 Infrastructure Administrator can disable pause flood protection
+#Create infrastructure Administrator
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+    ${resp}    Fusion Api Add User      body=${users[4]}
+    Run Keyword If  '${resp['status_code']}' != '200'  Fail    ELSE  Log to console and logfile   \n-Created ${users[4]['userName']} user successfully
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${usercred[4]}
+    Log to console and logfile  \n Logged in successfully as ${usercred[4]['userName']}
+#Edit LIG to disable pause flood protection
+    ${resp}    Edit LIG    ${ligs['lig2']}
+    ${task} =   Wait For Task    ${resp}    400s    2s
+    ${valDict} =    Create Dictionary   status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response   ${task}  ${valDict}
+    ValidateLIG Pause Flood Protect     ${LIGname}   ${PFPFalse}
+#enable the pause flood protection
+    ${resp}    Edit LIG    ${ligs['lig3']}
+    ${task} =   Wait For Task    ${resp}    400s    2s
+    ValidateLIG Pause Flood Protect     ${LIGname}   ${PFPTrue}
+    Fusion Api Logout Appliance
+
+TC06_OVF569_API_9 Server administrator cannot edit pause flood protection in Edit LIG
+    Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+#Create Server Administrator
+    ${resp}    Fusion Api Add User      body=${users[1]}
+    Run Keyword If  '${resp['status_code']}' != '200'  Fail    ELSE  Log to console and logfile   \n-Created ${users[1]['userName']} user successfully
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${usercred[1]}
+    Log to console and logfile  \n Logged in successfully as ${usercred[1]['userName']}
+#Edit LIG to disable pause flood protection
+    ${resp}    Edit LIG    ${ligs['lig2']}
+    ${valDict} =    Create Dictionary   status_code=${403}
+    ...                                 errorCode=ACTION_FORBIDDEN_BY_ROLE
+    Validate Response   ${resp}  ${valDict}
+    ValidateLIG Pause Flood Protect     ${LIGname}   ${PFPTrue}
+    Fusion Api Logout Appliance
+
+TC07_OVF569_API_10 Storage administrator cannot edit pause flood protection in Edit LIG
+    Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+#Create Storage Administrator
+    ${resp}     Fusion Api Add User     body=${users[2]}
+    Run Keyword If  '${resp['status_code']}' != '200'  Fail    ELSE  Log to console and logfile   \n-Created ${users[2]['userName']} user successfully
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${usercred[2]}
+    Log to console and logfile    \n Logged in successfully as ${usercred[2]['userName']}
+#Edit LIG to disable pause flood protection
+    ${resp}    Edit LIG    ${ligs['lig2']}
+    ${valDict} =    Create Dictionary   status_code=${403}
+    ...                                 errorCode=ACTION_FORBIDDEN_BY_ROLE
+    Validate Response   ${resp}  ${valDict}
+    ValidateLIG Pause Flood Protect     ${LIGname}   ${PFPTrue}
+    Fusion Api Logout Appliance
+
+TC08_OVF569_API_11 Backup administrator cannot edit pause flood protection in Edit LIG
+    Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+#Create Backup Administrator
+    ${resp}     Fusion Api Add User     body=${users[3]}
+    Run Keyword If  '${resp['status_code']}' != '200'  Fail    ELSE  Log to console and logfile   \n-Created ${users[3]['userName']} user successfully
+    ${resp}     Fusion Api Login Appliance      ${APPLIANCE_IP}     ${usercred[3]}
+    Log to console and logfile  \n Logged in successfully as ${usercred[3]['userName']}
+#Edit LIG to disable pause flood protection
+    ${resp}    Edit LIG    ${ligs['lig2']}
+    ${valDict} =    Create Dictionary   status_code=${403}
+    ...                                 errorCode=ACTION_FORBIDDEN_BY_ROLE
+    Validate Response   ${resp}  ${valDict}
+    ValidateLIG Pause Flood Protect     ${LIGname}   ${PFPTrue}
+    Fusion Api Logout Appliance
+
+TC09_OVF569_API_12 Reset pause flood protection available after Disabling PFP in LIG and LI
+    Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+#Removing all users
+    Remove ALL User
+#Edit LIG to disable pause flood protection
+    ${resp}    Edit LIG    ${ligs['lig2']}
+    ${task} =    Wait For Task     ${resp}     120s
+    Run Keyword If  '${task['status_code']}' != '200'  Fail    ELSE    Log to console and logfile   \n-Edit LIG successful
+    ValidateLIG Pause Flood Protect     ${LIGname}   ${PFPFalse}
+    Perform an Update From Group    ${li}    20 min        1 min
+    ValidateLI Pause Flood Protection    ${li}   ${PFPFalse}
+#perform reset port protection
+    ${icUri}        Get IC URI    ${ICM_1}
+    ${resp}    fusion_api_reset_loop_and_pause_flood_protection    uri=${icUri}
+    ${task} =    Wait For Task     ${resp}     500s
+    Run Keyword If  '${task['status_code']}' != '200'  Fail    ELSE  Log to console and logfile   \n-Reset pause flood protection action successful
+    Validate Interconnect state    ${INTERCONNECTS}    ${IC_CONFIG_STATE}
+
+TC10_OVF569_API_13 Verify increment of pause flood detection counter by generating pause frame traffics
+#Edit LIG to enable pauseflood condition and perform update from Group
+    ${resp}    Edit LIG    ${ligs['lig3']}
+    ${task} =    Wait For Task     ${resp}     120s
+    Run Keyword If  '${task['status_code']}' != '200'  Fail    ELSE  Log to console and logfile   \n-Edit LIG successful
+    ValidateLIG Pause Flood Protect     ${LIGname}   ${PFPTrue}
+    Perform an Update From Group    ${li}    20 min        1 min
+    Validate Interconnect state    ${INTERCONNECTS}    ${IC_CONFIG_STATE}
+#perform reset port protection and verify the counters
+    ${icUri}        Get IC URI    ${ICM_1}
+    ${resp}    fusion_api_reset_loop_and_pause_flood_protection    uri=${icUri}
+    ${task} =    Wait For Task     ${resp}     500s
+    ${ic_uri_statistics} =        catenate    ${icUri}/${stat}/${UL_PORT_NAME[0]}
+    ${statistics_data}    Fusion Api Get Interconnect    ${ic_uri_statistics}
+    ${port_counters_In}    Get from Dictionary    ${statistics_data['commonStatistics']}    rfc2665Dot3InPauseFrames
+    Run keyword unless  ${port_counters_In}== 0    Fail    "Port statistics is not cleared"
+    ${port_counters_Out}    Get from Dictionary    ${statistics_data['commonStatistics']}    rfc2665Dot3OutPauseFrames
+    Run keyword unless  ${port_counters_Out}== 0    Fail    "Port statistics is not cleared"
+#Enable the pauseflood condition verifying pause flood alert available and uplink downlink port status
+    Edit Pauseflood Condition   ${IC_IP}   ${uplink_interface}   ${ic_set_pf}
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${UL_PORT_NAME[0]}     ${PORT_STATUS_LINK}   ${PFD_PORT_STATUS_REASON}
+    Edit Pauseflood Condition   ${IC_IP}   ${downlink_interface}   ${ic_set_pf}
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds    10 min   15s    Validate SubPortStatus And SubPortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${UPLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG1}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG1}    ${varTrue}    ${Alert[1]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG}    ${varTrue}    ${Alert[1]}
+#verify server ping fails on pauseflood condition
+    Verify Server Ping Fails        ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+#verify port statistics
+    ${icUri}        Get IC URI    ${ICM_1}
+    ${ic_uri_statistics} =        catenate    ${icUri}/${stat}/${UL_PORT_NAME[0]}
+    ${statistics_data}    Fusion Api Get Interconnect    ${ic_uri_statistics}
+    ${port_counters_In}    Get from Dictionary    ${statistics_data['commonStatistics']}    rfc2665Dot3InPauseFrames
+    Run keyword unless  ${port_counters_In}== 0   Fail    "Port statistics is not as expected"
+    ${port_counters_Out}    Get from Dictionary    ${statistics_data['commonStatistics']}    rfc2665Dot3OutPauseFrames
+    Run keyword unless  ${port_counters_Out}== 0    Fail    "Port statistics is not as expected"
+#clear pauseflood condition reset port protection and verify server ping successful
+    Clear Pause Flood condition    ${IC_IP}   ${uplink_interface}   ${ic_off_pf}    ${downlink_interface}    ${UL_PORT_NAME[0]}    ${PORT_STATUS_LINK}    ${PORT_STATUS_REASON_ACTIVE}    ${DL_PORT_NAME[0]}   ${PORT_STATUS_REASON_OK}    ${UPLINK_MSG}    ${DOWNLINK_MSG}    ${SERVER_PROF_MSG}
+    Verify Server Ping Successful    ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+
+TC11_OVF569_API_14 Verify that the Pause flood protection is enabled in LI if pause flood protection is enabled in LIG
+    ValidateLIG Pause Flood Protect     ${LIGname}   ${PFPTrue}
+    ValidateLI Pause Flood Protection    ${li}   ${PFPTrue}
+
+TC12_OVF569_API_15 Verify uplink port state on pause flood detection
+#Enable the pauseflood condition verifying pause flood alert available and uplink port status
+    Validate Interconnect state    ${INTERCONNECTS}    ${IC_CONFIG_STATE}
+    Edit Pauseflood Condition   ${IC_IP}   ${uplink_interface}   ${ic_set_pf}
+    Wait Until Keyword Succeeds    5 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${UL_PORT_NAME[0]}     ${PORT_STATUS_LINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${UPLINK_MSG}    ${varTrue}    ${Alert[0]}
+
+TC13_OVF569_API_16 Verify downlink port state on pause flood detection
+#Enable the pauseflood condition verifying pause flood alert available and downlink port status
+    Validate Interconnect state    ${INTERCONNECTS}    ${IC_CONFIG_STATE}
+    Edit Pauseflood Condition   ${IC_IP}   ${downlink_interface}   ${ic_set_pf}
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds    10 min   15s    Validate SubPortStatus And SubPortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG1}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG1}    ${varTrue}    ${Alert[1]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG}    ${varTrue}    ${Alert[1]}
+    Verify Server Ping Fails        ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+#Clear pauseflood condition reset port protection and server ping successful
+    Clear Pause Flood condition    ${IC_IP}   ${uplink_interface}   ${ic_off_pf}    ${downlink_interface}    ${UL_PORT_NAME[0]}    ${PORT_STATUS_LINK}    ${PORT_STATUS_REASON_ACTIVE}    ${DL_PORT_NAME[0]}   ${PORT_STATUS_REASON_OK}    ${UPLINK_MSG}    ${DOWNLINK_MSG}    ${SERVER_PROF_MSG}
+    Verify Server Ping Successful    ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+
+TC14_OVF569_API_19 Verify pause flood condition after disabling the downlinkport
+#Enable the pauseflood condition verifying pause flood alert available and uplink downlink port status
+    Validate Interconnect state    ${INTERCONNECTS}    ${IC_CONFIG_STATE}
+    Edit Pauseflood Condition   ${IC_IP}   ${uplink_interface}   ${ic_set_pf}
+    Wait Until Keyword Succeeds    5 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${UL_PORT_NAME[0]}     ${PORT_STATUS_LINK}   ${PFD_PORT_STATUS_REASON}
+    Edit Pauseflood Condition   ${IC_IP}   ${downlink_interface}   ${ic_set_pf}
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds    10 min   15s    Validate SubPortStatus And SubPortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${UPLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG1}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG1}    ${varTrue}    ${Alert[1]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG}    ${varTrue}    ${Alert[1]}
+    Verify Server Ping Fails        ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+    #disabling downlink port and verifying pause flood alert available and uplink downlink port status
+    Edit Ports    ${downlink_port_disable}    ${interconnects}    ${downlink_ports}
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${UL_PORT_NAME[0]}     ${PORT_STATUS_LINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds    10 min   15s    Validate SubPortStatus And SubPortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${UPLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG1}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG1}    ${varTrue}    ${Alert[1]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG}    ${varTrue}    ${Alert[1]}
+#Verifying server ping fails on pauseflood condition
+    Verify Server Ping Fails    ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+
+
+TC15_OVF569_API_20 Verify pause flood condition after enabling the downlinkport
+#Enabling the downlink port verifying pause flood alert available and uplink downlink port status
+    Edit Ports    ${downlink_port_enable}    ${interconnects}    ${downlink_ports}
+    Validate Interconnect state    ${INTERCONNECTS}    ${IC_CONFIG_STATE}
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${UL_PORT_NAME[0]}     ${PORT_STATUS_LINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds    10 min   15s    Validate SubPortStatus And SubPortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${UPLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG1}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG1}    ${varTrue}    ${Alert[1]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG}    ${varTrue}    ${Alert[1]}
+#verify server ping fails
+    Verify Server Ping Fails    ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+#Clear pauseflood condition reset port protection and server ping successful
+    Clear Pause Flood condition    ${IC_IP}   ${uplink_interface}   ${ic_off_pf}    ${downlink_interface}    ${UL_PORT_NAME[0]}    ${PORT_STATUS_LINK}    ${PORT_STATUS_REASON_ACTIVE}    ${DL_PORT_NAME[0]}   ${PORT_STATUS_REASON_OK}    ${UPLINK_MSG}    ${DOWNLINK_MSG}    ${SERVER_PROF_MSG}
+    Verify Server Ping Successful    ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+
+TC16_OVF569_API_27 verify that if both the uplink and down link ports are in Pause flood condition during and after support dump collection the pause flood condition should still exists in the uplink and down link ports
+#Enable the pauseflood condition verifying pause flood alert available and uplink downlink port status
+    Validate Interconnect state    ${INTERCONNECTS}    ${IC_CONFIG_STATE}
+    Edit Pauseflood Condition   ${IC_IP}   ${uplink_interface}   ${ic_set_pf}
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${UL_PORT_NAME[0]}     ${PORT_STATUS_LINK}   ${PFD_PORT_STATUS_REASON}
+    Edit Pauseflood Condition   ${IC_IP}   ${downlink_interface}   ${ic_set_pf}
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds    10 min   15s    Validate SubPortStatus And SubPortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${UPLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG1}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG1}    ${varTrue}    ${Alert[1]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG}    ${varTrue}    ${Alert[1]}
+#Verify server ping fails on pauseflood condition
+    Verify Server Ping Fails        ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+#creating support dump verifying pause flood alert available and uplink downlink port status
+    Log to console and logfile     \n-Getting the LE id
+    ${le_uri} =    Get LE URI      ${LE_name}
+    ${logicalEnclosureId}=    Fetch From Right        ${le_uri}      /
+    Log to console and logfile     \n-Creating support dump for the LE
+    ${payload} =    Build support dump payload      Mydump      ${true}
+    ${Response}=    Fusion Api Get Logical Enclosure Support Dump   ${payload}   ${logicalEnclosureId}
+    Log to console and logfile     \n-Waiting for dump creation task to complete
+    ${task} =                       Wait For Task           ${Response}     45min    1min
+    ${valDict}      Create Dictionary   status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response   ${task}    ${valDict}
+    Log to console and logfile     \n-Support dump created successfully
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${UL_PORT_NAME[0]}     ${PORT_STATUS_LINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds    10 min   15s    Validate SubPortStatus And SubPortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${UPLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG1}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG1}    ${varTrue}    ${Alert[1]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG}    ${varTrue}    ${Alert[1]}
+#Verify server ping fails on pause condition
+    Verify Server Ping Fails        ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+#Clear pauseflood condition reset port protection and verify server ping successful
+    Clear Pause Flood condition    ${IC_IP}   ${uplink_interface}   ${ic_off_pf}    ${downlink_interface}    ${UL_PORT_NAME[0]}    ${PORT_STATUS_LINK}    ${PORT_STATUS_REASON_ACTIVE}    ${DL_PORT_NAME[0]}   ${PORT_STATUS_REASON_OK}    ${UPLINK_MSG}    ${DOWNLINK_MSG}    ${SERVER_PROF_MSG}
+    Verify Server Ping Successful    ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+
+TC17_OVF569_API_28 Verify that Update from group via LE level should be success when Pause flood condition occurred
+#Enable the pauseflood condition verifying pause flood alert available and uplink downlink port status
+    Validate Interconnect state    ${INTERCONNECTS}    ${IC_CONFIG_STATE}
+    Edit Pauseflood Condition   ${IC_IP}   ${uplink_interface}   ${ic_set_pf}
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${UL_PORT_NAME[0]}     ${PORT_STATUS_LINK}   ${PFD_PORT_STATUS_REASON}
+    Edit Pauseflood Condition   ${IC_IP}   ${downlink_interface}   ${ic_set_pf}
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds    10 min   15s    Validate SubPortStatus And SubPortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${UPLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG1}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG1}    ${varTrue}    ${Alert[1]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG}    ${varTrue}    ${Alert[1]}
+#verify server ping fails on pauseflood condition
+    Verify Server Ping Fails        ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+#Edit LIG and perform update from group in LE
+    ${resp}    Edit LIG    ${ligs['lig8']}
+    ${task}    Wait for Task   ${resp}   400s    20s
+    ${valDict}      Create Dictionary   status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response   ${task}    ${valDict}
+    ${LE_uri}    Get LE URI    ${LE_name}
+    Log to console and logfile    \n LE_uri is ${LE_uri}
+    ${resp}    Fusion Api Update Logical Enclosure from Group    uri=${LE_uri}
+    ${task}    Wait for Task   ${resp}   600s    20s
+#verifying pause flood alert available uplink downlink port status and server ping fails on pauseflood condition
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${UL_PORT_NAME[0]}     ${PORT_STATUS_LINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds    10 min   15s    Validate SubPortStatus And SubPortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${UPLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG1}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG1}    ${varTrue}    ${Alert[1]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG}    ${varTrue}    ${Alert[1]}
+    Verify Server Ping Fails        ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+#Clear pauseflood condition reset port protection and verify server ping successful
+    Clear Pause Flood condition    ${IC_IP}   ${uplink_interface}   ${ic_off_pf}    ${downlink_interface}    ${UL_PORT_NAME[0]}    ${PORT_STATUS_LINK}    ${PORT_STATUS_REASON_ACTIVE}    ${DL_PORT_NAME[0]}   ${PORT_STATUS_REASON_OK}    ${UPLINK_MSG}    ${DOWNLINK_MSG}    ${SERVER_PROF_MSG}
+    Verify Server Ping Successful    ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+#Edit LIG and perform update from group
+    ${resp}    Edit LIG    ${ligs['LIG1']}
+    ${task}    Wait for Task   ${resp}   400s    20s
+    ${valDict}      Create Dictionary   status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response   ${task}    ${valDict}
+    Perform an Update From Group    ${li}    20 min        1 min
+
+TC18_OVF569_API_39 Verify the pause flood condition should be cleared when disable the TOR port that is connected to potash uplink that is affected by pause flood condition
+#Enable the pauseflood condition verifying pause flood alert available and uplink downlink port status
+    Validate Interconnect state    ${INTERCONNECTS}    ${IC_CONFIG_STATE}
+    Edit Pauseflood Condition   ${IC_IP}   ${uplink_interface}   ${ic_set_pf}
+    Wait Until Keyword Succeeds    5 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${UL_PORT_NAME[0]}     ${PORT_STATUS_LINK}   ${PFD_PORT_STATUS_REASON}
+    Edit Pauseflood Condition   ${IC_IP}   ${downlink_interface}   ${ic_set_pf}
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds    10 min   15s    Validate SubPortStatus And SubPortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${UPLINK_MSG}    ${varTrue}    ${Alert[0]}
+   Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG1}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG1}    ${varTrue}    ${Alert[1]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG}    ${varTrue}    ${Alert[1]}
+#verify server ping fails on pauseflood condition
+    Verify Server Ping Fails        ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+#Edit switchport to disable the uplink interface verifying pause flood alert available and uplink downlink port status
+    Edit switch port    ${Enet_switch_ip}   ${switchport_interface}   ${disable_command}
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${UL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON_NONE}
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}      ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}      ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds    10 min   15s    Validate SubPortStatus And SubPortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${UPLINK_MSG}    ${varFalse}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG1}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG1}    ${varTrue}    ${Alert[1]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG}    ${varTrue}    ${Alert[1]}
+    Edit switch port    ${Enet_switch_ip}   ${switchport_interface}   ${enable_command}
+    Wait Until Keyword Succeeds    15 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${UL_PORT_NAME[0]}     ${PORT_STATUS_LINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds    15 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}      ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}      ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds    10 min   15s    Validate SubPortStatus And SubPortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_UNLINK}   ${PFD_PORT_STATUS_REASON}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${UPLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG1}    ${varTrue}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG1}    ${varTrue}    ${Alert[1]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG}    ${varTrue}    ${Alert[1]}
+    Verify Server Ping Fails        ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+#Clear pauseflood condition by reset port protection and verify server ping successful
+    Clear Pause Flood condition    ${IC_IP}   ${uplink_interface}   ${ic_off_pf}    ${downlink_interface}    ${UL_PORT_NAME[0]}    ${PORT_STATUS_LINK}    ${PORT_STATUS_REASON_ACTIVE}    ${DL_PORT_NAME[0]}   ${PORT_STATUS_REASON_OK}    ${UPLINK_MSG}    ${DOWNLINK_MSG}    ${SERVER_PROF_MSG}
+    Verify Server Ping Successful    ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+
+***Keywords***
+ValidateLIG Pause Flood Protect
+    [Documentation]    Validating if PauseFloodProtection value in LIG
+    ...             Example:
+    ...             ValidateLIG Pause Flood Protect   ${LIG}   ${varFalse}
+    [Arguments]     ${LIGname}   ${PFPValue}
+    Log to console and logfile    ${LIGname}
+    ${ligResp} =         Get LIG Member      ${LIGname}
+    Log to console and logfile    ${ligResp}
+    ${es} =     Get From Dictionary        ${ligResp}    ethernetSettings
+    Log to console and logfile    ${es}
+    ${pfp} =     Get From Dictionary        ${es}    enablePauseFloodProtection
+    Should be Equal as Strings    ${pfp}        ${PFPValue}
+    Log to console and logfile    \nSuccessfully Validated PauseFloodProtection value in LIG
+
+Validate PortStatus And PortStatusReason
+    [Documentation]    Validating if the ports contain the specified portstatus and portStatusReason
+    ...             Example:
+    ...             Validate PortStatus And PortStatusReason   ${ICM_1}        ${UL_PORT_NAME[0]}     ${PORT_STATUS_LINK}   ${PORT_STATUS_REASON_ACTIVE}
+    [Arguments]        ${ICM_NAME}      ${portName}          ${portStatus}      ${portStatusReason}
+    ${l} =  Get Length  ${portName}
+    Log to console and logfile    Validating ports for Pause Flood Detection port status and reason
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${port}      Get Port Data From Port Name        ${ICM_NAME}    ${portName}
+    \   ${pS}       Get From Dictionary     ${port}    portStatus
+    \   ${pSR}      Get From Dictionary     ${port}    portStatusReason
+    \   Should be Equal as Strings    ${pS}        ${portStatus}
+    \   run keyword if    '${pS}'!='${portStatus}'    Fail    "Port Status is not matching"
+    \   run keyword if    '${pSR}'!='${portStatusReason}'    Fail    "Port Status Reason is not matching"
+
+Validate SubPortStatus And SubPortStatusReason
+    [Documentation]    Validating if the subports contain the specified portstatus and portStatusReason
+    ...             Example:
+    ...             Validate SubPortStatus And SubPortStatusReason   ${ICM_1}        ${UL_PORT_NAME[0]}     ${PORT_STATUS_LINK}   ${PORT_STATUS_REASON_ACTIVE}
+    [Arguments]        ${ICM_NAME}      ${portName}          ${portStatus}      ${portStatusReason}
+    ${l} =  Get Length  ${portName}
+    Log to console and logfile    Validating sub-ports for Pause Flood Detection port status and reason
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${port}      Get Port Data From Port Name        ${ICM_NAME}    ${portName}
+    \   #Log to console and logfile    \n port details ${port}
+    \   ${subports}       Get From Dictionary     ${port}    subports
+    \   ${subportSR}      Get From Dictionary     ${subports[0]}    portStatusReason
+    \   ${subport_status}      Get From Dictionary     ${subports[0]}    portStatus
+    \   run keyword if    '${subport_status}'!='${portStatus}'    Fail    " sub port Status is not matching"
+    \   run keyword if    '${subportSR}'!='${portStatusReason}'    Fail    "sub Port Status Reason is not matching"
+
+Edit LI
+    [Documentation]    Editing LI and validating with expected Pauseflood condition
+    ...             Example:
+    ...             Edit LI   ${li}    ${li_disable}        ${varFalse}
+    [Arguments]        ${li}    ${li_set}    ${expected}
+    ${body} =    Build LI body    ${li_set}
+    ${li_uri} =     Get LI URI   ${li}
+    ${resp} =     Fusion Api Get Li    ${li_uri}
+    ${es} =     Get From Dictionary        ${resp}    ethernetSettings
+    ${uri} =     Get From Dictionary        ${es}        uri
+    ${id} =     Get From Dictionary        ${es}        id
+    Set to Dictionary    ${body}    id    ${id}
+    ${resp1} =     Fusion Api Update LI Ethernet Settings    body=${body}        uri=${li_uri}
+    ${task} =    Wait For Task     ${resp1}     240s
+    ${valDict} =     Create Dictionary    status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response    ${task}    ${valDict}
+    ValidateLI Pause Flood Protection   ${li}    ${expected}
+
+Build LI body
+    [Documentation]    Building LI with enablePauseFloodProtection value
+    ...             Example:
+    ...             Build LI body  ${li}
+    [Arguments]        ${liedit}
+    ${liedit} =     Copy Dictionary    ${liedit}
+    ${type} =                       Get Variable Value  ${liedit['type']}
+    ${enablePauseFloodProtection} =           Get Variable Value  ${liedit['enablePauseFloodProtection']}
+    ${body} =     Create Dictionary                type=${type}
+    ...                                         enablePauseFloodProtection=${enablePauseFloodProtection}
+    ...
+    [Return]    ${body}
+
+Perform an Update From Group
+    [Documentation]    Performing update from Group in LI
+    ...             Example:
+    ...             Perform an Update From Group  ${li}   20min   1min
+    [Arguments]        ${li}=${LE}-${LIG1}    ${timeout}=5 min     ${interval}=15s
+    ${li_uri} =    Get LI URI    ${li}
+    ${resp} =         Fusion Api Update from group    ${li_uri}
+    ${task} =        Wait For Task     ${resp}     ${timeout}        ${interval}
+    ${valDict} =     Create Dictionary    status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response    ${task}    ${valDict}
+
+Get LE URI
+    [Documentation]    Getting LE uri
+    ...             Example:
+    ...             Get LE URI  ${LE}
+    [Arguments]     ${LE}
+    ${resp} =   Fusion Api Get Logical Enclosure        param=?filter="'name'=='${LE}'"
+    ${uri} =    Get From Dictionary     ${resp['members'][0]}   uri
+    [Return]    ${uri}
+
+Perform Update From Group in LE
+    [Documentation]    Performing update from Group in LE
+    ...             Example:
+    ...             Perform Update From Group in LE   ${LE}   20min   1min
+    [Arguments]       ${le}     ${timeout}=15 min    ${interval}=15s
+    ${le_uri}    Get LE URI    ${le}
+    ${resp} =       Fusion Api Update Logical Enclosure    ${le_uri}
+    ${task} =       Wait For Task       ${resp}     ${timeout}        ${interval}
+    ${valDict} =    Create Dictionary   status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response    ${task}    ${valDict}
+
+ValidateLI Pause Flood Protection
+    [Documentation]    Validating Pause Flood Protection in LI
+    ...             Example:
+    ...             ValidateLI Pause Flood Protection   ${li}    ${varFalse}
+    [Arguments]        ${li_name}    ${expected}
+    ${li_uri} =     Get LI URI   ${li_name}
+    ${resp} =     Fusion Api Get Li    ${li_uri}
+    ${es} =     Get From Dictionary        ${resp}    ethernetSettings
+    ${pfpFound} =     Get From Dictionary        ${es}    enablePauseFloodProtection
+    ${status} =    Should Be Equal    ${pfpFound}    ${expected}
+    run keyword if    '${status}'=='False'    Fail    "Pause flood protection value not same as expected"
+    Log to console and logfile    \nSuccessfully Validated PauseFloodProtection value in LI
+
+Edit LIG
+    [Documentation]    Editing LIG
+    ...             Example:
+    ...             Edit LIG    ${lig}
+    [Arguments]     ${lig}
+    ${body} =   Build LIG body      ${lig}
+    ${lig} =        Get LIG Member      ${LIGname}
+    ${lig_uri} =    Get LIG Uri         ${LIGname}
+    ${resp} =   Fusion Api Edit LIG    body=${body}    uri=${lig_uri}
+    [Return]    ${resp}
+
+Get Port Data From Port Name
+    [Documentation]    Fetching given port information
+    ...             Example:
+    ...             Get Port Data From Port Name    ${ICM_NAME}      ${portName}
+    [Arguments]        ${ICM_NAME}      ${portName}
+    ${ic} =     Get IC      ${ICM_NAME}
+    ${ports} =  Get From Dictionary     ${ic}    ports
+    ${l} =     Get Length    ${ports}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \   ${port} =     Get From List   ${ports}    ${x}
+    \     Exit For Loop If     '${port['portName']}' == '${portName}'
+    [Return]    ${port}
+
+Edit Ports
+    [Documentation]    Editing Interconnect ports
+    ...             Example:
+    ...             Edit Ports    ${downlink_port_disable}    ${interconnects}    ${downlink_ports}
+    [Arguments]        ${Port}    ${interconnects}    ${ports}
+    ${l}    Get Length    ${Port}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${uri} =    Get IC URI      ${interconnects[0]}
+    \   @{id} =     Split String    ${uri}  /
+    \   ${port_id} =    Get From List   ${id}   3
+    \   ${portid}       catenate    ${port_id}:${ports[${x}]}
+    \   ${portid1}    convert_unicode_to_string    ${portid}
+    \   Set to Dictionary   ${Port[${x}]}  portId     ${portid1}
+    \   ${temp_list} =  Create List     ${Port[${x}]}
+    \   ${Resp}     Fusion Api Edit Interconnect Ports      ${temp_list}        ${uri}
+    \   ${task} =    Wait For Task     ${Resp}     300s
+    \   Run Keyword If  '${task['status_code']}' != '200'  Fail    ELSE  Log to console and logfile   \n-Successfully Edited the port
+    [Return]    ${task}
+
+Edit interconnects Power State
+    [Documentation]    Editing Interconnect power state
+    ...             Example:
+    ...             Edit interconnects Power State    ${INTERCONNECTS}    ${Power_edit}    ${Powerstate}    ${IC_CONFIG_STATE}
+    [Arguments]        ${INTERCONNECTS}    ${Power_edit}    ${Powerstate}    ${State}
+    :FOR     ${interconnect}   IN   @{INTERCONNECTS}
+    \   ${ic_uri} =    Get IC URI    ${interconnect}
+    \   ${body} =   Create Dictionary   op=replace
+    \   ...                             path=${Powerstate}
+    \   ...                             value=${Power_edit}
+    \   ${body} =   Create list     ${body}
+    \   ${resp} =   fusion api patch interconnect   body=${body}    uri=${ic_uri}
+    \   ${task} =   Wait for Task   ${resp}   5min    10s
+    \   ${valDict} =    Create Dictionary   status_code=${200}
+    \   ...                                 taskState=Completed
+    \   Validate Response   ${task}    ${valDict}
+    \   Wait Until Keyword Succeeds    30 min   15s     Validate Interconnect Power State     ${interconnect}        ${Power_edit}
+    \   Wait Until Keyword Succeeds    30 min   15s     Validate Interconnect state    ${INTERCONNECTS}    ${State}
+
+Reset interconnects
+    [Documentation]    Resetting the Interconnect
+    ...             Example:
+    ...             Reset interconnects    ${INTERCONNECTS}    ${Power_edit}    ${Powerstate}    ${IC_CONFIG_STATE}    ${IC_PowerState}
+    [Arguments]        ${INTERCONNECTS}    ${Power_edit}    ${Powerstate}    ${State}    ${IC_PowerState}
+    :FOR     ${interconnect}   IN   @{INTERCONNECTS}
+    \   ${ic_uri} =    Get IC URI    ${interconnect}
+    \   ${body} =   Create Dictionary   op=replace
+    \   ...                             path=${Powerstate}
+    \   ...                             value=${Power_edit}
+    \   ${body} =   Create list     ${body}
+    \   ${resp} =   fusion api patch interconnect   body=${body}    uri=${ic_uri}
+    \   ${task} =   Wait for Task   ${resp}   5min    10s
+    \   ${valDict} =    Create Dictionary   status_code=${200}
+    \   ...                                 taskState=Completed
+    \   Validate Response   ${task}   ${valDict}
+    \   Log to console and logfile  \nVerify ${interconnect} is ${Power_edit}
+    \   Wait Until Keyword Succeeds    30 min   15s     Validate Interconnect Power State     ${interconnect}        ${IC_PowerState}
+    \   Wait Until Keyword Succeeds    30 min   15s     Validate Interconnect state    ${INTERCONNECTS}    ${State}
+
+Validate Interconnect Power State
+    [Documentation]    Validating the power state of Interconnect
+    ...             Example:
+    ...             Validate Interconnect Power State    ${ICM_1}    ${POWER_STATE}
+    [Arguments]        ${ICM_NAME}        ${POWER_STATE}
+    Log to console and logfile    \n\nPower State passed is ${POWER_STATE}
+    ${IC}=    Fusion Api Get Interconnect    param=?filter="'name'=='${ICM_NAME}'"
+    ${powerState} =     Get From dictionary    ${IC['members'][0]}   powerState
+    Should Be Equal As Strings    ${powerState}    ${POWER_STATE}
+
+Validate Interconnect state
+    [Documentation]    Validate state of Interconnect module with the expected state
+    ...             Example:
+    ...             Validate Interconnect state    ${ICM_1}    ${IC_CONFIG_STATE}
+    [Arguments]        ${ICM_NAME}    ${State}
+    ${len_ic} =   Get Length   ${ICM_NAME}
+    :FOR    ${x}    IN RANGE    0  ${len_ic}
+    \    ${IC}=    Fusion Api Get Interconnect    param=?filter="'name'=='${ICM_NAME[${x}]}'"
+    \    ${ic_uri} =     Get From Dictionary     ${IC['members'][0]}     uri
+    \    ${resp} =   fusion api get resource     ${ic_uri}
+    \    ${resp_state}    convert_unicode_to_string    ${resp['state']}
+    \    Should Be Equal As Strings     ${resp_state}    ${State}
+
+Clear Interconnect Port Counters
+    [Documentation]    Clearing Interconnect Port Counters
+    ...             Example:
+    ...             Clear Interconnect Port Counters    ${ICM_1}
+    [Arguments]        ${ICM_1}
+    ${icUri}       Get IC URI    ${ICM_1}
+    ${body}        Create Dictionary
+    ${resp}        Fusion Api clear Interconnect Ports    ${body}    ${ic_uri}
+    Log to console and logfile    \n ${resp}
+    Run Keyword If  ${resp['status_code']} != 200    fail    msg=Clearing Interconnect Ports of ${ICM_1} Failed
+    ...         ELSE    Log to console and logfile  \n Interconnect Ports of ${ICM_1} cleared successfully
+    Log to console and logfile      Waiting for 2 minutes for 'Clear port counters' to clear the statistics data
+    Sleep    2 minutes
+
+Re-apply Interconnect configuration
+    [Documentation]    Reapplying the interconnect configuration
+    ...             Example:
+    ...             Re-apply Interconnect configuration    ${ICM_1}
+    [Arguments]        ${ICM_1}
+    ${icUri}        Get IC URI    ${ICM_1}
+    ${resp}         fusion api reapply interconnect configuration        ${icUri}
+    ${task}         Wait For Task   ${resp}     750s
+    ${valDict}      Create Dictionary   status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response   ${task}    ${valDict}
+
+Perform Enclosure Refresh
+    [Documentation]    Performing refresh of enclosure
+    ${encs} =   Fusion Api Get Enclosures
+    :FOR    ${enc}  IN  @{encs['members']}
+    \       ${resp} =      fusion_api_refresh_enclosure     uri=${enc['uri']}
+    \       ${task} =     Wait For Task    ${resp}     600s    10s
+    \       ${val} =       Create Dictionary   taskState=Completed
+    \       ${result} =    Validate Response    ${task}    ${val}
+
+Perform Server Hardware Refresh
+    [Documentation]    Performing server hardware refresh
+    ...             Example:
+    ...             Perform Server Hardware Refresh    ${server_hardware}
+    [Arguments]        ${server_hardware}
+    ${hardware} =   Get Server Hardware URI    ${server_hardware}
+    ${resp} =      fusion_api_refresh_server_hardware       uri=${hardware}
+    ${task} =      Wait For Task    ${resp}     350s    60s
+    ${val} =       Create Dictionary   taskState=Completed
+    ${result} =    Validate Response    ${task}    ${val}
+
+Reset Loop and Pause Flood Protection
+    [Documentation]    Performing reset loop and port protection
+    ...             Example:
+    ...             Reset Loop and Pause Flood Protection    ${ICM_1}
+    [Arguments]        ${ICM_1}
+    ${icUri}        Get IC URI    ${ICM_1}
+    ${resp}         fusion api reset loop and pause flood protection        ${icUri}
+    ${task}         Wait For Task   ${resp}     700s    10s
+    ${valDict}      Create Dictionary   status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response   ${task}    ${valDict}
+
+#Get Alert Count
+  #  [Documentation]    Getting the number of 'Active' alerts
+  #  ${Response}    Fusion Api Get Alerts    /rest/alerts?filter="alertState EQ 'Active'"
+  #  ${Count}    Get From Dictionary    ${Response}    count
+  #  Return From Keyword If    '${Count}'=='0'    msg=No active alert events found
+  #  [Return]    ${Count}
+
+Get Alert count
+    [Documentation]    Validating the 'Active' alert message with a variable which contains the expected alert message
+    ...             Example:
+    ...             Validate Alert Message    ${UPLINK_MSG}    ${varTrue}    ${Alert[0]}
+    [Arguments]     ${Alerts}
+    ${Response}    Fusion Api Get Alerts    /rest/alerts?filter="alertState EQ '${Alerts}'"
+    ${Count}    Get From Dictionary    ${Response}    count
+    [Return]    ${Count}
+
+Edit Server Profiles from variable
+    [Documentation]   Editing the existing Server Profiles
+    ...             Example:
+    ...             Edit Server Profiles from variable    ${profiles}
+    [Arguments]     ${profiles}
+    Log to console and logfile      Editing SERVER PROFILES
+    :FOR    ${profile}  IN  @{profiles}
+    \   ${profile} =    Copy Dictionary     ${profile}
+    \   ${shuri} =  Get from Dictionary     ${profile}    serverHardwareUri
+    \   ${name}    Get from Dictionary     ${profile}    name
+    \   ${uri} =    Get Server Hardware URI     ${shuri}
+    \   Set to Dictionary   ${profile}  serverHardwareUri   ${uri}
+    \   ${eg} =     Get from Dictionary     ${profile}    enclosureGroupUri
+    \   ${uri} =    Common URI Lookup by name   ${eg}
+    \   Set to Dictionary   ${profile}  enclosureGroupUri   ${uri}
+    \   ${enc} =    Get from Dictionary     ${profile}  enclosureUri
+    \   ${uri} =    Common URI Lookup by name   ${enc}
+    \   Set to Dictionary   ${profile}  enclosureUri    ${uri}
+    \   ${connections} =    Get From Dictionary     ${profile}  connections
+    \   ${connections} =    Lookup Connection Uris  ${connections}
+    \   Set to Dictionary   ${profile}  connections     ${connections}
+    \   ${resturi} =    Get Profile Uri    ${name}
+    \   ${eTag} =   Get Profile ETag    ${name}
+    \   Set to Dictionary   ${profile}  eTag     ${eTag}
+    \   ${resp} =   Fusion Api Edit Server Profile   ${profile}     uri=${resturi}
+    \   ${task} =   Wait For Task   ${resp}     timeout=10 mins      interval=10s
+    \   ${task_state} =     Get From dictionary     ${task}     taskState
+    \   @{message} =    Get From dictionary     ${task}     taskErrors
+        :FOR    ${mess}   IN   @{message}
+        \   ${dict} =   Get from Dictionary     ${mess}     recommendedActions
+        \   Run Keyword If  '${dict[0]}' == 'errormessage'  Exit For Loop
+    \   Should Match Regexp     ${task_state}   ((?i)Warning|Error)
+
+Get Profile Uri
+    [Documentation]     Getting Server Profile URI
+    ...             Example:
+    ...             Get Profile Uri    ${name}
+    [Arguments]    ${name}
+    Log to console and logfile      Getting SERVER PROFILE
+    ${profiles} =   Fusion Api Get Server Profiles  param=?sort=name:ascending
+    Log to console and logfile      ${profiles}
+    ${l} =  Get Length  ${profiles['members']}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   Log to console and logfile      ${profiles['members'][${x}]['name']}
+    \   Run Keyword If  '${profiles['members'][${x}]['name']}' != '${name}'        Continue For Loop
+    \   ${uri} =    Get From Dictionary     ${profiles['members'][${x}]}    uri
+    [Return]    ${uri}
+
+Get Profile ETag
+    [Documentation]     Getting Server Profile Etag
+    ...             Example:
+    ...             Get Profile ETag    ${name}
+    [Arguments]    ${name}
+    Log to console and logfile      Getting SERVER PROFILE
+    ${profiles}    Fusion Api Get Server Profiles  param=?sort=name:ascending
+    ${l} =  Get Length  ${profiles['members']}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   Run Keyword If  '${profiles['members'][${x}]['name']}' != '${name}'        Continue For Loop
+    \   ${eTag} =   Get From Dictionary     ${profiles['members'][${x}]}    eTag
+    [Return]    ${eTag}
+
+
+Interconnect Firmware Update in LI
+    [Documentation]    Performing IC firmware upgrade
+    ...             Example:
+    ...             Interconnect Firmware Update in LI    ${old_SPP_bundle}    ${LI}    @{INTERCONNECTS}    ${ic_firmwareVersion_old}
+    [Arguments]         ${SPP_bundle}    ${LI}    ${INTERCONNECTS}    ${ic_firmwareVersion}
+    ${resp}=   Fusion Api Get Firmware Driver    param=?filter="name='${SPP_bundle}'"    api=500
+    Run Keyword If   ${resp['count']} == 0   Fail    msg=\n No SPP bundle found!!.Please upload the correct SPP bundle
+    ${fw_uri_old}=   Get From Dictionary  ${resp['members'][0]}    uri
+    ${li_uri} =     Get LI URI   ${LI}
+    Set to dictionary     ${liupdate_body}     sppUri    ${fw_uri_old}
+    ${response}=    Fusion Api Li Upgrade Firmware    ${liupdate_body}    ${li_uri}
+    ${task} =     Wait For Task        ${response}   30min    1min
+    Run Keyword If  '${task['taskState']}' !='Completed' or ${task['status_code']} !=200   fail    msg=\nLI Firmware update Failed.
+    ...         ELSE    Log to console and logfile  \n\nLI FW Upgrade completed successfully
+
+Firmware bundle upload
+    [Documentation]    Uploading a firmware bundle
+    ...             Example:
+    ...             Firmware bundle upload    ${SPP_Path}
+    [Arguments]         ${SPP_Path}
+    ${resp} =     Fusion Api Upload Firmware Bundle    api=${300}    localfile=${SPP_Path}
+    Log to console and logfile    Upload spp details ${resp}
+
+Validate Interconnect firmware version
+    [Documentation]    Verifying the interconnect firmware version
+    ...             Example:
+    ...             Validate Interconnect firmware version    ${INTERCONNECTS}    ${ic_firmwareVersion_new}
+    [Arguments]         ${INTERCONNECTS}    ${ic_firmwareVersion}
+    Log to console and logfile    \nValidating the interconnect firmware before update
+    :FOR     ${IC}     IN   @{INTERCONNECTS}
+    \     ${resp} =   Fusion Api Get Interconnect    param=?filter="'name' = '${IC}'"
+    \     ${current_ic_fw_version} =  Get From Dictionary  ${resp['members'][0]}    firmwareVersion
+    \     Run keyword unless    '${current_ic_fw_version}' == '${ic_firmwareVersion}'    Fail    "Firmware version mismatch"
+    \     ...   ELSE     Log to console and logfile    \nFirmware version is verified for ${IC}
+
+Restore From Backup
+    [Documentation]    Restoring from backup
+    ...             Example:
+    ...             Restore From Backup
+    ${status}=  Set Variable    ${EMPTY}
+    ${Response}     Fusion Api Get Backup
+    Run keyword unless  ${Response['status_code']}== 200    Fail    "Unable to Get the latest backup"
+    ${restore_body}     Create Dictionary   type=RESTORE
+    ...                                     uriOfBackupToRestore=${Response['members'][0]['uri']}
+    ${output}       Fusion Api Restore Backup       ${restore_body}
+    Sleep   200sec
+    Run keyword unless  ${output['status_code']}== 202  Fail    "Unable to perform the restore from backup operation"
+    ${restore_resp}     Fusion API Get Restore Status
+    Run keyword unless  ${restore_resp['status_code']}== 200    Fail    "Unable to get the restore details"
+    :FOR    ${index}    IN RANGE    ${restore_resp['count']}
+    \   Run Keyword If  '${restore_resp['members'][${index}]['backupIdToRestore']}' != '${Response['members'][0]['id']}'        Continue For Loop
+    \   ${restore_id} =    Set Variable    ${restore_resp['members'][${index}]['id']}
+    :FOR    ${index}    IN RANGE    50
+    \   sleep   60sec
+    \   ${resp}     Fusion API Get Restore Status   ${restore_id}
+    \   Run keyword unless  ${resp['status_code']}== 200    Fail    "Unable to get the restore id details"
+    \   Run Keyword If  '${resp['progressStep']}' != 'COMPLETED'    Continue For Loop
+    \   ${status} =    Set Variable    ${resp['status']}
+    \   Run Keyword If  '${resp['progressStep']}' == 'COMPLETED'    Exit For Loop
+    Should Be Equal    ${status}    SUCCEEDED
+    Sleep    30
+    Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+
+Get IC
+    [Documentation]    Validating expected IC name with the value of name from response
+    ...             Example:
+    ...             Get IC   ${ICM_NAME}
+    [Arguments]    ${ICM_NAME}
+    ${resp}    fusion api get interconnect
+    ${ics}    Get From Dictionary    ${resp}    members
+    ${l}     Get Length    ${ics}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    ${ic}    Get From List    ${ics}    ${x}
+    \    Exit For Loop If    '${ic['name']}' == '${ICM_NAME}'
+    [Return]    ${ic}
+
+Efuse Interconnect
+    [Documentation]    Performing Efuse of Interconnect
+    ...             Example:
+    ...             Efuse Interconnect   ${HOST}    ${EM_SN}    ${Efuse_Action[0]}    ${Bay_No[0]}
+    [Arguments]         ${HOST}    ${EM_SN}    ${Action}    ${Bay_No}
+    Open Connection And Log In      ${HOST}   root   hpvse1
+    ${EM1}=  Execute Command   /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${EM_SN}
+    ${EM}=  catenate   SEPARATOR=   ${EM1}%bond0
+    ${XAUTH}=  Execute Command  /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${EM_SN} -o t
+    ${efuse_operation}=   Execute Command   curl -i -X POST https://[${EM}]/rest/v1/InterconnectBays/${Bay_No} -k -H "X-Auth-Token: ${XAUTH}" -d '{"Action":"${Action}"}'
+    Close All Connections
+    should contain   ${efuse_operation}  Accepted
+
+Edit Pauseflood Condition
+    [Documentation]    Creating Pauseflood condition with the commands in platform side
+    ...             Example:
+    ...             Edit Pauseflood Condition   ${IC_IP}   ${uplink_interface}   ${ic_set_pf}
+    [Arguments]         ${SSH_SNMP_IP}   ${interface_name}   ${status}   ${SSH_USER}=root
+    Open Connection     ${SSH_SNMP_IP}     timeout=60s
+    Set Suite variable  ${SSH_PASS}     UnoVista
+    Login               ${SSH_USER}     ${SSH_PASS}
+    Log to console and logfile    Logged into the Snmp client : ${SSH_SNMP_IP}
+    SSHLibrary.Write    su - OneView
+    Sleep    3s
+    SSHLibrary.Write    configure terminal
+    SSHLibrary.Read Until    (config)#
+    SSHLibrary.Write    interface ${interface_name}
+    Sleep    5sec
+    SSHLibrary.Read Until    (config-if)#
+    SSHLibrary.Write    pauseflood debug-status ${status}
+    SSHLibrary.Write    exit
+    SSHLibrary.Read Until    (config)#
+    SSHLibrary.Write    exit
+    SSHLibrary.Read Until    OneView#
+    SSHLibrary.Write    exit
+
+Edit switch port
+    [Documentation]    Editing switch port
+    ...             Example:
+    ...             ${Enet_switch_ip}   ${switchport_interface}   ${disable_command}
+    [Arguments]         ${Enet_switch_ip}   ${interface_name}   ${command}    ${SSH_USER}=admin
+    Open Connection     ${Enet_switch_ip}     timeout=60s
+    Set Suite variable  ${SSH_PASS}     welcome123
+    Login               ${SSH_USER}     ${SSH_PASS}
+    SSHLibrary.Write    sys
+    SSHLibrary.Read Until    [HP]
+    SSHLibrary.Write    interface ${interface_name}
+    SSHLibrary.Read Until    [HP-${interface_name}]
+    SSHLibrary.Write    ${command}
+    Sleep   5sec
+    SSHLibrary.Write    quit
+
+Build support dump payload
+    [Documentation]    Building the support dump payload
+    ...             Example:
+    ...             Build support dump payload    ${name}     ${encrypt}
+    [Arguments]     ${name}     ${encrypt}
+    ${payload_dict}=   Create Dictionary  errorCode=${name}
+    ...                                   encrypt=${encrypt}
+    ...                                   excludeApplianceDump=false
+    [return]    ${payload_dict}
+
+Clear Pause Flood condition
+    [Documentation]    Clearing the Pauseflood condition
+    ...             Example:
+    ...             Clear Pause Flood condition    ${IC_IP}   ${uplink_interface}   ${ic_off_pf}    ${downlink_interface}    ${UL_PORT_NAME[0]}    ${PORT_STATUS_LINK}    ${PORT_STATUS_REASON_ACTIVE}    ${DL_PORT_NAME[0]}   ${PORT_STATUS_REASON_OK}    ${UPLINK_MSG}    ${DOWNLINK_MSG}    ${SERVER_PROF_MSG}
+    [Arguments]     ${IC_IP}   ${uplink_interface}   ${ic_off_pf}    ${downlink_interface}    ${UL_PORT_NAME[0]}    ${PORT_STATUS_LINK}    ${PORT_STATUS_REASON_ACTIVE}    ${DL_PORT_NAME[0]}   ${PORT_STATUS_REASON_OK}    ${UPLINK_MSG}    ${DOWNLINK_MSG}    ${SERVER_PROF_MSG}
+    Edit Pauseflood Condition   ${IC_IP}   ${uplink_interface}   ${ic_off_pf}
+    Edit Pauseflood Condition   ${IC_IP}   ${downlink_interface}   ${ic_off_pf}
+    Reset Loop and Pause Flood Protection    ${ICM_1}
+    Wait Until Keyword Succeeds    5 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}        ${UL_PORT_NAME[0]}     ${PORT_STATUS_LINK}   ${PORT_STATUS_REASON_ACTIVE}
+    Log to console and logfile  \nValidate Downlink Port status and reason for downlink port in pause flood detected condition
+    Wait Until Keyword Succeeds    10 min   15s    Validate PortStatus And PortStatusReason    ${ICM_1}      ${DL_PORT_NAME[0]}     ${PORT_STATUS_LINK}      ${PORT_STATUS_REASON_OK}
+    Wait Until Keyword Succeeds    10 min   15s    Validate SubPortStatus And SubPortStatusReason    ${ICM_1}        ${DL_PORT_NAME[0]}     ${PORT_STATUS_LINK}   ${PORT_STATUS_REASON_OK}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${UPLINK_MSG}    ${varFalse}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG}    ${varFalse}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${DOWNLINK_MSG1}    ${varFalse}    ${Alert[0]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG1}    ${varFalse}    ${Alert[1]}
+    Wait Until Keyword Succeeds     10 min   15s      Validate Alert Message      ${SERVER_PROF_MSG}    ${varFalse}    ${Alert[1]}
+
+Verify Port Statistics
+    [Documentation]    Verifying port statistics
+    ...             Example:
+    ...             Verify Port Statistics   ${ic_uri_statistics}     ${port_counters_out_octets}    ${port_counters__out_NU_pkts}
+    [Arguments]     ${ic_uri_statistics}     ${port_counters_out_octets}    ${port_counters__out_NU_pkts}    ${port_counters_In_NU_pkts}
+    ${statistics_data}    Fusion Api Get Interconnect    ${ic_uri_statistics}
+    Log to console and logfile    \n${statistics_data['commonStatistics']}
+    ${port_counters_out_octets1}    Get from Dictionary    ${statistics_data['commonStatistics']}    rfc1213IfOutOctets
+    Run Keyword If    '${port_counters_out_octets}' > ${port_counters_out_octets1}    Log to console and logfile   \n port counters are cleared    ELSE    Fail
+    ${port_counters_out_NU_pkts1}    Get from Dictionary    ${statistics_data['commonStatistics']}    rfc1213IfOutNUcastPkts
+    Run Keyword If    '${port_counters_out_NU_pkts}' > ${port_counters_out_NU_pkts1}    Log to console and logfile   \n port counters are cleared    ELSE    Fail
+    ${port_counters_In_NU_pkts1}    Get from Dictionary    ${statistics_data['commonStatistics']}    rfc1213IfInNUcastPkts
+    Run Keyword If    '${port_counters_In_NU_pkts}' > ${port_counters_In_NU_pkts1}    Log to console and logfile   \n port counters are cleared    ELSE    Fail
+
+Build LIG body
+    [Documentation]    Building LiG body
+    ...             Example:
+    ...             Build LIG body    ${xlig}
+    [Arguments]     ${xlig}
+    ${xlig} =   fusion_api_appliance_setup.Copy Dictionary  ${xlig}
+    ${uplinkSets} =     Copy List   ${xlig['uplinkSets']}
+    ${l} =  Get Length  ${uplinkSets}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${networkType} =    Get From Dictionary     ${uplinkSets[${x}]}    networkType
+    \   ${networks} =       Get From Dictionary     ${uplinkSets[${x}]}    networkUris
+    \   ${networks_native} =        Get From Dictionary     ${uplinkSets[${x}]}    nativeNetworkUri
+    \   Run Keyword If  '${networkType}' == 'Ethernet'      Continue For Loop
+    \   ${networkUris} =    Get FC Uris    ${networks}
+    \   Set to dictionary   ${uplinkSets[${x}]}    networkUris    ${networkUris}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${networkType} =    Get From Dictionary     ${uplinkSets[${x}]}   networkType
+    \   ${networks} =       Get From Dictionary     ${uplinkSets[${x}]}    networkUris
+    \   ${networks_native} =        Get From Dictionary     ${uplinkSets[${x}]}    nativeNetworkUri
+    \   Run Keyword If  '${networkType}' == 'FibreChannel'  Continue For Loop
+    \   ${networkUris} =    Get FCoE Uris   ${networks}
+    \   ${ethernetUris} =   Get Ethernet URIs   ${networks}
+    \   ${ethernetUris_native} =   Get Ethernet URI   ${networks_native}
+    \   ${networkUris} =    combine lists   ${networkUris}    ${ethernetUris}
+    \   Set to dictionary   ${uplinkSets[${x}]}   networkUris    ${networkUris}
+    \   Set to dictionary   ${uplinkSets[${x}]}   nativeNetworkUri    ${ethernetUris_native}
+    ${name} =                       Get Variable Value  ${xlig['name']}
+    ${enclosureIndexes} =           Get Variable Value  ${xlig['enclosureIndexes']}
+    ${enclosureType} =              Get Variable Value  ${xlig['enclosureType']}
+    ${ethernetSettings} =           Get Variable Value  ${xlig['ethernetSettings']}
+    ${fcoeSettings} =               Get Variable Value  ${xlig['fcoeSettings']}
+    ${interconnectBaySet} =         Get Variable Value  ${xlig['interconnectBaySet']}
+    ${interconnectMapTemplate} =    Get Variable Value  ${xlig['interconnectMapTemplate']}
+    ${redundancyType} =             Get Variable Value  ${xlig['redundancyType']}
+    ${stackingMode} =               Get Variable Value  ${xlig['stackingMode']}
+    ${telemetryConfiguration} =     Get Variable Value  ${xlig['telemetryConfiguration']}
+    ${snmpConfiguration} =          Get Variable Value  ${xlig['snmpConfiguration']}
+    ${enclosureIndexes} =           Get Variable Value  ${xlig['enclosureIndexes']}
+    #${uplinkSets} =                 Get Variable Value  ${xlig['uplinkSets']}
+    ${body} =   Fusion Api Create LIG Payload   name=${name}
+    ...                                         enclosureIndexes=${enclosureIndexes}
+    ...                                         enclosureType=${enclosureType}
+    ...                                         ethernetSettings=${ethernetSettings}
+    ...                                         fcoeSettings=${fcoeSettings}
+    ...                                         interconnectBaySet=${interconnectBaySet}
+    ...                                         interconnectMapTemplate=${interconnectMapTemplate}
+    ...                                         redundancyType=${redundancyType}
+    ...                                         stackingMode=${stackingMode}
+    ...                                         telemetryConfiguration=${telemetryConfiguration}
+    ...                                         snmpConfiguration=${snmpConfiguration}
+    ...                                         uplinkSets=${uplinkSets}
+    [Return]    ${body}
+
+Remove All User
+    [Documentation]    Removing all users from OneView
+    ${users} =  Fusion Api Get User
+    :FOR    ${user}    IN  @{users['members']}
+    \       Continue For Loop If    '${user['userName']}'=='Administrator'
+    \       Continue For Loop If    '${user['userName']}'=='administrator'
+    \       Continue For Loop If    '${user['userName']}'=='HardwareSetup'
+    \       ${resp} =   Fusion Api Remove User      uri=${user['uri']}
+
+Efuse Server
+    [Documentation]    Performing blade efuse
+    ...             Example:
+    ...             Efuse Server    ${HOST}    ${EM_SN}    ${Efuse_Action[0]}  ${Server_No}
+    [Arguments]         ${HOST}    ${EM_SN}    ${Action}    ${Server_No}
+    Open Connection And Log In      ${HOST}   root   hpvse1
+    ${EM1}=  Execute Command   /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${EM_SN}
+    ${EM}=  catenate   SEPARATOR=   ${EM1}  %bond0
+    ${XAUTH}=  Execute Command  /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${EM_SN} -o t
+    ${eoff}=   Execute Command    curl -g -x "" -k -i -H "x-auth-token:${XAUTH}" -X POST https://[${EM}]/rest/v1/BladeBays/${Server_No} -d '{"Action":"${Action}"}'
+    Close All Connections
+    should contain   ${eoff}  Accepted
+    Sleep    40sec
+
+Get ICM IP
+    [Documentation]    Fetching ICM IP
+    ...             Example:
+    ...             Get ICM IP    ${ICM_NAME}
+    [Arguments]         ${ICM_NAME}
+    ${IC}=    Fusion Api Get Interconnect    param=?filter="'name'=='${ICM_NAME}'"
+    ${address}=     Get From Dictionary     ${IC['members'][0]}   ipAddressList
+    ${ipaddress}=     Get From Dictionary     ${address[0]}   ipAddress
+    ${ipadress1}     Convert to String    ${ipaddress}
+    [Return]    ${ipadress1}
+
+Validate Alert Message
+    [Documentation]    Validating the 'Active' alert message with a variable which contains the expected alert message
+    ...             Example:
+    ...             Validate Alert Message    ${UPLINK_MSG}    ${varTrue}    ${Alert[0]}
+    [Arguments]     ${msg}    ${flag}    ${Alerts}
+    ${Response}    Fusion Api Get Alerts    /rest/alerts?filter="alertState EQ '${Alerts}'"
+    ${Count}    Get From Dictionary    ${Response}    count
+    Run Keyword If    '${Count}'=='0'    Fail    "Failed as alert message is not found"
+    ${Members}    Get From Dictionary    ${Response}    members
+    :FOR    ${Index}    IN RANGE    0    ${Count}
+    \    ${Alert}        Get From List    ${Members}    ${Index}
+    \    ${AlertDesc}    Get From Dictionary    ${Alert}    description
+    \    Exit For Loop If     '${AlertDesc}' == '${msg}'
+    run keyword if    '${flag}'=='True'   Should Be Equal As Strings     ${AlertDesc}    ${msg}    ELSE   Should Not Be Equal As Strings     ${AlertDesc}    ${msg}
+
+
+Validate LIG LI Consistency
+    [Documentation]    Validating LIG LI Consistency
+    ...             Example:
+    ...             Validate LIG LI Consistency    ${Consistency_State[0]}
+    [Arguments]         ${expected}
+    ${IC}=    Fusion Api Get LI
+    Log to Console    \n ${IC}
+    Run Keyword If  '${IC['members'][0]['consistencyStatus']}' != '${expected}'     Fail
+
+
+Get Valid Server IP list
+    [Documentation]    Gets valid server IP list
+    [Arguments]    ${ilo_details}    ${server_details}    ${up_interface}    ${down_interface}    ${get_interface}
+    ${Adapter_list}    Get Valid Interface List    ${ilo_details}    ${server_details}    ${up_interface}    ${down_interface}
+    ${ifconfig_output_list}    Create List
+    ${Len_of_adapter}    Get Length    ${Adapter_list}
+    :For    ${x}    INRANGE    0    ${Len_of_adapter}
+    \    ${ifconfig_name}    Replace String Using Regexp    ${get_interface}    interface-name    ${Adapter_list[${x}]}
+    \    ${Ip_output}    Get Valid Server IP    ${ilo_details}    ${server_details}    ${ifconfig_name}
+    \    Log to console and logfile    ${Ip_output}
+    \    Append to list    ${ifconfig_output_list}    ${Ip_output}
+    ${temp_list}    Convert To String    ${ifconfig_output_list}
+    ${ret}    Get Regexp Matches    ${temp_list}    inet (\\d+.\\d+.\\d+.\\d+)\\s+netmask
+    ${match} =    Create List
+    ${length1} =    Get Length  ${ret}
+    :FOR    ${x}    IN RANGE    0   ${length1}
+    \    Append To List   ${match}    ${ret[${x}]}
+    ${length} =     Get Length  ${match}
+    ${Ip_List} =    Create List
+    :FOR    ${x}    IN RANGE    0   ${length}
+    \    ${Ret}    ${match1}    Should Match Regexp    ${match[${x}]}    inet (\\d+.\\d+.\\d+.\\d+)\\s+netmask
+    \    Log to console   values ${match[${x}]}
+    \    Append To List   ${Ip_List}    ${match1}
+    Log to console and logfile    ${Ip_List}
+    [Return]    ${Ip_List}
+
+Get Valid Interface List
+    [Documentation]    Gets valid interface list
+    [Arguments]    ${ilo_details}    ${server_details}    ${up_interface}    ${down_interface}
+    ${ip_adapter}    Get Server IP Linux    ${ilo_details}    ${server_details}
+    ${ret}    Get Regexp Matches    ${ip_adapter}    \\d+:\\s+(.*):\\s+<BROADCAST
+    ${ret_1}    Get Regexp Matches    ${ip_adapter}    \\d+:\\s+(.*):\\s+<NO-CARRIER
+    ${Interface_list} =    Create List
+    ${length} =     Get Length  ${ret}
+    :FOR    ${x}    IN RANGE    0   ${length}
+    \    Append To List   ${Interface_list}    ${ret[${x}]}
+    ${length} =     Get Length    ${Interface_list}
+    ${Adapter_name} =    Create List
+    :FOR    ${x}    IN RANGE    0   ${length}
+    \    ${ret}    ${match}    Should Match Regexp    ${Interface_list[${x}]}    \\d+:\\s+(.*):\\s+<BROADCAST
+    \    Log to console   values ${match}
+    \    Append To List   ${Adapter_name}    ${match}
+    Remove Values From List    ${Adapter_name}    virbr0-nic
+    Remove Values From List    ${Adapter_name}    ens2f4
+
+    ${Len_of_adapter}    Get Length    ${Adapter_name}
+    ${Adapter_list}    Create list
+    :FOR    ${x}    INRANGE    0    ${Len_of_adapter}
+    \    ${temp}    Convert To String    ${Adapter_name[${x}]}
+    \    Append to list    ${Adapter_list}    ${temp}
+    Log to console and logfile    ${Adapter_list}
+
+    ${Len_of_adapter_list}    Get Length    ${Adapter_list}
+    :FOR    ${x}    INRANGE    0    ${Len_of_adapter_list}
+    \    ${ifup_adapter}    Replace String Using Regexp   ${up_interface}    interface-name    ${Adapter_list[${x}]}
+    \    Up the Interface    ${ilo_details}    ${server_details}    ${ifup_adapter}
+
+    ${Non_Interface_list} =    Create List
+    ${length} =     Get Length  ${ret_1}
+    :FOR    ${x}    IN RANGE    0   ${length}
+    \    Append To List   ${Non_Interface_list}    ${ret_1[${x}]}
+
+    ${length} =     Get Length    ${Non_Interface_list}
+    ${Non_Adapter_name} =    Create List
+    :FOR    ${x}    IN RANGE    0   ${length}
+    \    ${ret}    ${match}    Should Match Regexp    ${Non_Interface_list[${x}]}    \\d+:\\s+(.*):\\s+<NO-CARRIER
+    \    Log to console   values ${match}
+    \    Append To List   ${Non_Adapter_name}    ${match}
+    Remove Values From List    ${Non_Adapter_name}    virbr0
+    Append To List   ${Non_Adapter_name}   ens2f4
+    ${Len_of_non_adapter}    Get Length    ${Non_Adapter_name}
+    ${Non_Adapter_list}    Create list
+    :FOR    ${x}    INRANGE    0    ${Len_of_non_adapter}
+    \    ${temp}    Convert To String    ${Non_Adapter_name[${x}]}
+    \    Append to list    ${Non_Adapter_list}    ${temp}
+    Log to console and logfile    ${Non_Adapter_list}
+
+    ${Len_of_non_adapter_list}    Get Length    ${Non_Adapter_list}
+    :FOR    ${x}    INRANGE    0    ${Len_of_non_adapter_list}
+    \    ${ifdown_adapter}    Replace String Using Regexp   ${down_interface}    interface-name    ${Non_Adapter_list[${x}]}
+    \    Down the Interface    ${ilo_details}    ${server_details}    ${ifdown_adapter}
+
+    [Return]    ${Adapter_list}
+
+Get Valid Server IP
+    [Documentation]    Gets valid server IP
+    [Arguments]         ${ilo_details}    ${server_details}    ${ifconfig_adapter_name}
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=40s
+    ${login}    SSHLibrary.Login    ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Write    ${server_details['username']}
+    Sleep    10sec
+    SSHLibrary.Write    ${server_details['password']}
+    Sleep    10sec
+    SSHLibrary.Read Until    ~]#
+    SSHLibrary.write    ${ifconfig_adapter_name}
+    Sleep    10sec
+    ${cmd_out}    SSHLibrary.Read
+    Sleep    15sec
+    SSHLibrary.Write    exit
+    SSHLibrary.Read Until    localhost login:
+    Sleep    5sec
+    SSHLibrary.Close All Connections
+    [Return]    ${cmd_out}
+
+Get Server IP Linux
+    [Documentation]    Gets the valid ip of the server.
+    [Arguments]         ${linux_ilo_details}    ${linux_server_details}
+    SSHLibrary.Open Connection     ${linux_ilo_details['ilo_ip']}     prompt=>     timeout=40s
+    ${login}    SSHLibrary.Login               ${linux_ilo_details['username']}     ${linux_ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    20sec
+    SSHLibrary.Read
+    Sleep    5sec
+    SSHLibrary.Write     ${linux_server_details['username']}
+    Sleep    10sec
+    SSHLibrary.Write     ${linux_server_details['password']}
+    Sleep    10sec
+    SSHLibrary.Read
+    SSHLibrary.Write     ip addr
+    Sleep    10sec
+    ${stdout}    SSHLibrary.Read
+    Sleep    15sec
+    SSHLibrary.Write    exit
+    SSHLibrary.Read Until    localhost login:
+    Sleep    5sec
+    SSHLibrary.Close All Connections
+    [Return]    ${stdout}
+
+Down the Interface
+    [Documentation]    Disables the interface
+    [Arguments]         ${ilo_details}    ${server_details}    ${ifdown_adapter}
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=40s
+    ${login}    SSHLibrary.Login    ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Write    ${server_details['username']}
+    Sleep    10sec
+    SSHLibrary.Write    ${server_details['password']}
+    Sleep    10sec
+    SSHLibrary.Read Until    ~]#
+    SSHLibrary.write    ${ifdown_adapter}
+    Sleep    10sec
+    SSHLibrary.Write    exit
+    SSHLibrary.Read Until    localhost login:
+    Sleep    5sec
+    SSHLibrary.Close All Connections
+
+Up the Interface
+    [Documentation]    Enables the interface
+    [Arguments]         ${ilo_details}    ${server_details}    ${ifup_adapter}
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=40s
+    ${login}    SSHLibrary.Login    ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Write    ${server_details['username']}
+    Sleep    10sec
+    SSHLibrary.Write    ${server_details['password']}
+    Sleep    10sec
+    SSHLibrary.Read Until    ~]#
+    SSHLibrary.write    ${ifup_adapter}
+    Sleep    10sec
+    SSHLibrary.Write    exit
+    SSHLibrary.Read Until    localhost login:
+    Sleep    5sec
+    SSHLibrary.Close All Connections
+
+Ping Server IP
+    [Documentation]    Pinging the given server ip
+    ...             Example:
+    ...             Ping Server IP    ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+    [Arguments]         ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+    startthread    ${number}    ${server_ip}    ${name}    ${flag}
+    Sleep    20
+    ${contents1}=    OperatingSystem.Get File    ${name}
+    Log to console and logfile    ${contents1}
+    [Return]     ${contents1}
+
+Verify Server Ping Successful
+    [Documentation]    Verifying if the server ping is successful by checking if loss is 0% and if it does not contain destination unreachable or Request timed out
+    ...             Example:
+    ...             Verify Server Ping Successful    ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+    [Arguments]         ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+    ${loss} =    Ping Server IP    ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+    ${match}   ${ret1}    Should Match Regexp    ${loss}    Lost\\s+=\\s+\\d+\\s+\\((\\d+%)\\s+loss\\)
+    Run Keyword If    '${ret1}' == '0%'    Log to console and logfile    \n Pinging is successful    ELSE    Fail
+    Should Not Contain    ${loss}    ${time_out}
+    Should Not Contain    ${loss}    ${Dest_unreachable}
+
+Verify Server Ping Fails
+    [Documentation]    Verifying if server ping fails by checking if the response does not contain TTL=
+    ...             Example:
+    ...             Verify Server Ping Fails    ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+    [Arguments]         ${number}    ${server_ip}    ${name}    ${flag}    ${file_path}
+    ${loss} =    Ping Server IP    ${number}    ${server_ip}    ${name}    ${flag}     ${file_path}
+    Should Not Contain    ${loss}    TTL=
+
+Validate Alert Message compliance
+    [Documentation]    Validating the 'Active' alert message with a variable which contains the expected alert message
+    ...             Example:
+    ...             Validate Alert Message    ${UPLINK_MSG}    ${varTrue}    ${Alert[0]}
+    [Arguments]     ${msg}    ${flag}    ${Alerts}    ${Alert_id}
+    Log to console and logfile        \Alerts is:${Alerts}
+    ${Response}    Fusion Api Get Alerts    /rest/alerts?filter="alertState EQ '${Alerts}'"
+    ${Count}    Get From Dictionary    ${Response}    count
+    Run Keyword If    '${Count}'=='0'    Fail    "Failed as alert message is not found"
+    ${Members}    Get From Dictionary    ${Response}    members
+    :FOR    ${Index}    IN RANGE    0    ${Count}
+    \    ${Alert}        Get From List    ${Members}    ${Index}
+    \    ${AlertID}    Get From Dictionary    ${Alert}    alertTypeID
+    \    Exit For Loop If   '${AlertID}' == '${Alert_id}'
+    Log to console and logfile        \AlertID is:${AlertID}
+    ${AlertDesc}    Get From Dictionary    ${AlertID}    description
+    Log to console and logfile        \AlertDesc is:${AlertDesc}
+    #Exit For Loop If     '${AlertDesc}' == '${msg}'
+    run keyword if    '${flag}'=='True'   Should Be Equal As Strings     ${AlertDesc}    ${msg}    ELSE   Should Not Be Equal As Strings     ${AlertDesc}    ${msg}

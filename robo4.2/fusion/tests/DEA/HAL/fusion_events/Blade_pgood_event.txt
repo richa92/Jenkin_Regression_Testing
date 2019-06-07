@@ -1,0 +1,87 @@
+*** Settings ***
+Documentation    Test suite to validate blade related events on OneView and FLM
+...    It covers testing of: (these events are for Storage Blade ONLY)
+...        BladeEfusePGoodFault
+...        BladeEfusePGoodFaultCleared
+...    = GENERIC USAGE =
+...    | pybot | -v ENC_SERIAL_NO:[enclosure serial #] | -v APPLIANCE_IP:<ipv4> | -v CIM_Linux_IP:<ipv4> |-v GIT_REPO_ROOT: | Blade_pgood_event.txt |
+...    = Variables =
+...    | GIT_REPO_ROOT |      Required: Repo root path if NOT defined in environment variable this is mgmtfw root location|
+...    | ENC_SERIAL_NO |      Optional: If omitted, will use the 1st enclosure detected in OV |
+...    | APPLIANCE_IP |       Required: OneView IPv4 address |
+...    | CIM_Linux_IP |       Required:CI Manager ipv4 under test |
+
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Library           RoboGalaxyLibrary
+Library           MgmtFWLibrary
+Library           json
+
+Suite Setup       Configure Events Test Environment
+Suite Teardown    Run Keywords  Logout of EM RIS   AND    Logout of Fusion Via REST
+
+*** Test Case ***
+TC 01: Verify Blade Efuse PGood And Efuse PGood Cleared Events
+    [Documentation]    This test is to verify events for Storage Blade EfusePGood and EfusePGood Cleared with StorageBladeFaultInjection
+    [Tags]    Blade    Alert    Events    FLM1.01     FLM2.00    OV3.10    Automated
+    ${occupied_bigbird_list}=    Get List of Occupied Bigbird Blade Bays
+    Should Not Be Empty    ${occupied_bigbird_list}    msg=No BigBird Blades present in the enclosure
+    : FOR    ${blade_bay}    IN    @{occupied_bigbird_list}
+    \    Log    message=Injecting EfusePGood StorageBladeFault for bay:${blade_bay} and verify status/alert event in diags audit log    console=True
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${Blade_Fault_Status}=    Set EM RIS Faults    StorageBladeFaultInjection    ${blade_bay}    EFusePGood    true
+    \    Should Be Equal As Strings    ${Blade_Fault_Status}    <Response [200]>
+    \    Sleep    8
+    \    Wait for Device Critical    ${Blade_Device}    ${blade_bay}
+    \    ${fault_status}=    Get Blade Fault Status    ${blade_bay}    E-Fuse PGood
+    \    Should Be Equal     ${fault_status}     ${HEALTH_Critical}
+    \    ${fault_status}=    Get Blade Fault Status    ${blade_bay}    System PGood
+    \    Should Be Equal     ${fault_status}     ${HEALTH_OK}
+    \    ${blade_health_post_frufault}=    Get Blade Health    ${blade_bay}
+    \    Should Be Equal     ${blade_health_post_frufault}     ${HEALTH_Critical}  
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_Blade_Critical}    ${Blade_Device}    ${blade_bay}    250
+    \    Verify Audit Log Alert Event    ${EL_Blade_EfusePGoodFault}    ${Blade_Device}    ${blade_bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_EfusePGoodFault}    ${last_fusion_event_id}
+    \    Log    message=Clearing EfusePGood StorageBladeFault for bay:${blade_bay} and verify ok status/alert event in diags audit log    console=True
+    \    ${Blade_Fault_Status}=    Set EM RIS Faults    StorageBladeFaultInjection    ${blade_bay}    EFusePGood    false
+    \    Should Be Equal As Strings    ${Blade_Fault_Status}    <Response [200]>
+    \    Sleep    5
+    \    Wait for Device OK    ${Blade_Device}    ${blade_bay}
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_Blade_OK}    ${Blade_Device}    ${blade_bay}    250
+    \    Verify Audit Log Alert Event    ${EL_Blade_EfusePGoodFaultCleared}    ${Blade_Device}    ${blade_bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_EfusePGoodFaultCleared}    ${last_fusion_event_id}
+    [Teardown]    Run Keyword If Test Failed    Set EM RIS Faults    StorageBladeFaultInjection    ${blade_bay}    EfusePGood    false
+       
+TC 02: Verify BladeSystemPGoodFault & BladeSystemPGoodFaultCleared
+    [Documentation]    This test will verify BladeSystemPGoodFault & BladeSystemPGoodFaultCleared events
+    [Tags]    Blade    Alert    Events    FLM1.01    FLM2.00    OV3.10    Automated
+    ${present_list}=    Get List of Occupied Bigbird Blade Bays
+    Should Not Be Empty    ${present_list}    msg=No Bigbird blades present in the enlcosure
+    : FOR    ${blade_bay}    IN    @{present_list}
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    # Injecting under voltage fault on storage blade and verifying the error message and events
+    \    ${blade_diagfault_status}=    Set EM RIS Faults   StorageBladeFaultInjection    ${blade_bay}    EfusePGood    true/IpUndervoltage
+    \    Should Be Equal As Strings    ${blade_diagfault_status}    <Response [200]>
+    \    Sleep    20
+    \    Wait for Device Critical    ${Blade_Device}    ${blade_bay}
+    \    # Clearing under voltage fault on storage blade and verifying the events
+    \    ${blade_diag_faultclear_status}=    Set EM RIS Faults   StorageBladeFaultInjection    ${blade_bay}    EfusePGood    false/IpUndervoltage
+    \    Should Be Equal As Strings    ${blade_diag_faultclear_status}    <Response [200]>
+    \    Sleep    20
+    \    Wait for Device OK    ${Blade_Device}    ${blade_bay}
+    \    # Verifying events in audit log file
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_Blade_SystemPGoodFault}    ${Blade_Device}    ${blade_bay}    900
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_SystemPGoodFault}    ${last_fusion_event_id}
+    \    Verify Audit Log Alert Event    ${EL_Blade_SystemPGoodFaultCleared}    ${Blade_Device}    ${blade_bay}    900
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_SystemPGoodFaultCleared}    ${last_fusion_event_id}
+    [Teardown]    Run Keyword If Test Failed    Set EM RIS Faults   StorageBladeFaultInjection    ${blade_bay}    EfusePGood    false/IpUndervoltage

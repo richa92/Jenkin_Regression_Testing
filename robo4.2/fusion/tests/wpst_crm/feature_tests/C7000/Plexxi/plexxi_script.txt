@@ -1,0 +1,1737 @@
+*** Settings ***
+Documentation       Plexxi
+Library             json
+Library             Collections
+Library             RoboGalaxyLibrary
+Library             FusionLibrary
+Library             SSHLibrary
+Library             String
+Library             Telnet
+Variables           data_variables_rack.py
+Library             ServerOperations
+Library             back_ping
+Resource            ../../../../../Resources/api/fusion_api_resource.txt
+
+***Variables***
+${user_uri}     /rest/users
+${restart}       restart.txt
+${single_ns_pingfile}       single_ns.txt
+${single_nw_pingfile}       single_nw.txt
+${ping_team}       Ping_team.txt
+${ping_lost}    Lost
+${number_restart}       1000
+${number}      5
+
+***Test cases****
+
+1_API_TC_[Fabrics]__Configure OV pack in Plexxi connect and verify the fabric is created automatically verify the state is unmanaged
+    [Documentation]    Configure OV pack in Plexxi connect and verify the fabric is created automatically verify the state is unmanaged
+    Set Log Level    Trace
+    Fusion Api Login Appliance    ${APPLIANCE_IP_4_20}    ${admin_credentials}
+    Setup Plexxi connect appliance     ${oneview_config}
+    ${resp}=    Fusion Api Get Fabric     param=?filter="'name'='${Fabric_name}'"
+    Run Keyword If  '${resp['status_code']}' == '202'    Log    \nStatus Code: ${resp['status_code']} \nSuccessfully!! Imported the fabric successfully\n    console=True
+    Run Keyword If    '${resp['members'][0]['state']}' == 'Unmanaged'    Log    fabric is in Unmanaged state    console=True    ELSE    Fail
+
+2_API_TC_[Fabrics]__Verify the various attributes like state, plexxi manger, version and link works in the fabrics page
+    [Documentation]    Verify the various attributes like state, plexxi manger, version and link works in the fabrics page
+    ${resp}=    Fusion Api Get Fabric     param=?filter="'name'='${Fabric_name}'"
+    Validate connect version and plexxi manager    ${resp}    ${plexxi_connect_version}    ${plexxi_connect_host}
+
+3_API_TC_[Fabrics]__Edit the fabric and change the name of the fabric after the OV pack configuration
+    [Documentation]     Editing the name of the fabric and verifying the name in fabric page in one view
+    ${resp_fab}=    Fusion Api Get Fabric    param=?filter="'name'='${Fabric_name}'"
+    ${uri}=    Get From Dictionary    ${resp_fab['members'][0]}    uri
+    Set To Dictionary    ${resp_fab['members'][0]}     name     ${Fabric_name}_new
+    ${resp}=    Fusion Api Edit Fabric    ${resp_fab['members'][0]}   ${uri}
+    Wait For Task2    ${resp}    10m   5
+    ${resp_after_edit}=   Fusion Api Get Fabric    param=?filter="'name'='${Fabric_name}_new'"
+    Should be equal     ${resp_after_edit['members'][0]['name']}     ${Fabric_name}_new
+    ${uri}=    Get From Dictionary    ${resp_after_edit['members'][0]}    uri
+    Set To Dictionary    ${resp_after_edit['members'][0]}     name     ${Fabric_name}
+    ${resp}=    Fusion Api Edit Fabric    ${resp_after_edit['members'][0]}   ${uri}
+    Wait For Task2    ${resp}    10m   5
+
+4_API_TC_[Fabrics]__Before claiming the fabric add server hardware to the OV applianceand verify the ports in hardware page
+    [Documentation]    Before claiming the fabric add server hardware to the OV applianceand verify the ports in hardware page
+    :FOR   ${x}   IN RANGE   1    ${Rack_Length}
+    \   ${server}=     Add Server Hardware    ${DH_380_Ips['Rack_${x}']}     ${DL_SH_body}
+    \   Verify port address should be empty    ${server}
+
+5_API_TC_[Fabrics]__Claim the fabric and verify the fabric state is moved to configured state and switches are added into configured state
+    [Documentation]    After fabric claim, Verify OV discover Plexxi switches including the neighbour data
+    Sleep    5min
+    Log     wait for oneview to configure in connect     console=True
+    ${resp}=   Fusion Api Get Fabric    param=?filter="'name'='${Fabric_name}'"
+    ${uri}=    Get From Dictionary    ${resp['members'][0]}    uri
+    ${resp}=    Fusion Api Patch fabric    ${Fabric_claim}    ${uri}
+    Wait For Task2    ${resp}    10m   5
+    Sleep   200s
+    ${resp}=     Fusion Api Get Switch
+    Run Keyword Unless   ${resp['count']} != 0  FAIL   switches not added
+    : FOR  ${x}   IN RANGE    0    ${resp['count']}
+    \   Run Keyword Unless   '${resp['members'][${x}]['state']}'  ==  'Configured'    FAIL   Fabric not in configured state
+
+6_API_TC_[Fabrics]__Once the fabric is claimed verify the switch names,state, model, FW and links to the switches is working
+    [Documentation]   Once the fabric is claimed verify the switch names,state, model, FW and links to the switches is working
+    :For  ${x}    IN RANGE   1    ${Rack_length}
+    \    ${switch_Rack}     Set Variable   ${Plexxi_switch_names['Rack_${x}']}
+    \    Switch details Validation      ${switch_Rack}     ${switch_details}
+
+7_API_TC_[Fabrics]__Try refresh the fabric and verify all the switches in the fabric is getting refreshed
+    [Documentation]    Try refresh the fabric and verify all the switches in the fabric is getting refreshed
+    ${switches_resp}=   Fusion Api Get Switch
+    ${resp}=    Fusion Api Get Fabric    param=?&filter="'name'=='${Fabric_name}'"
+    ${fabric_uri}=    Get From Dictionary    ${resp['members'][0]}    uri
+    ${resp}=    Fusion Api Patch fabric    ${refresh_body}   ${fabric_uri}
+    ${location}=     Get Variable Value      ${resp['headers']['location']}
+    Sleep    40s
+    ${task}=    Fusion Api Get Task     uri=${location}
+    Run keyword Unless    '${task['taskState']}' == 'Completed'    FAIL
+
+8_API_TC_[LSG]__Create LSG with the plexxi template for both types of plexxi switches Verify the LSG created successfully and verify the data
+    [Documentation]    Creation of LSG and checking the no of switches in LSG
+    ${resp}    Add Logical Switch Group from variable    ${lsgs}
+    ${LSG_details} =    Fusion Api Get LSG      param=?filter="'name'=='${LSG}'"
+    ${switchmapTemplate} =  Get from Dictionary    ${LSG_details['members'][0]['switchMapTemplate']}    switchMapEntryTemplates
+    ${length}    Get Length    ${switchmapTemplate}
+    Run Keyword If    ${length} != 2    Fail    msg="The number of switches allowed is 2"
+
+9_API_TC_[LSG]__Edit LSG and Change the name of the LSG before creating LS
+    [Documentation]    Editing the name of the LSG
+    Edit LSG    ${LSG}   ${LSG_new}
+
+10_API_TC_[LSG]__Delete LSG, which was created, and verify the delete action is completed successfully and add back the LSG
+    [Documentation]    Deleting the LSG and adding back the LSG
+    ${Resp} =    Fusion Api Delete Lsg      LSG_new
+    ${task}=    Wait For Task2    ${Resp}    10m    5
+    ${LSG_resp} =    Fusion Api Get LSG      param=?filter="'name'=='LSG_new'"
+    Run Keyword If    ${LSG_resp['count']}== 0    Add Logical Switch Group from variable    ${lsgs}    ELSE    Fail
+
+11_API_TC_[Switch]__Before LS creation in LS attribute should be empty
+    [Documentation]    Before LS creation in LS attribute should be empty
+    ${len}=    Get Length    ${switch_names}
+    : FOR   ${y}    IN RANGE   0   ${len}
+    \   ${LS_Uri}=    LS verification in switch page     ${y}
+    \   Should Be Equal    '${LS_Uri}'    'None'
+
+12_API_TC_[LS]_Create LS by choosing the LSG and switches Verify the switch state and other attributes in the LS page
+    [Documentation]    Create LS by choosing the LSG and switches Verify the switch state and other attributes in the LS page
+    Creation of LS    ${ls_names[0]}    ${lss}    ${Plexxi_switch_names['Rack_1']}
+    Verify Switch State in LS     ${ls_names[0]}     Configured
+
+13_API_TC_[LS]_Edit name of the LSG after LS creation and And verify the "used by" field set by LS name
+    [Documentation]    Edit name of the LSG after LS creation and And verify the "used by" field set by LS name
+    Edit LSG    ${LSG}   ${LSG_new}
+    Verify Switch State in LS     ${ls_names[0]}     Configured
+    Edit LSG    ${LSG_new}   ${LSG}
+    Verify Switch State in LS     ${ls_names[0]}     Configured
+
+14_API_TC_[LS]_Refresh LS and verify only the two switches in the LS get refreshed Re-apply configuration verification
+    [Documentation]    Refresh LS and verify only the two switches in the LS get refreshed Re-apply configuration verification
+    ${resp}=    Fusion Api Get LS
+    ${Ls_uri}    Get From Dictionary    ${resp['members'][0]}    uri
+    ${uri}=    catenate    ${Ls_uri}/refresh
+    ${update_resp} =   Fusion Api Update LS    uri=${uri}
+    ${location}=     Get Variable Value      ${update_resp['headers']['location']}
+    Wait Until Keyword Succeeds   10 min    20s     Verify Task State     ${location}
+    Verify Switch State in LS     ${ls_names[0]}     Configured
+
+15_API_TC_[LS]_Edit LS and try to choose different switches and verify the new switches are in coming in configured state
+    [Documentation]    Edit LS and try to choose different switches and verify the new switches are in coming in configured state
+    ${switchuri_list}=    Get switch uris based on rack    ${Plexxi_switch_names['Rack_2']}
+    ${resp}=    Fusion Api Get LS
+    ${Ls_uri}    Get From Dictionary    ${resp['members'][0]}    uri
+    ${lsg_uri}    Get LSG URI    ${LSG}
+    Set to dictionary   ${lss[0]['logicalSwitch']}    switchUris    ${switchuri_list}
+    Set to dictionary   ${lss[0]['logicalSwitch']}    logicalSwitchGroupUri   ${lsg_uri}
+    Set to dictionary   ${lss[0]['logicalSwitch']}    uri   ${Ls_uri}
+    ${resp}     Fusion Api Update LS     ${lss[0]}    ${Ls_uri}
+    Wait For Task2     ${resp}    10m   5
+    Verify Switch State in LS     ${ls_names[0]}     Configured
+
+16_API_TC_[LS]_Edit LS and change the name of the LS and verify the new name is reflected
+    [Documentation]     Edit LS and change the name of the LS and verify the new name is reflected
+    ${switchuri_list}    Create List
+    :FOR    ${x}    IN RANGE    0  2
+    \    ${resp}    Fusion Api Get Switch    param=?filter="'name'=='${plexxi_Switch_IPS['Rack_1'][${x}]}'
+    \    Append To List    ${switchuri_list}    ${resp['members'][${x}]['uri']}
+    Log    ${switchuri_list}    console=True
+    ${resp}=    Fusion Api Get LS
+    ${Ls_uri}    Get From Dictionary    ${resp['members'][0]}    uri
+    ${lsg_uri}    Get LSG URI    ${LSg}
+    Set to dictionary   ${lss[0]['logicalSwitch']}    name    ${ls_names[0]}_new
+    Set to dictionary   ${lss[0]['logicalSwitch']}    switchUris    ${switchuri_list}
+    Set to dictionary   ${lss[0]['logicalSwitch']}    logicalSwitchGroupUri   ${lsg_uri}
+    Set to dictionary   ${lss[0]['logicalSwitch']}    uri   ${Ls_uri}
+    ${resp}     Fusion Api Update LS     ${lss[0]}    ${Ls_uri}
+    Wait For Task2     ${resp}    10m   5
+    Verify Switch State in LS     ${ls_names[0]}     Configured
+    ${resp}=    Fusion Api Get LS
+    ${Ls_uri}    Get From Dictionary    ${resp['members'][0]}    uri
+    ${resp} =    Fusion Api Delete LS        uri=${ls_uri}
+    ${task}=    Wait For Task2    ${resp}    10m    5
+
+17_API_TC_[LS]_In Mini scale setup try to choose different switches to create LS it should result in creating the LS
+    [Documentation]    Edit LS and try to choose different switches and verify the new switches are in coming in configured state
+    ${switchuri_list}=    Get switch uris based on rack    ${LS_neg_switches}
+    ${resp}=    Creation of LS    ${ls_names[0]}    ${ls1}    ${LS_neg_switches}
+
+18_API_TC_[LS]__Delete LS and verify LS deleted and switches should be in configured mode
+    [Documentation]    Delete LS and verify LS deleted and switches should be in configured mode
+    ${resp}=    Fusion Api Get LS
+    ${Ls_uri}    Get From Dictionary    ${resp['members'][0]}    uri
+    ${resp} =    Fusion Api Delete LS        uri=${ls_uri}
+    ${task}=    Wait For Task2    ${resp}    10m    5
+    Verify Switch details
+    ${LS_resp} =    Fusion Api Get LS
+    Run Keyword Unless    ${LS_resp['count']}== 0    FAIL   LS not deleted
+
+19_API_TC_[LS]_Create LS based on no of Racks
+    [Documentation]    Creating LS based on no of Racks
+    :For  ${x}    IN RANGE   0    ${RACKS}
+    \    ${y}=    Evaluate    ${x}+1
+    \    Creation of LS    ${ls_names[${x}]}    ${ls1}   ${Plexxi_switch_names['Rack_${y}']}
+    \    Verify Switch State in LS     ${ls_names[${x}]}     Configured
+
+20_API_TC_[Switch]__Once the switches are created by fabric claim verify the state, model, chassid, Fw, IPv4&6, fabric
+    [Documentation]    Verify switches details
+    :For  ${x}    IN RANGE   1    ${Rack_length}
+    \    ${switch_Rack}     Set Variable   ${Plexxi_switch_names['Rack_${x}']}
+    \    Switch details Validation      ${switch_Rack}     ${switch_details}
+
+21_API_TC_[Switch]_After Creating LS, LS attribute should have the name of the LS
+    [Documentation]    After Creating LS, LS attribute should have the name of the LS
+    ${len}=    Get Length    ${switch_names}
+    : FOR   ${y}    IN RANGE   0   ${len}
+    \   ${LS_Uri}=    LS verification in switch page     ${y}
+    \   Should Not Be Equal    '${LS_Uri}'    'None'
+
+22_API_TC_[Switch]__Before adding servers it should display uuid names of the servers
+    [Documentation]    Before adding servers it should display uuid names of the servers
+    :FOR    ${x}    IN RANGE   1    ${Rack_Length}
+    \    ${server_hardwares}=   Combine Lists    ${DH_380_IPs['Rack_${x}']}    ${DH_360_Ips['Rack_${x}']}
+    \    ${switch_Rack}     Set Variable   ${Plexxi_switch_names['Rack_${x}']}
+    \    Switch Validation for access ports to display UUID    ${switch_Rack}    ${server_hardwares}
+
+23_API_TC_[server]__Add the servers of both 360 and 380 and verify the port mapping with correct switch mac /name and other details
+    [Documentation]    Add the server hardware and vaerify port mapping
+    Remove All Server Hardware
+    ${racks_DL_380}=    Create List
+    ${racks_DL_360}=    Create List
+    ${DL_380}=    Add server hardware in racks    ${Rack_length}    ${DH_380_IPs}    ${racks_DL_380}
+    ${DH_380_Serverhardwares}=    Map the hardware names to data    ${DL_380}     ${DH_380_Serverhardwares}
+    Set Global Variable    ${DH_380_Serverhardwares}    ${DH_380_Serverhardwares}
+    ${DL_360}=    Add server hardware in racks    ${Rack_length}    ${DH_360_IPs}    ${racks_DL_360}
+    ${DH_360_Serverhardwares}=    Map the hardware names to data    ${DL_360}     ${DH_360_Serverhardwares}
+    Set Global Variable    ${DH_360_Serverhardwares}    ${DH_360_Serverhardwares}
+    Verify presence of respective switchuris in both hardware types    ${Rack_length}    ${DH_360_Serverhardwares}    ${Plexxi_switch_names}
+    Verify presence of respective switchuris in both hardware types    ${Rack_length}    ${DH_380_Serverhardwares}    ${Plexxi_switch_names}
+
+24_API_TC_[server]__Try to add the DL server 360 and 380 belongs to different rack which were already added/configured in the appliance
+    [Documentation]    Adding the same hardware twice should throw an error message
+    Set To Dictionary    ${DL_SH_body}    hostname=${DH_380_IPs['Rack_1'][0]}
+    ${resp}    Fusion Api Add Server Hardware    ${DL_SH_body}
+    ${task}=    Wait For Task    ${resp}
+    Run Keyword Unless   '${task['taskErrors'][0]['errorCode']}' == 'SERVER_ALREADY_ADDED'    ELSE   Fail
+
+25_API_TC_[Switch]__After adding servers it should display ILO names of the servers
+    [Documentation]    after adding servers it should display ILO names of the servers
+    #Concading the both 360 and 380 server hardwares
+    :FOR    ${x}    IN RANGE   1    ${Rack_Length}
+    \    ${server_hardwares}=   Combine Lists    ${DH_360_Serverhardwares['Rack_${x}']}    ${DH_380_Serverhardwares['Rack_${x}']}
+    \    ${switch_Rack}     Set Variable   ${Plexxi_switch_names['Rack_${x}']}
+    \    Switch Validation for access ports to display ILO name    ${switch_Rack}    ${server_hardwares}
+
+26_API_TC__[switch]_Edit the switches and enable/disable the ports verify the connected to section have the valid server names Disable/enable multiple ports in the switches
+    [Documentation]    Edit the switches and enable/disable the ports verify the connected to section have the valid server names Disable/enable multiple ports in the switches
+    : FOR   ${y}    IN RANGE    0    2
+    \    Disable/Enable switch ports and verify the server name     ${y}
+
+27_API_TC_[Switch]_Verify the access ports details
+    [Documentation]    Verify the access ports details
+    Log   verifying whether the access ports are in linked state
+    :FOR    ${x}    IN RANGE   1    ${Rack_Length}
+    \    ${server_hardwares}=   Combine Lists    ${DH_360_Serverhardwares['Rack_${x}']}    ${DH_380_Serverhardwares['Rack_${x}']}
+    \    ${switch_uris}=    Get switch uris based on rack    ${Plexxi_switch_names['Rack_${x}']}
+    \    Verify access ports state Linked    ${switch_uris}    ${server_hardwares}
+
+28_API_TC_[Network]_Try Create unTagged network, FC and FCOE network and try to assign it to profiles
+    [Documentation]    Create Ethernet Network
+    Add Ethernet Networks from variable   ${Untagged_network}
+    Add FC Networks from variable    ${fc_netowrks}
+    Add FCoE Networks from variable    ${FCoE_network}
+    ${len}    Get Length    ${Server_profiles_neg_nw}
+    :FOR  ${x}    IN RANGE    0    ${len}
+    \    ${y}=    Evaluate   ${x} + 1
+    \    Set to Dictionary    ${Server_profiles_neg_nw[${x}]}    serverHardwareUri    SH:${serverhardwares['Rack_${y}'][0]}.us.rdlabs.hpecorp.net
+    \    Set to Dictionary    ${Server_profiles_neg_nw[${x}]}    name    ${serverhardwares['Rack_${y}'][0]}
+    \    ${resp}=    Add Server Profile      ${Server_profiles_neg_nw[${x}]}
+    \    ${location}=     Get Variable Value      ${resp['headers']['location']}
+    \    Sleep    40s
+    \    ${task}=    Fusion Api Get Task        uri=${location}
+    \    Run keyword Unless    '${task['taskErrors'][0]['errorCode']}' == '${error_messages_sp[${x}]}'    FAIL
+
+29_API_TC__[Network]_Create a tagged ethernet network and verify the corresponding vlan created in the plexxi switch after the server profiles are assinged
+    [Documentation]    Create a tagged ethernet network and verify the corresponding vlan created in the plexxi switch after the server profiles are assinged
+    ${resp}    Add Ethernet Networks from variable   ${ethnets}
+    ${resplist} =  Create List
+    Wait For Task2    ${resp}    10m   20
+    : FOR   ${x}   IN RANGE    1     ${Rack_length}
+    \   Set to Dictionary    ${server_profile_dn}    serverHardwareUri    SH:${serverhardwares['Rack_${x}'][0]}.us.rdlabs.hpecorp.net
+    \   Set to Dictionary    ${server_profile_dn}    name    ${serverhardwares['Rack_${x}'][0]}
+    \   ${resp}=    Add Server Profile      ${server_profile_dn}
+    \   append to list        ${resplist}    ${resp}
+    Wait For Task2     ${resplist}    15m   50
+    : FOR   ${x}   IN RANGE    1     ${Rack_length}
+    \    ${switch_output}    Execute command in the Plexxi Switch    ${plexxi_Switch_IPS['Rack_${x}']}    show vlan   ${vlan_network}
+    \    Should Contain   ${switch_output[0]}    xp4
+    \    Should Contain   ${switch_output[1]}    xp4
+
+30_API_TC__[Network]_Delete the network after SP and verify the alerts message in SP, LS
+    [Documentation]   Delete the network after SP and verify the alerts message in SP, LS
+    ${uri}=   Get Ethernet URI    ${ethnets[0]['name']}
+    ${resp}=    Fusion Api Delete Ethernet Network    uri=${uri}
+    Wait For Task2    ${resp}    2m    2
+    Validate the alert message    alertState=Locked    physicalResourceType=server-profiles    severity=Critical    alerts=${alert_msg[2]}
+    : FOR   ${x}   IN RANGE    1     ${Rack_length}
+    \    ${switch_output}    Execute command in the Plexxi Switch    ${plexxi_Switch_IPS['Rack_${x}']}    show vlan   ${vlan_network}
+    \    Should Not Contain   ${switch_output[0]}    xp4
+    \    Should Contain   ${switch_output[1]}    xp4
+
+31_API_TC__[Network]_Recreate the network and assign it back to SP verify the alerts auto cleared and verify the vlan cofigured in switch
+    [Documentation]   Recreate the network and assign it back to SP verify the alerts auto cleared and verify the vlan cofigured in switch
+    ${resp}    Fusion Api Create Ethernet Network   ${ethnets[0]}
+    Wait For Task2    ${resp}    4m    20
+    #########Edit Server profile and add back networks######
+     ${resplist} =  Create List
+    : FOR   ${x}   IN RANGE    1     ${Rack_length}
+    \   Set to Dictionary    ${server_profile_dn}    serverHardwareUri    SH:${serverhardwares['Rack_${x}'][0]}.us.rdlabs.hpecorp.net
+    \   Set to Dictionary    ${server_profile_dn}    name    ${serverhardwares['Rack_${x}'][0]}
+    \   ${resp}    Edit Server Profile    ${server_profile_dn}
+    \   append to list        ${resplist}    ${resp}
+    Wait For Task2     ${resplist}    15m   50
+    Wait Until Keyword Succeeds    5 min    20s    Validate the alert message    alertState=Cleared    physicalResourceType=server-profiles    severity=OK    alerts=${alert_msg[2]}
+    : FOR   ${x}   IN RANGE    1     ${Rack_length}
+    \    ${switch_output}    Execute command in the Plexxi Switch    ${plexxi_Switch_IPS['Rack_${x}']}    show vlan   ${vlan_network}
+    \    Should Contain   ${switch_output[0]}    xp4
+    \    Should Contain   ${switch_output[1]}    xp4
+
+#####bandwidth feature is not yet develpoed once after development cahnge the code accordingly####
+32_API_TC__[Network]_Change the bandwidth of the network and verify the corresponding BW set/allocated during server profile creation Verify in the server OS too
+    [Documentation]    Change the bandwidth of the network and verify the corresponding BW set/allocated during server profile creation Verify in the server OS too
+    Log    Updating bandwidth of Ethernet networks    console=True
+    ${nets}    Fusion Api Get Ethernet Networks
+    ${net}    Get From Dictionary    ${nets}    members
+    ${l}    Get Length    ${net}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${ct}    Fusion Api Get Connection Templates    ${net[${x}]['connectionTemplateUri']}
+    \    ${bw}    Create Dictionary    maximumBandwidth=18000    typicalBandwidth=3000
+    \    Set to Dictionary    ${ct}    bandwidth=${bw}
+    \    Remove From Dictionary    ${ct}    status_code    headers
+    \    ${resp}    Fusion Api Update Connection Template    ${ct}    ${net[${x}]['connectionTemplateUri']}
+    Set to Dictionary    ${server_profile_dn}    serverHardwareUri    SH:${serverhardwares['Rack_1'][0]}.us.rdlabs.hpecorp.net
+    Set to Dictionary    ${server_profile_dn}    name    ${serverhardwares['Rack_1'][0]}
+    ${resp}    Edit Server Profile    ${server_profile_dn}
+    Wait For Task2    ${resp}    20m    10
+
+33_API_TC_[Fabrics]_After fabric claimed, change the Plexxi connect credentials and verify the server profile got created
+    [Documentation]    After fabric claimed, change the Plexxi connect credentials and verify the server profile got created
+    Power off ALL servers
+    Remove All Server Profiles
+    Plexxi Api Login   ${plexxi_connect_host}   ${plexxi_connect_user}   ${plexxi_connect_password}
+    ${ch_pwd}=    plexxi api change current user password    ${new_credentials_plexxi}
+    Run Keyword If  '${ch_pwd['status_code']}' == '200'    Log  Successfully changed password   console=True     ELSE      fail
+    Set to Dictionary    ${server_profile_dn}    serverHardwareUri    SH:${serverhardwares['Rack_1'][0]}.us.rdlabs.hpecorp.net
+    Set to Dictionary    ${server_profile_dn}    name    ${serverhardwares['Rack_1'][0]}
+    ${resp}=    Add Server Profile      ${server_profile_dn}
+    Wait For Task2     ${resp}    10m   50
+    Sleep    60s
+    ${switch_output}    Execute command in the Plexxi Switch    ${plexxi_Switch_IPS['Rack_1']}    show vlan   ${vlan_network}
+    Should Contain   ${switch_output[0]}    xp4
+    Should Contain   ${switch_output[1]}    xp4
+
+34_API_TC_[Fabrics]_After fabric claimed, pass the correct Plexxi connect credentials and verify the server profile got created
+    [Documentation]   After fabric claimed, pass the correct Plexxi connect credentials and verify the server profile got created
+    Plexxi Api Login   ${plexxi_connect_host}   ${plexxi_connect_user}   ${new_credentials_plexxi['new_password']}
+    ${ch_pwd}=    plexxi api change current user password    ${plexxi_credentials}
+    Set to Dictionary    ${server_profile_dn}    serverHardwareUri    SH:${serverhardwares['Rack_2'][0]}.us.rdlabs.hpecorp.net
+    Set to Dictionary    ${server_profile_dn}    name    ${serverhardwares['Rack_2'][0]}
+    ${resp}=    Add Server Profile      ${server_profile_dn}
+    Wait For Task2     ${resp}    10m   50
+    Sleep    60s
+    ${switch_output}    Execute command in the Plexxi Switch    ${plexxi_Switch_IPS['Rack_2']}    show vlan   ${vlan_network}
+    Should Contain   ${switch_output[0]}    xp4
+    Should Contain   ${switch_output[1]}    xp4
+
+35_API_TC_[Fabrics]_After fabric claimed, change the OV credentials and verify the server profile got created
+    [Documentation]    After fabric claimed, change the OV credentials and verify the server profile got created
+    ${edit_resp}=    Fusion Api Edit User    ${user_passwrd_body}    ${user_uri}
+    Wait For Task2    ${edit_resp}
+    Set to Dictionary    ${server_profile_dn}    serverHardwareUri    SH:${serverhardwares['Rack_3'][0]}.us.rdlabs.hpecorp.net
+    Set to Dictionary    ${server_profile_dn}    name    ${serverhardwares['Rack_3'][0]}
+    ${resp}=    Add Server Profile      ${server_profile_dn}
+    Wait For Task2     ${resp}    10m   50
+    Sleep    60s
+    Fusion Api Logout Appliance
+    ${switch_output}    Execute command in the Plexxi Switch    ${plexxi_Switch_IPS['Rack_3']}    show vlan   ${vlan_network}
+    Should Contain   ${switch_output[0]}    xp4
+    Should Contain   ${switch_output[1]}    xp4
+
+
+36_API_TC_[Fabrics]__After fabric claimed, pass the correct OV credentials and verify the server profile got created
+    [Documentation]    After fabric claimed, pass the correct OV credentials and verify the server profile got created
+    Fusion Api Login Appliance    ${APPLIANCE_IP_4_20}    ${new_admin_credentials}
+    ${edit_resp}=    Fusion Api Edit User    ${user_passwrd_body1}    ${user_uri}
+    Wait For Task2    ${edit_resp}
+    Fusion Api Logout Appliance
+    Fusion Api Login Appliance    ${APPLIANCE_IP_4_20}    ${admin_credentials}
+    Set to Dictionary    ${server_profile_dn}    serverHardwareUri    SH:${DH_360_Serverhardwares['Rack_2'][0]}.us.rdlabs.hpecorp.net
+    Set to Dictionary    ${server_profile_dn}    name    ${DH_360_Serverhardwares['Rack_2'][0]}
+    ${resp}=    Add Server Profile      ${server_profile_dn}
+    Wait For Task2     ${resp}    10m   50
+    Sleep    60s
+    ${switch_output}    Execute command in the Plexxi Switch    ${plexxi_Switch_IPS['Rack_2']}    show vlan   ${vlan_network}
+    Should Contain   ${switch_output[0]}    xp1
+    Should Contain   ${switch_output[1]}    xp1
+
+37_API_TC_[NWset]_Create network set with tagged networks verify the vlan groups get created in Plexxi CFM and assinged to switch after the server profile created
+    [Documentation]   Create n etwork set with tagged networks verify the vlan groups get created in Plexxi CFM and assinged to switch after the server profile created
+    Power off ALL servers
+    Remove All Server Profiles
+    ${resp}=    Add Network Sets from variable    ${network_sets}
+    :FOR    ${x}    IN RANGE   1    2
+    \    Set to Dictionary    ${server_profile_dns}    serverHardwareUri    SH:${serverhardwares['Rack_${x}'][0]}.us.rdlabs.hpecorp.net
+    \    Set to Dictionary    ${server_profile_dns}    name    ${serverhardwares['Rack_${x}'][0]}
+    \    ${resp}=    Add Server Profile      ${server_profile_dns}
+    \    Wait For Task2     ${resp}    10m   10
+    \    Power on server    ${server_profile_dns['name']}.us.rdlabs.hpecorp.net
+    \    Sleep    100s
+
+    \    ${switch_output}    Execute command in the Plexxi Switch for networkset   ${plexxi_Switch_IPS['Rack_${x}']}    show vlan    ${vlan_NS}
+    \     Should contain    ${switch_output[0]}   xp4
+    \     Should Contain    ${switch_output[1]}   xp4
+    \     Should Contain    ${switch_output[2]}   xp4
+    \     Should Contain    ${switch_output[3]}   xp4
+
+38_API_TC__[NWset]_Edit the network set then remove few networks and add few networks verify the few vlans get deleted and few get created in plexxi switch vlan group
+    [Documentation]    Edit the network set then remove few networks and add few networks verify the few vlans get deleted and few get created in plexxi switch vlan group
+    ${resp}=    Update Network Set    ${update_ns_del}
+    sleep    100s
+    :FOR    ${x}    IN RANGE   1    2
+    \    ${switch_output}    Execute command in the Plexxi Switch for networkset   ${plexxi_Switch_IPS['Rack_${x}']}    show vlan    ${vlan_NS}
+    \     Should contain    ${switch_output[0]}   xp4
+    \     Should Not Contain    ${switch_output[1]}   xp4
+    \     Should Contain    ${switch_output[2]}   xp4
+    \     Should Contain    ${switch_output[3]}   xp4
+
+    ${resp}=    Update Network Set    ${update_ns_add}
+    sleep    100s
+    :FOR    ${x}    IN RANGE   1    2
+    \    ${switch_output}    Execute command in the Plexxi Switch for networkset   ${plexxi_Switch_IPS['Rack_${x}']}    show vlan    ${vlan_NS}
+    \     Should contain    ${switch_output[0]}   xp4
+    \     Should Contain    ${switch_output[1]}   xp4
+    \     Should Contain    ${switch_output[2]}   xp4
+    \     Should Contain    ${switch_output[3]}   xp4
+
+
+39_API_TC_[NWset]__Delete the network set after Sp, remove the Nwset should result in alert message in SP and corresponding vlan group should be deleted
+    [Documentation]    Delete the network set after Sp, remove the Nwset should result in alert message in SP and corresponding vlan group should be deleted
+
+    ${resp}=    Fusion Api Delete Network Set     ${network_sets[0]['name']}
+    Wait For Task2    ${resp}    5m    10
+    Validate the alert message    alertState=Locked    physicalResourceType=server-profiles    severity=Critical    alerts=${alert_msg[3]}
+    Sleep    50s
+    :FOR    ${x}    IN RANGE   1    2
+    \    ${switch_output}    Execute command in the Plexxi Switch for networkset   ${plexxi_Switch_IPS['Rack_${x}']}    show vlan    ${vlan_NS}
+    \     Should Not Contain    ${switch_output[0]}   xp4
+    \     Should Not Contain    ${switch_output[1]}   xp4
+    \     Should Contain    ${switch_output[2]}   xp4
+    \     Should Contain    ${switch_output[3]}   xp4
+
+40_API_TC_[NWset]__Add the deleted nw set back then edit the SP connection and add it back verify the alerts get cleared And Vlan group created in plexxi switch
+    [Documentation]    Add the deleted nw set back then edit the SP connection and add it back verify the alerts get cleared And Vlan group created in plexxi switch
+    ${resp}=    Add Network Sets from variable    ${network_sets1}
+    :FOR    ${x}    IN RANGE   1    2
+    \    Power off Server    ${serverhardwares['Rack_${x}'][0]}.us.rdlabs.hpecorp.net
+    \    Set to Dictionary    ${server_profile_dns}    serverHardwareUri    SH:${serverhardwares['Rack_${x}'][0]}.us.rdlabs.hpecorp.net
+    \    Set to Dictionary    ${server_profile_dns}    name    ${serverhardwares['Rack_${x}'][0]}
+    \    ${resp}=   Edit Server Profile    ${server_profile_dns}
+    \    Wait For Task2    ${resp}    10m    10
+    \    Validate the alert message    alertState=Cleared    physicalResourceType=server-profiles    severity=OK    alerts=${alert_msg[3]}
+    \    Power on server    ${serverhardwares['Rack_${x}'][0]}.us.rdlabs.hpecorp.net
+    \    Sleep    60s
+    \    ${switch_output}    Execute command in the Plexxi Switch for networkset   ${plexxi_Switch_IPS['Rack_${x}']}    show vlan    ${vlan_NS}
+    \     Should contain    ${switch_output[0]}   xp4
+    \     Should Contain    ${switch_output[1]}   xp4
+    \     Should Contain    ${switch_output[2]}   xp4
+    \     Should Contain    ${switch_output[3]}   xp4
+
+
+ #####this faeture is not yet deveoped, after the develpemt modify the tets case accordingly####
+41_API_TC_[NWSet]__Change the bandwidth of the network set and verify the corresponding BW set/allocated during server profile creation Verify in the server OS too
+    [Documentation]    Change the bandwidth of the network set and verify the corresponding BW set/allocated during server profile creation Verify in the server OS too
+    ${nets}    Fusion Api Get Network Set
+    ${net}    Get From Dictionary    ${nets}    members
+    ${l}    Get Length    ${net}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${ct}    Fusion Api Get Connection Templates    ${net[${x}]['connectionTemplateUri']}
+    \    ${bw}    Create Dictionary    maximumBandwidth=18000    typicalBandwidth=3000
+    \    Set to Dictionary    ${ct}    bandwidth=${bw}
+    \    Remove From Dictionary    ${ct}    status_code    headers
+    \    ${resp}    Fusion Api Update Connection Template    ${ct}    ${net[${x}]['connectionTemplateUri']}
+
+42_API_TC_[NWset]__Create network set with 4000 networks and assign to profiles verify the vlan group with 4000 reflected in plexxi switch
+    [Documentation]    Create network set with 4000 networks and assign to profiles verify the vlan group with 4000 reflected in plexxi switch Verify traffic
+    Power off ALL servers
+    Remove All Server Profiles
+    ${resp} =   Fusion Api Create Ethernet Bulk Networks        ${bulk_networks_4000}
+    Sleep    600s
+    ${resp}=    Add Network Sets from variable    ${network_sets_4000}
+    :FOR    ${x}    IN RANGE   1    ${Rack_length}
+    \    Set to Dictionary    ${server_profile_4000_ns}    serverHardwareUri    SH:${serverhardwares['Rack_${x}'][0]}.us.rdlabs.hpecorp.net
+    \    Set to Dictionary    ${server_profile_4000_ns}    name    ${serverhardwares['Rack_${x}'][0]}
+    \    ${resp}=    Add Server Profile      ${server_profile_4000_ns}
+    \    Wait For Task2     ${resp}    10m   10
+    \    Power on server    ${serverhardwares['Rack_${x}'][0]}.us.rdlabs.hpecorp.net
+    \    Sleep    100s
+    \    ${switch_output}=    Execute command in the Plexxi Switch for vlan group     ${plexxi_Switch_IPS['Rack_${x}']}    show vlan group
+    \    Should Contain    ${switch_output[0]}    1-4000
+    \    Should Contain    ${switch_output[1]}    1-4000
+
+
+43_API_TC__[NWset]_Try to create a network set with more 4000 networks
+    [Documentation]    Creating a network set with more than 4000 networks will result in error
+    ${resp}    Add Ethernet Networks from variable   ${net_vlan4001}
+    Wait For Task2    ${resp}    4m    20
+    ${resp}=    Add Network Sets from variable1    ${network_sets_4001}
+    Run keyword Unless    '${resp['errorCode']}' == 'CRM_DOMAIN_NETWORK_SET_LIMIT_EXCEEDED'    FAIL
+
+
+44_API_TC_[SPT]__Create server profiles from the server profile template then poweron server and verify the downlink ports are configured with the vlans in nw connections
+    [Documentation]    Create server profiles from the server profile template then poweron server and verify the downlink ports are configured with the vlans in nw connections
+    Power off ALL servers    control=PressAndHold
+    Remove All Server Profiles
+
+    ${SPT_name}=    Create List
+    ${len}=    Get length    ${profile_template_networks}
+    :FOR   ${x}   IN RANGE    0    ${len}
+    \   ${name}=    Get From Dictionary      ${profile_template_networks[${x}]}    name
+    \   Append To List    ${SPT_name}   ${name}
+    ${resp}=    Add Server Profile Templates from variable    ${profile_template_networks}
+    Wait For Task2     ${resp}     10m   10
+    Create profile with template based on racks   ${Rack_length}    ${DH_380_Serverhardwares}   ${SPT_name[0]}   ${profile}
+    Create profile with template based on racks   ${Rack_length}    ${DH_360_Serverhardwares}   ${SPT_name[1]}   ${profile}
+
+45_API_TC_[SPT]__Edit the server profile template and change the connection to different networks then perform UFG in SP verify the new networks are reflected in SP and plexxi switches
+    [Documentation]    Edit the server profile template and change the connection to different networks then perform UFG in SP verify the new networks are reflected in SP and plexxi switches
+    ${len}=    Evaluate    ${RACKS}+1
+    Set Global Variable    ${Rack_length}    ${len}
+    ${resp}=    Edit Server Profile Templates from variable    ${Edit_template_network}
+    Wait For Task2     ${resp}     10m   10
+    Update profile from Templates    ${Rack_length}    ${DH_380_Serverhardwares}
+    Update profile from Templates    ${Rack_length}    ${DH_360_Serverhardwares}
+
+46_API_TC_[SPT]__Create Server profile template with connections having network sets and then use this to create profile verify the connections are configured in plexxi switches
+    [Documentation]    Create Server profile template with connections having network sets and then use this to create profile verify the connections are configured in plexxi switches
+    Power off ALL servers    control=PressAndHold
+    Remove All Server Profiles
+    ${SPT_name}=    Create List
+    ${len}=    Get length    ${profile_template_ns}
+    :FOR   ${x}   IN RANGE    0    ${len}
+    \   ${name}=    Get From Dictionary      ${profile_template_ns[${x}]}    name
+    \   Append To List    ${SPT_name}   ${name}
+    ${resp}=    Add Server Profile Templates from variable    ${profile_template_ns}
+    Wait For Task2     ${resp}     10m   10
+    Create profile with template based on racks   ${Rack_length}    ${DH_380_Serverhardwares}   ${SPT_name[0]}   ${profile}
+    Create profile with template based on racks   ${Rack_length}    ${DH_360_Serverhardwares}   ${SPT_name[1]}   ${profile}
+
+47_API_TC_[SPT]__Edit the server profile template and change the network set to different one and then perform UFG in profile verify the connection is deployed in switch
+    [Documentation]     Edit the server profile template and change the network set to different one and then perform UFG in profile verify the connection is deployed in switch
+    ${len}=    Evaluate    ${RACKS}+1
+    Set Global Variable    ${Rack_length}    ${len}
+    ${resp}=    Edit Server Profile Templates from variable    ${Edit_template_ns}
+    Wait For Task2     ${resp}     10m   10
+    Update profile from Templates    ${Rack_length}    ${DH_380_Serverhardwares}
+    Update profile from Templates    ${Rack_length}    ${DH_360_Serverhardwares}
+
+48_API_TC_[SPT]__Create server profile template without networkset in connections and create server profile with the template power on the servers verify no connections are deployed then edit template and add network to the connections then do update from template in server profile and verify the connections deployed for the network set in plexxi switch ports
+    [Documentation]    Create server profile template without network in connections and edit template and poweron the server
+    Power off ALL servers    control=PressAndHold
+    Remove All Server Profiles
+    Remove All Server Profile Templates
+    ${empty}=   Create Dictionary
+    ${SPT_name}=    Create List
+    ${len}=    Get length    ${profile_template_ns}
+    :FOR   ${x}   IN RANGE    0    ${len}
+    \   ${name}=    Get From Dictionary      ${profile_template_ns[${x}]}    name
+    \   Append To List    ${SPT_name}   ${name}
+    ${profile_template_ns[0]['connectionSettings']}    Set Variable     ${empty}
+    ${profile_template_ns[1]['connectionSettings']}    Set Variable     ${empty}
+    ${resp}=    Add Server Profile Templates from variable    ${profile_template_ns}
+    Wait For Task2     ${resp}     10m   10
+    Create profile with template based on racks   ${Rack_length}    ${DH_380_Serverhardwares}   ${SPT_name[0]}   ${profile}
+    Create profile with template based on racks   ${Rack_length}    ${DH_360_Serverhardwares}   ${SPT_name[1]}   ${profile}
+    Power on ALL servers
+    ${resp}=    Edit Server Profile Templates from variable    ${Edit_template_ns}
+    Wait For Task2     ${resp}     10m    10
+    Update profile from Templates    ${Rack_length}    ${DH_380_Serverhardwares}
+    Update profile from Templates    ${Rack_length}    ${DH_360_Serverhardwares}
+
+49_API_TC_[SPT]__Create server profile template without networks in connections and create server profile with the template power on the servers verify no connections are deployed then edit template and add network sets to the connections then do update from template in server profile and verify the connections deployed for the network set in plexxi switch ports
+    [Documentation]    Create server profile template without network in connections and edit template and poweron the server
+    Power off ALL servers    control=PressAndHold
+    Remove All Server Profiles
+    ${empty}=   Create Dictionary
+    ${SPT_name}=    Create List
+    ${len}=    Get length    ${profile_template_networks}
+    :FOR   ${x}   IN RANGE    0    ${len}
+    \   ${name}=    Get From Dictionary      ${profile_template_networks[${x}]}    name
+    \   Append To List    ${SPT_name}   ${name}
+    ${profile_template_networks[0]['connectionSettings']}    Set Variable     ${empty}
+    ${profile_template_networks[1]['connectionSettings']}    Set Variable     ${empty}
+    ${resp}=    Add Server Profile Templates from variable    ${profile_template_networks}
+    Wait For Task2     ${resp}     10m    10
+    Create profile with template based on racks   ${Rack_length}    ${DH_380_Serverhardwares}   ${SPT_name[0]}   ${profile}
+    Create profile with template based on racks   ${Rack_length}    ${DH_360_Serverhardwares}   ${SPT_name[1]}   ${profile}
+    Power on ALL servers
+    ${resp}=    Edit Server Profile Templates from variable    ${Edit_template_network}
+    Wait For Task2     ${resp}     10m    10
+    Update profile from Templates    ${Rack_length}    ${DH_380_Serverhardwares}
+    Update profile from Templates    ${Rack_length}    ${DH_360_Serverhardwares}
+
+50_API_TC_[SPT]_Delete the Server profile template and verify the template is getting deleted
+    [Documentation]    Delete the Server profile template and verify the template is getting deleted
+    Power off ALL servers    control=PressAndHold
+    Remove All Server Profiles
+    Remove Server Profile Template    ${profile_template_networks[0]}
+    ${resp}=    Fusion Api Get Server Profile Templates     param=?filter="'name'='${profile_template_networks[0]}'"
+    Run Keyword Unless   ${resp['status_code']} == 400  FAIL   SPT not deleted
+
+51_API_TC_[SP]_Create server profiles with connections as networks greater than vlan 4000 verify the error message
+    [Documentation]     Create server profiles with connections as networks greater than vlan 4000 verify the error message
+    Power off ALL servers    control=PressAndHold
+    Remove All Server Profiles
+    Add Ethernet Networks from variable   ${net_vlan4001}
+    :FOR   ${x}    IN RANGE   1   ${Rack_length}
+    \    Set to Dictionary    ${server_profile_4001_nw}    serverHardwareUri    SH:${DH_380_Serverhardwares['Rack_${x}'][0]}.us.rdlabs.hpecorp.net
+    \    Set to Dictionary    ${server_profile_4001_nw}    name    ${DH_380_Serverhardwares['Rack_${x}'][0]}
+    \    ${resp}=    Add Server Profile      ${server_profile_4001_nw}
+    \    ${task}=   Wait For Task     ${resp}    200
+    \    Run keyword Unless    '${task['taskErrors'][0]['errorCode']}' == 'ComposableRackNetworkOutOfVlanRange'    Fail
+
+52_API_TC_[SP]_Create server profiles with network set having networks greater than vlan 4000 verify the error message
+    [Documentation]    Create server profiles with network set having networks greater than vlan 4000 verify the error message
+    ${resp}    Add Network Sets from variable   ${network_sets_neg}
+    :FOR   ${x}    IN RANGE   1   ${Rack_length}
+    \    Set to Dictionary    ${server_profile_4001_ns}    serverHardwareUri    SH:${DH_380_Serverhardwares['Rack_${x}'][0]}.us.rdlabs.hpecorp.net
+    \    Set to Dictionary    ${server_profile_4001_ns}    name    ${DH_380_Serverhardwares['Rack_${x}'][0]}
+    \    ${resp}=    Add Server Profile      ${server_profile_4001_ns}
+    \    ${task}=   Wait For Task     ${resp}    200
+    \    Run keyword Unless    '${task['taskErrors'][0]['errorCode']}' == 'ComposableRackNetworkSetOutOfVlanRange'    Fail
+
+53_API_TC_[SP]_Disable the network adapter in the server verify the state of the access ports
+    [Documentation]    Disable the network adapter in the server verify the state of the access ports and enable it back and verify again
+    Power off ALL servers    control=PressAndHold
+    Remove All Server Profiles
+    Set to Dictionary    ${server_profile_sn}    serverHardwareUri    ${disable_server_interface}.us.rdlabs.hpecorp.net
+    Set to Dictionary    ${server_profile_sn}    name    ${disable_server_interface}
+    ${resp}=    Add Server Profile    ${server_profile_sn}
+    Wait For Task2    ${resp}    300
+    Power on server    ${disable_server_interface}.us.rdlabs.hpecorp.net
+    Sleep    600
+    ${IP}    Get Windows Server IP    ${ilo_details_WI}
+    Convert to String    ${IP}
+    Set Global Variable    ${server_ip}    ${IP}
+    ${resp} =    Fusion Api Get Server Profiles    param=?filter="'name'=='${disable_server_interface}'"
+    ${mac_addr_list} =    Create List
+    ${mac} =    Get Profile Details    ${resp}    ${disable_server_interface}
+    ${mac_length} =    Get Length    ${mac}
+    :FOR    ${x}    IN RANGE    ${mac_length}
+    \   ${mac_address} =    Replace String Using Regexp    ${mac[${x}]}    :    -
+    \   Append To List   ${mac_addr_list}    ${mac_address}
+    ${mac_addr_len}    Get Length    ${mac_addr_list}
+    #####Compare mac address with server#####
+    ${adapter_name_list} =   Create List
+    :FOR    ${x}    IN RANGE    ${mac_addr_len}
+    \   ${replaced_cmd} =     Replace String Using Regexp    ${Powershell_get_mac}    pppppppp    ${mac_addr_list[${x}]}
+    \   Log    \n the string is step2 ${replaced_cmd}    console=True
+    ##########calling Get Mac Address from server##########
+    \   Log    \n the server details is ${windows_server_details}    console=True
+    \   Log    \n the ip is ${server_ip}    console=True
+    \   ${output}    Get Mac Address from server    ${windows_server_details}    ${server_ip}    ${replaced_cmd}
+    \   Log    \n the string is step3    console=True
+    \   ${string}    Convert To String    ${output}
+    \   ${adapter_name}     Should Match Regexp    ${string}    .*Embedded\\s+.*
+    \   Append to List   ${adapter_name_list}   ${adapter_name}
+    Log    \nadapter names list ${adapter_name_list}    console=True
+    Set Global Variable    ${Adapter_name_List}    ${adapter_name_list}
+    Command to Disable/enable Server Interface    ${Adapter_name_List[1]}    ${interface_disable}    ${windows_server_details}    ${server_ip}
+
+    Log    Verify the state of access ports in switches    console=True
+    ${resp} =   Fusion Api Get LS
+    ${switchUris}    Get from Dictionary    ${resp['members'][0]}    switchUris
+    ${LS_uri}    Get from Dictionary    ${resp['members'][0]}    uri
+    ${length}    Get Length    ${switchUris}
+    :FOR    ${x}    IN RANGE   0    ${length}
+    \    ${Switch_resp}    Fusion Api Get Switch     uri=${switchUris[${x}]}
+    \    Run keyword Unless    '${Switch_resp['ports'][${x}]['portStatus']}' == 'UnLinked'   Fail
+
+54_API_TC_[SP]__Enable the network adapter in the server verify the state of the access ports
+    [Documentation]    Enable the network adapter in the server verify the state of the access ports
+    Log    \nadapter names lsit${Adapter_name_List}    console=True
+    Command to Disable/enable Server Interface    ${Adapter_name_List[1]}    ${interface_enable}    ${windows_server_details}    ${server_ip}
+    ${resp} =   Fusion Api Get LS
+    ${switchUris}    Get from Dictionary    ${resp['members'][0]}    switchUris
+    ${LS_uri}    Get from Dictionary    ${resp['members'][0]}    uri
+    ${length}    Get Length    ${switchUris}
+    :FOR    ${x}    IN RANGE   0    ${length}
+    \    ${Switch_resp}    Fusion Api Get Switch     uri=${switchUris[${x}]}
+    \    Run keyword Unless    '${Switch_resp['ports'][${x}]['portStatus']}' == 'Linked'    Fail
+
+55_API_TC_[SP]_Create server profile with single network set and verify traffic
+    [Documentation]    Create server profile with single network set and verify traffic
+    Set to Dictionary    ${server_profile_single_ns}    serverHardwareUri    SH:${single_ns_Serverhardware[0]}.us.rdlabs.hpecorp.net
+    Set to Dictionary    ${server_profile_single_ns}    name    ${single_ns_Serverhardware[0]}
+    ${resp}=    Add Server Profile      ${server_profile_single_ns}
+    ${task}=    Wait For Task     ${resp}    200
+    Power on server    ${single_ns_Serverhardware[0]}.us.rdlabs.hpecorp.net
+    Sleep   600
+    ${IP}=    Get Server valid IP     ${single_ns_Serverhardware[0]}
+    Ping IP and verify ping is succuss     ${number}    ${IP}    ${single_ns}    ${ping_lost}
+
+56_API_TC_[SP]_Create server profile with single network and verify traffic
+    [Documentation]    Create server profile with single network set and verify traffic
+    Set to Dictionary    ${server_profile_single_nw}    serverHardwareUri    SH:${single_nw_Serverhardware[0]}.us.rdlabs.hpecorp.net
+    Set to Dictionary    ${server_profile_single_nw}    name    ${single_nw_Serverhardware[0]}
+    ${resp}=    Add Server Profile      ${server_profile_single_nw}
+    ${task}=    Wait For Task     ${resp}    200
+    Power on server    ${single_nw_Serverhardware[0]}.us.rdlabs.hpecorp.net
+    Sleep   600
+    ${IP}=    Get Windows Server IP for Rack servers     ${ilo_details_SNW}
+    Ping IP and verify ping is succuss     ${number}    ${IP}    ${single_nw_pingfile}    ${ping_lost}
+
+57_API_TC_[SP]_Create server profile with single Large networkset and verify traffic
+    [Documentation]    Create server profile with single network set and verify traffic
+    Set to Dictionary    ${server_profile_Large_ns}    serverHardwareUri    SH:${single_lnw_Serverhardware[0]}.us.rdlabs.hpecorp.net
+    Set to Dictionary    ${server_profile_Large_ns}    name    ${single_lnw_Serverhardware[0]}
+    ${resp}=    Add Server Profile      ${server_profile_Large_ns}
+    ${task}=    Wait For Task     ${resp}    200
+    Power on server    ${single_lnw_Serverhardware[0]}.us.rdlabs.hpecorp.net
+    Sleep   600
+    ${IP}=    Get Server valid IP     ${single_lnw_Serverhardware[0]}
+    Ping IP and verify ping is succuss     ${number}    ${IP}    ${single_nw_pingfile}    ${ping_lost}
+
+58_API_TC_[SP]_Create Server profile with 1st connection as network and second connection as Networkset and verify the traffic and vlans and vlan group in plexxi
+    [Documentation]    Create Server profile with 1st connection as network and second connection as Networkset and verify the traffic and vlans and vlan group in plexxi
+    :FOR   ${x}    IN RANGE   1   ${Rack_length}
+    \    Set to Dictionary    ${server_profile_nw_ns}    serverHardwareUri    SH:${DH_380_Serverhardwares['Rack_${x}'][0]}.us.rdlabs.hpecorp.net
+    \    Set to Dictionary    ${server_profile_nw_ns}    name    ${DH_380_Serverhardwares['Rack_${x}'][0]}
+    \    ${resp}=    Add Server Profile      ${server_profile_nw_ns}
+    \    ${task}=   Wait For Task     ${resp}    200
+    Power on server    ${DH_380_Serverhardwares['Rack_${x}'][0]}.us.rdlabs.hpecorp.net
+    Sleep   600
+    ${IP}=    Get Server valid IP     ${DH_380_Serverhardwares['Rack_${x}'][0]}
+    Ping IP and verify ping is succuss     ${number}    ${IP}    ${single_nw_pingfile}    ${ping_lost}
+
+59_API_TC_[LAG]__Create Server profiles with LAG configured [Switch independent teaming mode] and verify the end to end traffic and plexxi switch configuration
+    [Documentation]    Create Server profiles with LAG configured [Switch independent teaming mode] and verify the end to end traffic
+    Power off ALL servers    control=PressAndHold
+    Remove All Server Profiles
+    Set to Dictionary    ${profile_LAG}    serverHardwareUri    ${profile_LAG_name[0]}.us.rdlabs.hpecorp.net
+    Set to Dictionary    ${profile_LAG}    name    ${profile_LAG_name[0]}
+    ${resp}=    Add Server Profile    ${profile_LAG}
+    Wait For Task2    ${resp}    300
+    Power on server    ${profile_LAG_name[0]}.us.rdlabs.hpecorp.net
+    Sleep    300
+    ${IP}=    Get Server valid IP     ${profile_LAG_name[0]}
+    Ping IP and verify ping is succuss     ${number}    ${IP}    ${ping_team}    ${ping_lost}
+
+60_API_TC_[LAG]__Create Server profiles with LAG configured with LNS connection and verify traffic
+    [Documentation]    Create Server profiles with LAG configured with LNS connection and verify traffic
+
+    Set to Dictionary    ${profile_LAG_LNS}    serverHardwareUri    ${profile_LAG_LNS_name[0]}.us.rdlabs.hpecorp.net
+    Set to Dictionary    ${profile_LAG_LNS}    name    ${profile_LAG_LNS_name[0]}
+    ${resp}=    Add Server Profile    ${profile_LAG_LNS}
+    Wait For Task2    ${resp}    300
+    Power on server    ${profile_LAG_LNS_name[0]}.us.rdlabs.hpecorp.net
+    Sleep    300
+    ${IP}=    Get Server valid IP     ${profile_LAG_LNS_name[0]}
+    Ping IP and verify ping is succuss     ${number}    ${IP}    ${ping_team}    ${ping_lost}
+
+61_API_TC_[LAG]__Create Server profiles with LAG configured with RNS connection and verify traffic
+    [Documentation]    Create Server profiles with LAG configured with LNS connection and verify traffic
+
+    Set to Dictionary    ${profile_LAG_RNS}    serverHardwareUri    ${profile_LAG_RNS_name[0]}.us.rdlabs.hpecorp.net
+    Set to Dictionary    ${profile_LAG_RNS}    name    ${profile_LAG_RNS_name[0]}
+    ${resp}=    Add Server Profile    ${profile_LAG_RNS}
+    Wait For Task2    ${resp}    300
+    Power on server    ${profile_LAG_RNS_name[0]}.us.rdlabs.hpecorp.net
+    Sleep    300
+    ${IP}=    Get Server valid IP     ${profile_LAG_LNS_name[0]}
+    Ping IP and verify ping is succuss     ${number}    ${IP}    ${ping_team}    ${ping_lost}
+
+62,63,64,65_API_TC_[SP]__Create profiles with four different types of connections
+    [Documentation]    Create profiles with four types of connections(with same network,different networks,same networkset, different networkset)
+    Power off ALL servers     control=PressAndHold
+    Remove All Server Profiles
+    :For    ${x}    In Range    1    ${Rack_length}
+    \    ${360_len}=    Get Length     ${DH_360_IPs['Rack_${x}']}
+    \    Run Keyword If    ${360_len} > 4    Run Keyword   Create Profiles with four connections    ${DH_360_Serverhardwares['Rack_${x}']}    ${config_type}    ${server_profile_sn}   ${server_profile_dn}    ${server_profile_sns}    ${server_profile_dns}
+    ...    ELSE IF    ${360_len} < 4    Run Keyword    Create profiles for remaining server profiles      ${360_len}     ${config_type}    ${DH_360_Serverhardwares['Rack_${x}']}    ${server_profile_sn}   ${server_profile_dn}    ${server_profile_sns}
+    \    ${380_len}=    Get Length     ${DH_380_IPs['Rack_${x}']}
+    \    Run Keyword If    ${380_len} > 4    Run Keyword   Create Profiles with four connections    ${DH_360_Serverhardwares['Rack_${x}']}    ${config_type}    ${server_profile_sn}   ${server_profile_dn}    ${server_profile_sns}    ${server_profile_dns}
+    ...    ELSE IF    ${380_len} < 4    Run Keyword    Create profiles for remaining server profiles      ${380_len}     ${config_type}    ${DH_380_Serverhardwares['Rack_${x}']}    ${server_profile_sn}   ${server_profile_dn}    ${server_profile_sns}
+    Power on ALL servers
+
+66_API_TC_[SP]__Verify Traffic within the rack servers
+    [Documentation]    Verify Traffic within the rack servers
+    Sleep    1000s
+    :For    ${x}    In Range    1    ${Rack_length}
+    \    server ping in each server    ${profiles['Rack_${x}']}
+
+67_API_TC_[SP]__Verify Traffic between DL servers and Jump station
+    [Documentation]    Verify Traffic between DL servers and Jump station
+    ${Server_IPs_List}=    Create List
+    ${OS_Type_List}=       Create List
+    ${name_List}=      Create List
+    ${OS_Type1}   Create Dictionary
+    ${name1}   Create Dictionary
+    :For    ${x}    In Range    1    ${Rack_length}
+    \    ${Server_IPs}    ${OS_Type}    Get Valid IPs for Rack servers    ${profiles['Rack_${x}']}
+    \    Append To List    ${Server_IPs_List}    ${Server_IPs}
+    \    Log    ${OS_Type}    console=True
+    \    Set to Dictionary    ${OS_Type1}    OS=${OS_Type}
+    \    Append To List    ${OS_Type_List}    ${OS_Type1}
+    \    Log    ${Server_IPs_List}    console=True
+    \    Set to Dictionary    ${name1}    name=${name[${x}]}
+    \    Append To List    ${name_List}    ${name1}
+    Set Global Variable    ${server_IPs_global}    ${Server_IPs_List}
+    startthread    ${number}    ${server_IPs_global}    ${name_List}    ${OS_Type_List}
+    ${len}=    Get Length    ${name}
+    :For    ${x}    In Range    1    ${len}
+    \    ${contents}=    OperatingSystem.Get File    ${name[${x}]}
+    \    ${Lines}=    Get Lines Containing String    ${contents}    ${Ping_Lost}
+    \    Log    \ncontents are ${Lines}    console=True
+    \    ${match}   ${ret1}    Should Match Regexp    ${Lines}    Lost\\s+=\\s+\\d+\\s+\\((\\d+%)\\s+loss\\)
+    \    Log     ${ret1}    console=True
+    \    Run Keyword Unless  '${ret1}' != '100%'  Fail
+    Log     All the IP's are reachable    console=True
+
+
+68_API_TC_[Fabrics]_Edit the fabric and change the name of the fabric after the LS creation and server profiles
+    [Documentation]    Edit the fabric and change the name of the fabric after the LS creation and server profiles
+    ${resp_fab}=    Fusion Api Get Fabric    param=?filter="'name'='${Fabric_name}'"
+    ${uri}=    Get From Dictionary    ${resp_fab['members'][0]}    uri
+    Set To Dictionary    ${resp_fab['members'][0]}     name     ${Fabric_name}_new
+    ${resp}=    Fusion Api Edit Fabric    ${resp_fab['members'][0]}   ${uri}
+    Wait For Task2    ${resp}    10m   5
+    ${resp_after_edit}=   Fusion Api Get Fabric    param=?filter="'name'='${Fabric_name}_new'"
+    Should be equal     ${resp_after_edit['members'][0]['name']}     ${Fabric_name}_new
+    ${uri}=    Get From Dictionary    ${resp_after_edit['members'][0]}    uri
+    Set To Dictionary    ${resp_after_edit['members'][0]}     name     ${Fabric_name}
+    ${resp}=    Fusion Api Edit Fabric    ${resp_after_edit['members'][0]}   ${uri}
+    Wait For Task2    ${resp}    10m   5
+
+
+69_API_TC_[LS]_Delete LS should delete the LS Try delete LS after profile creation should throw error message
+    [Documentation]    Delete LS should delete the LS Try delete LS after profile creation should throw error message
+    ${resp}=    Fusion Api Get LS
+    ${Ls_uri}    Get From Dictionary    ${resp['members'][0]}    uri
+    ${resp} =    Fusion Api Delete LS        uri=${ls_uri}
+    ${task}=    Wait For Task2    ${resp}    10m    5    errorMessage=CRM_LS_DELETE_PROFILE_CONNECTIONS_ASSOCIATED
+
+
+70_API_TC_[REBOOT]_After the server profiles created with networks in connections start the traffic for more than 20 mins and restart the OV appliance verify the traffic loss if any Before restart configure gatway vlans
+    [Documentation]    After the server profiles created with networks in connections start the traffic for more than 20 mins and restart the OV appliance verify the traffic loss if any Before restart configure gatway vlans
+    ${IP}=    Get Server valid IP     ${single_ns_Serverhardware[0]}
+    Restart Appliance
+    startthread1    ${number_restart}    ${IP}    ${restart}
+    Sleep    1500
+    ${contents}=    OperatingSystem.Get File    ${restart}
+    ${Lines}=    Get Lines Containing String    ${contents}    ${ping_lost}
+    Log    \ncontents are ${Lines}    console=True
+    ${match}   ${ret1}    Should Match Regexp    ${Lines}    Lost\\s+=\\s+\\d+\\s+\\((\\d+%)\\s+loss\\)
+    Log     ${ret1}    console=True
+    Run Keyword Unless  '${ret1}' != '100%'    Fail
+
+71_API_TC_[REBOOT]_After the OV appliance rebooted verify the connections status, ports, fabric status etc
+    [Documentation]    After the OV appliance rebooted verify the connections status, ports, fabric status etc
+    ${resp}=     Fusion Api Get Switch
+
+    : FOR  ${x}   IN RANGE    0    ${resp['count']}
+    \   Run Keyword Unless   '${resp['members'][${x}]['state']}'  ==  'Configured'    FAIL   Fabric not in configured state
+
+    :For  ${x}    IN RANGE   1    ${Rack_length}
+    \    ${switch_Rack}     Set Variable   ${Plexxi_switch_names['Rack_${x}']}
+    \    Switch details Validation      ${switch_Rack}     ${switch_details}
+
+
+    :FOR    ${x}    IN RANGE   1    ${Rack_Length}
+    \    ${server_hardwares}=   Combine Lists    ${DH_360_Serverhardwares['Rack_${x}']}    ${DH_380_Serverhardwares['Rack_${x}']}
+    \    ${switch_uris}=    Get switch uris based on rack    ${Plexxi_switch_names['Rack_${x}']}
+    \    Verify access ports state Linked    ${switch_uris}    ${server_hardwares}
+
+72_API_TC_[REBOOT]_After the server profiles created with networks in connections start the traffic for more than 20 mins and restart the plerxi connect appliance verify the traffic loss if any Before restart configure gatway vlans
+    [Documentation]    After the server profiles created with networks in connections start the traffic for more than 20 mins and restart the OV appliance verify the traffic loss if any Before restart configure gatway vlans
+    ${IP}=    Get Server valid IP     ${single_ns_Serverhardware[0]}
+    Restart plexxi Appliance
+    startthread1    ${number_restart}    ${IP}    ${restart}
+    Sleep    1500
+    ${contents}=    OperatingSystem.Get File    ${restart}
+    ${Lines}=    Get Lines Containing String    ${contents}    ${ping_lost}
+    Log    \ncontents are ${Lines}    console=True
+    ${match}   ${ret1}    Should Match Regexp    ${Lines}    Lost\\s+=\\s+\\d+\\s+\\((\\d+%)\\s+loss\\)
+    Log     ${ret1}    console=True
+    Run Keyword Unless  '${ret1}' != '100%'    Fail
+
+73_API_TC_[REBOOT]_After the plexxi appliance rebooted verify the connections status, ports, fabric status etc
+    [Documentation]    After the OV appliance rebooted verify the connections status, ports, fabric status etc
+    ${resp}=     Fusion Api Get Switch
+
+    : FOR  ${x}   IN RANGE    0    ${resp['count']}
+    \   Run Keyword Unless   '${resp['members'][${x}]['state']}'  ==  'Configured'    FAIL   Fabric not in configured state
+
+    :For  ${x}    IN RANGE   1    ${Rack_length}
+    \    ${switch_Rack}     Set Variable   ${Plexxi_switch_names['Rack_${x}']}
+    \    Switch details Validation      ${switch_Rack}     ${switch_details}
+
+    :FOR    ${x}    IN RANGE   1    ${Rack_Length}
+    \    ${server_hardwares}=   Combine Lists    ${DH_360_Serverhardwares['Rack_${x}']}    ${DH_380_Serverhardwares['Rack_${x}']}
+    \    ${switch_uris}=    Get switch uris based on rack    ${Plexxi_switch_names['Rack_${x}']}
+    \    Verify access ports state Linked    ${switch_uris}    ${server_hardwares}
+
+
+
+
+
+
+
+***Keywords***
+Add OneView Configuration To Plexxi Connect From Variable
+    [Documentation]   Add OneView Control to Plexxi Connect Packs
+    [Arguments]   ${oneview_config}
+    :FOR   ${body}   IN   @{oneview_config}
+    \   ${resp} =   Plexxi Api Add OneView Configuration   ${body}
+    [return]    ${resp}
+
+Remove OneView Configuration From Variable In Plexxi Connect
+    [Documentation]   Remove OneView configuration defined in data file from Plexxi Connect
+    [Arguments]   ${oneview_config}
+    ${resp}=   Plexxi Api Get OneView Configuration
+    ${unable_to_find} =   Create List
+    :FOR   ${ov}   IN   @{resp['result']}
+    \   Run Keyword If   '${ov['host']}' == '${APPLIANCE_IP_4_20}'   Plexxi Api Delete OneView Configuration   ${ov['uuid']}
+    \   ...       ELSE   Append To List   ${unable_to_find}   ${ov['host']}
+    :FOR   ${f}   IN   @{unable_to_find}
+    \   Log   \n\tUnable to find OneView config host to remove: ${f}    console=True
+    Run Keyword If   ${unable_to_find} != @{EMPTY}   Fail   \tUnable to find one or more OneView config to remove.
+
+Setup Plexxi connect appliance
+    [Documentation]    Setting up plexxi connect appliance with one view appliance
+    [Arguments]    ${oneview_config}
+    Plexxi Api Login   ${plexxi_connect_host}   ${plexxi_connect_user}   ${plexxi_connect_password}
+    ${oneview_config} =   Get Variable Value    ${oneview_config}
+    ${resp}=    Run Keyword If   ${oneview_config} is not ${Null}   Add OneView Configuration To Plexxi Connect From Variable   ${oneview_config}
+    Wait For Task2    ${resp}    10m   5
+    Sleep    5min
+
+Validate connect version and plexxi manager
+    [Documentation]    checking connect version and plexxi IP
+    [Arguments]    ${resp}    ${Connect_version}    ${Plexxi_Ip}
+
+    Run keyword If    '${resp['members'][0]['foreignManager'][0]['propertyName']}'== 'ip_address'    Run Keyword   Should Match    ${resp['members'][0]['foreignManager'][0]['value']}    ${Plexxi_Ip}
+    Run keyword If    '${resp['members'][0]['foreignManager'][2]['propertyName']}'== 'version'    Should Match    ${resp['members'][0]['foreignManager'][2]['value']}    ${Connect_version}
+
+Get Switch uri in LS
+    [Documentation]    Get Switch uri in LS
+    [Arguments]    ${count}    ${resp}    ${Plexxi_switch_names}
+    :FOR    ${x}    IN RANGE    0    ${count}
+    \    ${switchuri}=    Run Keyword If    '${resp['members'][${x}]['name']}' != '${Plexxi_switch_names}'    Continue For Loop    ELSE    Get From Dictionary    ${resp['members'][${x}]}    uri
+    [Return]    ${switchuri}
+
+Creation of LS
+    [Documentation]    Creation of LS using switches
+    [Arguments]     ${ls_name}    ${lss}   ${Plexxi_switch_names}
+    ${switchuri_list}    Create List
+    :FOR    ${x}    IN RANGE    0  2
+    \    ${resp}    Fusion Api Get Switch    param=?filter="'name'=='${Plexxi_switch_names[${x}]}'
+    \    ${count}    Get From Dictionary    ${resp}    count
+    \    ${switchuri}=    Get Switch uri in LS    ${count}    ${resp}    ${Plexxi_switch_names[${x}]}
+    \    Append To List    ${switchuri_list}    ${switchuri}
+    Set to dictionary   ${lss[0]['logicalSwitch']}    name    ${ls_name}
+    Set to dictionary   ${lss[0]['logicalSwitch']}    switchUris    ${switchuri_list}
+    ${resp}    Add Logical Switch from variable    ${lss[0]}
+    [Return]    ${resp}
+
+Get switch uris based on rack
+    [Documentation]    Get switch uris based on rack
+    [Arguments]    ${Plexxi_switch_names}
+    ${switchuri_list}    Create List
+    :FOR    ${x}    IN RANGE    0  2
+    \    ${resp}    Fusion Api Get Switch    param=?filter="'name'=='${Plexxi_switch_names[${x}]}'
+    \    ${count}    Get From Dictionary    ${resp}    count
+    \    ${switchuri}=    Get Switch uri in LS    ${count}    ${resp}    ${Plexxi_switch_names[${x}]}
+    \    Append To List    ${switchuri_list}    ${switchuri}
+    [Return]    ${switchuri_list}
+
+Verify Switch State in LS
+    [Documentation]    Verifying switch state
+    ...             Example:
+    ...             Verify Switch State    ${LSname}
+    [Arguments]         ${LSname}    ${state}
+    ${resp} =   Fusion Api Get LS
+    ${switchUris}    Get from Dictionary    ${resp['members'][0]}    switchUris
+    ${length}    Get Length    ${switchUris}
+    :FOR    ${x}    IN RANGE   0    ${length}
+    \    ${resp}    Fusion Api Get Switch     uri=${switchUris[${x}]}
+    \    Should Be Equal    ${resp['state']}     ${state}
+
+Edit LSG
+    [Documentation]   Edit LSG name
+    [Arguments]     ${LSG}    ${LSG_new}
+    ${LSG_details} =    Fusion Api Get LSG      param=?filter="'name'=='${LSG}'"
+    ${uri}=     Get From Dictionary    ${LSG_details['members'][0]}    uri
+    Set to dictionary     ${LSG_details['members'][0]}    name    ${LSG_new}
+    ${resp}=     Fusion Api Edit Lsg      ${LSG_details['members'][0]}    ${uri}
+    ${task}=    Wait For Task2    ${resp}    3m    10
+
+Verify Switch details
+    [Documentation]     Verify Switch details on switch page
+    [Arguments]
+    ${resp}=     Fusion Api Get Switch
+    Run Keyword Unless   ${resp['count']} != 0  FAIL   switches not added
+    : FOR  ${x}   IN RANGE    0    ${resp['count']}
+    \   Run Keyword Unless   '${resp['members'][${x}]['state']}'  ==  'Configured'    FAIL   Fabric not in configured state
+
+Validate neighbor data for ports in switch
+    [Documentation]    Validate neighbor data for ports in switch
+    [Arguments]    ${resp}
+    Should Match Regexp    ${resp['neighbor']['remoteChassisId']}    \\d+.\\d+.\\d+.\\d+
+    ${mac}=     Run Keyword If    '${resp['neighbor']['remotePortId']}' != 'null'    Get From Dictionary    ${resp['neighbor']}     remotePortId
+
+    Run Keyword If    '${resp['neighbor']['linkUri']}' == 'None'    Should Be Equal    ${resp['neighbor']['remoteChassisId']}    ${resp['neighbor']['linkLabel']}    ELSE     Should Match Regexp    ${resp['neighbor']['linkUri']}    \\s*
+
+Get Switch uris for each rack
+    [Documentation]    Get switch uris based on each rack
+    [Arguments]    ${Plexxi_switch_name}
+    ${switchuris}=      Create List
+    ${len}=    Get Length    ${Plexxi_switch_name}
+    :FOR  ${x}    IN RANGE   0   ${len}
+    \   ${resp}=    fvt_api_get_switch_by_name    ${Plexxi_switch_name[${x}]}
+    \   ${uri}=    Get From Dictionary    ${resp}     uri
+    \   Append To List    ${switchuris}     ${uri}
+    [Return]    ${switchuris}
+
+
+Verifying switch mac address in server
+    [Documentation]    verifying switch mac address in server hardware
+    [Arguments]     ${server_hardware}    ${Plexxi_switch_name}
+    ${len}=    Get Length     ${server_hardware}
+    ${switch_uris}=     Create List
+    :FOR    ${x}    IN RANGE    0     ${len}
+    \   ${name}=   Get From Dictionary    ${server_hardware}    ${x}
+    \   ${SH}=    Set Variable    ${name}.us.rdlabs.hpecorp.net
+    \   ${resp}    fvt_api_get_server_hardware_by_name    ${SH}
+    \   ${switch_uris}=    Get Switch uris for each rack    ${Plexxi_switch_name}
+    \   ${port1_switch}=    Get From Dictionary    ${resp['portMap']['deviceSlots'][0]['physicalPorts'][0]}    physicalInterconnectUri
+    \   List Should Contain Value    ${switch_uris}     ${port1_switch}
+    \   ${port2_switch}=    Get From Dictionary    ${resp['portMap']['deviceSlots'][0]['physicalPorts'][1]}    physicalInterconnectUri
+    \   List Should Contain Value    ${switch_uris}     ${port2_switch}
+
+Verify presence of respective switchuris in both hardware types
+    [Documentation]    Verifying mac adrress in hardwares based on racks
+    [Arguments]    ${RACKS}   ${DH_Serverhardwares}   ${Plexxi_switch_names}
+    :For    ${x}    In Range    1    ${RACKS}
+    \    ${server_hardware}    Set Variable    ${DH_Serverhardwares['Rack_${x}']}
+    \    ${Plexxi_switch_name}    Set Variable    ${Plexxi_switch_names['Rack_${x}']}
+    \    Verifying switch mac address in server    ${server_hardware}    ${Plexxi_switch_name}
+
+
+Create profile with template
+    [Documentation]    Creating profile with Template
+    [Arguments]    ${SPT_name}    ${profile}    ${server_hardware}
+    ${uri1} =    Get Server Profile Template URI     ${SPT_name}
+    Set to Dictionary   ${profile}    serverProfileTemplateUri    ${uri1}
+    set To Dictionary   ${profile}    serverHardwareUri    SH:${server_hardware}.us.rdlabs.hpecorp.net
+    Set to Dictionary   ${profile}    name    ${server_hardware}
+    ${resp1}=    Add Server Profile     ${profile}
+    Wait For Task2     ${resp1}    10m    10
+
+Create profile with template based on racks
+    [Documentation]    Creating profile with Template
+    [Arguments]    ${Rack_Length}   ${DH_Serverhardwares}   ${SPT_name}    ${profile}
+    : FOR   ${x}    IN RANGE     1    ${Rack_Length}
+    \    ${server_hardware}=        Get From List       ${DH_Serverhardwares['Rack_${x}']}   0
+    \    Create profile with template    ${SPT_name}    ${profile}    ${server_hardware}
+
+
+Get length and append to list
+    [Documentation]    Get length and append to list
+    [Arguments]    ${len1}    ${DL_Server_names}    ${DH_Serverhardwares}    ${y}
+    :For    ${x}    In Range    0    ${len1}
+    \    ${DL_Server_name} =    get from list   ${DL_Server_names}   ${x}
+    \    Append To List    ${DH_Serverhardwares['Rack_${y}']}    ${DL_Server_name}
+    Log    ${DH_Serverhardwares}
+    [return]    ${DH_Serverhardwares}
+
+Map the hardware names to data
+    [Documentation]    Mapping the hardwarenames as per racks into data
+    [Arguments]    ${DL_servers}     ${DH_Serverhardwares}
+    ${len}=    Get Length   ${DL_servers}
+    :For    ${x}    In Range    0    ${len}
+    \    ${DL_Server_names} =    get from list   ${DL_servers}   ${x}
+    \    ${len1}=    Get Length    ${DL_Server_names}
+    \    ${y}=    Evaluate   ${x}+1
+    \    ${Serverhardware_names}    Get length and append to list    ${len1}    ${DL_Server_names}    ${DH_Serverhardwares}    ${y}
+    [return]     ${Serverhardware_names}
+
+Add Server Hardware
+    [Documentation]    Add Server Hardware
+    [Arguments]    ${DL_SH_IP}    ${DL_SH_body}
+    ${Server_names}=    Create List
+    ${len}    Get Length    ${DL_SH_IP}
+    ${temp}    Copy Dictionary    ${DL_SH_body}
+    :For    ${x}    In Range    0    ${len}
+    \    Set To Dictionary    ${temp}    hostname=${DL_SH_IP[${x}]}
+    \    ${resp}    Fusion Api Add Server Hardware    ${temp}
+    \    Run Keyword If  '${resp['status_code']}' == '202'    Log    \nStatus Code: ${resp['status_code']} \nSuccessfully!! Imported the DL server with IP ${DL_SH_IP[${x}]}\n    console=True
+    \    ...    ELSE    FAIL
+    \   Wait For Task2    ${resp}    5m    10
+    \   ${uri}    Get Server Hardware URI By ILO IP   ${DL_SH_IP[${x}]}
+    \   ${server_resp}    Fusion Api Get Server Hardware    ${uri}
+    \   ${server_name}    Get From dictionary    ${server_resp}    name
+    \   ${Server_name}=    Fetch From Left    ${server_name}    .
+    \   Append To List     ${Server_names}     ${Server_name}
+    [Return]    ${Server_names}
+
+Add server hardware in racks
+    [Documentation]    Adding server hardware
+    [Arguments]    ${len}    ${DL_IPS}    ${racks_DL_IPS}
+    :For    ${x}    In Range    1    ${len}
+    \    ${DL_len}=    Get Length    ${DL_IPS['Rack_${x}']}
+    \    ${rack_DL_IPS}=    Run Keyword If    ${DL_len}!= 0    Add Server Hardware    ${DL_IPS['Rack_${x}']}    ${DL_SH_body}    ELSE    Log    NO server hardware in this rack for DL380 server type    console=True
+    \    Append To List    ${racks_DL_IPS}    ${rack_DL_IPS}
+    [Return]    ${racks_DL_IPS}
+
+
+Update profile from Templates
+    [Documentation]    Update profile from Templates
+    [Arguments]    ${Rack_Length}     ${DH_Serverhardwares}
+    : FOR   ${x}    IN RANGE     1    ${Rack_Length}
+    \    ${server_hardware}=        Get From List       ${DH_Serverhardwares['Rack_${x}']}   0
+    \    ${dict}=   Create Dictionary    name    ${server_hardware}
+    \    ${resp}=   Patch Server Profile    ${dict}
+    \    Wait For Task2     ${resp}     10m    10
+
+create profile for remaining servers
+    [Documentation]    create profile for remaining servers
+   [Arguments]    ${flag1}    ${Server_name}    ${profile_sn}    ${profile_dn}   ${profile_sns}
+   Run Keyword If    '${flag1}' == 'same_nw'    Run Keyword    Create Profile    ${Server_name[-1]}   ${profile_sn}
+   ...    ELSE IF    '${flag1}'== 'diff_nw'    Run Keyword     Create Profile    ${Server_name[-2]}   ${profile_dn}
+   ...    ELSE IF    '${flag1}' == 'same_ns'    Run Keyword     Create Profile    ${Server_name[-3]}   ${profile_sns}
+
+Create profiles for remaining server profiles
+    [Documentation]    Create profiles for remaining server profiles
+    [Arguments]    ${rem_server}    ${config_type}   ${Server_name}   ${profile_sn}    ${profile_dn}   ${profile_sns}
+    :FOR    ${k}    IN RANGE    0    ${rem_server}
+    \    create profile for remaining servers      ${config_type[${k}]}   ${Server_name}   ${profile_sn}    ${profile_dn}   ${profile_sns}
+
+Create Profiles with four connections
+    [Documentation]    Create Profile
+    [Arguments]    ${Server_name}     ${config_type}     ${profile_sn}     ${profile_dn}     ${profile_sns}     ${profile_dns}
+    ${loop}      Create List
+    ${server_profiles}=     Create List
+    ${len}    Get Length    ${Server_name}
+    ${count}    Evaluate    ${len}/4
+    ${rem_server}    Evaluate    ${len}%4
+    ${count1}    Evaluate    ${len}-${rem_server}
+    ${count2}=    Set Variable    0
+    :FOR  ${x}    IN RANGE    0    4
+    \   ${count2}    Evaluate    ${count}+${count2}
+    \   Append to List    ${loop}    ${count2}
+    ${Server_name_list1}    Copy Dictionary    ${Server_name[0:${loop[0]}]}
+    ${Server_name_list2}    Copy Dictionary    ${Server_name[${loop[0]}:${loop[1]}]}
+    ${Server_name_list3}    Copy Dictionary    ${Server_name[${loop[1]}:${loop[2]}]}
+    ${Server_name_list4}    Copy Dictionary    ${Server_name[${loop[2]}:${count1}]}
+
+
+    :FOR    ${k}    IN RANGE    0    ${count}
+    \   ${profile_sn_SH}     ${profile_sn}=   Create Profile    ${Server_name_list1[${k}]}   ${profile_sn}
+    \   ${profile_dn_SH}    ${profile_dn}=    Create Profile    ${Server_name_list2[${k}]}   ${profile_dn}
+    \   ${profile_sns_SH}   ${profile_sns}=   Create Profile    ${Server_name_list3[${k}]}   ${profile_sns}
+    \   ${profile_dns_SH}   ${profile_dns}=   Create Profile    ${Server_name_list4[${k}]}   ${profile_dns}
+    Append To List    ${server_profiles}    ${profile_sn_SH[0]}    ${profile_dn_SH[0]}     ${profile_sns_SH[0]}    ${profile_dns_SH[0]}
+
+    Run keyword If    ${rem_server}>0    Create profiles for remaining server profiles    ${rem_server}   ${config_type}   ${Server_name}   ${profile_sn}    ${profile_dn}   ${profile_sns}    ELSE   Log   no servers to create profiles    console=True
+
+    [Return]    ${server_profiles}
+
+Create Profile
+    [Documentation]    Create Profile with networkset
+    [Arguments]    ${Server_name}    ${profile}
+    ${empty}    Create Dictionary
+    Set to Dictionary    ${profile}    serverHardwareUri    ${Server_name}.us.rdlabs.hpecorp.net
+    Set to Dictionary    ${profile}    name    ${Server_name}
+    ${resp}=    Add Server Profile    ${profile}
+    Wait For Task2    ${resp}    10m   10
+    ${profile['serverHardwareUri']}      Set Variable    ${empty}
+    ${profile['name']}      Set Variable    ${empty}
+
+    [Return]    ${Server_name}     ${profile}
+
+LS verification in switch page
+    [Documentation]    LS attribute verification in switch page
+    [Arguments]     ${y}
+    ${resp}    Fusion Api Get Switch
+    : FOR  ${x}    IN RANGE   0   ${resp['count']}
+    \    ${Sw_name}    Get From Dictionary    ${resp['members'][${x}]}    name
+    \    ${switch_resp}=    Set Variable    ${resp['members'][${x}]}
+    \    ${LS_uri}=    Run keyword If    '${Sw_name}'=='${switch_names[${y}]}'    Get From Dictionary   ${switch_resp}    logicalSwitchUri   ELSE    Continue For loop
+    [Return]    ${LS_uri}
+
+Switch Validation for access ports to display ILO name
+    [Documentation]   Switch validation for access ports to display ILO name
+    [Arguments]    ${Switch_names}    ${server_hardwares}
+    ${switchuri_list}=   Create List
+    : FOR  ${x}    IN RANGE   0   2
+    \    ${resp}    Fusion Api Get Switch    param=?filter="'name'=='${Switch_names[${x}]}'
+    \    Append To List    ${switchuri_list}    ${resp['members'][${x}]['uri']}
+    \    ${resp}=   Fusion Api Get Switch    uri=${switchuri_list[${x}]}
+    \    Access ports validation to display ILO names    ${resp}    ${server_hardwares}
+
+Access ports validation to display ILO names
+    [Documentation]    Access ports validation to display ILO names
+    [Arguments]    ${resp}    ${server_hardwares}
+    ${len}=    Get Length    ${server_hardwares}
+    : FOR   ${x}    IN RANGE    0    ${len}
+    \    ${Link_label}=    Get From Dictionary    ${resp['ports'][${x}]['neighbor']}    linkLabel
+    \    ${Link}=   Fetch From Left     ${Link_label}    .
+    \    List Should Contain Value    ${server_hardwares}    ${Link}
+
+Switch Validation for access ports to display UUID
+    [Documentation]   Switch validation for access ports to display UUID
+    [Arguments]    ${Switch_names}    ${server_hardwares}
+
+    ${switchuri_list}=   Create List
+    : FOR  ${x}    IN RANGE   0   2
+    \    ${resp}    Fusion Api Get Switch    param=?filter="'name'=='${Switch_names[${x}]}'
+    \    ${count}    Get From Dictionary    ${resp}    count
+    \    ${switchuri}=    Get Switch uri in LS    ${count}    ${resp}    ${Switch_names[${x}]}
+    \    Append To List    ${switchuri_list}    ${switchuri}
+    ${resp}=    Fusion Api Get Switch     uri=${switchuri_list[0]}
+    Access ports validation to display UUID    ${resp}    ${server_hardwares}
+    ${resp1}=    Fusion Api Get Switch     uri=${switchuri_list[1]}
+    Access ports validation to display UUID    ${resp1}    ${server_hardwares}
+
+Access ports validation to display UUID
+    [Documentation]    Access ports validation to display UUID
+    [Arguments]    ${resp}    ${server_hardwares}
+    ${len}=    Get Length    ${server_hardwares}
+    : FOR   ${x}    IN RANGE    0    ${len}
+    \    ${Link_label}=    Get From Dictionary    ${resp['ports'][${x}]['neighbor']}    linkLabel
+    \    ${Link}=   Fetch From Left     ${Link_label}    ,
+    \    Should Match Regexp    ${Link}    (\\d+)
+
+Validate the alert message
+    [Documentation]    Validating the alert message
+    [Arguments]    ${alertState}    ${physicalResourceType}    ${severity}   ${alerts}
+    ${Alert}=    Create List
+    ${resp} =    Fusion Api Get Alerts
+    ${mem_resp} =  Get From Dictionary     ${resp}     members
+    ${len} =   Get Length  ${mem_resp}
+    :FOR   ${x}    IN RANGE    0   ${len}
+    \    Run Keyword If    '${mem_resp[${x}]['alertState']}' !='${alertState}'    Continue For Loop
+    \    Run Keyword If    '${mem_resp[${x}]['physicalResourceType']}' !='${physicalResourceType}'   Continue For Loop
+    \    Run Keyword If    '${mem_resp[${x}]['severity']}' !='${severity}'    Continue For Loop
+    \    ${replace}=     Remove String Using Regexp  ${mem_resp[${x}]['description']}  \n
+    \    Run Keyword If  '${replace}' == '${alerts}'   Exit For Loop    ELSE    Fail
+
+Execute command in the Plexxi Switch for vlan group
+    [Documentation]    Execute command in the Plexxi Switch and return the output of the same
+    [Arguments]    ${switch_IP}    ${command}
+    ${vlan_output}    Create List
+    ${length}    Get Length    ${switch_IP}
+    :FOR    ${x}    IN RANGE    0    ${length}
+    \    SSHLibrary.Open Connection     ${switch_IP[${x}]}
+    \    SSHLibrary.Login    ${switch_login}    ${switch_password}
+    \    ${output}    SSHLibrary.Read Until    ${switch_login_prompt}
+    \    Should contain    ${output}    :~$
+    \    SSHLibrary.Write    ${sudo_command}
+    \    ${output1}    SSHLibrary.Read Until    ${sudo_login_prompt}
+    \    Should contain    ${output1}    ${sudo_password_prompt}
+    \    SSHLibrary.Write    ${sudo_password}
+    \    ${output2}    SSHLibrary.Read Until    ${plexxi_switch_prompt}
+    \    Should contain    ${output2}    >
+    \    SSHLibrary.Write    ${command}
+    \    ${output3}    SSHLibrary.Read Until    ${plexxi_switch_prompt}
+    \    Append to List    ${vlan_output}    ${output3}
+    \    SSHLibrary.Close all connections
+    [Return]    ${vlan_output}
+
+Execute command in the Plexxi Switch
+    [Documentation]    Execute command in the Plexxi Switch and return the output of the same
+    [Arguments]    ${switch_IP}    ${command}    ${Vlan}
+    ${vlan_output}    Create List
+    ${length}    Get Length    ${switch_IP}
+
+    :FOR    ${x}    IN RANGE    0    ${length}
+    \    SSHLibrary.Open Connection     ${switch_IP[${x}]}
+    \    SSHLibrary.Login    ${switch_login}    ${switch_password}
+    \    ${output}    SSHLibrary.Read Until    ${switch_login_prompt}
+    \    Should contain    ${output}    :~$
+    \    SSHLibrary.Write    ${sudo_command}
+    \    ${output1}    SSHLibrary.Read Until    ${sudo_login_prompt}
+    \    Should contain    ${output1}    ${sudo_password_prompt}
+    \    SSHLibrary.Write    ${sudo_password}
+    \    ${output2}    SSHLibrary.Read Until    ${plexxi_switch_prompt}
+    \    Should contain    ${output2}    >
+    \    SSHLibrary.Write    ${command} ${vlan[${x}]}
+    \    ${output3}    SSHLibrary.Read Until    ${plexxi_switch_prompt}
+    \    Append to List    ${vlan_output}    ${output3}
+    \    SSHLibrary.Close all connections
+    [Return]    ${vlan_output}
+
+Execute command in the Plexxi Switch for networkset
+    [Documentation]    Execute command in the Plexxi Switch and return the output of the same
+    [Arguments]    ${switch_IP}    ${command}    ${Vlan}
+    ${vlan_output}    Create List
+    ${length}    Get Length    ${switch_IP}
+    :FOR    ${x}    IN RANGE    0    ${length}
+    \    SSHLibrary.Open Connection     ${switch_IP[${x}]}
+    \    SSHLibrary.Login    ${switch_login}    ${switch_password}
+    \    ${output}    SSHLibrary.Read Until    ${switch_login_prompt}
+    \    Should contain    ${output}    :~$
+    \    SSHLibrary.Write    ${sudo_command}
+    \    ${output1}    SSHLibrary.Read Until    ${sudo_login_prompt}
+    \    Should contain    ${output1}    ${sudo_password_prompt}
+    \    SSHLibrary.Write    ${sudo_password}
+    \    ${output2}    SSHLibrary.Read Until    ${plexxi_switch_prompt}
+    \    Should contain    ${output2}    >
+    \    SSHLibrary.Write    ${command} ${vlan[${x}][0]}
+    \    ${output3}    SSHLibrary.Read Until    ${plexxi_switch_prompt}
+    \    Append to List    ${vlan_output}    ${output3}
+    \    SSHLibrary.Write    ${command} ${vlan[${x}][1]}
+    \    ${output3}    SSHLibrary.Read Until    ${plexxi_switch_prompt}
+    \    Append to List    ${vlan_output}    ${output3}
+    \    SSHLibrary.Close all connections
+    [Return]    ${vlan_output}
+
+Create Switch Dictionary
+    [Documentation]   Create switch dictionary
+    [Arguments]    ${switch_resp}
+    ${Sw_name}    Get From Dictionary    ${switch_resp}    name
+    ${Sw_model}    Get From Dictionary    ${switch_resp}    modelName
+    ${Sw_fw}    Get From Dictionary    ${switch_resp}    firmwareVersion
+    ${state}    Get From Dictionary    ${switch_resp}    state
+    ${chassisId}    Get From Dictionary    ${switch_resp}    chassisId
+
+    ${temp}    Create Dictionary     name=${Sw_name}
+    ...                              modelName=${Sw_model}
+    ...                              firmwareVersion=${Sw_fw}
+    ...                              state=${state}
+    ...                              chassisId=${chassisId}
+    ...
+    [Return]    ${temp}
+
+Switch details Validation
+    [Documentation]     Switch validation
+    [Arguments]     ${Plexxi_switch_names}    ${switch_details}
+    ${switchuri_list}    Create List
+    :FOR    ${x}    IN RANGE    0  2
+    \    ${resp}    Fusion Api Get Switch    param=?filter="'name'=='${Plexxi_switch_names[${x}]}'
+    \    Append To List    ${switchuri_list}    ${resp['members'][${x}]['uri']}
+    :FOR    ${x}    IN RANGE    0  2
+    \   ${switch_resp}    Fusion Api Get Switch    uri=${switchuri_list[${x}]}
+    \   ${switch_detail}=   Create Switch Dictionary   ${switch_resp}
+    \   List Should Contain Value     ${switch_details}    ${switch_detail}
+
+Get UUID from server hardware
+    [Documentation]    Get UUID from server hardware
+    [Arguments]    ${server_hardwares}
+    ${UUID}=    Create List
+    ${len}=   Get Length    ${server_hardwares}
+    : FOR   ${x}   IN RANGE    0    ${len}
+    \   ${resp}=    fvt_api_get_server_hardware_by_name    ${server_hardwares[${x}]}.us.rdlabs.hpecorp.net
+    \   ${uri}=    Get From Dictionary    ${resp}    uri
+    \   ${Uri}=    Fetch From Left    ${uri}    ,
+    \   Append To List     ${UUID}   ${Uri}
+    [Return]    ${UUID}
+
+Update Access ports in Switch
+    [Documentation]    Update Access ports in Switch
+    [Arguments]    ${switchUris}    ${portName}   ${body}
+    ${resp}    Fusion Api Get Switch     uri=${switchUris}
+    ${portId}=    Run Keyword If    '${resp['ports'][0]['portName']}' == '${portName}'    Get from Dictionary    ${resp['ports'][0]}    uri
+    ${portId}=    Split String From Right                       ${portId}              /              1
+    Set to dictionary           ${body}                   portName    ${portName}
+    Set to dictionary           ${body}                   portId    ${portId[-1]}
+    ${edit_body} =    Create List
+                Append to list      ${edit_body}    ${body}
+    ${switchUris} =              Catenate             SEPARATOR=/    ${switchUris}    update-ports
+    ${resp}    Fusion Api Edit Switch     ${edit_body}    uri=${switchUris}
+    ${task}    Wait For Task2    ${resp}   5m    10
+
+Disable/Enable switch ports and verify the server name
+    [Documentation]    Disable/Enable switch ports and verify the server name
+    [Arguments]    ${y}
+    ${resp}    Fusion Api Get Switch
+    : FOR  ${x}    IN RANGE   0   ${resp['count']}
+    \    ${Sw_name}    Get From Dictionary    ${resp['members'][${x}]}    name
+    \    ${switch_resp}=    Set Variable    ${resp['members'][${x}]}
+    \    ${Link_label}=     Run keyword If    '${Sw_name}'=='${switch_names[${y}]}'    Get From Dictionary    ${Switch_resp['ports'][0]['neighbor']}    linkLabel    ELSE    Continue For Loop
+    \    ${uri}=    Get From Dictionary    ${Switch_resp}    uri
+    \    ${resp_disable}    Update Access ports in Switch     ${uri}    ${portName}    ${disable_access_port[0]}
+    \    Log    Verify the Connected to section in switch page has the valid server names after disabling the port    console=True
+    \    ${Link_label}=    Fetch From Left     ${Link_label}    .
+    \    Should Match Regexp    ${Link_label}    ^[0-9A-Z].*
+    \    Log    Enable Access ports cables in Switch     console=True
+    \    ${resp_enable}    Update Access ports in Switch     ${uri}    ${portName}    ${enable_access_port[0]}
+    \    Should Match Regexp    ${Link_label}    ^[0-9A-Z].*
+
+Verify Task State
+    [Documentation]    Verify Task state continuoes by getting the task uri
+    [Arguments]    ${location}
+    ${task}=    Fusion Api Get Task     uri=${location}
+    Run keyword Unless    '${task['taskState']}' == 'Completed'    FAIL
+
+Remove All Server Hardware
+    [Documentation]    Removes server Hardware
+    ${SH}    Fusion Api Get Server Hardware
+    :FOR    ${server}    IN     @{SH['members']}
+    \    ${resp} =    Fusion Api delete Server Hardware        uri=${server['uri']}
+    \    Wait For Task2    ${resp}    10m   5
+
+Add Network Sets from variable1
+    [Documentation]    Adds Network sets to an appliance from a variable which contains a list of dicts with the entire payload
+    ...              scope process example:
+    ...                 'initialScopeUris': ['Scope:Test', 'Scope:Production']
+    [Arguments]     ${networks}
+    Log     Adding NETWORK SETS    console=True
+    :FOR    ${net}  IN  @{networks}
+    \       ${networkUris} =    Get Ethernet URIs   ${net['networkUris']}
+    \       Set to dictionary   ${net}  networkUris ${networkUris}
+    \       ${nativeNetworkUri} =   Run Keyword If  '${net['nativeNetworkUri']}' != 'None'      Get Ethernet URI    ${net['nativeNetworkUri']}
+    \       Set To Dictionary   ${net}  nativeNetworkUri    ${nativeNetworkUri}
+    \       ${initialScopeUris}=  Pop From Dictionary  ${net}  initialScopeUris  default=${None}
+    \       ${scopeUris}=       Run Keyword If    ${initialScopeUris} != ${None}
+    \       ...                 Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    \       Run Keyword If      ${initialScopeUris} != ${None}
+    \       ...                 Set To Dictionary    ${net}  initialScopeUris  ${scopeUris}
+    \       ${resp} =   Fusion Api Create Network Set       body=${net}
+    [return]    ${resp}
+
+Verify port address should be empty
+    [Documentation]   Verify port address should be empty
+    [Arguments]    ${server}
+    ${len}=   Get Length   ${server}
+    :FOR   ${x}   IN RANGE   0    ${len}
+    \   ${resp}    fvt_api_get_server_hardware_by_name    ${server[${x}]}.us.rdlabs.hpecorp.net
+    \   Run keyword Unless    ${resp['portMap']['deviceSlots'][0]['physicalPorts'][0]['physicalInterconnectUri']}== None   Fail
+    \   Run keyword Unless    ${resp['portMap']['deviceSlots'][0]['physicalPorts'][1]['physicalInterconnectUri']}== None   Fail
+
+Verify access ports state Linked
+    [Documentation]   Verifying state of access port
+    [Arguments]    ${switchUris}    ${server_hardwares}
+    ${len}=   Get Length    ${server_hardwares}
+    : FOR   ${x}   IN RANGE    0    ${len}
+    \    ${Switch_resp}    Fusion Api Get Switch     uri=${switchUris[0]}
+    \    Run keyword Unless     '${Switch_resp['ports'][${x}]['portStatus']}' == 'Linked'    Fail
+    \    ${Switch_resp}    Fusion Api Get Switch     uri=${switchUris[1]}
+    \    Run keyword Unless     '${Switch_resp['ports'][${x}]['portStatus']}' == 'Linked'    Fail
+
+
+Get Mac Address from server
+    [Documentation]    Get Mac Address from server
+    [Arguments]         ${server_details}    ${IP}    ${Powershell_get_mac}
+    Telnet.Open Connection     ${IP}     prompt=>     timeout=30s
+    Sleep    5sec
+    Telnet.Write    a
+    ${login}    Telnet.Login    ${server_details['username']}    ${server_details['password']}    login_prompt=login:    password_prompt=password:
+    Log      \nLogged in to server    console=True
+    Sleep    30sec
+    ${out}    Telnet.Read
+    Sleep    30sec
+    Telnet.Write    Powershell
+    Sleep    30sec
+    Telnet.Write    ${Powershell_get_mac}
+    Sleep    60sec
+    ${stdout}    Telnet.Read
+    Sleep    60sec
+    Telnet.Close Connection
+    Telnet.Close All Connections
+    [Return]    ${stdout}
+
+Get Mac address Of Server Profile
+    [Documentation]    Get Mac address Of Server Profile
+    [Arguments]                  ${connections}
+    ${mac_address}    Create List
+    ${connection_length}    Get Length    ${connections}
+    :FOR    ${x}    IN RANGE    ${connection_length}
+    \   Append To List   ${mac_address}    ${connections[${x}]['mac']}
+    [return]            ${mac_address}
+
+Get Profile Details
+    [Documentation]    Get Profile Details
+    [Arguments]        ${resp}    ${profile_name}
+    ${profile_len}    Get Length    ${resp['members']}
+    :FOR    ${x}    IN RANGE   ${profile_len}
+    \   ${y}    Set Variable    ${resp['members'][${x}]['connectionSettings']}
+    \   ${mac_address}    Run Keyword If  '${resp['members'][${x}]['name']}' == '${profile_name}'
+    \   ...    Get Mac address Of Server Profile    ${y['connections']}
+    \   ...    ELSE
+    \   ...    Continue For Loop
+    [return]            ${mac_address}
+
+
+Command to Disable/enable Server Interface
+    [Documentation]    Command to Disable/enable Server Interface
+    [Arguments]         ${adapter_name_1}    ${interface_cmd}    ${windows_server_details}    ${serverip_List1_global[1]}
+    ${tmp}    Remove Whitespace   ${adapter_name_1}
+    ${replaced_cmd1} =  Replace String Using Regexp    ${interface_cmd}    name    ${tmp}
+    Log    \nstrafter strip is${tmp}    console=True
+    Log    \nreplaced_cmd1 is${replaced_cmd1}    console=True
+    Disable Server Interface   ${serverip_List1_global[1]}    ${windows_server_details}    ${replaced_cmd1}
+
+Disable Server Interface
+    [Documentation]    Disable Server Interface
+    [Arguments]         ${server_ip}    ${windows_server_details}    ${team_cmd}
+    Telnet.Open Connection     ${server_ip}     prompt=>     timeout=20s
+    Log      \nSuccessfully opened connection to the server    console=True
+    Telnet.Write    a
+    ${login}    Telnet.Login               ${windows_server_details['username']}     ${windows_server_details['password']}    login_prompt=login:    password_prompt=password:
+    Log    \nSuccessfully logged into the server    console=True
+    Sleep    10sec
+    Telnet.Write    powershell
+    Log      \n${team_cmd}    console=True
+    Telnet.Write    ${team_cmd}
+    Sleep    30sec
+    Telnet.Write    y
+    Sleep    30sec
+    Telnet.Close Connection
+    Telnet.Close All Connections
+    Log    \nServer interface disabled successfully    console=True
+
+
+Get Windows Server IP
+    [Documentation]    Gets the valid ip and gateway ip of the server.
+    [Arguments]     ${ilo_details}
+    SSHLibrary.Open Connection    ${ilo_details['ip']}
+    SSHLibrary.Login    ${ilo_details['username']}    ${ilo_details['password']}
+    Sleep    5
+    ${windows_ips}      Create List
+    SSHLibrary.Write    stop /system1/oemhp_VSP1
+    Sleep    5
+    SSHLibrary.Write    vsp
+    Sleep    5
+    SSHLibrary.Read Until    SAC>
+    Sleep    5
+    SSHLibrary.Write    i
+    Sleep    5
+    ${output1}=    SSHLibrary.Read
+    ${cmd_output}=    Get Regexp Matches    ${output1}    192\\.\\d+\\.10+\\.\\d+
+    ${IP_Count}=    Get Length    ${cmd_output}
+    ${Server_IP}    Convert To String    ${cmd_output[${x}]}
+    SSHLibrary.Close All Connections
+    [Return]  ${Server_IP}
+
+Get Windows Server IP for Rack servers
+    [Documentation]    Gets the valid ip and gateway ip of the server.
+    [Arguments]     ${win_server_details}   ${ip}
+
+    SSHLibrary.Open Connection    ${ip}
+    SSHLibrary.Login    ${win_server_details['username']}    ${win_server_details['password']}
+    Sleep    5
+    ${windows_ips}      Create List
+    SSHLibrary.Write    stop /system1/oemhp_VSP1
+    Sleep    5
+    SSHLibrary.Write    vsp
+    Sleep    5
+    SSHLibrary.Read Until    SAC>
+    Sleep    5
+    SSHLibrary.Write    i
+    Sleep    5
+    ${output1}=    SSHLibrary.Read
+    ${cmd_output}=    Get Regexp Matches    ${output1}    192\\.\\d+\\.\\d+\\.\\d+
+    ${IP_Count}=    Get Length    ${cmd_output}
+    ${Server_IP}=    Convert To String    ${cmd_output[0]}
+    SSHLibrary.Close All Connections
+    [Return]   ${Server_IP}
+
+Get Redhat IP
+    [Documentation]    ssh login to Redhat DL 380 Server using eno4 interface to fetch IPs of eno5 & eno6
+    [Arguments]         ${redhat_ip}    ${ilo_details}    ${server_details1}
+    SSHLibrary.Open Connection     ${redhat_ip}     prompt=>     timeout=20s
+    ${login}    SSHLibrary.Login               ${ilo_details['username']}     ${ilo_details['password']}
+    Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    60sec
+    SSHLibrary.Write    ${server_details1['username']}
+    Sleep    5sec
+    SSHLibrary.Write    ${server_details1['password']}
+    SSHLibrary.Write    ifconfig
+    Sleep    60sec
+    ${stdout1} =  Read
+    ${string1}    Convert To String    ${stdout1}
+    ${ip_list}    Get Regexp Matches    ${string1}    inet\\s+(192.168.10.\\d+)    1
+    ${Server_IP}=    Convert To String    ${ip_list[0]}
+    SSHLibrary.Write    exit
+    SSHLibrary.Close All Connections
+    [Return]    ${Server_IP}
+
+Get Server IP Esxi
+    [Documentation]    Fetching server IP's for multiple servers that captures IP in separate list for different interconnects
+   [Arguments]     ${ilo_details}    ${server_details}
+   SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=20s
+    ${login}    SSHLibrary.Login               ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Read
+    SSHLibrary.Write    ${server_details['username']}
+    Sleep    5sec
+    SSHLibrary.Read
+    SSHLibrary.Write    ${server_details['password']}
+    Sleep    5sec
+    SSHLibrary.Read
+    Sleep    5sec
+    SSHLibrary.Write    esxcli network ip interface ipv4 get
+    Sleep    60sec
+    ${out1}    SSHLibrary.Read
+    Log    ${out1}    console=True
+    ${out_string1}    Convert To String    ${out1}
+    SSHLibrary.Write    esxcli network ip neighbor list
+    Sleep    60sec
+    ${out2}    SSHLibrary.Read
+    ${out_string2}    Convert To String    ${out2}
+    SSHLibrary.Write    exit
+    ${ip_list}    Get Regexp Matches    ${out_string1}    vmk\\d+\\s+(10.\\d+.\\d+.\\d+)\\s+255.\\d+.*    1
+    ${gateway_list}    Get Regexp Matches    ${out_string2}    (10.\\d+.0.\\d+)\\s+\\d+:\\d+:*    1
+    SSHLibrary.Close All Connections
+    [Return]    ${ip_list}
+
+Get Server Hardware OS type and ILO IP
+    [Documentation]    Get server hardware OS type and ILO IP
+    [Arguments]     ${server_name}
+    ${resp}    Fusion Api Get Server Hardware    param=?filter=name=${server_name}.us.rdlabs.hpecorp.net
+    ${SH_name}    Get From Dictionary    ${resp['members'][0]}    serverName
+    ${ip}=      Get From Dictionary     ${resp['members'][0]['mpHostInfo']['mpIpAddresses'][0]}   address
+    [return]   ${SH_name}    ${ip}
+
+Get Server valid IP
+    [Documentation]    Get Valid IP's for server
+    [Arguments]    ${DL_server_names}
+    ${server_name}    ${ip}    Get Server Hardware OS type and ILO IP    ${DL_server_names}
+    ${Server_name} =    Split String From Right     ${server_name}  _   1
+    ${splitstring}    Set Variable    ${Server_name[1][0:2]}
+    Set to Dictionary    ${ilo_details}    ilo_ip=${ip}
+    ${output1}    Run keyword If    '${splitstring}'== 'W1'    Get Windows Server IP for Rack servers   ${ilo_details1}  ${ip}
+    ...   ELSE IF    '${splitstring}'== 'RH'    Get Redhat IP    ${ip}    ${ilo_details1}    ${redhat_details}
+    ...   ELSE    Get Server IP Esxi    ${ip}    ${ilo_details}
+    [Return]    ${output1}
+
+Get Server credentials
+    [Documentation]    Get Valid credentials
+    [Arguments]    ${DL_server_names}
+    ${server_name}    ${ip}    Get Server Hardware OS type and ILO IP    ${DL_server_names}
+    ${Server_name} =    Split String From Right     ${server_name}  _   1
+    ${splitstring}    Set Variable    ${Server_name[1][0:2]}
+    Run keyword If    '${splitstring}'== 'W1'    Run Keywords    Set to Dictionary    ${server_Auth_details}    username=${windows_details['username']}    AND    Set to Dictionary   ${server_Auth_details}    password=${windows_details['password']}
+    ...   ELSE IF    '${splitstring}'== 'RH'    Run Keywords    Set to Dictionary   ${server_Auth_details}    username=${redhat_details['username']}    AND    Set to Dictionary   ${server_Auth_details}    password=${redhat_details['password']}
+    ${Server_auth}    Copy Dictionary     ${server_Auth_details}
+    [Return]    ${Server_auth}    ${splitstring}
+
+Get list of valid IPs
+    [Documentation]    Get list of valid IPs
+    [Arguments]    ${profiles}
+    ${IP_List}=    Create List
+    ${len}=    Get Length    ${profiles}
+    :FOR   ${x}   IN RANGE    0    ${len}
+    \    ${IP}=  Get Server valid IP     ${profiles[${x}]}
+    \    ${IP1}   Create Dictionary
+    \    Set to Dictionary    ${IP1}    ip1=${IP}
+    \    Append To List   ${IP_List}   ${IP1}
+    [Return]    ${IP_List}
+
+Get Server valid IP and OS type
+    [Documentation]    Get Valid IP's for server
+    [Arguments]    ${DL_server_names}
+    ${server_name}    ${ip}    Get Server Hardware OS type and ILO IP    ${DL_server_names}
+    ${Server_name} =    Split String From Right     ${server_name}  _   1
+    ${splitstring}    Set Variable    ${Server_name[1][0:2]}
+    Set to Dictionary    ${ilo_details}    ilo_ip=${ip}
+    ${output1}    Run keyword If    '${splitstring}'== 'W1'    Get Windows Server IP for Rack servers   ${ilo_details1}  ${ip}
+    ...   ELSE IF    '${splitstring}'== 'RH'    Get Redhat IP    ${ip}    ${ilo_details1}    ${redhat_details}
+    ...   ELSE    Get Server IP Esxi    ${ip}    ${ilo_details}
+    [Return]    ${output1}    ${splitstring}
+
+Get Valid IPs for Rack servers
+    [Documentation]    Get Valid IPs for Rack servers
+    [Arguments]    ${profiles}
+    ${len}=    Get Length    ${profiles}
+    :FOR   ${x}   IN RANGE    0    ${len}
+    \    ${IP}    ${OS_Type}     Get Server valid IP and OS type     ${profiles[${x}]}
+    \    ${IP1}   Create Dictionary
+    \    Set to Dictionary    ${IP1}    ip1=${IP}
+    [Return]    ${IP1}    ${OS_Type}
+
+Get Valid IPs for all servers
+    [Documentation]    Get Valid IPs for all servers
+    [Arguments]    ${RACK_Length}    ${profiles}
+    ${IP_List}=    Create List
+    :For    ${x}    In Range    1    ${Rack_length}
+    \    ${IP}=  Get Server valid IP     ${profiles['Rack_${x}'][0]}
+    \    ${IP1}   Create Dictionary
+    \    Set to Dictionary    ${IP1}    ip1=${IP}
+    \    Append To List   ${IP_List}   ${IP1}
+    [Return]    ${IP_List}
+
+server ping in each server
+    [Documentation]    server ping in each server
+    [Arguments]    ${profiles}
+    ${len}=    Get Length    ${profiles}
+    ${IP_List}=  Get list of valid IPs     ${profiles}
+    :FOR   ${x}   IN RANGE    0    ${len}
+    \   Log    ${IP_List}    console=true
+    \   Server to server ping    ${IP_List[${x}]}    ${IP_List}
+
+Server to server ping
+    [Documentation]    Server to server ping
+    [Arguments]    ${IP1}    ${IP_List}
+    ${Server_details_list}=    Create List
+    ${Server_details}   Create Dictionary
+    Set to Dictionary    ${Server_details}    ip=${IP1}
+    ${Server_Credentials}    ${OS_Type}    Get Server credentials    ${profiles}
+    Set to Dictionary    ${Server_details}    username=${Server_Credentials['username']}
+    Set to Dictionary    ${Server_details}    password=${Server_Credentials['password']}
+    ${Output}=    execute_traffic_parallel    ${Server_details}    ${IP_List}    ${OS_Type}
+    ${len}=    Get Length    ${Output}
+    :FOR   ${x}   IN RANGE    0    ${len}
+    \    Run Keyword If    ${Output[${x}]} != 0    fail    Log    Traffic flow is not successful    console=True
+
+Ping IP and verify ping is succuss
+    [Documentation]    Ping IP and verify ping is succuss
+    [Arguments]    ${number}    ${IP}    ${name}    ${ping_Lost}
+    startthread1    ${number}    ${IP}    ${name}
+    Sleep    50
+    ${contents}=    OperatingSystem.Get File    ${name}
+    ${Lines}=    Get Lines Containing String    ${contents}    ${ping_Lost}
+    Log    \ncontents are ${Lines}    console=True
+    ${match}   ${ret1}    Should Match Regexp    ${Lines}    Lost\\s+=\\s+\\d+\\s+\\((\\d+%)\\s+loss\\)
+    Log     ${ret1}    console=True
+    Run Keyword Unless  '${ret1}' != '100%'    Fail
+
+
+Restart plexxi Appliance
+    [Documentation]    Restart plexxi Appliance
+    SSHLibrary.Open Connection     ${plexxi_connect_host}
+    SSHLibrary.Login    ${plexxi_connect_user}    ${plexxi_connect_password}
+    ${output}    SSHLibrary.Read Until    ${switch_login_prompt}
+    Should contain    ${output}    :~$
+    SSHLibrary.Write    sudo reboot
+    Sleep    10s
+    SSHLibrary.Close all connections

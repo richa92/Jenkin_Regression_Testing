@@ -1,0 +1,1179 @@
+*** Settings ***
+Library                RoboGalaxyLibrary
+Library                FusionLibrary
+Library                OperatingSystem
+Library                BuiltIn
+Library                Collections
+Library                XML
+Library                SSHLibrary
+Library                String
+Library                Dialogs
+Library             ./ProfileHelpers.py
+
+*** Keywords ***
+Get Server Profile Type
+    [Documentation]    Get Server Profile Type using API version for 1.20 to 3.10 appliances
+    ${resp} =           Fusion Api Get Appliance Api Versions
+    ${version} =        Get Variable Value      ${X-API-VERSION}        ${resp['currentVersion']}
+    ${type} =    Set Variable If
+    ...    ${version} == 101    ServerProfileV3
+    ...    ${version} == 120    ServerProfileV4
+    ...    ${version} == 200    ServerProfileV5
+    ...    ${version} == 201    ServerProfileV5
+    ...    ${version} == 300    ServerProfileV6
+    ...    ${version} == 400    ServerProfileV400
+    ...    ${version} == 500    ServerProfileV7
+    [Return]    ${type}
+
+Create Server Profile POST Payload
+    [Documentation]    Create Server Profile POST Payload
+    ...                    profile = {"type":"ServerProfileV6","serverHardwareUri":'SH:'+ ${ENC1SHBAY1},
+    ...                            "serverHardwareTypeUri":'SHT:SY 480 Gen9 1',
+    ...                            "enclosureGroupUri":"EG:EG1",
+    ...                            "initialScopeUris":["Scope:scope1","Scope:scope2"],
+    ...                           ...}
+    [Arguments]        ${profile}
+    ${payload} =  copy dictionary  ${profile}
+    # Server Hardware
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${payload}  serverHardwareUri
+    ${sh} =  set variable if  '${status}'=='PASS'  ${return}  error
+    ${sh} =  run keyword if  '${sh}'!= '${None}'  replace string using regexp  ${sh}  SH:  ${EMPTY}
+    ${sh_uri} =  run keyword if  '${status}'=='PASS' and '${sh}'!='' and '${sh}'!= '${None}'  Get Server Hardware URI  ${sh}
+    ${is_uri}  ${return} =  Run Keyword And Ignore Error   Should Contain    ${sh}    /rest/server-hardware/
+    run keyword if  '${status}'=='PASS' and '${sh}'!='' and '${is_uri}'=='FAIL'  Set to Dictionary    ${payload}    serverHardwareUri    ${sh_uri}
+    # Server Hardware Type
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${payload}  serverHardwareTypeUri
+    ${sht} =  set variable if  '${status}'=='PASS'  ${return}  error
+    ${sht} =     Add Category    ${sht}  SHT
+    ${sht_uri} =  run keyword if  '${status}'=='PASS' and '${sht}'!=''   Common URI Lookup by name  ${sht}
+    run keyword if  '${status}'=='PASS' and '${sht}'!=''  Set to Dictionary    ${payload}    serverHardwareTypeUri    ${sht_uri}
+    # SPT
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${payload}  serverProfileTemplateUri
+    ${spt} =  set variable if  '${status}'=='PASS'  ${return}  error
+    ${spt_uri} =  run keyword if  '${status}'=='PASS' and '${spt}'!=''   Common URI Lookup by name  ${spt}
+    run keyword if  '${status}'=='PASS' and '${spt}'!=''  Set to Dictionary    ${payload}    serverProfileTemplateUri    ${spt_uri}
+    # EG
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${payload}  enclosureGroupUri
+    ${eg} =  set variable if  '${status}'=='PASS'  ${return}  error
+    ${eg} =     Add Category    ${eg}   EG
+    ${eg_uri} =  run keyword if  '${status}'=='PASS' and '${eg}'!=''    Common URI Lookup by name    ${eg}
+    run keyword if  '${status}'=='PASS' and '${eg}'!=''  Set to Dictionary    ${payload}    enclosureGroupUri    ${eg_uri}
+    # Enclosure
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${payload}  enclosureUri
+    ${enc} =  set variable if  '${status}'=='PASS'  ${return}  error
+    ${enc} =     Add Category    ${enc}  ENC
+    ${enc_uri} =  run keyword if  '${status}'=='PASS' and '${enc}'!=''    Common URI Lookup by name    ${enc}
+    run keyword if  '${status}'=='PASS' and '${enc}'!=''  Set to Dictionary    ${payload}    enclosureUri    ${enc_uri}
+    # Connections (refactored to allow v600 & v500 and below API DTO's)
+    # v600 API DTO code
+    ${status1}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary    ${payload['connectionSettings']}    connections
+    ${connections} =     set variable if  '${status1}'=='PASS'  ${return}
+    ${connections} =     Run Keyword If  '${status1}'=='PASS'  Lookup Connection Uris    ${connections}
+    Run Keyword If  '${status1}'=='PASS'  Set to Dictionary   ${payload['connectionSettings']}  connections     ${connections}
+    # v500 and below API DTO code
+    ${status2}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary    ${payload}    connections
+    ${connections} =     set variable if  '${status2}'=='PASS'  ${return}
+    ${connections} =     Run Keyword If  '${status2}'=='PASS'  Lookup Connection Uris    ${connections}
+    Run Keyword If  '${status2}'=='PASS'  Set to Dictionary   ${payload}  connections     ${connections}
+    # sanStorage
+    ${status}  ${return} =  Run Keyword and Ignore Error      Get From Dictionary    ${payload}    sanStorage
+    ${sanStorage} =  set variable if  '${status}'=='PASS'  ${return}  error
+    ${sanStorage} =   run keyword if  '${status}'=='PASS' and ${sanStorage}!=${None}     Verify Storage Volume        ${sanStorage}
+    ${ssc_status}  ${sanSystemCredentials} =  Run Keyword and Ignore Error  Get From Dictionary  ${sanStorage}  sanSystemCredentials
+    ${new_sanSystemCredentials} =  run keyword if  '${ssc_status}'=='PASS'  Lookup sanSystemCredentials uris  ${sanSystemCredentials}
+    Run Keyword If  '${ssc_status}'=='PASS'  Set to Dictionary  ${sanStorage}  sanSystemCredentials  ${new_sanSystemCredentials}
+    Run Keyword If  '${status}'=='PASS'  Set to Dictionary   ${payload}  sanStorage     ${sanStorage}
+    # type
+    ${default_type} =    Get Server Profile Type
+    ${status}    ${return}    Run Keyword and Ignore Error    Get From Dictionary    ${payload}    type
+    ${type} =    Set Variable If    '${status}'=='PASS'    ${return}    ${default_type}
+    Set to Dictionary    ${payload}    type    ${type}
+
+	# Initial Scope process.
+    ${initialScopeUris}=  Pop From Dictionary  ${payload}  initialScopeUris  default=${None}
+    ${scopeUris}=       Run Keyword If    ${initialScopeUris} != ${None}
+    ...                 Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    Run Keyword If      ${initialScopeUris} != ${None}
+    ...                 Set To Dictionary    ${payload}  initialScopeUris  ${scopeUris}
+
+    # osDeploymentSettings
+    ${status}  ${return} =  Run Keyword and Ignore Error      Get From Dictionary    ${payload}    osDeploymentSettings
+    ${osDeploymentSettings} =  set variable if  '${status}'=='PASS'  ${return}  error
+    ${osDeploymentSettings} =   run keyword if  '${status}'=='PASS' and ${osDeploymentSettings}!=${None}     Set OS Deployment settings        ${osDeploymentSettings}
+    Run keyword if  '${status}'=='PASS' and ${osDeploymentSettings}!=${None}	Set to Dictionary   ${payload}  osDeploymentSettings     ${osDeploymentSettings}
+
+     # localStorage - sasLogicalJBODs URIs
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary    ${payload['localStorage']}    sasLogicalJBODs
+    ${sasLogicalJBODs} =     set variable if  '${status}'=='PASS'  ${return}
+    ${sasLogicalJBODs} =     Run Keyword If  '${status}'=='PASS'  Lookup sasLogicalJBOD uris   ${sasLogicalJBODs}
+    Run Keyword If  '${status}'=='PASS'  Set to Dictionary   ${payload['localStorage']}  sasLogicalJBODs  ${sasLogicalJBODs}
+
+   [return]  ${payload}
+
+Create Server Profile POST Payload from SPT
+    [Documentation]    Create Server Profile POST payload when SPT is defined. Name, serverHardwareTypeUri, and serverProfileTemplateUri are required.
+    ...                    profile = {
+    ...                                "type":"ServerProfileV8","name":PROFILE1_NAME,
+    ...                                "serverHardwareUri":'SH:'+ENC1SHBAY1,
+    ...                                "initialScopeUris":["Scope:scope1","Scope:scope2"],
+    ...                                "serverProfileTemplateUri":"SPT:"+SPT1_NAME,
+    ...                                "iscsiInitiatorName":PROFILE1_IQN}
+    [Arguments]        ${profile}  ${api}=${None}
+    ${payload} =  copy dictionary  ${profile}
+    ${spt} =  Get From Dictionary  ${payload}  serverProfileTemplateUri
+    ${spt_uri} =  Common URI Lookup by name  ${spt}
+    # get the new payload based on the SPT
+    ${new_payload} =  Fusion Api Get Server Profile Template New Profile  ${spt_uri}  api=${api}
+    # remove the status_code and headers in the response
+    remove from dictionary  ${new_payload}  status_code
+    remove from dictionary  ${new_payload}  headers
+    # set profile name in the payload
+    Set to Dictionary   ${new_payload}  name  ${payload['name']}
+    # Initial Scope process.
+    ${initialScopeUris}=  Pop From Dictionary  ${payload}  initialScopeUris  default=${None}
+    ${scopeUris}=       Run Keyword If    ${initialScopeUris} != ${None}
+    ...                 Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    Run Keyword If      ${initialScopeUris} != ${None}
+    ...                 Set To Dictionary    ${new_payload}  initialScopeUris  ${scopeUris}
+    # set serverHardwareUri in the payload
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${payload}  serverHardwareUri
+    ${sh} =  set variable if  '${status}'=='PASS'  ${return}  error
+    ${sh} =  run keyword if  '${sh}'!= '${None}'  replace string using regexp  ${sh}  SH:  ${EMPTY}
+    ${sh_uri} =  run keyword if  '${status}'=='PASS' and '${sh}'!='' and '${sh}'!= '${None}'  Get Server Hardware URI  ${sh}
+    run keyword if  '${status}'=='PASS'  Set to Dictionary   ${new_payload}  serverHardwareUri  ${sh_uri}
+    # set serverHardwareTypeUri in the create server profile post payload
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${payload}  serverHardwareTypeUri
+    ${sht} =  set variable if  '${status}'=='PASS'  ${return}  error
+    ${sht} =  run keyword if  '${sht}'!= '${None}'  replace string using regexp  ${sht}  SHT:  ${EMPTY}
+    ${sht_uri} =  run keyword if  '${status}'=='PASS' and '${sh}'!='' and '${sh}'!= '${None}'  Get Server Hardware Type URI  ${sht}
+    run keyword if  '${status}'=='PASS'  Set to Dictionary   ${new_payload}  serverHardwareTypeUri  ${sht_uri}
+    # set iscsiInitiatorName in the payload if defined in the data
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${payload}  iscsiInitiatorName
+    ${iscsiInitiatorName} =  set variable if  '${status}'=='PASS'  ${return}  ${EMPTY}
+    run keyword if  '${status}'=='PASS'  set to dictionary  ${new_payload}  iscsiInitiatorName  ${iscsiInitiatorName}
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${payload}  iscsiInitiatorNameType
+    ${iscsiInitiatorNameType} =  set variable if  '${status}'=='PASS'  ${return}  ${EMPTY}
+    run keyword if  '${status}'=='PASS'  set to dictionary  ${new_payload}  iscsiInitiatorNameType  ${iscsiInitiatorNameType}
+    # set connections in the payload if defined in the data (refactored to allow v600 & v500 and below API DTO's)
+    # v600 API DTO code
+    ${status1}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${payload}  connectionSettings
+    ${connectionSettings} =  set variable if  '${status1}'=='PASS'  ${return}
+    ${status2}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${connectionSettings}  connections
+    ${connections} =  set variable if  '${status2}'=='PASS'  ${return}  ${EMPTY}
+    ${connections} =  run keyword if  '${status2}'=='PASS'  Lookup Connection Uris  ${connections}
+    run keyword if  '${status2}'=='PASS'  Set to Dictionary   ${connectionSettings}  connections  ${connections}
+    run keyword if  '${status2}'=='PASS'  Set to Dictionary   ${new_payload}  connectionSettings  ${connectionSettings}
+    # v500 and below API DTO code
+    ${status3}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${payload}  connections
+    ${connections} =  set variable if  '${status3}'=='PASS'  ${return}  ${EMPTY}
+    ${connections} =  run keyword if  '${status3}'=='PASS'  Lookup Connection Uris  ${connections}
+    run keyword if  '${status3}'=='PASS'  Set to Dictionary   ${new_payload}  connections  ${connections}
+    # Lookup SanStorage Payload
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${payload}  sanStorage
+    ${sanStorage} =  set variable if  '${status}'=='PASS'  ${return}  error
+    ${sanStorage} =   run keyword if  '${status}'=='PASS' and ${sanStorage}!=${None}   Verify Storage Volume  ${sanStorage}
+    # SanStorage[sanSystemCredentials]
+    ${ssc_status}  ${sanSystemCredentials} =  Run Keyword and Ignore Error  Get From Dictionary  ${sanStorage}  sanSystemCredentials
+    ${new_sanSystemCredentials} =  run keyword if  '${ssc_status}'=='PASS'  Lookup sanSystemCredentials uris  ${sanSystemCredentials}
+    Run Keyword If  '${ssc_status}'=='PASS'  Set to Dictionary  ${sanStorage}  sanSystemCredentials  ${new_sanSystemCredentials}
+    run keyword if  '${status}'=='PASS'  Set to Dictionary   ${payload}  sanStorage  ${sanStorage}
+    ${payload} =  run keyword if  '${status}'=='PASS' and ${sanStorage}!=${None}  Lookup Volume Attachment ATAI for Server Profile from Template  ${payload}
+    ...    ELSE    Get Variable Value    ${payload}
+    run keyword if  '${status}'=='PASS' and ${sanStorage}!=${None}  Set to Dictionary   ${new_payload}  sanStorage  ${payload['sanStorage']}
+    # Get Boot Order from payload
+    ${status}  ${return} =  Run Keyword and Ignore Error      Get From Dictionary    ${payload}    boot
+    ${bootOrder} =  set variable if  '${status}'=='PASS'  ${return}  error
+    Run keyword if  '${status}'=='PASS' and ${bootOrder}!=${None}  Set to Dictionary  ${new_payload}  boot  ${bootOrder}
+
+    # osDeploymentSettings
+    ${status}  ${return} =  Run Keyword and Ignore Error      Get From Dictionary    ${payload}    osDeploymentSettings
+    ${osDeploymentSettings} =  set variable if  '${status}'=='PASS'  ${return}  error
+    ${osDeploymentSettings} =   run keyword if  '${status}'=='PASS' and ${osDeploymentSettings}!=${None}     Set OS Deployment settings        ${osDeploymentSettings}
+    Run keyword if  '${status}'=='PASS' and ${osDeploymentSettings}!=${None}	Set to Dictionary   ${payload}  osDeploymentSettings     ${osDeploymentSettings}
+
+    # localStorage - sasLogicalJBODs URIs
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary    ${payload['localStorage']}    sasLogicalJBODs
+    ${sasLogicalJBODs} =     set variable if  '${status}'=='PASS'  ${return}
+    ${sasLogicalJBODs} =     Run Keyword If  '${status}'=='PASS'  Lookup sasLogicalJBOD uris   ${sasLogicalJBODs}
+    Run Keyword If  '${status}'=='PASS'  Set to Dictionary   ${new_payload['localStorage']}  sasLogicalJBODs  ${sasLogicalJBODs}
+
+    # initialScopeUri
+    ${status}  ${return} =  Run Keyword and Ignore Error      Get From Dictionary    ${payload}    initialScopeUris
+    ${scopes} =  set variable if  '${status}'=='PASS'  ${return}  error
+    ${scope_uris} =    Run Keyword if  '${status}'=='PASS' and '${scopes}'!=''  Get Scope URIs By Name  ${scopes}
+    run keyword if  '${status}'=='PASS' and '${scopes}'!=''  Set to Dictionary    ${new_payload}    initialScopeUris    ${scope_uris}
+
+    [return]  ${new_payload}
+
+Add Server Profile
+    [Documentation]  Add Server Profile
+    ...                    profile = [{'name':'Server18', 'type':'ServerProfileV6', 'serverHardwareUri':'SH:CN750163KV, bay 9', 'serialNumberType':'Virtual', 'iscsiInitiatorNameType':'AutoGenerated', 'macType':'Virtual', 'wwnType':'Virtual', 'description':'Updated Profile', 'affinity':'Bay',
+    ...                    'connectionSettings': {'connections':[{'id':1, 'name':'Ethernet1', 'functionType':'Ethernet', 'portId':'Mezz 3:1-a', 'requestedMbps':'2500', 'networkUri':'ETH:net1038-a', 'boot':{'priority':'Primary'}, 'mac':None, 'wwpn':'', 'wwnn':''},
+    ...                                          {'id':2, 'name':'FCOE1', 'functionType':'FibreChannel', 'portId':'Mezz 3:1-b', 'requestedMbps':'2500', 'networkUri':'FCOE:FCOE-1084', 'boot':{'priority':'NotBootable'}},
+    ...                                          {'id':3, 'name':'FCOE2', 'functionType':'FibreChannel', 'portId':'Mezz 3:2-b', 'requestedMbps':'2500', 'networkUri':'FCOE:FCOE-1085', 'boot':{'priority':'NotBootable'}}]},
+    ...                    'boot':{'manageBoot':True, 'order':['HardDisk']},
+    ...                    'bootMode':{'manageMode':True, 'mode':'UEFI', 'pxeBootPolicy':'Auto'},
+    ...                    'firmware':{'manageFirmware':False, 'firmwareBaselineUri':'', 'forceInstallFirmware':False, 'firmwareInstallType':None},
+    ...                    'bios':{'manageBios':False, 'overriddenSettings':[]},
+    ...                    'hideUnusedFlexNics':True, 'iscsiInitiatorName':'', 'osDeploymentSettings':None,
+    ...                    'localStorage':{'sasLogicalJBODs':[], 'controllers':[{'deviceSlot':'Embedded', 'mode':'RAID', 'initialize':True, 'importConfiguration': False, 'logicalDrives': [{'name':'OSDisk', 'raidLevel': 'RAID0', 'bootable': True, 'numPhysicalDrives': 1, 'driveTechnology': 'SasHdd', 'sasLogicalJBODId': None, 'driveNumber': None}]}]},
+    ...                    'sanStorage':{'manageSanStorage':True, 'hostOSType':'Windows 2012 / WS2012 R2',
+    ...                                  'volumeAttachments':[{'id':1, 'volumeUri':None, 'volumeName':'Server18Volume1', 'volumeProvisionType':'Thin', 'lunType':'Manual', 'lun':1, 'volumeProvisionedCapacityBytes':'53687091200', 'permanent':False, 'volumeStoragePoolUri':'SPOOL:TB4-Raid5-FC', 'volumeStorageSystemUri':'SSYS:tbr13par', 'volumeShareable':False, 'storagePaths':[{'connectionId':2, 'isEnabled':True}]},
+    ...                                                       {'id':2, 'volumeUri':'SVOL:TestVol', 'lunType':'Manual', 'lun':2, 'storagePaths':[{'connectionId':3, 'isEnabled':True}]}]
+    ...                                  },
+    ...                    'initialScopeUris': ['Scope:Test', 'Scope:Production']
+    ...                    }
+    ...             ]
+    [Arguments]  ${profile}  ${param}=?force=ignoreServerHealth    ${api}=${None}  ${headers}=${None}  ${status_code}=202
+    ${name} =   Get from Dictionary  ${profile}  name
+    Log     \nCreating Server Profile ${name}    console=yes
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${profile}  serverProfileTemplateUri
+    ${spt} =  set variable if  '${status}'=='PASS'  ${return}  error
+    ${payload} =  Run keyword if  '${status}'=='PASS' and '${spt}'!=''  Create Server Profile POST Payload from SPT  ${profile}  ${api}
+    ...           ELSE  Create Server Profile POST Payload  ${profile}
+    ${resp} =   Fusion Api Create Server Profile   body=${payload}  param=${param}  api=${api}  headers=${headers}
+    Run Keyword And Continue on Failure   should be equal as integers  ${resp['status_code']}  ${status_code}
+    [return]  ${resp}
+
+Create Server Profile PUT Payload
+    [Documentation]    Create Server Profile PUT payload.
+    [Arguments]        ${profile}
+    ${payload} =  copy dictionary  ${profile}
+    # Server Hardware
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${payload}  serverHardwareUri
+    ${sh} =  set variable if  '${status}'=='PASS'  ${return}  error
+    ${sh} =  run keyword if  '${sh}'!= '${None}'  replace string using regexp  ${sh}  SH:  ${EMPTY}
+    ${sh_uri} =  run keyword if  '${status}'=='PASS' and '${sh}'!='' and '${sh}'!= '${None}'  Get Server Hardware URI  ${sh}
+    ${is_uri}  ${return} =  Run Keyword And Ignore Error   Should Contain    ${sh}    /rest/server-hardware/
+    run keyword if  '${status}'=='PASS' and '${sh}'!='' and '${is_uri}'=='FAIL'  Set to Dictionary    ${payload}    serverHardwareUri    ${sh_uri}
+    # Server Hardware Type
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${payload}  serverHardwareTypeUri
+    ${sht} =  set variable if  '${status}'=='PASS'  ${return}  error
+    ${sht} =     Add Category    ${sht}  SHT
+    ${sht_uri} =  run keyword if  '${status}'=='PASS' and '${sht}'!=''   Common URI Lookup by name  ${sht}
+    run keyword if  '${status}'=='PASS' and '${sht}'!=''  Set to Dictionary    ${payload}    serverHardwareTypeUri    ${sht_uri}
+    # Server Profile Template
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${payload}  serverProfileTemplateUri
+    ${spt} =  set variable if  '${status}'=='PASS'  ${return}  error
+    ${spt} =     Add Category    ${spt}  SPT
+    ${spt_uri} =  run keyword if  '${status}'=='PASS' and '${sht}'!=''   Common URI Lookup by name  ${spt}
+    run keyword if  '${status}'=='PASS' and '${spt}'!=''  Set to Dictionary    ${payload}    serverProfileTemplateUri    ${spt_uri}
+    # Enclosure Group
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${payload}  enclosureGroupUri
+    ${eg} =  set variable if  '${status}'=='PASS'  ${return}  error
+    ${eg} =     Add Category    ${eg}   EG
+    ${eg_uri} =  run keyword if  '${status}'=='PASS' and '${eg}'!=''    Common URI Lookup by name    ${eg}
+    run keyword if  '${status}'=='PASS' and '${eg}'!=''  Set to Dictionary    ${payload}    enclosureGroupUri    ${eg_uri}
+    # Enclosure
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${payload}  enclosureUri
+    ${enc} =  set variable if  '${status}'=='PASS'  ${return}  error
+    ${enc} =     Add Category    ${enc}  ENC
+    ${enc_uri} =  run keyword if  '${status}'=='PASS' and '${enc}'!=''    Common URI Lookup by name    ${enc}
+    run keyword if  '${status}'=='PASS' and '${enc}'!=''  Set to Dictionary    ${payload}    enclosureUri    ${enc_uri}
+    # Connections (refactored to allow v600 & v500 and below API DTO's)
+    # v600 API DTO code
+    ${status1}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary    ${payload['connectionSettings']}    connections
+    ${connections} =     set variable if  '${status1}'=='PASS'  ${return}
+    ${connections} =     Run Keyword If  '${status1}'=='PASS'  Lookup Connection Uris    ${connections}
+    Run Keyword If  '${status1}'=='PASS'  Set to Dictionary   ${payload['connectionSettings']}  connections  ${connections}
+    # v500 and below API DTO code
+    ${status2}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary    ${payload}    connections
+    ${connections} =     set variable if  '${status2}'=='PASS'  ${return}
+    ${connections} =     Run Keyword If  '${status2}'=='PASS'  Lookup Connection Uris    ${connections}
+    Run Keyword If  '${status2}'=='PASS'  Set to Dictionary   ${payload}  connections  ${connections}
+    # localStorage - sasLogicalJBODs URIs
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary    ${payload['localStorage']}    sasLogicalJBODs
+    ${sasLogicalJBODs} =     set variable if  '${status}'=='PASS'  ${return}
+    ${sasLogicalJBODs} =     Run Keyword If  '${status}'=='PASS'  Lookup sasLogicalJBOD uris   ${sasLogicalJBODs}
+    ${sasLogicalJBODs} =     Run Keyword If  '${status}'=='PASS'  Change sasLogicalJBOD names   ${sasLogicalJBODs}
+    Run Keyword If  '${status}'=='PASS'  Set to Dictionary   ${payload['localStorage']}  sasLogicalJBODs  ${sasLogicalJBODs}
+    # sanStorage
+    ${status}  ${return} =  Run Keyword and Ignore Error      Get From Dictionary    ${payload}    sanStorage
+    ${sanStorage} =  set variable if  '${status}'=='PASS'  ${return}  error
+    ${sanStorage} =   run keyword if  '${status}'=='PASS' and ${sanStorage}!=${None}     Verify Storage Volume        ${sanStorage}
+    ${ssc_status}  ${sanSystemCredentials} =  Run Keyword and Ignore Error  Get From Dictionary  ${sanStorage}  sanSystemCredentials
+    ${new_sanSystemCredentials} =  run keyword if  '${ssc_status}'=='PASS'  Lookup sanSystemCredentials uris  ${sanSystemCredentials}
+    Run Keyword If  '${ssc_status}'=='PASS'  Set to Dictionary  ${sanStorage}  sanSystemCredentials  ${new_sanSystemCredentials}
+    Run Keyword If  '${status}'=='PASS'  Set to Dictionary   ${payload}  sanStorage  ${sanStorage}
+    # sanStorage Volume Attachments ATAI
+    ${payload} =  run keyword if  '${status}'=='PASS' and ${sanStorage}!=${None}  lookup server profile volume attachment ATAI  ${payload}
+    ...    ELSE    Get Variable Value    ${payload}
+
+    # osDeploymentSettings
+    ${status}  ${return} =  Run Keyword and Ignore Error      Get From Dictionary    ${payload}    osDeploymentSettings
+    ${osDeploymentSettings} =  set variable if  '${status}'=='PASS'  ${return}  error
+    ${osDeploymentSettings} =   run keyword if  '${status}'=='PASS' and ${osDeploymentSettings}!=${None}     Set OS Deployment settings        ${osDeploymentSettings}
+    Run keyword if  '${status}'=='PASS' and ${osDeploymentSettings}!=${None}    Set to Dictionary   ${payload}  osDeploymentSettings     ${osDeploymentSettings}
+
+    [return]  ${payload}
+
+Edit Server Profile
+    [Documentation]    Edit Server Profile
+    [Arguments]        ${profile}    ${param}=?force=ignoreServerHealth   ${headers}=${None}    ${api}=${None}    ${newname}=${None}
+    ${name} =     Get from Dictionary    ${profile}    name
+    Log      \nEditing Server Profile ${name}    console=True
+    Log      \nEditing Server Profile Name to ${newname}    console=True
+    Log      \nheaders ${headers}    console=True
+
+    ${payload} =  Create Server Profile Put Payload  ${profile}
+    ${profile_dto} =     Get Resource  SP:${name}
+    ${profile_etag} =     Get From Dictionary        ${profile_dto}    eTag
+    ${profile_uri} =  Get From Dictionary        ${profile_dto}  uri
+    Set to dictionary    ${payload}    eTag    ${profile_etag}
+
+    # new name if suuplied
+    run keyword if  '${newName}'!='None'    Set to Dictionary    ${payload}    name    ${newName}
+    run keyword if  '${newName}'!='None'    Log      \nEditing Server Profile Name to ${newName}    console=True
+
+    ${resp} =  Fusion Api Edit Server Profile  body=${payload}  uri=${profile_uri}  param=${param}  api=${api}  headers=${headers}
+    [return]  ${resp}
+
+Edit Server Profile With Local Storage
+    [Documentation]    Edit Server Profile With Local Storage
+    [Arguments]        ${profile}    ${param}=?force=ignoreServerHealth     ${headers}=${None}    ${api}=${None}    ${newname}=${None}
+    ${name} =     Get from Dictionary    ${profile}    name
+    Log      \nEditing Server Profile ${name}    console=True
+    Log      \nEditing Server Profile Name to ${newname}    console=True
+    Log      \nheaders ${headers}    console=True
+
+    ${payload} =  Create Server Profile Put Payload  ${profile}
+    ${profile_dto} =     Get Resource  SP:${name}
+    ${profile_etag} =     Get From Dictionary        ${profile_dto}    eTag
+    ${profile_uri} =  Get From Dictionary        ${profile_dto}  uri
+    Set to dictionary    ${payload}    eTag    ${profile_etag}
+
+    # sasLogical JBODs
+    ${localStorage} =     Get From Dictionary    ${payload}    localStorage
+
+    # new name if suuplied
+    run keyword if  '${newName}'!='None'    Set to Dictionary    ${payload}    name    ${newName}
+    run keyword if  '${newName}'!='None'    Log      \nEditing Server Profile Name to ${newName}    console=True
+
+    ${resp} =     Fusion Api Edit Server Profile        body=${payload}        uri=${profile_uri}   param=${param}    api=${api}    headers=${headers}
+    [return]  ${resp}
+
+
+Add Non Existing Server Profiles
+    [Documentation]    Adds non existing Server Profiles to an appliance from a variable which contains a list of dicts with the entire payload
+    ...                    profile = [{'name':'Server18', 'type':'ServerProfileV6', 'serverHardwareUri':'SH:CN750163KV, bay 9', 'serialNumberType':'Virtual', 'iscsiInitiatorNameType':'AutoGenerated', 'macType':'Virtual', 'wwnType':'Virtual', 'description':'Updated Profile', 'affinity':'Bay',
+    ...                    'connectionSettings': {'connections':[{'id':1, 'name':'Ethernet1', 'functionType':'Ethernet', 'portId':'Mezz 3:1-a', 'requestedMbps':'2500', 'networkUri':'ETH:net1038-a', 'boot':{'priority':'Primary'}, 'mac':None, 'wwpn':'', 'wwnn':''},
+    ...                                          {'id':2, 'name':'FCOE1', 'functionType':'FibreChannel', 'portId':'Mezz 3:1-b', 'requestedMbps':'2500', 'networkUri':'FCOE:FCOE-1084', 'boot':{'priority':'NotBootable'}},
+    ...                                          {'id':3, 'name':'FCOE2', 'functionType':'FibreChannel', 'portId':'Mezz 3:2-b', 'requestedMbps':'2500', 'networkUri':'FCOE:FCOE-1085', 'boot':{'priority':'NotBootable'}}]},
+    ...                    'boot':{'manageBoot':True, 'order':['HardDisk']},
+    ...                    'bootMode':{'manageMode':True, 'mode':'UEFI', 'pxeBootPolicy':'Auto'},
+    ...                    'firmware':{'manageFirmware':False, 'firmwareBaselineUri':'', 'forceInstallFirmware':False, 'firmwareInstallType':None},
+    ...                    'bios':{'manageBios':False, 'overriddenSettings':[]},
+    ...                    'hideUnusedFlexNics':True, 'iscsiInitiatorName':'', 'osDeploymentSettings':None,
+    ...                    'localStorage':{'sasLogicalJBODs':[], 'controllers':[{'deviceSlot':'Embedded', 'mode':'RAID', 'initialize':True, 'importConfiguration': False, 'logicalDrives': [{'name':'OSDisk', 'raidLevel': 'RAID0', 'bootable': True, 'numPhysicalDrives': 1, 'driveTechnology': 'SasHdd', 'sasLogicalJBODId': None, 'driveNumber': None}]}]},
+    ...                    'sanStorage':{'manageSanStorage':True, 'hostOSType':'Windows 2012 / WS2012 R2',
+    ...                                  'volumeAttachments':[{'id':1, 'volumeUri':None, 'volumeName':'Server18Volume1', 'volumeProvisionType':'Thin', 'lunType':'Manual', 'lun':1, 'volumeProvisionedCapacityBytes':'53687091200', 'permanent':False, 'volumeStoragePoolUri':'SPOOL:TB4-Raid5-FC', 'volumeStorageSystemUri':'SSYS:tbr13par', 'volumeShareable':False, 'storagePaths':[{'connectionId':2, 'isEnabled':True}]},
+    ...                                                       {'id':2, 'volumeUri':'SVOL:TestVol', 'lunType':'Manual', 'lun':2, 'storagePaths':[{'connectionId':3, 'isEnabled':True}]}]
+    ...                                  },
+    ...                    'initialScopeUris': ['Scope:Test', 'Scope:Production']
+    ...                 }
+    ...             ]
+    [Arguments]        ${profiles}  ${notFoundStatusCodeList}=404
+    ${toAdd} =  Create List
+    :FOR    ${profile}    IN    @{profiles}
+    \        Log   Adding Server Profile -${profile['name']}   console=True
+    \        ${resp} =          Get Resource  SP:${profile['name']}
+    \        ${statusCode}=  Convert To String  ${resp['status_code']}
+    \        ${status}=      Run Keyword And Return Status   List Should Contain Value  ${notFoundStatusCodeList}  ${statusCode}
+    \        Run Keyword If    ${status}==True    Append To List   ${toAdd}  ${profile}
+    ${response} =  Add Server Profiles from variable  ${toAdd}
+    [Return]    ${response}
+
+Add Server Profiles from variable
+    [Documentation]    Add Server Profiles
+    [Arguments]    ${profiles}  ${api}=${None}  ${status_code}=202  ${param}=?force=ignoreServerHealth
+    Log    Adding SERVER PROFILES    console=yes
+    ${toAdd} =  Create List
+    :FOR    ${profile}    IN    @{profiles}
+    \    ${status} =  Check Resource Existing  SP:${profile['name']}
+    \    Run Keyword If    ${status}=='FAIL'  Append To List   ${toAdd}  ${profile}
+    \   Run Keyword If    ${status}=='PASS'   Log   Server Profile ${profile['name']} already exist   WARN
+    ${len} =   get length  ${toAdd}
+    Return from keyword if  '${len}'=='0'
+    ${resplist} =  Create List
+    :FOR    ${profile}    IN    @{toAdd}
+    \       ${resp} =  Add Server Profile  ${profile}  api=${api}   param=${param}
+    \       continue for loop if  ${resp['status_code']}!=${status_code}
+    \       append to list        ${resplist}    ${resp}
+    [return]    ${resplist}
+
+Edit Server Profiles from variable
+    [Documentation]    Edit Server Profiles from a variable which contains a list of dicts with the entire payload
+    [Arguments]        ${profiles}    ${api}=${None}  ${param}=?force=ignoreServerHealth
+    Log     Editing SERVER PROFILES    console=True
+    ${resplist} =     Create List
+    :FOR    ${profile}    IN    @{profiles}
+    \    ${resp} =  Edit Server Profile  ${profile}  api=${api}  param=${param}
+    \    append to list        ${resplist}    ${resp}
+    [return]    ${resplist}
+
+Lookup connection uris
+    [Documentation]    Processes a list of connections, getting the uris for networks
+    [Arguments]        ${connections}
+    ${conns} =  Create List
+    :FOR    ${connection}    IN    @{connections}
+    \   ${connection} =     Copy dictionary     ${connection}
+    \    ${functionType} =     Get from Dictionary    ${connection}    functionType
+    \    ${net} =             Get From Dictionary    ${connection}    networkUri
+    \   Run keyword if    '${net}'=='' or '${net}'=='${None}'     append to list    ${conns}    ${connection}
+    \   Continue For Loop If    '${net}'=='' or '${net}'=='${None}'
+    \    @{words} =     Split String    ${net}    :
+    \    ${type} =     Get From List    ${words}    0
+    \    ${net} =     Get From List    ${words}    1
+    \    ${net} =     Create List    ${net}
+    \     ${uri} =     Run Keyword If     '${type}' == 'FC'        Get FC URIs            ${net}
+    \     ...            ELSE IF            '${type}' == 'ETH'        Get Ethernet URIs    ${net}
+    \     ...            ELSE IF            '${type}' == 'NS'        Get Network Set URIs    ${net}
+    \     ...            ELSE IF            '${type}' == 'FCOE'        Get FCoE URIs    ${net}
+    \    ${uri} =     Get From List    ${uri}    0
+    \    Set to Dictionary    ${connection}    networkUri    ${uri}
+    \   append to list  ${conns}    ${connection}
+    [Return]    ${conns}
+
+Lookup sanSystemCredentials uris
+    [Documentation]    Processes a list of sanSystemCredentials, getting the uris for storage systems
+    [Arguments]        ${sscreds}
+    Return From Keyword If  ${sscreds} == ${None}  ${None}
+    ${retsscreds} =  Create List
+    :FOR    ${sscred}    IN    @{sscreds}
+    \   ${sscred} =   Copy dictionary     ${sscred}
+    \   ${ssuri} =  Get From Dictionary  ${sscred}  storageSystemUri
+    \   @{words} =    Split String    ${ssuri}    :
+    \   ${type} =     Get From List    ${words}    0
+    \   ${ssname} =   Get From List    ${words}    1
+    \   Run keyword if    '${type}'!='SSYS'     append to list    ${retsscreds}    ${sscred}
+    \   Continue For Loop If    '${type}'!='SSYS'
+    \   ${uri} =  Get Storage System URI  ${ssname}
+    \   Set to Dictionary  ${sscred}  storageSystemUri  ${uri}
+    \   append to list  ${retsscreds}  ${sscred}
+    [Return]  ${retsscreds}
+
+Lookup sasLogicalJBOD uris
+    [Documentation]    Processes a list of sasLogicalJBODs, getting the uris for each
+    [Arguments]        ${sasLogicalJBODs}
+    ${JBODs} =  Create List
+    :FOR    ${sasLogicalJBOD}    IN    @{sasLogicalJBODs}
+    \   ${name} =  Get from Dictionary   ${sasLogicalJBOD}   name
+    \   ${status}  ${return} =  Run Keyword and Ignore Error  Get from Dictionary   ${sasLogicalJBOD}   sasLogicalJBODUri
+    \   ${sasLogicalJBODUri} =  Run keyword if  '${status}'=='PASS' and "${return}"!="${None}"  Get Sas Logical Jbod URI  ${name}
+    \   Run keyword if  '${status}'=='PASS' and "${return}"!="${None}"  Set to Dictionary   ${sasLogicalJBOD}   sasLogicalJBODUri   ${sasLogicalJBODUri}
+    \   append to list   ${JBODs}   ${sasLogicalJBOD}
+    [Return]   ${JBODs}
+
+Change sasLogicalJBOD names
+    [Documentation]    Processes a list of sasLogicalJBODs, setting the new names for each
+    [Arguments]        ${sasLogicalJBODs}
+    ${JBODs} =  Create List
+    :FOR    ${sasLogicalJBOD}    IN    @{sasLogicalJBODs}
+    \   ${name} =  Get from Dictionary   ${sasLogicalJBOD}   name
+    \   ${sasLogicalJBODNewName} =  Get Sas Logical Jbod New Name  ${name}
+    \   Set to Dictionary   ${sasLogicalJBOD}   name   ${sasLogicalJBODNewName}
+    \   append to list   ${JBODs}   ${sasLogicalJBOD}
+    [Return]   ${JBODs}
+
+Verify Storage Volume
+    [Documentation]     Verify if SAN storage Volume is already present or created along with profile. Can accept both v500 or v600 DTO.
+    ...                 Expected v600 DTO example (when creating a new volume):
+    ...                 "sanStorage": {
+    ...                     "hostOSType": "RHE Linux (5.x, 6.x, 7.x)",
+    ...                     "manageSanStorage": True,
+    ...                     "volumeAttachments": [
+    ...                         {
+    ...                             "id": 1,
+    ...                             "associatedTemplateAttachmentId": 'SPTVAID:1',
+    ...                             "volumeUri": None,
+    ...                             "volume": {
+    ...                                 "properties": {
+    ...                                     "name": VOLUME_NAME,
+    ...                                     "description": "useful description",
+    ...                                     "size": 10737418240,
+    ...                                     "provisioningType": "Full",
+    ...                                     "isShareable": False,
+    ...                                     "dataProtectionLevel": "NetworkRaid0None",
+    ...                                     "storagePool": "SP:" + STORAGE_POOL_NAME
+    ...                                 },
+    ...                                 "isPermanent": False,
+    ...                                 "templateUri": 'SVT:' + STORAGE_VOLUME_TEMPLATE_NAME,
+    ...                             },
+    ...                             "volumeStorageSystemUri": "SSYS:" + STORAGE_SYSTEM_NAME,
+    ...                             "isBootVolume": True,
+    ...                             "lunType": "Auto",
+    ...                             "storagePaths": [
+    ...                                 {
+    ...                                     "isEnabled": True,
+    ...                                     "connectionId": 1,
+    ...                                     "targetSelector": "Auto",
+    ...                                 },
+    ...                             ],
+    ...                         },
+    ...                     ]
+    ...                 }
+    ...
+    ...                 Expected v500 DTO example (when creating a new volume):
+    ...                 "sanStorage": {
+    ...                     "hostOSType": "RHE Linux (5.x, 6.x, 7.x)",
+    ...                     "manageSanStorage": True,
+    ...                     "volumeAttachments": [
+    ...                         {
+    ...                             "id": 1,
+    ...                             "volumeUri": None,
+    ...                             "volumeName": VOLUME_NAME,
+    ...                             "volumeDescription": "useful description",
+    ...                             "volumeStoragePoolUri": "SP:" + STORAGE_POOL_NAME,
+    ...                             "volumeStorageSystemUri": "SSYS:" + STORAGE_SYSTEM_NAME,
+    ...                             "isBootVolume": True,
+    ...                             "volumeProvisionType": "Full",
+    ...                             "volumeProvisionedCapacityBytes": "10737418240",
+    ...                             "volumeShareable": False,
+    ...                             "lunType": "Auto",
+    ...                             "dataProtectionLevel": "NetworkRaid0None",
+    ...                             "permanent": False,
+    ...                             "storagePaths": [
+    ...                                 {
+    ...                                     "isEnabled": True,
+    ...                                     "connectionId": 1,
+    ...                                     "targetSelector": "Auto",
+    ...                                 },
+    ...                             ],
+    ...                         },
+    ...                     ]
+    ...                 }
+    [Arguments]        ${sanStorage}
+    ${sanStorageCopy} =  copy dictionary  ${sanStorage}
+    ${vols} =  Create List
+    ${volumeList}=    Get from Dictionary        ${sanStorageCopy}      volumeAttachments
+    :FOR    ${vol}    IN    @{volumeList}
+    \       ${vol} =     Copy dictionary     ${vol}
+    \       ${status1}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${vol}  volumeUri
+    \       ${volumeUri} =  set variable if  '${status1}'=='PASS'  ${return}  error
+    \       ${status2}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${vol}  volumeStorageSystemUri
+    \       ${volumeStorageSystemUri} =  set variable if  '${status2}'=='PASS'  ${return}  error
+    \       ${status3}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${vol}  volumeStoragePoolUri
+    \       ${volumeStoragePoolUri} =  set variable if  '${status3}'=='PASS'  ${return}  error
+    \       ${status4}  ${return} =  Run Keyword and Ignore Error  Get from Dictionary  ${vol}  volume
+    \       ${volume} =  set variable if  '${status4}'=='PASS'  ${return}  error
+    \       ${status5}  ${return} =  Run Keyword and Ignore Error  Get from Dictionary  ${volume}  templateUri
+    \       ${templateUri} =  set variable if  '${status5}'=='PASS'  ${return}  error
+    \       ${status6}  ${return} =  Run Keyword and Ignore Error  Get from Dictionary  ${volume}  properties
+    \       ${volumeProperties} =  set variable if  '${status6}'=='PASS'  ${return}  error
+    \       ${status7}  ${return} =  Run Keyword and Ignore Error  Get from Dictionary  ${volumeProperties}  storagePool
+    \       ${storagePool} =  set variable if  '${status7}'=='PASS'  ${return}  error
+    \       ${status8}  ${return} =  Run Keyword and Ignore Error  Get from Dictionary  ${volume}  initialScopeUris
+    \       ${volumeScope} =  Set Variable If   '${status8}'=='PASS'  ${return}  error
+    \        ${sanvolume} =    Run Keyword If    '${status1}'=='PASS' and '${volumeUri}'!='' and '${volumeUri}'!='${None}'    Lookup Storage Volume Uri        ${vol}
+    \       ${sanvolume} =    Run Keyword If    '${status2}'=='PASS' and '${status3}'=='PASS' and '${volumeStorageSystemUri}'!='' and '${volumeStorageSystemUri}'!='${None}' and '${volumeStoragePoolUri}'!='' and '${volumeStoragePoolUri}'!='${None}'     Legacy Lookup Storage System And Pool Uri        ${vol}
+    \       ${sanvolume} =    Run Keyword If    '${status5}'=='PASS' and '${templateUri}'!='' and '${templateUri}'!='${None}'  Lookup Volume Template Uri  ${vol}
+    \       ${sanvolume} =    Run Keyword If    '${status2}'=='PASS' and '${status7}'=='PASS' and '${volumeStorageSystemUri}'!='' and '${volumeStorageSystemUri}'!='${None}' and '${storagePool}'!='' and '${storagePool}'!='${None}'  Lookup Storage System And Pool Uri        ${vol}
+    \       ${sanvolume} =    Run Keyword If    '${status2}'=='PASS' and '${status3}'=='FAIL' and '${status7}'=='FAIL' and '${volumeStorageSystemUri}'!='' and '${volumeStorageSystemUri}'!='${None}'  Lookup Storage System Uri        ${vol}
+    \       # Initial Scope process.
+    \       ${sanvolume} =    Run Keyword If    '${status8}'=='PASS' and ${volumeScope} is not ${None}    Lookup Scope URI    ${vol}
+    \       append to list  ${vols}    ${vol}
+    Set to Dictionary    ${sanStorageCopy}  volumeAttachments  ${vols}
+    [Return]    ${sanStorageCopy}
+
+Lookup Scope URI
+    [Documentation]  Processes storage volumes, and dynamiclly looks up the initial scope uris.
+    ...                 Expected data example :
+    ...                 {
+    ...                     "id": 1,
+    ...                     "associatedTemplateAttachmentId": 'SPTVAID:1',
+    ...                     "volumeUri": None,
+    ...                     "volume": {
+    ...                         "properties": {
+    ...                             "name": VOLUME_NAME,
+    ...                             "description": "useful description",
+    ...                             "size": 10737418240,
+    ...                             "provisioningType": "Full",
+    ...                             "isShareable": False,
+    ...                             "dataProtectionLevel": "NetworkRaid0None",
+    ...                             "storagePool": "SP:" + STORAGE_POOL_NAME
+    ...                         },
+    ...                         "isPermanent": False,
+    ...                         "templateUri": 'SVT:' + STORAGE_VOLUME_TEMPLATE_NAME,
+    ...                         "initialScopeUris": ["Scope:Test", "Scope:Production"],
+    ...                     },
+    ...                     "volumeStorageSystemUri": "SSYS:" + STORAGE_SYSTEM_NAME,
+    ...                     "isBootVolume": True,
+    ...                     "lunType": "Auto",
+    ...                     "storagePaths": [
+    ...                         {
+    ...                             "isEnabled": True,
+    ...                             "connectionId": 1,
+    ...                             "targetSelector": "Auto",
+    ...                         },
+    ...                     ],
+    ...                 },
+    [Arguments]  ${Volume}
+    ${v} =  Get from Dictionary  ${Volume}  volume
+    ${initialScopeUris}=  Pop From Dictionary  ${v}  initialScopeUris  default=${None}
+    ${scopeUris}=       Run Keyword If    ${initialScopeUris} != ${None}
+    ...      Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    Run Keyword If      ${initialScopeUris} != ${None}
+    ...       Set To Dictionary    ${Volume["volume"]}  initialScopeUris  ${scopeUris}
+    [Return]    ${Volume}
+
+Lookup Storage Volume Uri
+    [Documentation]     Processes storage volume, getting the uri for volume based on the volume name.
+    ...                 Expected data example:
+    ...                 {
+    ...                     "id": 1,
+    ...                     "associatedTemplateAttachmentId": 'SPTVAID:1',
+    ...                     "volumeUri": "v:" + VOLUME_NAME,
+    ...                     "volume": None,
+    ...                     "volumeStorageSystemUri": "SSYS:" + STORAGE_SYSTEM_NAME,
+    ...                     "isBootVolume": True,
+    ...                     "lunType": "Auto",
+    ...                     "storagePaths": [
+    ...                         {
+    ...                             "isEnabled": True,
+    ...                             "connectionId": 1,
+    ...                             "targetSelector": "Auto",
+    ...                         },
+    ...                     ],
+    ...                 },
+    [Arguments]        ${Volume}
+    ${v} =     Get from Dictionary        ${Volume}    volumeUri
+    @{words} =     Split String    ${v}    :
+    ${type} =     Get From List    ${words}    0
+    ${v} =         Get From List    ${words}    1
+    ${uri} =       Get Storage Volume URI            ${v}
+    Set to Dictionary    ${Volume}    volumeUri    ${uri}
+    Log  ${Volume}
+    [Return]    ${Volume}
+
+Legacy Lookup Storage System And Pool Uri
+    [Documentation]     Processes storage volumes, getting the Storage System and Pool uri volumes with v500 API DTO or before.
+    ...                 Expected v500 DTO example:
+    ...                 "sanStorage": {
+    ...                     "hostOSType": "RHE Linux (5.x, 6.x, 7.x)",
+    ...                     "manageSanStorage": True,
+    ...                     "volumeAttachments": [
+    ...                         {
+    ...                             "id": 1,
+    ...                             "volumeUri": None,
+    ...                             "volumeName": VOLUME_NAME,
+    ...                             "volumeDescription": "useful description",
+    ...                             "volumeStoragePoolUri": "SP:" + STORAGE_POOL_NAME,
+    ...                             "volumeStorageSystemUri": "SSYS:" + STORAGE_SYSTEM_NAME,
+    ...                             "isBootVolume": True,
+    ...                             "volumeProvisionType": "Full",
+    ...                             "volumeProvisionedCapacityBytes": "10737418240",
+    ...                             "volumeShareable": False,
+    ...                             "lunType": "Auto",
+    ...                             "dataProtectionLevel": "NetworkRaid0None",
+    ...                             "permanent": False,
+    ...                             "storagePaths": [
+    ...                                 {
+    ...                                     "isEnabled": True,
+    ...                                     "connectionId": 1,
+    ...                                     "targetSelector": "Auto",
+    ...                                 },
+    ...                             ],
+    ...                         },
+    ...                     ]
+    ...                 }
+    [Arguments]        ${Volume}
+    ${vss} =    Get from Dictionary     ${Volume}    volumeStorageSystemUri
+    @{words} =     Split String    ${vss}    :
+    ${type} =     Get From List    ${words}    0
+    ${stsysname} =         Get From List    ${words}    1
+    ${ssysuri} =       Get Storage System URI            ${stsysname}
+    ${vsp} =     Get from Dictionary        ${Volume}    volumeStoragePoolUri
+    @{words} =     Split String    ${vsp}    :
+    ${type} =     Get From List    ${words}    0
+    ${stpoolname} =         Get From List    ${words}    1
+    ${spooluri} =    Get Storage Pool URI    ${stpoolname}    ${stsysname}
+    Set to Dictionary    ${Volume}    volumeStoragePoolUri    ${spooluri}
+    Set to Dictionary    ${Volume}    volumeStorageSystemUri    ${ssysuri}
+    Log  ${Volume}
+    [Return]    ${Volume}
+
+Lookup Storage System Uri
+    [Documentation]    Processes storage volumes, getting the Storage System uri based on the storage systems name.
+    ...                 Expected Data Example:
+    ...                 {
+    ...                     "id": 1,
+    ...                     "associatedTemplateAttachmentId": 'SPTVAID:1',
+    ...                     "volumeUri": "v:" + VOLUME_NAME,
+    ...                     "volume": None,
+    ...                     "volumeStorageSystemUri": "SSYS:" + STORAGE_SYSTEM_NAME,
+    ...                     "isBootVolume": True,
+    ...                     "lunType": "Auto",
+    ...                     "storagePaths": [
+    ...                         {
+    ...                             "isEnabled": True,
+    ...                             "connectionId": 1,
+    ...                             "targetSelector": "Auto",
+    ...                         },
+    ...                     ],
+    ...                 },
+    [Arguments]        ${Volume}
+    ${vss} =    Get from Dictionary     ${Volume}    volumeStorageSystemUri
+    @{words} =     Split String    ${vss}    :
+    ${type} =     Get From List    ${words}    0
+    ${stsysname} =         Get From List    ${words}    1
+    ${ssysuri} =       Get Storage System URI            ${stsysname}
+    Set to Dictionary    ${Volume}    volumeStorageSystemUri    ${ssysuri}
+    Log  ${Volume}
+    [Return]    ${Volume}
+
+Lookup Storage System And Pool Uri
+    [Documentation]     Processes storage volumes, getting the Storage System and Pool uri for volumes with v600 API DTO or later
+    ...                 Expected Data Example:
+    ...                 {
+    ...                     "id": 1,
+    ...                     "associatedTemplateAttachmentId": 'SPTVAID:1',
+    ...                     "volumeUri": None,
+    ...                     "volume": {
+    ...                         "properties": {
+    ...                             "name": VOLUME_NAME,
+    ...                             "description": "useful description",
+    ...                             "size": 10737418240,
+    ...                             "provisioningType": "Full",
+    ...                             "isShareable": False,
+    ...                             "dataProtectionLevel": "NetworkRaid0None",
+    ...                             "storagePool": "SP:" + STORAGE_POOL_NAME
+    ...                         },
+    ...                         "isPermanent": False,
+    ...                         "templateUri": 'SVT:' + STORAGE_VOLUME_TEMPLATE_NAME,
+    ...                     },
+    ...                     "volumeStorageSystemUri": "SSYS:" + STORAGE_SYSTEM_NAME,
+    ...                     "isBootVolume": True,
+    ...                     "lunType": "Auto",
+    ...                     "storagePaths": [
+    ...                         {
+    ...                             "isEnabled": True,
+    ...                             "connectionId": 1,
+    ...                             "targetSelector": "Auto",
+    ...                         },
+    ...                     ],
+    ...                 },
+    [Arguments]        ${Volume}
+    ${vss} =    Get from Dictionary     ${Volume}    volumeStorageSystemUri
+    @{words} =     Split String    ${vss}    :
+    ${type} =     Get From List    ${words}    0
+    ${stsysname} =         Get From List    ${words}    1
+    ${ssysuri} =       Get Storage System URI            ${stsysname}
+    ${v} =  Get from Dictionary  ${Volume}  volume
+    ${vp} =     Get from Dictionary     ${v}    properties
+    ${vsp} =     Get from Dictionary        ${vp}    storagePool
+    @{words} =     Split String    ${vsp}    :
+    ${type} =     Get From List    ${words}    0
+    ${stpoolname} =         Get From List    ${words}    1
+    ${spooluri} =    Get Storage Pool URI    ${stpoolname}    ${stsysname}
+    Set to Dictionary    ${Volume}    volumeStorageSystemUri    ${ssysuri}
+    Set to Dictionary    ${vp}    storagePool     ${spooluri}
+    Set to Dictionary   ${Volume['volume']}  properties  ${vp}
+    Log  ${Volume}
+    [Return]    ${Volume}
+
+Lookup Volume Template Uri
+    [Documentation]     Processes storage volumes, and dynamiclly looks up the volume template uri.
+    ...                 Keyword expects two different string formats.
+    ...                 Either a sting in the format "ROOT:<storage pool name>" and will look up the root volume template uri based on the storage pool name.
+    ...                 or a sting in the format "SVT:<volume template name>" and will look up the volume template uri based on the volume template name.
+    ...
+    ...                 Expected data example (When using the root volume template):
+    ...                 {
+    ...                     "id": 1,
+    ...                     "associatedTemplateAttachmentId": 'SPTVAID:1',
+    ...                     "volumeUri": None,
+    ...                     "volume": {
+    ...                         "properties": {
+    ...                             "name": VOLUME_NAME,
+    ...                             "description": "useful description",
+    ...                             "size": 10737418240,
+    ...                             "provisioningType": "Full",
+    ...                             "isShareable": False,
+    ...                             "dataProtectionLevel": "NetworkRaid0None",
+    ...                             "storagePool": "SP:" + STORAGE_POOL_NAME
+    ...                         },
+    ...                         "isPermanent": False,
+    ...                         "templateUri": 'ROOT:' + STORAGE_POOL_NAME,
+    ...                     },
+    ...                     "volumeStorageSystemUri": "SSYS:" + STORAGE_SYSTEM_NAME,
+    ...                     "isBootVolume": True,
+    ...                     "lunType": "Auto",
+    ...                     "storagePaths": [
+    ...                         {
+    ...                             "isEnabled": True,
+    ...                             "connectionId": 1,
+    ...                             "targetSelector": "Auto",
+    ...                         },
+    ...                     ],
+    ...                 },
+    ...
+    ...                 Expected data example (When using a user created volume template):
+    ...                 {
+    ...                     "id": 1,
+    ...                     "associatedTemplateAttachmentId": 'SPTVAID:1',
+    ...                     "volumeUri": None,
+    ...                     "volume": {
+    ...                         "properties": {
+    ...                             "name": VOLUME_NAME,
+    ...                             "description": "useful description",
+    ...                             "size": 10737418240,
+    ...                             "provisioningType": "Full",
+    ...                             "isShareable": False,
+    ...                             "dataProtectionLevel": "NetworkRaid0None",
+    ...                             "storagePool": "SP:" + STORAGE_POOL_NAME
+    ...                         },
+    ...                         "isPermanent": False,
+    ...                         "templateUri": 'SVT:' + STORAGE_VOLUME_TEMPLATE_NAME,
+    ...                     },
+    ...                     "volumeStorageSystemUri": "SSYS:" + STORAGE_SYSTEM_NAME,
+    ...                     "isBootVolume": True,
+    ...                     "lunType": "Auto",
+    ...                     "storagePaths": [
+    ...                         {
+    ...                             "isEnabled": True,
+    ...                             "connectionId": 1,
+    ...                             "targetSelector": "Auto",
+    ...                         },
+    ...                     ],
+    ...                 },
+    [Arguments]        ${Volume}
+    ${v} =  Get from Dictionary  ${Volume}  volume
+    ${svt} =  Get from Dictionary  ${v}  templateUri
+    @{words} =  Split String    ${svt}    :
+    ${type} =     Get From List    ${words}    0
+    ${name} =         Get From List    ${words}    1
+    ${return} =  Run Keyword if  '${type}'=='ROOT'  Get Root Template URI by Storage Pool  ${name}
+    ${templateUri} =  Set Variable if  '${return}'!='' and '${return}'!='${None}'  ${return}
+    ${return} =  Run Keyword if  '${type}'=='SVT'  Get Storage Volume Template URI  ${name}
+    ${templateUri} =  Set Variable if  '${return}'!='' and '${return}'!='${None}'  ${return}  ${templateUri}
+    Set to Dictionary  ${Volume['volume']}  templateUri  ${templateUri}
+    [Return]    ${Volume}
+
+Remove Server Profile
+    [Documentation]    Remove Server Profile fron profile DTO
+    ...                    profile = {"type":"ServerProfileV6","serverHardwareUri":'SH:'+ ${ENC1SHBAY1},
+    ...                            "serverHardwareTypeUri":'SHT:SY 480 Gen9 1',
+    ...                            "enclosureGroupUri":"EG:EG1",
+    ...                           ...}
+    ...                Remove Server Profile  ${bay1_profile}
+    ...                Remove Server Profile  ${bay1_profile}  ${force}=${True}
+    [Arguments]        ${profile}  ${force}=${False}
+    Log      \nRemoving Server Profile ${profile['name']}   console=True
+    ${param} =  set variable if  ${force}==${False}  ${Empty}  ?force=${True}
+    ${uri} =  Get Server Profile URI  ${profile['name']}
+    ${resp} =     Fusion Api Delete Server Profile    uri=${uri}   param=${param}
+    [return]  ${resp}
+
+Remove Server Profiles from variable
+    [Documentation]    Remove Server Profiles from a list of profile DTO
+    ...                profile = {"type":"ServerProfileV6","serverHardwareUri":'SH:'+ ${ENC1SHBAY1},
+    ...                            "serverHardwareTypeUri":'SHT:SY 480 Gen9 1',
+    ...                            "enclosureGroupUri":"EG:EG1",
+    ...                           ...}
+    ...                Remove Server Profiles from variable  ${all_profiles}
+    ...                Remove Server Profiles from variable  ${all_profiles}  force=${True}
+    [Arguments]  ${profiles}  ${force}=${False}
+    ${resplist} =     Create List
+    :FOR    ${profile}    IN    @{profiles}
+    \   ${status} =  Check Resource Existing  SP:${profile['name']}
+    \   continue for loop if  ${status}=='FAIL'
+    \    ${resp} =  Remove Server Profile  ${profile}  force=${force}
+    \    append to list        ${resplist}     ${resp}
+    [return]    ${resplist}
+
+Remove All Server Profiles Async
+    [Documentation]    Querys the appliance for all Server Profiles and then removes them
+    ...                Remove All Server Profiles
+    ...                Remove All Server Profiles  force=${True}
+    ...             Updated to return -${resplist}, helps Async deletion.
+    ...               Handle the response list in the test case using "Run Keyword for List with kwargs  ${responses}  Wait For Task2   timeout=600    interval=5"
+    [Arguments]  ${force}=${False}
+    Log      Removing SERVER PROFILES    console=True
+    # Set the force flag
+    ${param} =  set variable if  ${force}==${False}  ${Empty}  ?force=${True}
+    ${profiles} =     Fusion Api Get Server Profiles  param=?sort=name:ascending
+    ${count}=    Convert To String  ${profiles['count']}
+    Run Keyword If  '${count}'=='0'   Log  Server Profile doesn't exists   WARN
+    ${resplist} =     Create List
+    :FOR    ${profile}    IN    @{profiles['members']}
+    \        ${resp} =     Fusion Api Delete Server Profile    uri=${profile['uri']}   param=${param}
+    \        append to list        ${resplist}     ${resp}
+    [return]    ${resplist}
+
+Remove All Server Profiles
+    [Documentation]    Querys the appliance for all Server Profiles and then removes them
+    ...                Remove All Server Profiles
+    ...                Remove All Server Profiles  force=${True}
+    [Arguments]  ${force}=${False}
+    Log      Removing SERVER PROFILES    console=True
+    # Set the force flag
+    ${tasks}=  Create List
+    ${param} =  set variable if  ${force}==${False}  ${Empty}  ?force=${True}
+    ${profiles} =     Fusion Api Get Server Profiles  param=?sort=name:ascending
+    :FOR    ${profile}    IN    @{profiles['members']}
+    \       Log      Removing SERVER ${profile['uri']}
+    \        ${resp} =     Fusion Api Delete Server Profile    uri=${profile['uri']}   param=${param}
+    \       Append To List    ${tasks}  ${resp}
+
+    # Verify if all Tasks are complete. Continue with next task Uri, if any task fails
+    :FOR    ${task}    IN    @{tasks}
+    \    Run Keyword And Continue on Failure  Wait For Task2  ${task}  timeout=240  interval=5
+
+Get Server Profile URI
+    [Documentation]    Get Server Profile URI
+    ...                Get Server Profile URI  ${bay1_profile_name}
+    [Arguments]        ${sp}
+    ${resp} =     Fusion Api Get Server Profiles        param=?filter="'name'=='${sp}'"
+    Return From Keyword If  ${resp['count']}==0  /rest/server_profile_uri_${sp}_not_found
+    ${uri} =     Get From Dictionary        ${resp['members'][0]}    uri
+    [Return]    ${uri}
+
+Get Server Profile URIS
+    [Documentation]    Get Resources Uris list and return it
+    ...                Data File Example:
+    ...                splist = ["sp1", "sp2", "sp3", "sp4"]
+    [Arguments]      ${splist}
+    ${urilist} =     Create List
+    :FOR    ${sp}   IN    @{splist}
+    \   ${resp} =   Get Server Profile URI   ${sp}
+    \   Append To List    ${urilist}    ${resp}
+    [Return]    ${urilist}
+
+Get Server Profile Firmware Install State
+    [Documentation]    Get Server Profile Firmware Install State
+    ...             Data File Example:
+    ...                   profile = {"type":"ServerProfileV6","serverHardwareUri":'SH:'+ ${ENC1SHBAY1}, ...}
+    ...                   profile = {"type":"ServerProfileV6","serverHardwareUri": ${ENC1SHBAY1}, ...}
+    [Arguments]        ${profile}
+    Log      Getting Server Profile Firmware Install State    console=True
+    ${sh} =  Get From Dictionary  ${profile}  serverHardwareUri
+    ${sh} =  run keyword if  '${sh}'!= '${None}'  replace string using regexp  ${sh}  SH:  ${EMPTY}
+    ${resp} =  Fusion Api Get Server Hardware        param=?filter="'name'=='${sh}'"
+    Return From Keyword If  ${resp['count']}==0  /rest/server_hardware_uri_${sh}_not_found
+    ${sh} =  Get From Dictionary        ${resp['members'][0]}    uri
+    ${uri} =  Set Variable    /rest/index/resources?filter=_uri:${sh}
+    ${sh} =  Fusion Api Get Resource    ${uri}
+    [Return]    ${sh['members'][0]['attributes']['fwInstallState']}
+
+Wait For ALL Server Profile In Normal State
+    [Documentation]    Querys the appliance for all Server Profiless and wait for them create/edit complete
+    [Arguments]     ${timeout}=3600s  ${interval}=15s
+    Log      Wait For ALL Server Profiles Complete Creating/Updating    console=True
+    ${profiles} =     Fusion Api Get Server Profiles
+    :FOR    ${profile}    IN    @{profiles['members']}
+    \        Continue For Loop If    '${profile['state']}'=='Normal'
+    \        Wait Until Keyword Succeeds    ${timeout}    ${interval}    Profile In Normal State    ${profile}
+
+Profile In Normal State
+    [Documentation]    Profile In Normal State
+    ...                Profile In Normal State  ${bay1_profile}
+    [Arguments]    ${profile}
+    Set Log Level    TRACE
+    ${profile} =   Fusion Api Get Server Profiles     ${profile['uri']}
+    ${state} =  Get From Dictionary  ${profile}  state
+    Log    \t Server Profile: [${profile['name']}] is: ${state}
+    Should Match    ${state}    Normal
+
+Server Profiles Attribute ${attribute} Should Have Value ${value}
+    [Documentation]    Profiles Status Should be expected
+    ${profiles} =   Fusion Api Get Server Profiles
+    # Make sure we get (more than zero) profile listed
+    Run Keyword If  '${profiles['count']}'=='0'    Fail    msg=No profiles found
+    ${res} =  Set Variable  ${empty}
+    :FOR    ${profile}  IN  @{profiles['members']}
+    \  ${res} =  Run Keyword If  '${profile['${attribute}']}' != '${value}'  Catenate  ${res}
+    ...  \nProfile name [${profile['name']}] Expected ${attribute} ${value} but found ${profile['${attribute}']}
+    \  ...  ELSE  Set Variable  ${res}
+    ${count} =  Get Length  ${res}
+    Run Keyword If  '${count}' > '0'  Fail  ${res}
+
+Verify Server Profile
+    [Documentation]  Verify profile DTO with the expected one
+    ...              **kwargs are used to add key value pair to the expected DTO
+    ...              Example:
+    ...                Verify Server Profile  ${profile}
+    ...                Verify Server Profile  ${profile}  status=OK
+    ...              Data Required:
+    ...                Expected profile DTO
+    [Arguments]  ${profile}  ${api}=${None}  &{kwargs}
+    ${name} =  Get From Dictionary  ${profile}  name
+    Log     ${\n}Verifying Server Profile ${name}    console=True
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${profile}  serverProfileTemplateUri
+    ${spt} =  set variable if  '${status}'=='PASS'  ${return}  error
+    ${expected_dto} =  Create Server Profile PUT Payload  ${profile}
+    ${expected_dto} =  Add Key Value to DTO  ${expected_dto}  &{kwargs}
+    ${dto} =  Get Resource  SP:${name}  api=${api}
+    ${validate_status} =  Fusion api validate response follow  ${expected_dto}  ${dto}  wordy=${True}
+    Run Keyword If  '${validate_status}'=='False'  Fail  Validate Server Profile ${name} failed
+
+Patch Server Profile
+    [Documentation]  Patch server Profile.
+    ...              Example:
+    ...                Patch Server Profile  ${profile}  op=replace  path=/templateCompliance  value=Compliant
+    ...              Data Required:
+    ...                Server Profile
+    [Arguments]  ${profile}  ${op}=replace  ${path}=/templateCompliance  ${value}=Compliant  ${api}=${None}
+    ${name} =  get from dictionary  ${profile}  name
+    Log     Patching Server Profile ${name} with op=${op} path=${path} and value=${value}   console=True
+    ${uri} =  Common URI lookup by name  SP:${name}
+    ${dict} =    Create Dictionary    op=${op}    path=${path}    value=${value}
+    Run Keyword If    '${value}'=='ExcludeValue'    Remove From Dictionary    ${dict}    value
+    ${payload} =  Create List  ${dict}
+    ${resp} =  Fusion Api Patch Server Profile  body=${payload}  uri=${uri}  api=${api}
+    [return]  ${resp}
+
+Verify Server Profile Compliance
+    [Documentation]    Verify Profile Compliance
+    ...             Data File Example:
+    ...             profile1_compliance = { "name":test_profile,
+    ...                                     "compliance-preview":{
+    ...                                          "type": "ServerProfileCompliancePreviewV1",
+    ...                                          "automaticUpdates": [
+    ...                                               COMPLIANCE_MISSING_VOLUME_REGEX,],
+    ...                                           "manualUpdates":[] }
+    [Arguments]        ${profile_compliance}  ${VERBOSE}=False
+    Log  \nVerify Profile Compliance for profile ${profile_compliance['name']}    console=True
+    ${profile_uri} =  Common URI lookup by name  SP:${profile_compliance['name']}
+    ${actual_profile_compliance} =  fusion api get server profiles  uri=${profile_uri}  param=/compliance-preview
+     Run Keyword If    '${VERBOSE}'=='True'    Log    Actual profile compliance is ${actual_profile_compliance}    console=True
+     # remove the status_code and headers in the response
+    remove from dictionary  ${actual_profile_compliance}  status_code
+    remove from dictionary  ${actual_profile_compliance}  headers
+    ${validate_status} =  Fusion api validate response follow  ${profile_compliance['compliance-preview']}  ${actual_profile_compliance}  wordy=${VERBOSE}
+    Run Keyword If  '${validate_status}'=='False'  Fail  Verify Profile Compliance for profile ${profile_compliance['name']} failed
+    Log  Verify Profile Compliance for profile ${profile_compliance['name']} succeeded    console=True
+
+Update Server Profiles from Template
+    [Documentation]  Update a list of server profiles from their template.
+    ...              Example:
+    ...                Update Server Profiles from Template  ${profiles}
+    [Arguments]  ${profiles}
+    ${resplist} =     Create List
+    Log     ${\n}Update Server Profiles from Template    console=True
+    :FOR    ${profile}    IN    @{profiles}
+    \    ${resp} =  Patch Server Profile  ${profile}
+    \    append to list  ${resplist}  ${resp}
+    [return]    ${resplist}
+
+Verify Server profile exists
+    [Documentation]   Verify if any server profile exists
+    ...               Checks if any server profile is present
+    Log   Verifying if any profile exists    console=True
+    ${response}=   Fusion Api Get Server profiles
+    ${count}=   Convert To String  ${response['count']}
+    Run Keyword If   '${response['count']}'!='0'   Fail   msg=All Server profiles are not removed
+
+Server Profile Should Not Exist
+    [Documentation]    Check specified server profile does not exists after removal
+    [Arguments]  ${profiles}
+    Log   Verifying if server profile still exists in appliance    console=True
+    :FOR    ${profile}    IN    @{profiles}
+    \   ${profileFound} =  Check Resource Existing  SP:${profile['name']}
+    \   Log    profileFound ${profileFound}    console=True
+    \   Run Keyword If   ${profileFound}=='PASS'    Fail    msg=Server Profile '${profile['name']}' still exists
+
+Get Server Profile Transformation URI
+    [Documentation]     Get Server Profile Transformation URI
+    [Arguments]      ${server_profile}
+    ${payload} =  copy dictionary  ${server_profile}
+    ${name} =     Get from Dictionary     ${server_profile}     name
+    Log    Creating SERVER PROFILE Transformation URI    console=True
+    # SHT
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${payload}    serverHardwareTypeUri
+    ${sht} =  set variable if  '${status}'=='PASS'  ${return}  error
+    ${sht_uri} =  run keyword if  '${status}'=='PASS' and '${sht}'!=''   Common URI Lookup by name  ${sht}
+    run keyword if  '${status}'=='PASS' and '${sht}'!=''  Set to Dictionary    ${payload}     serverHardwareTypeUri    ${sht_uri}
+    # EG
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${payload}     enclosureGroupUri
+    ${eg} =  set variable if  '${status}'=='PASS'  ${return}  error
+    ${eg_uri} =  run keyword if  '${status}'=='PASS' and '${eg}' != '${None}' and '${eg}'!=''     Common URI Lookup by name    ${eg}
+    run keyword if  '${status}'=='PASS' and '${eg}' != '${None}' and '${eg}'!=''  Set to Dictionary     ${payload}     enclosureGroupUri     ${eg_uri}
+    # SPT
+    ${profile_dto} =      Get Resource  SP:${name}
+    log  ${profile_dto}    console=True
+    ${profile_uri} =  Get From Dictionary      ${profile_dto}  uri
+    ${uri}=     Run Keyword If  '${eg_uri}' == '${None}'  Set Variable  ${profile_uri}/transformation?serverHardwareTypeUri=${sht_uri}
+    ...         ELSE  Set Variable  ${profile_uri}/transformation?serverHardwareTypeUri=${sht_uri}&enclosureGroupUri=${eg_uri}
+    [return]  ${uri}
+
+Get Server Profile Transformation
+    [Documentation]      Get Server Profile Transformation
+    [Arguments]      ${uri}
+    ${resp} =       Fusion Api Get Server Profiles     uri=${uri}
+    [Return]     ${resp}
+
+Verify Server Profile Transformation DTO
+    [Documentation]  Verify Server Profile Transformation DTO
+    ...              Example:
+    ...                Verify Resource  ${expected_dto}      ${transformation_dto}
+    ...                Verify Resource  ${expected_dto}      ${transformation_dto}     Status=OK
+    ...              Data Required:
+    ...                Expected Resource DTO     Transformation DTO
+    [Arguments]  ${expected_dto}      ${transformation_dto}
+    ${payload} =  copy dictionary  ${expected_dto}
+    ${name} =      Get from Dictionary     ${payload}     name
+    Log       ${\n}Verifying ${name}    console=True
+    ${new_expected_dto}=       Create Server Profile Post Payload      ${expected_dto}
+    log     ${transformation_dto}    console=True
+    log     ${new_expected_dto}      console=True
+    ${validate_status} =  Fusion api validate response follow  ${new_expected_dto}  ${transformation_dto}  wordy=${False}
+    Run Keyword If  '${validate_status}'=='False'  Fail  Verify  ${name} failed
+    Log      Verify ${name} succeeded    console=True
+
+Remove Server Profiles by Server Hardware
+    [Documentation]  Look-up to see if the Server Hardware in a profile DTO already has a profile applied and, if so, remove it.
+    ...              Returns a list of tasks.
+    ...
+    ...             RG Example:
+    ...                  ${resp_list} =  Remove Server Profiles by Server Hardware  ${server_hardware_list}
+    ...
+    ...             Data File Example (a normal list of Server Profile DTO's may be passed into this keyword as well as the following...):
+    ...                  [
+    ...                      {
+    ...                          'serverHardwareUri': 'SH:' + SERVER_HARDWARE_NAME1,
+    ...                      },
+    ...                      {
+    ...                          'serverHardwareUri': 'SH:' + SERVER_HARDWARE_NAME2,
+    ...                      },
+    ...                  ]
+    [Arguments]  ${servers}  ${force}=${False}
+    ${resplist} =  Create List
+    :FOR  ${server}  IN  @{servers}
+    \    ${serverHardwareUri} =  Get From Dictionary  ${server}  serverHardwareUri
+    \    @{words} =  Split String  ${serverHardwareUri}  :
+    \    ${type} =  Get From List  ${words}  0
+    \    ${serverHardwareName} =  Get From List  ${words}  1
+    \    ${resp1} =  Fusion Api Get Server Hardware  param=?filter="'name'=='${serverHardwareName}'"
+    \    Run Keyword If  ${resp1['count']}==0  log  \nServer Hardware: '${serverHardwareName}' Not Found.  console=True
+    \    Continue For Loop if  ${resp1['count']}==0
+    \    ${serverProfileUri} =  Get From Dictionary  ${resp1['members'][0]}  serverProfileUri
+    \    Run Keyword If  '${serverProfileUri}'=='${None}'  log  \nNo profile assigned to Server Hardware: '${serverHardwareName}'  console=True
+    \    Continue For Loop If  '${serverProfileUri}'=='${None}'
+    \    Log  \nRemoving Server Profile from Server Hardware: '${serverHardwareUri}'  console=True
+    \    ${param} =  set variable if  ${force}==${False}  ${Empty}  ?force=${True}
+    \    ${resp2} =  Fusion Api Delete Server Profile  uri=${serverProfileUri}  param=${param}
+    \    append to list  ${resplist}  ${resp2}
+    [return]  ${resplist}
+
+Set OS Deployment settings
+	[Documentation]      Set the OS deployment settings in Server Profile payload
+    [Arguments]      ${osds}
+    ${osdp} =    Run Keyword If    ${osds} != None    Get From Dictionary    ${osds}  osDeploymentPlanUri
+    ...    ELSE    Set Variable    ${osds}
+    ${osdp_Uri} =   Run Keyword If    '${osdp}' != 'None'    Get OSDP URI    ${osdp}
+    ...    ELSE    Set Variable    ${osdp}
+    Run Keyword If    ${osds} != None    Set to Dictionary  ${osds}  osDeploymentPlanUri=${osdp_uri}
+    # Get Network URI of os custom attributes
+    ${os_cas} =    Run Keyword If    ${osds} != None    Get From Dictionary    ${osds}    osCustomAttributes
+    ...    ELSE    Create List
+    :FOR  ${os_ca}  IN  @{os_cas}
+    \    ${ca_name} =  Get From Dictionary  ${os_ca}  name
+    \    ${regex_match} =  Evaluate  re.search(r'networkuri', '${ca_name}', re.I)    re
+    \    Run Keyword If  '${regex_match}' == 'None'  continue For Loop
+    \    ${mgmt_nic}=  Get From Dictionary  ${os_ca}  value
+    \    @{words}=     Split String  ${mgmt_nic}    :
+    \    ${net}=  Get From List  ${words}  1
+    \    ${nwuri}=  Get Ethernet URI  ${net}
+    \    Log   \n${mgmt_nic} Network URI ${nwuri}    console=True
+    \    Set to Dictionary  ${os_ca}  value=${nwuri}
+    [return]    ${osds}

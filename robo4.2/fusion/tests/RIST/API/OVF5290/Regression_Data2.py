@@ -1,0 +1,209 @@
+# DTO Versioning
+PORT_DTO_TYPE = "portV5"
+SERVER_PROFILE_DTO_TYPE = "ServerProfileV10"
+
+# Credentials
+appliance_credentials = {
+    'userName': 'Administrator',
+    'password': 'wpsthpvse1'
+}
+
+ilo_credentials = {
+    'username': 'Administrator',
+    'password': 'hpvse123'
+}
+
+EG_NAME = 'EG1'
+
+# Enclosures
+ENC2 = 'CN75120D77'
+
+# Server bays
+SERVER_GEN9_BAY = 1
+SERVER_GEN10_BAY = 6
+
+# Server name
+SERVER_GEN9 = '{}, bay {}'.format(ENC2, SERVER_GEN9_BAY)
+SERVER_GEN10 = '{}, bay {}'.format(ENC2, SERVER_GEN10_BAY)
+
+# Server hardware URIs
+SH_GEN9 = "SH:" + SERVER_GEN9
+SH_GEN10 = "SH:" + SERVER_GEN10
+
+server_hardware_uris_gen9 = [
+    {
+        'serverHardwareUri': SH_GEN9,
+    }
+]
+server_hardware_uris_gen10 = [
+    {
+        'serverHardwareUri': SH_GEN10,
+    }
+]
+server_hardware_uris = server_hardware_uris_gen9 + server_hardware_uris_gen10
+
+# PROFILE1 SETTINGS
+PROFILE1_NAME_PREFIX = 'OVF5290_FC_2BootVol'
+PROFILE1_GEN9_NAME = PROFILE1_NAME_PREFIX + " (Gen9)"
+PROFILE1_GEN10_NAME = PROFILE1_NAME_PREFIX + " (Gen10)"
+
+PROFILE_TEMPLATE1_NAME_PREFIX = 'OVF5290_FC_2BootVol_SPT'
+PROFILE_TEMPLATE1_GEN9_NAME = PROFILE_TEMPLATE1_NAME_PREFIX + " (Gen9)"
+PROFILE_TEMPLATE1_GEN10_NAME = PROFILE_TEMPLATE1_NAME_PREFIX + " (Gen10)"
+
+# There should really be 2 StorServs for these tests. Tests will work with 1 if that's all you have available
+STORESERV1_NAME = 'wpst3par-7200-7-srv'
+STORESERV2_NAME = 'wpst3par-7200-7-srv'
+STORESERV1_POOL = 'FVT_Tbird_reg1_r1'
+STORESERV2_POOL = 'FVT_Tbird_reg1_r1'
+STORESERV_VOLUME_PREFIX = 'OVF5290_vol'
+STORESERV_VOLUME1_NAME_GEN9 = STORESERV_VOLUME_PREFIX + '1 (Gen9)'
+STORESERV_VOLUME2_NAME_GEN9 = STORESERV_VOLUME_PREFIX + '2 (Gen9)'
+STORESERV_VOLUME1_NAME_GEN10 = STORESERV_VOLUME_PREFIX + '1 (Gen10)'
+STORESERV_VOLUME2_NAME_GEN10 = STORESERV_VOLUME_PREFIX + '2 (Gen10)'
+
+FC_NETWORK_A = 'FA5'
+FC_NETWORK_B = 'FA6'
+
+FC_UPLINK_ICM = {"A": "{}, interconnect 1".format(ENC2), "B": "{}, interconnect 4".format(ENC2)}
+FC_UPLINK_SET = {"A": "FA-path5", "B": "FA-path6"}
+
+DOWNLINK_PORT = {"gen9": "d{}".format(SERVER_GEN9_BAY), "gen10": "d{}".format(SERVER_GEN10_BAY)}
+
+
+# Function declarations
+
+# # Function "downlink_dto" is to create a dynamic dict
+# # which returns dict specific port config of port_side for server_gen_type
+# # following are some of the valid calls
+# # downlink_dto("gen9", "A") / downlink_dto("gen9", "B", false)
+# # downlink_dto("gen10", "A", true) / downlink_dto("gen10", "B")
+def downlink_dto(server_gen_type, port_side, port_state=False):
+    return {
+        "type": PORT_DTO_TYPE,
+        "associatedUplinkSetUri": FC_UPLINK_SET[port_side],
+        "interconnectName": FC_UPLINK_ICM[port_side],
+        "enabled": port_state,
+        "portName": DOWNLINK_PORT[server_gen_type]
+    }
+
+
+# Function "add_vol_connection" purpose is to add
+# volume connections in server profile
+def add_vol_connection(connect_id, connect_name, network_uri, function_type="FibreChannel", port_id="Auto",
+                       priority="Primary", bootvolumesource="ManagedVolume", managed=True):
+    return {
+        "id": connect_id,
+        "name": connect_name,
+        "functionType": function_type,
+        "networkUri": network_uri,
+        "portId": port_id,
+        "boot": {
+            "priority": priority,
+            "bootVolumeSource": bootvolumesource,
+        },
+        "managed": managed
+    }
+
+
+# Function "add_storagepaths" purpose is to add
+# storage paths in server profile
+def add_storagepaths(connection_id, target_selector="Auto", is_enabled=True):
+    return {
+        "connectionId": connection_id,
+        "targetSelector": target_selector,
+        "isEnabled": is_enabled
+    }
+
+
+# Function "add_vol_attachment" purpose is to add
+# volume attachments in server profile
+def add_vol_attachment(vol_id, volumestoragesystemuri, vol_name, storagepool, vol_size, templateuri,
+                       isshareable=False, ispermanent=False, luntype="Auto", provisioningtype="Thin",
+                       volumeuri=None, bootvolumepriority="Primary"):
+    return {
+        "id": vol_id,
+        "lunType": luntype,
+        "volumeUri": volumeuri,
+        "volumeStorageSystemUri": volumestoragesystemuri,
+        "volume": {
+            "properties": {
+                "name": vol_name,
+                "storagePool": storagepool,
+                "provisioningType": provisioningtype,
+                "size": vol_size,
+                "isShareable": isshareable,
+            },
+            "isPermanent": ispermanent,
+            "templateUri": templateuri,
+        },
+        "storagePaths": [
+            add_storagepaths(1, "Auto", True),
+            add_storagepaths(2, "Auto", True)
+        ],
+        "bootVolumePriority": bootvolumepriority
+    }
+
+
+# Profile creation using defined functions
+ts1_gen9_2_target_2_boot_volume_sp = {
+    "type": SERVER_PROFILE_DTO_TYPE,
+    "name": PROFILE1_GEN9_NAME,
+    "description": "",
+    "iscsiInitiatorNameType": "AutoGenerated",
+    "serverHardwareUri": SH_GEN9,
+    "enclosureGroupUri": "EG:" + EG_NAME,
+    "connectionSettings": {
+        "connections": [
+            add_vol_connection(1, "FCConnA", "FC:" + FC_NETWORK_A, "FibreChannel", "Auto", "Primary", "ManagedVolume",
+                               True),
+            add_vol_connection(2, "FCConnB", "FC:" + FC_NETWORK_B, "FibreChannel", "Auto", "Secondary", "ManagedVolume",
+                               True)
+        ]
+    },
+    "bootMode": {"manageMode": True, "mode": "UEFI", "pxeBootPolicy": "Auto", "secureBoot": "Disabled"},
+    "boot": {"manageBoot": True, "order": ["HardDisk"]},
+    "bios": {"manageBios": False},
+    "sanStorage": {
+        "hostOSType": "Windows 2012 / WS2012 R2",
+        "manageSanStorage": True,
+        "volumeAttachments": [
+            add_vol_attachment(1, "SSYS:" + STORESERV1_NAME, STORESERV_VOLUME1_NAME_GEN9, "SPOOL:" + STORESERV1_POOL,
+                               2147483648, "ROOT:" + STORESERV1_POOL, False, False, "Auto", "Thin", None, "Primary"),
+            add_vol_attachment(2, "SSYS:" + STORESERV2_NAME, STORESERV_VOLUME2_NAME_GEN9, "SPOOL:" + STORESERV2_POOL,
+                               2147483648, "ROOT:" + STORESERV2_POOL, False, False, "Auto", "Thin", None, "Secondary")
+        ],
+        "sanSystemCredentials": [],
+    },
+}
+
+ts1_gen10_2_target_2_boot_volume_sp = {
+    "type": SERVER_PROFILE_DTO_TYPE,
+    "name": PROFILE1_GEN10_NAME,
+    "description": "",
+    "iscsiInitiatorNameType": "AutoGenerated",
+    "serverHardwareUri": SH_GEN10,
+    "enclosureGroupUri": "EG:" + EG_NAME,
+    "connectionSettings": {
+        "connections": [
+            add_vol_connection(1, "FCConnA", "FC:" + FC_NETWORK_A, "FibreChannel", "Auto", "Primary", "ManagedVolume",
+                               True),
+            add_vol_connection(2, "FCConnB", "FC:" + FC_NETWORK_B, "FibreChannel", "Auto", "Secondary", "ManagedVolume",
+                               True)
+        ]
+    },
+    "bootMode": {"manageMode": True, "mode": "UEFI", "pxeBootPolicy": "Auto", "secureBoot": "Disabled"},
+    "boot": {"manageBoot": True, "order": ["HardDisk"]},
+    "bios": {"manageBios": False},
+    "sanStorage": {
+        "hostOSType": "Windows 2012 / WS2012 R2",
+        "manageSanStorage": True,
+        "volumeAttachments": [
+            add_vol_attachment(1, "SSYS:" + STORESERV1_NAME, STORESERV_VOLUME1_NAME_GEN10, "SPOOL:" + STORESERV1_POOL,
+                               2147483648, "ROOT:" + STORESERV1_POOL, False, False, "Auto", "Thin", None, "Primary"),
+            add_vol_attachment(2, "SSYS:" + STORESERV2_NAME, STORESERV_VOLUME2_NAME_GEN10, "SPOOL:" + STORESERV2_POOL,
+                               2147483648, "ROOT:" + STORESERV2_POOL, False, False, "Auto", "Thin", None, "Secondary")
+        ],
+        "sanSystemCredentials": [],
+    },
+}

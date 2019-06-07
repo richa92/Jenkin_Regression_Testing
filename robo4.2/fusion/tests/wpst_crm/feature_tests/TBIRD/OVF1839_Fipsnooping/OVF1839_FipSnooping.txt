@@ -1,0 +1,593 @@
+*** Settings ***
+Documentation       FIPSnooping using FusionLibrary API keywords
+Variables       data_variablesME.py
+Library         json
+Library         FusionLibrary
+Library         RoboGalaxyLibrary
+Library         Collections
+Library         SSHLibrary
+Resource        ../../../../../Resources/api/fusion_api_resource.txt
+Suite Setup     Suite Setup Tasks
+
+
+*** Variables ***
+${APPLIANCE_IP}     15.245.131.206
+${stat}         statistics
+
+*** Test cases ***
+#######################################Pre-condition#################################################
+
+Create FCOE network
+    [Documentation]    create network
+    Set Log Level    TRACE
+    ${resp}    Add FCoE Networks from variable    ${fcoenets}
+    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2   ${resp[0]}    ELSE    Fail
+    Log  Network created   console=True
+
+Create LIG
+    [Documentation]    create LIG
+    Add LIG from variable    ${ligs['lig1']}
+    Log  LIG created   console=True
+
+Creating Enclosure Group
+    [Documentation]    create EG
+    ${resp}    Add Enclosure Group from variable    ${enc_group['EG']}
+    Run Keyword If  '${resp['status_code']}' == '201'    Wait For Task2    ${resp}    ELSE    Fail    Log    failed    console=True
+
+Creating Logical Enclosure
+    [Documentation]    create LE
+    Add Logical Enclosure from variable    ${Logical_Enclosure['LE']}
+    Log  LE created successfully    console=True
+
+Verify interconnect status are in configured
+    [Documentation]    Verify interconnect status
+    Log    Verifying if interconnects are configured    console=True
+    :FOR    ${x}    IN    @{Interconnect_dto}
+    \    Verify Interconnect    ${x}    state=Configured
+
+    Log    Fetching ICM URI    console=True
+    ${ic_uris}    Create List
+    :FOR    ${icm}    IN    @{Interconnect_name}
+    \    ${uri} =    Get IC URI    ${icm}
+    \    Run Keyword If    '${icm}' == '${Interconnect_name[0]}'    Set Suite Variable    ${ICM3_uri}    ${uri}
+    \    ...    ELSE IF    '${icm}' == '${Interconnect_name[1]}'    Set Suite Variable    ${ICM6_uri}    ${uri}
+    \    Append To List    ${ic_uris}    ${uri}
+    Log     ${ICM3_uri}    console=True
+    Log     ${ICM6_uri}    console=True
+    Set Suite Variable    ${ICM_uris}    ${ic_uris}
+    Sleep    5min
+
+    Log    Verify if ports are linked    console=True
+    ${Port_Resp}    Get IC Port    ${ICM3_uri}    ${port_name[0]}
+    Run Keyword If    '${Port_Resp['portStatus']}' != 'Linked'    Fail    msg=Port ${port_name} is unlinked
+    ...    ELSE    Log    Successfully verified that ${port_name} is Linked    console=True
+
+Creating Server Profile and Powering on server
+    [Documentation]    create server profile
+    Set Log Level    TRACE
+    ${Resp}    Add Server Profiles from variable    ${server_profiles}
+    Run Keyword If  '${Resp[0]['status_code']}' == '202'    Wait For Task2    ${Resp[0]}    20m    1m    ELSE    Fail    Log    failed    console=True
+    Power on server    ${server_profiles[0]['serverHardwareUri']}
+    Log  Server to boot    console=True
+    Sleep   10min
+
+####################Test Case 1 - Verify FIP Snooping Data object is present in port Statistics and sub-Port Statistics################
+TC_1_1_verifying the FipSnooping data
+    [Documentation]    FipSnooping data to be verify
+    ${Resp}    Get FipSnooping Data    ${interconnects[0]}    ${ports[0]['uplink_port']}    ${ports[0]['downlink_port']}
+    Validate Response    ${Resp['fips_data_uplink'][0]}    ${FIPsnooping_Parameters_uplink}
+    Validate Response    ${Resp['fips_data_downlink'][0]}    ${FIPsnooping_Parameters_downlink}
+    Log    Fipsnooping data verified successfully for both uplink and downlink    console=True
+
+###################################Test Case 2 - Adding different user and verify FipSnooping data#####################################
+TC_2_1_Adding Different user
+    [Documentation]    Different user is added
+    Set Log Level    TRACE
+    ${resp}    Add Users from variable    ${users}
+    ${l}    Get Length    ${resp}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Run Keyword If  '${resp[${x}]['status_code']}' == '200'    Wait For Task2    ${resp[${x}]}    2m    1m    ELSE    Fail    Log    '${resp[${x}]['errorCode']}'    Console = True
+
+TC_2_2_Logging into different user
+    [Documentation]    Logging into different user
+    ${l} =  Get Length  ${users}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${resp}    Login all users    ${usercred}
+    \   ${Resp}    Get FipSnooping Data    ${interconnects[0]}    ${ports[0]['uplink_port']}    ${ports[0]['downlink_port']}
+    \   Validate Response    ${Resp['fips_data_uplink'][0]}    ${FIPsnooping_Parameters_uplink}
+    \   Validate Response    ${Resp['fips_data_downlink'][0]}    ${FIPsnooping_Parameters_downlink}
+    Log  Logged into different users and Fipsnooping data verified successfully for both uplink and downlink    console=True
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+
+####################################Test Case 3 -Disable/Enable the uplink ports & verify FipSnooping data##############################
+TC_3_1_Disable Uplink Ports
+    [Documentation]    Disabling the uplink port
+    Set Log Level    TRACE
+    ##########Global variable############
+    ${uri} =        Get IC URI      ${interconnects[0]}
+    Set Suite Variable    ${ICM3uri}    ${uri}
+    #####################################
+
+    ${Resp}    Get IC Port    ${ICM3uri}    ${port_name[0]}
+    ${enabled_portStatusReason} =    Set Variable If    '${Resp['portStatus']}' == 'Linked'    StandbyFcoeActive    Unknown
+    ${enabled_portStatus} =    Set Variable If    '${Resp['portStatus']}' == 'Linked'    Linked    Unlinked
+    Log    Disabling the uplink port    console=True
+    ${Resp}    Update IC Port     ${interconnects[0]}   ${uplink_ports}   ${Disable_Port}
+    Wait Until Keyword Succeeds    5 min    20s      IC reached state    ${ICM3uri}    Configured
+    Log    Verifying if Port is disabled    console=True
+    Sleep    5min
+    ${Disabled_Resp}    Get IC Port    ${ICM3uri}    ${port_name[0]}
+    Should be Equal As Strings    ${Disabled_Resp['portStatusReason']}    AdminDisabled
+
+TC_3_2_Verifying the FipSnooping data In Uplink Port
+    [Documentation]    verify the FipSnooping data in uplink ports
+    ${ic_uri} =        catenate    ${ICM3uri}/${stat}/${ports[0]['uplink_port']}
+    ${resp1}   ${Resp}    Verify FipSnooping Data    ${ic_uri}
+    Log   ${resp1}    console=True
+    Run Keyword If  '${resp1['fipSnoopingInfo']}' != '[]'  Fail    ELSE    Log  Successfully verified absence of Fips data    console=True
+
+TC_3_3_Verifying the FipSnooping data in downlink port
+    [Documentation]    verify FipSnooping data in downlink port
+    ${ic_uri} =        catenate    ${ICM3uri}/${stat}/${ports[0]['downlink_port']}
+    ${resp1}   ${Resp}    Verify FipSnooping Data in Downlink    ${ic_uri}
+    Log   ${resp1}    console=True
+    Run Keyword If  '${resp1['fipSnoopingInfo']}' != '[]'  Fail    ELSE    Log  Successfully verified absence of Fips data    console=True
+
+TC_3_4_Enable Uplink Ports
+    [Documentation]    Enabling Uplink port
+    Log    Enabling the uplink port    console=True
+    ${Resp}    Get IC Port    ${ICM3uri}    ${port_name[0]}
+    ${Resp}    Update IC Port     ${interconnects[0]}   ${uplink_ports}   ${Enable_Port}
+    Wait Until Keyword Succeeds    5 min    20s      IC reached state    ${ICM3uri}    Configured
+    Log    Verifying if Port is Enabled    console=True
+    Sleep    5min
+    ${Enabled_Resp}    Get IC Port    ${ICM3uri}    ${port_name[0]}
+    ${enabled_portStatusReason} =    Set Variable If    '${Enabled_Resp['portStatus']}' == 'Linked'    StandbyFcoeActive    Unknown
+    ${enabled_portStatus} =    Set Variable If    '${Enabled_Resp['portStatus']}' == 'Linked'    Linked    Unlinked
+    Should be Equal As Strings    ${Enabled_Resp['portStatusReason']}    ${enabled_portStatusReason}
+
+TC_3_5_Verifying the FipSnooping data
+    [Documentation]    verifying the FipSnooping data
+    ${Resp}    Get FipSnooping Data    ${interconnects[0]}    ${ports[0]['uplink_port']}    ${ports[0]['downlink_port']}
+    Validate Response    ${Resp['fips_data_uplink'][0]}    ${FIPsnooping_Parameters_uplink}
+    Validate Response    ${Resp['fips_data_downlink'][0]}    ${FIPsnooping_Parameters_downlink}
+    Log  Fipsnooping data verified successfully for both uplink and downlink after enabling uplink port    console=True
+
+#######################################Test case 4-ON\Off the power on ICM & verify FipSnooping data######################################
+
+TC_4_1_Issue a powerControl Off
+    [Documentation]    Issue powerControl Off
+    [Tags]  powerOff
+    Set Log Level    TRACE
+    Log  power off ICM    console=True
+    Patch Interconnect    ${dto[0]}    op=replace  path=/powerState  value=Off  timeout=60  interval=10
+    Wait Until Keyword Succeeds    7 min    20s      IC reached state    ${ICM3uri}    Maintenance
+    Log  ICM powered off    console=True
+
+TC_4_2_Issue a powerControl On
+    [Documentation]    Issue a powerControl On
+    [Tags]  powerOn
+    Log  power on ICM    console=True
+    Patch Interconnect    ${dto[0]}    op=replace  path=/powerState  value=On  timeout=60  interval=10
+    Wait Until Keyword Succeeds    10 min    20s      IC reached state    ${ICM3uri}    Configured
+    Log  ICM powered on    console=True
+    Sleep   180s
+
+TC_4_3_Verifying the FipSnooping data after IC powerON
+    [Documentation]    verify FipSnooping data
+    ${Resp}    Get FipSnooping Data    ${interconnects[0]}    ${ports[0]['uplink_port']}    ${ports[0]['downlink_port']}
+    Log  ${Resp}   console=True
+    Validate Response    ${Resp['fips_data_uplink'][0]}    ${FIPsnooping_Parameters_uplink}
+    Validate Response    ${Resp['fips_data_downlink'][0]}    ${FIPsnooping_Parameters_downlink}
+    Log  verified successfully    console=True
+
+TC_4_4_Configured the other interconnect through Power Off/On
+    [Documentation]    Configured the other interconnect through Power Off/On
+    Patch Interconnect    ${dto[1]}    op=replace  path=/powerState  value=Off  timeout=60  interval=10
+    Wait Until Keyword Succeeds    7 min    20s      IC reached state    ${ICM6_uri}    Maintenance
+    Log  Powered off interconnect    console=True
+    Patch Interconnect    ${dto[1]}    op=replace  path=/powerState  value=On  timeout=60  interval=10
+    Wait Until Keyword Succeeds    10 min    20s      IC reached state    ${ICM6_uri}    Configured
+    Log  Powered off interconnect    console=True
+
+##########################################Test case 5-Reset ICM & verify the FipSnooping data########################################
+
+TC_5_1_Issue a Reset the ICM
+    [Documentation]    Reset the ICM
+    [Tags]  Reset
+    Set Log Level    TRACE
+    Log  reset ICM    console=True
+    Patch Interconnect    ${dto[0]}    op=replace  path=/deviceResetState  value=Reset  timeout=600  interval=10
+    Log  ICM Reset Successfully   console=True
+    sleep   120s
+
+TC_5_2_Verifying the FipSnooping data In Uplink Port
+    [Documentation]    verify the FipSnooping data in uplink ports
+    ${ic_uri} =        catenate    ${ICM3uri}/${stat}/${ports[0]['uplink_port']}
+    ${resp1}   ${Resp}    Verify FipSnooping Data    ${ic_uri}
+    Log   ${resp1}    console=True
+    Run Keyword If  '${resp1['fipSnoopingInfo']}' != '[]'  Fail    ELSE  Log  Successfully verified absence of data    console=True
+
+TC_5_3_Verifying the FipSnooping data in downlink port
+    [Documentation]    verify FipSnooping data in downlink port
+    ${ic_uri} =        catenate    ${ICM3uri}/${stat}/${ports[0]['downlink_port']}
+    ${resp1}   ${Resp}    Verify FipSnooping Data in Downlink    ${ic_uri}
+    Log   ${resp1}    console=True
+    Run Keyword If  '${resp1['fipSnoopingInfo']}' != '[]'  Fail    ELSE  Log  Successfully verified absence of data    console=True
+    Sleep    180s
+
+TC_5_4_Verifying the FipSnooping data after RESET
+    [Documentation]    verify FipSnooping data after RESET
+    ${Resp}    Get FipSnooping Data    ${interconnects[0]}    ${ports[0]['uplink_port']}    ${ports[0]['downlink_port']}
+    Validate Response    ${Resp['fips_data_uplink'][0]}    ${FIPsnooping_Parameters_uplink}
+    Validate Response    ${Resp['fips_data_downlink'][0]}    ${FIPsnooping_Parameters_downlink}
+    Log  verified successfully    console=True
+    Wait Until Keyword Succeeds     5 min   10s      Get Interconnect stackingDomainRole    ${Interconnect_name[0]}    ${IC_stacking_domain_role[0]}
+    Wait Until Keyword Succeeds     5 min   10s      Get Interconnect stackingDomainRole    ${Interconnect_name[1]}    ${IC_stacking_domain_role[1]}
+
+TC_5_5_RESET another interconnect to bring the interconnect back to original
+    [Documentation]    Configured the other interconnect through RESET
+    Patch Interconnect    ${dto[1]}    op=replace  path=/deviceResetState  value=Reset  timeout=600  interval=10
+    Log  ICM Reset Successfully    console=True
+    Wait Until Keyword Succeeds     5 min   10s      Get Interconnect stackingDomainRole    ${Interconnect_name[0]}    ${IC_stacking_domain_role[1]}
+    Wait Until Keyword Succeeds     5 min   10s      Get Interconnect stackingDomainRole    ${Interconnect_name[1]}    ${IC_stacking_domain_role[0]}
+
+######################################Test case 6-Editing server profile and verifying the FipSnooping data#################################
+
+TC_6_1_Power Off the server
+    [Documentation]    Power Off the server
+    Set Log Level    TRACE
+    Power off Servers in Profiles    ${server_profiles}
+    Log  server power off    console=True
+    Sleep   10min
+
+TC_6_2_Verifying the FipSnooping data In Uplink Port
+    [Documentation]    verify FipSnooping data in uplink port
+    ${ic_uri} =        catenate    ${ICM3uri}/${stat}/${ports[0]['uplink_port']}
+    ${resp1}   ${Resp}    Verify FipSnooping Data    ${ic_uri}
+    Log   ${resp1}    console=True
+    Validate Response    ${Resp['fips_data_uplink'][0]}    ${FIPsnooping_Parameters_uplink}
+    Log  verified successfully    console=True
+
+TC_6_3_Verifying the FipSnooping data In Downlink Port
+    [Documentation]    verify FipSnooping data in downlink port
+    ${ic_uri} =        catenate    ${ICM3uri}/${stat}/${ports[0]['downlink_port']}
+    ${resp1}   ${Resp}    Verify FipSnooping Data in Downlink    ${ic_uri}
+    Log   ${resp1}    console=True
+    Run Keyword If  '${resp1['fipSnoopingInfo']}' != '[]'  Fail    ELSE  Log  Successfully verified absence of fips data    console=True
+
+TC_6_4_Editing serverprofile with incorrect mac address
+    [Documentation]    Editing incorrect mac address
+    ${resp}    Edit Server Profiles from variable    ${server_profiles_edit}
+    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp[0]}    7m    1m    ELSE    Fail    Log    failed    console=True
+    ${resp1}    Edit Server Profiles from variable    ${server_profiles_edit1}
+    Run Keyword If  '${resp1[0]['status_code']}' == '202'    Wait For Task2    ${resp1[0]}    5m    1m    ELSE    Fail    Log    failed    console=True
+    Power on server    ${server_profiles[0]['serverHardwareUri']}
+    Log  booting the server    console=True
+    Sleep   10min
+
+TC_6_5_Verifying the FipSnooping data In Uplink Port
+    [Documentation]    verify FipSnooping data in uplink port
+    ${ic_uri} =        catenate    ${ICM3uri}/${stat}/${ports[0]['uplink_port']}
+    ${resp1}   ${Resp}    Verify FipSnooping Data    ${ic_uri}
+    Log   ${resp1}    console=True
+    Validate Response    ${Resp['fips_data_uplink'][0]}    ${FIPsnooping_Parameters_uplink}
+    Log  verified successfully    console=True
+
+TC_6_6_Verifying the FipSnooping data In Downlink Port
+    [Documentation]    verify FipSnooping data in downlink port
+    ${ic_uri} =        catenate    ${ICM3uri}/${stat}/${ports[0]['downlink_port']}
+    ${resp1}   ${Resp}    Verify FipSnooping Data in Downlink    ${ic_uri}
+    Log   ${resp1}    console=True
+    Run Keyword If  '${resp1['fipSnoopingInfo']}' != '[]'  Fail    ELSE  Log  Successfully verified absence of fips data    console=True
+
+    Power off Servers in Profiles    ${server_profiles}
+    Log  server power off    console=True
+    Sleep   5min
+
+TC_6_5_Editing serverprofile with correct mac address
+    [Documentation]    Edit server profile with valid MAC Address
+    ${resp}    Edit Server Profiles from variable    ${server_profiles_edit}
+    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp[0]}    7m    1m    ELSE    Fail    Log    failed    console=True
+    ${resp1}    Edit Server Profiles from variable    ${server_profiles}
+    Run Keyword If  '${resp1[0]['status_code']}' == '202'    Wait For Task2    ${resp1[0]}    5m    1m    ELSE    Fail    Log    failed    console=True
+
+    Power on server    ${server_profiles[0]['serverHardwareUri']}
+    Log  booting the server    console=True
+    Sleep   12min
+
+TC_6_6_Verifying the FipSnooping data after correct MAC address
+    [Documentation]    verify FipSnooping data after correct MAC address
+    ${Resp}    Get FipSnooping Data    ${interconnects[0]}    ${ports[0]['uplink_port']}    ${ports[0]['downlink_port']}
+    Validate Response    ${Resp['fips_data_uplink'][0]}    ${FIPsnooping_Parameters_uplink}
+    Validate Response    ${Resp['fips_data_downlink'][0]}    ${FIPsnooping_Parameters_downlink}
+    Log  verified successfully    console=True
+
+########################################Test case 7-Delete/Add networks in LIG & verify the FipSnooping data##################################
+
+TC_7_1_Edit LIG without network
+    [Documentation]    Edit the LIG without Network
+    Set Log Level    TRACE
+    ${body}    Get From Dictionary    ${ligs}    lig2
+    ${lig_body}    Create List    ${body}
+    ${resp}    Edit LIG    ${lig_body}
+    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp}    5min    10    ELSE    Fail    Log    failed    console=True
+    Update Logical Interconnect from Group    ${LI}
+    Sleep    180sec
+
+TC_7_2_Verifying the FipSnooping data In Uplink Port
+    [Documentation]    verify the FipSnooping data in uplink ports
+    ${ic_uri} =        catenate    ${ICM3uri}/${stat}/${ports[0]['uplink_port']}
+    ${resp1}   ${Resp}    Verify FipSnooping Data    ${ic_uri}
+    Log   ${resp1}    console=True
+    Run Keyword If  '${resp1['fipSnoopingInfo']}' != '[]'  Fail    ELSE  Log  Successfully verified absence of data    console=True
+
+TC_7_3_Verifying the FipSnooping data in downlink port
+    [Documentation]    verify FipSnooping data in downlink port
+    ${ic_uri} =        catenate    ${ICM3uri}/${stat}/${ports[0]['downlink_port']}
+    ${resp1}   ${Resp}    Verify FipSnooping Data in Downlink    ${ic_uri}
+    Log   ${resp1}    console=True
+    Run Keyword If  '${resp1['fipSnoopingInfo']}' != '[]'  Fail    ELSE  Log  Successfully verified absence of data    console=True
+
+TC_7_4_Edit LIG with network
+    [Documentation]    Edit LIG with network
+    ${body}    Get From Dictionary    ${ligs}    lig3
+    Log   ${body}    console=True
+    ${lig_body}    Create List    ${body}
+    Log   ${lig_body}    console=True
+    ${resp}    Edit LIG    ${lig_body}
+    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp}    5min    10    ELSE    Fail    Log    failed    console=True
+    Update Logical Interconnect from Group    ${LI}
+    Sleep    300sec
+
+TC_7_5_Verifying the FipSnooping data with network
+    [Documentation]    verify FipSnooping data with network
+    ${Resp}    Get FipSnooping Data    ${interconnects[0]}    ${ports[0]['uplink_port']}    ${ports[0]['downlink_port']}
+    Validate Response    ${Resp['fips_data_uplink'][0]}    ${FIPsnooping_Parameters_uplink}
+    Validate Response    ${Resp['fips_data_downlink'][0]}    ${FIPsnooping_Parameters_downlink}
+    Log  verified successfully    console=True
+
+########################################Test case 8-Disable/Enable Downlink ports & verify FipSnooping data##################################
+
+TC_8_1_Disable the downlink port
+    [Documentation]    Disable the downlink port
+    Set Log Level    TRACE
+    ${Resp}    Get IC Port    ${ICM3_uri}    ${downlink_ports}
+    ${enabled_portStatusReason} =    Set Variable If    '${Resp['portStatus']}' == 'Linked'    Ok    Unknown
+    ${enabled_portStatus} =    Set Variable If    '${Resp['portStatus']}' == 'Linked'    Linked    Unlinked
+    Log    Disabling the downlink port    console=True
+    ${Resp}    Update IC Port    ${interconnects[0]}    ${downlink_ports}    ${downlink_port_disable}
+    Wait Until Keyword Succeeds    5 min    20s      IC reached state    ${ICM3_uri}    Configured
+    Log    Verifying if Port is disabled    console=True
+    Sleep    5min
+    ${Disabled_Resp}    Get IC Port    ${ICM3_uri}    ${downlink_ports}
+    Should be Equal As Strings    ${Disabled_Resp['portStatusReason']}    AdminDisabled
+
+TC_8_2_Verifying FipSnooping Data in Uplink Port
+    [Documentation]    verify FipSnooping data in uplink port
+    ${ic_uri} =        catenate    ${ICM3uri}/${stat}/${ports[0]['uplink_port']}
+    ${resp1}   ${Resp}    Verify FipSnooping Data    ${ic_uri}
+    Validate Response    ${Resp['fips_data_uplink'][0]}    ${FIPsnooping_Parameters_uplink}
+    Log  verified successfully    console=True
+
+TC_8_3_Verify FIPSnooping data in downlink port
+    [Documentation]    verify FipSnooping data in downlink port
+    ${ic_uri} =        catenate    ${ICM3uri}/${stat}/${ports[0]['downlink_port']}
+    ${resp1}   ${Resp}    Verify FipSnooping Data in Downlink    ${ic_uri}
+    Log   ${Resp}    console=True
+    Run Keyword If  '${resp1['fipSnoopingInfo']}' != '[]'  Fail    ELSE  Log  Successfully verified absence of data    console=True
+
+TC_8_4_Enable downlink Ports
+    [Documentation]    Enable downlink ports
+    Log    Enabling the downlink port    console=True
+    ${Resp}    Get IC Port    ${ICM3_uri}    ${downlink_ports}
+    ${Resp}    Update IC Port    ${interconnects[0]}    ${downlink_ports}    ${downlink_port_enable}
+    Wait Until Keyword Succeeds    5 min    20s      IC reached state    ${ICM3_uri}    Configured
+    Log    Verifying if Port is Enabled    console=True
+    Sleep    5min
+    ${Enabled_Resp}    Get IC Port    ${ICM3_uri}    ${downlink_ports}
+    ${enabled_portStatusReason} =    Set Variable If    '${Enabled_Resp['portStatus']}' == 'Linked'    Ok    Unknown
+    ${enabled_portStatus} =    Set Variable If    '${Enabled_Resp['portStatus']}' == 'Linked'    Linked    Unlinked
+    Should be Equal As Strings    ${Enabled_Resp['portStatusReason']}    ${enabled_portStatusReason}
+    Should be Equal As Strings    ${Enabled_Resp['portStatus']}    ${enabled_portStatus}
+
+TC_8_5_Verifying the FipSnooping data
+    [Documentation]    verify FipSnooping data
+    ${Resp}    Get FipSnooping Data    ${interconnects[0]}    ${ports[0]['uplink_port']}    ${ports[0]['downlink_port']}
+    Validate Response    ${Resp['fips_data_uplink'][0]}    ${FIPsnooping_Parameters_uplink}
+    Validate Response    ${Resp['fips_data_downlink'][0]}    ${FIPsnooping_Parameters_downlink}
+    Log  verified successfully    console=True
+
+#####################################Test case 9-Delete/Add uplink port in LIG & verify the FipSnooping data################################
+
+TC_9_1_Edit LIG without uplinkport
+    [Documentation]    Edit the LIG without uplink port
+    Set Log Level    TRACE
+    ${body}    Get From Dictionary    ${ligs}    lig4
+    Log   ${body}    console=True
+    ${lig_body}    Create List    ${body}
+    Log   ${lig_body}    console=True
+    ${resp}    Edit LIG    ${lig_body}
+    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp}    5min    10    ELSE    Fail    Log    failed    console=True
+    Update Logical Interconnect from Group    ${LI}
+    Sleep    120s
+
+TC_9_2_Verifying the FipSnooping data In Uplink Port
+    [Documentation]    verify the FipSnooping data in uplink ports
+    ${ic_uri} =        catenate    ${ICM3uri}/${stat}/${ports[0]['uplink_port']}
+    ${resp1}   ${Resp}    Verify FipSnooping Data    ${ic_uri}
+    Log   ${resp1}    console=True
+    Run Keyword If  '${resp1['fipSnoopingInfo']}' != '[]'  Fail    ELSE  Log  Successfully verified absence of data    console=True
+
+TC_9_3_Verifying the FipSnooping data in downlink port
+    [Documentation]    verify FipSnooping data in downlink port
+    ${ic_uri} =        catenate    ${ICM3uri}/${stat}/${ports[0]['downlink_port']}
+    ${resp1}   ${Resp}    Verify FipSnooping Data in Downlink    ${ic_uri}
+    Log   ${resp1}    console=True
+    Run Keyword If  '${resp1['fipSnoopingInfo']}' != '[]'  Fail    ELSE  Log  Successfully verified absence of data    console=True
+
+TC_9_4_Edit LIG with uplinkport
+    [Documentation]    Edit LIG with Uplink port
+    ${body}    Get From Dictionary    ${ligs}    lig1
+    Log   ${body}    console=True
+    ${lig_body}    Create List    ${body}
+    Log   ${lig_body}    console=True
+    ${resp}    Edit LIG    ${lig_body}
+    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp}    5min    10    ELSE    Fail    Log    failed    console=True
+    Update Logical Interconnect from Group    ${LI}
+    Sleep   6min
+
+TC_9_5_Verifying the FipSnooping data
+    [Documentation]    verify FipSnooping data
+    ${Resp}    Get FipSnooping Data    ${interconnects[0]}    ${ports[0]['uplink_port']}    ${ports[0]['downlink_port']}
+    Validate Response    ${Resp['fips_data_uplink'][0]}    ${FIPsnooping_Parameters_uplink}
+    Validate Response    ${Resp['fips_data_downlink'][0]}    ${FIPsnooping_Parameters_downlink}
+    Log  verified successfully    console=True
+
+########################################Test case 10-Backup/Restore & verify the FipSnooping data######################################
+
+TC_10_1_Perform Backup Operation
+    [Documentation]    perform Backup Operation
+    ${Response}    Create Backup
+
+TC_10_2_Restore from Backup operation
+    [Documentation]    Restore Backup Operation
+    [Tags]  RestoreFromBackup
+    Restore Appliance
+    Sleep    5min
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    Log  logged into appliance    console=True
+
+TC_10_3_Verifying the FipSnooping data
+    [Documentation]    verify FipSnooping data
+    ${Resp}    Get FipSnooping Data    ${interconnects[0]}    ${ports[0]['uplink_port']}    ${ports[0]['downlink_port']}
+    Validate Response    ${Resp['fips_data_uplink'][0]}    ${FIPsnooping_Parameters_uplink}
+    Validate Response    ${Resp['fips_data_downlink'][0]}    ${FIPsnooping_Parameters_downlink}
+
+
+***Keywords***
+
+Get IC Port
+    [Documentation]    Returns the port info of the named port of specified interconnect uri
+    [Arguments]     ${uri}    ${portName}
+    ${return} =    Create List
+    ${resp} =    fusion api get interconnect ports    uri=${uri}
+    ${ports} =    Get From Dictionary    ${resp}    members
+    :FOR    ${port}    IN    @{ports}
+    \    ${return} =    Run Keyword If    '${port['portName']}' == '${portName}'    set variable    ${port}
+    \    Exit for loop if    '${port['portName']}' == '${portName}'
+    [Return]    ${return}
+
+Get Interconnect StackingDomainRole
+    [Documentation]    Fetches PLUGGABLE MODULE INFORMATION
+    [Arguments]     ${ic_name}    ${expected_role}
+    ${resp} =   Get Interconnect    ${ic_name}
+    ${Role}    Get From Dictionary    ${resp}    stackingDomainRole
+    Should Be Equal As Strings    ${Role}    ${expected_role}
+    [Return]    ${Role}
+
+Verify FipSnooping Data
+    [Documentation]    verify FipSnooping data
+    [Arguments]     ${ic_uri}
+    Log  {ic_uri}    console=True
+    ${resp1}    Fusion Api Get Interconnect    ${ic_uri}
+    Log  ${resp1}    console=True
+    ${Resp}    Get Fips Data Uplink    ${resp1}
+    Log  {Resp}    console=True
+    [Return]    ${resp1}   ${Resp}
+
+Verify FipSnooping Data in Downlink
+    [Documentation]    verify in downlink port
+    [Arguments]     ${ic_uri}
+    Log  {ic_uri}   console=True
+    ${resp1}    Fusion Api Get Interconnect    ${ic_uri}
+    Log  {resp1}   console=True
+    ${Resp}    Get Fips Data Downlink    ${resp1}
+    Log  {Resp}   console=True
+    [Return]    ${resp1}   ${Resp}
+
+Get FipSnooping Data
+    [Documentation]    Get the FipSnooping data
+    [Arguments]     ${ic}    ${uplink_port}    ${downlink_port}
+    ${ic_uri} =    Create List
+    Log  Getting interconnect uri    console=True
+    ${Resp}    Get IC URI    ${ic}
+    ${ic_uri_uplink} =        catenate    ${Resp}/${stat}/${uplink_port}
+    ${ic_uri_downlink} =        catenate    ${Resp}/${stat}/${downlink_port}
+    Append To List  ${ic_uri}   ${ic_uri_downlink}
+    Append To List  ${ic_uri}   ${ic_uri_uplink}
+    ${Resp_output}    Get Interconnect Statistics    ${ic_uri}
+    ${fips_data_downlink} =     Copy Dictionary    ${Resp_output[0]}
+    ${fips_data_uplink} =   Copy Dictionary    ${Resp_output[1]}
+    ${status_code} =    Run Keyword If    ${fips_data_downlink['status_code']} == 200 and ${fips_data_uplink['status_code']} == 200        Set Variable    ${200}
+    ...                     ELSE                    Set Variable    ${201}
+    ${Response} =   Create Dictionary       status_code=${status_code}
+    ...                                     fips_data_downlink=${fips_data_downlink['fips_data_downlink']}
+    ...                                     fips_data_uplink=${fips_data_uplink['fips_data_uplink']}
+    [Return]    ${Response}
+
+Get Interconnect Statistics
+    [Documentation]    Get Intercoonect statistics
+    [Arguments]     ${ic_uri}
+    ${fips_data} =    Create List
+    ${l} =  Get Length  ${ic_uri}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${resp}     Fusion Api Get Interconnect     ${ic_uri[${x}]}
+    \   ${Resp} =       Run Keyword If   '${x}' == '0' and '${resp['status_code']}' == '${200}'    Get Fips Data Downlink    ${resp}
+    \   ...         ELSE IF     '${x}' == '1' and '${resp['status_code']}' == '${200}'    Get Fips Data Uplink    ${resp}
+    \   Append To List  ${fips_data}    ${Resp}
+    [Return]    ${fips_data}
+
+Get Fips Data Uplink
+    [Documentation]    Get Fips Data Uplink
+    [Arguments]     ${resp}
+    ${fips_data_uplink} =   Copy List   ${resp['fipSnoopingInfo']}
+    ${k} =  Get Length  ${fips_data_uplink}
+    ${status_code} =        Run Keyword If          '${k}' == '0'        Set Variable    ${201}
+    ...                     ELSE                    Set Variable    ${200}
+    ${Response} =   Create Dictionary       status_code=${status_code}
+    ...                                     fips_data_uplink=${fips_data_uplink}
+    [Return]    ${Response}
+
+Get Fips Data Downlink
+    [Documentation]    Get Fips Data Downlink
+    [Arguments]     ${resp}
+    ${fips_data_downlink} =    Create List
+    ${m} =  Get Length  ${resp['subportStatistics']}
+    :FOR    ${x}    IN RANGE    0   ${m}
+    \   ${p} =  Get Length  ${resp['subportStatistics'][${x}]['fipSnoopingInfo']}
+    \   ${fips_data_downlink} =     Copy List   ${resp['subportStatistics'][${x}]['fipSnoopingInfo']}
+    \   ${fips_data_downlink} =    Run keyword if  '${p}' == '1'   Exit For Loop
+    \   ...                     ELSE            Create List
+    ${k} =  Get Length  ${fips_data_downlink}
+    ${status_code} =        Run Keyword If          '${k}' == '0'        Set Variable    ${201}
+    ...                     ELSE                    Set Variable    ${200}
+    ${Response} =   Create Dictionary       status_code=${status_code}
+    ...                                     fips_data_downlink=${fips_data_downlink}
+    [Return]    ${Response}
+
+Remove All User
+    [Documentation]    Querys the appliance for all Users and then removes them
+    ${users}    Fusion Api Get User
+    :FOR    ${user} IN  @{users['members']}
+    \       Continue For Loop If    '${user['userName']}'=='Administrator'
+    \       Continue For Loop If    '${user['userName']}'=='administrator'
+    \       Continue For Loop If    '${user['userName']}'=='HardwareSetup'
+    \       ${resp}    Fusion Api Remove User    uri=${user['uri']}
+    \       Log {resp}   console=True
+
+Suite Setup Tasks
+    [Documentation]    Cleans the appliance
+    ${Login_response} =    Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+    Run keyword unless    ${Login_response[0]['status_code']}== 200  Fail   "Unable to Login Appliance"
+
+    Power off ALL Servers    PressAndHold
+    Remove All Server Profiles
+    Remove All LEs
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove All Ethernet Networks
+    Remove All FC Networks
+    Remove All FCoE Networks
+    Remove ALL Network Sets
+    Remove ALL Users

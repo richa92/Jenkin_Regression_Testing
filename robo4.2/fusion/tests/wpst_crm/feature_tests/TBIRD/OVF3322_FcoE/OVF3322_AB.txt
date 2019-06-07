@@ -1,0 +1,146 @@
+*** Settings ***
+Documentation        Feature Test: OVF3322 FCoE for TClass
+Variables            data_variables_420.py
+Resource             ../../../../../Resources/api/fusion_api_resource.txt
+Resource             OVF3322_Resource.txt
+Library              FusionLibrary
+Library              RoboGalaxyLibrary
+Library              Collections
+Library              BuiltIn
+Library              OVF3322_validate.py
+Suite Setup          Suite Setup Tasks
+Suite Teardown       Suite Setup Tasks
+
+*** Variables ***
+${APPLIANCE_IP}     15.245.131.206
+
+*** Test Cases ***
+
+TC_45_AB_Create LIG with A&B side, create EG and LE, Create BFS server profiles, Pass traffic on both servers
+    [Documentation]    Create LIG with A&B side, create EG and LE, Create BFS server profiles, Pass traffic on both servers
+    [Tags]  45
+
+    ${len}    Get Length    ${fcoe_BFS}
+    :FOR    ${x}    IN RANGE    0   ${len}
+    \    ${resp}    Add FCoE Networks from variable    ${fcoe_BFS[${x}]}
+    \    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp}    ELSE    Fail    Log    Failed    console=True
+
+    ${resp}    Add Ethernet Networks from variable    ${ethernet_networks}
+    ${l}    Get Length    ${resp}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Run Keyword If  '${resp[${x}]['status_code']}' == '202'    Wait For Task2    ${resp[${x}]}    20m    1m    ELSE    Fail    Log    '${resp[${x}]['errorCode']}'    Console = True
+
+    Add LIG from variable    ${ligs['LIGAside']}
+    Add LIG from variable    ${ligs['LIGBside']}
+
+    ${resp}    Add Enclosure Group from variable    ${enc_group['EG_AB']}
+    Run Keyword If  '${resp['status_code']}' == '201'    Wait For Task2    ${resp}    ELSE    Fail    Log    failed    console=True
+
+    Add Logical Enclosure from variable    ${les['LE']}
+
+    Log    Verifying if interconnects are configured    console=True
+    :FOR    ${x}    IN    @{Interconnect_dto}
+    \    Verify Interconnect    ${x}    state=Configured
+
+
+    Log    Fetching ICM URI    console=True
+    ${ic_uris}    Create List
+    :FOR    ${icm}    IN    @{Interconnect_name}
+    \    ${uri} =    Get IC URI    ${icm}
+    \    Run Keyword If    '${icm}' == '${Interconnect_name[0]}'    Set Suite Variable    ${ICM3_uri}    ${uri}
+    \    ...    ELSE IF    '${icm}' == '${Interconnect_name[1]}'   Set Suite Variable    ${ICM6_uri}    ${uri}
+    \    Append To List    ${ic_uris}    ${uri}
+    Log     ${ICM3_uri}    console=True
+    Log     ${ICM6_uri}    console=True
+    Set Suite Variable    ${ICM_uris}    ${ic_uris}
+
+    Log    Verify if ports are linked    console=True
+    Wait Until Keyword Succeeds    10 min    20s    Verify Ports Status    ${ICM_uris}    ${port_name}
+    Sleep    10min
+
+    ${resp}    Add Server Profiles from variable   ${server_profiles}
+    ${l}    Get Length    ${resp}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Run Keyword If  '${resp[${x}]['status_code']}' == '202'    Wait For Task2    ${resp[${x}]}    20m    1m    ELSE    Fail    Log    failed    console=True
+    \    Power on server    ${server_profiles[${x}]['serverHardwareUri']}
+    Sleep    15min
+
+    Validate Windows BFS Disk Size    ${ilo_details[1]}    ${server_credentials[1]}
+
+    ${lun_count_list}    Create List
+    ${l}    Get Length    ${ilo_details}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${serverIp}    Get Server Ip Windows    ${ilo_details[${x}]}
+    \    Wait For Appliance To Become Pingable    ${serverIp[0]}
+
+    \    ${output}    execute_windows_commands    ${serverIp[0]}    ${server_credentials[${x}]['userName']}    ${server_credentials[${x}]['password']}    ${diskspd_cmd[0]}
+    \    Run Keyword If  ${output} == 0    Log    \n Successfully passed the traffic    console=True    ELSE    Fail    Log    Unable to pass traffic    console=True
+
+    \    ${lun_count}    validate_windows_lun_count    ${serverIp[0]}    ${server_credentials[${x}]['userName']}    ${server_credentials[${x}]['password']}
+    \    Append To List    ${lun_count_list}    ${lun_count}
+
+    Set Suite Variable    ${win_lun_count}    ${lun_count_list}
+
+    ${lun_count}    Get ESXI LUN Count    ${server_BFS}    ${cmd1}
+    Set Suite Variable    ${esxi_lun_BFS}    ${lun_count}
+
+TC_46_AB_Power off /on Nitro Module and verify traffic for FCoE network
+    [Documentation]    Power off /on Nitro Module and verify traffic for FCoE network
+    [Tags]  46
+    ${len}    Get Length    ${Interconnect_dto}
+    :FOR    ${x}    IN RANGE    0   ${len}
+    \    Patch Interconnect     ${Interconnect_dto[${x}]}    op=replace  path=/powerState  value=Off  timeout=60  interval=10
+    \    Wait Until Keyword Succeeds    10 min    20s      IC reached state    ${ICM_uris[${x}]}    Maintenance
+    \    Sleep    200sec
+
+    # Passing traffic and verifying LUN in server - Failover - While Powering off one Nitro ICM, traffic will be flowing through another Nitro ICM
+
+    \    Validate Windows BFS Disk Size    ${ilo_details[1]}    ${server_credentials[1]}
+    \    Execute Traffic And Validate Windows LUN    ${ilo_details}    ${server_credentials}    ${win_lun_count}
+
+    \    Patch Interconnect     ${Interconnect_dto[${x}]}    op=replace  path=/powerState  value=On  timeout=60  interval=10
+    \    Wait Until Keyword Succeeds    20 min    20s      IC reached state    ${ICM_uris[${x}]}    Configured
+    \    Sleep    300sec
+
+    # Passing traffic and verifying LUN in both local and BFS servers - After power on Nitro ICM, it is regained to original
+
+    \    Validate Windows BFS Disk Size    ${ilo_details[1]}    ${server_credentials[1]}
+    \    Execute Traffic And Validate Windows LUN    ${ilo_details}    ${server_credentials}    ${win_lun_count}
+
+    \    ${lun_count}    Get ESXI LUN Count    ${server_BFS}    ${cmd1}
+    \    Run Keyword If  '${lun_count}' == '${esxi_lun_BFS}'    Log    Expected LUN disks are available in BFS     console=True    ELSE    Fail    Log    Failed    console=True
+
+TC_47_AB_Efuse Remove / Insert Nitro Module and verify traffic for FCoE network
+    [Documentation]    Efuse Remove / Insert Nitro Module and verify traffic for FCoE network
+    [Tags]  47
+
+    ${len}    Get Length    ${ICM_uris}
+    :FOR    ${x}    IN RANGE    0   ${len}
+
+    \    Get EM IP    ${ENCs[${x}]}
+    \    Get EM Token    ${ENCs[${x}]}
+    \    Efuse ICM    EFuseOn    ${bay_numbers[${x}]}
+    \    Wait Until Keyword Succeeds    5 min    20s      IC reached state    ${ICM_uris[${x}]}    Absent
+    \    Sleep    200sec
+
+    \    Verify Alerts    ${alertstate_ICM}    ${alertType_ICM}    ${interconnect_alert}
+    \    Verify Alerts    ${alertstate_profiles}    ${alertType_profiles}    ${profile_alert}
+
+    # Passing traffic and verifying LUN in server - Failover - After removing one Nitro ICM traffic is flowing through another Nitro ICM
+
+    \    Validate Windows BFS Disk Size    ${ilo_details[1]}    ${server_credentials[1]}
+    \    Execute Traffic And Validate Windows LUN    ${ilo_details}    ${server_credentials}    ${win_lun_count}
+
+    \    Get EM IP    ${ENCs[${x}]}
+    \    Get EM Token    ${ENCs[${x}]}
+    \    Efuse ICM    EFuseOff    ${bay_numbers[${x}]}
+    \    Wait Until Keyword Succeeds    20 min    20s      IC reached state    ${ICM_uris[${x}]}    Configured
+    \    Sleep    240sec
+
+    # Passing traffic and verifying LUN in both local and BFS servers - After adding Nitro ICM, it is regained to original
+
+    \    Validate Windows BFS Disk Size    ${ilo_details[1]}    ${server_credentials[1]}
+    \    Execute Traffic And Validate Windows LUN    ${ilo_details}    ${server_credentials}    ${win_lun_count}
+
+    \    ${lun_count}    Get ESXI LUN Count    ${server_BFS}    ${cmd1}
+    \    Run Keyword If  '${lun_count}' == '${esxi_lun_BFS}'    Log    Expected LUN disks are available in BFS     console=True    ELSE    Fail    Log    Failed    console=True

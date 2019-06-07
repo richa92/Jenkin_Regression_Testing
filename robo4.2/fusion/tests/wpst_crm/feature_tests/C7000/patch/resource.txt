@@ -1,0 +1,258 @@
+*** Settings ***
+Library				RoboGalaxyLibrary
+Library				FusionLibrary
+Library				OperatingSystem
+Library				BuiltIn
+Library				Collections
+Library				XML
+
+Variables 		    data_variables.py
+#Variables 		    response_validation.py
+						
+
+*** Variables ***
+#${X-API-VERSION}							199
+#${X-API-VERSION}							${null}
+
+#${APPLIANCE_IP}                 15.199.235.0
+${APPLIANCE_IP}                 15.199.233.130
+${VM}							patch_test
+*** Keywords ***
+#######################################
+# SETUP WORFLOWS - Variables
+#######################################
+Add Licenses from variable
+	[Documentation]	Adds licenses to an appliance from a variable which contains the license keys
+	[Arguments]		${licenses}
+	Log to console and logfile  	Adding LICENSES	
+	:FOR	${license}	IN	@{licenses}
+	\		${resp} = 	Fusion Api Add License		key=${license['key']}
+
+#######################################
+# COMMON KEYWORDS
+#######################################	
+Log to console and logfile
+	[Arguments]	${data}
+	Log	${data}
+	Log to console	${data}
+	
+Wait For Task
+	[Documentation]	Waits for a task to reach an end-state
+	[Arguments]		${resp}	${timeout}=60 s	${interval}=2 s
+	Log to console	\n
+	${task} = 	Wait Until Keyword Succeeds		${timeout}	${interval}	Task Reached Endstate	${resp}
+	[Return]	${task}
+	
+Task Reached Endstate
+	[Arguments]	${resp}
+	Set Log Level	TRACE
+	Should Contain	${resp}	uri
+	${task_uri} =		Get From Dictionary		${resp}	uri
+	${task} = 			Fusion Api Get Task		uri=${task_uri}
+	${task_state} = 	Get From Dictionary		${task}		taskState
+	${task_category} = 	Get From Dictionary		${task}		category
+	${task_name} = 		Get From Dictionary		${task}		name
+	${resource} = 		Get From Dictionary		${task['associatedResource']}	resourceName
+	${resource_uri} = 	Get From Dictionary		${task['associatedResource']}	resourceUri
+	Log to console and logfile  	\t Task: [${task_category}:${task_name}] is: ${task_state} for resource: ${resource} ${resource_uri}
+	Should Match Regexp	${task_state}	((?i)Warning|Unknown|Terminated|Killed|Error|Completed)	
+	[Return]	${task}
+
+Wait For Appliance To Be Ready
+	[Documentation]	Waits for an appliance reach a the ready state
+	[Arguments]		${appliance}	${timeout}=20 min	${interval}=30 s
+	Wait Until Keyword Succeeds		${timeout}	${interval}	Appliance Reached Ready State	${appliance}	
+
+Wait For Appliance To Become Pingable
+	[Documentation]	Waits for an appliance to become pingable
+	[Arguments]		${appliance}	${timeout}=1 min	${interval}=5 s
+	Log to console and logfile 		Pinging: ${appliance} ...
+	Wait Until Keyword Succeeds		${timeout}	${interval}	Appliance is pingable 	${appliance}	
+
+Appliance is pingable
+	[Arguments]		${appliance}
+	Set Log Level	TRACE
+	${rc} = 	Run and return rc 	ping ${appliance}		
+	Log to console and logfile 		return code: ${rc} ...
+	Should be equal as integers 	${rc}	0
+	
+Appliance Reached Ready State
+	[Arguments]		${appliance}
+	${state} = 	Fusion Api Get Resource		${appliance}/controller-state.json
+	Log to console and logfile	-Appliance state: ${state['state']}
+	Should Match Regexp	${state['state']}	((?i)OK)
+	
+First Time Setup
+	[Documentation]	Changes intial administrator password, answers EULA, enables service access, adds licenses, configures appliance interfaces.
+	...	If args are null, uses XML ${DATAFILE}
+	[Arguments]	${DATAFILE}=${null}	${password}=${null}	${interfaces}=${null}
+	#${password} =	Set Variable	${password}
+	Log to console and logfile	[FIRST TIME SETUP]
+	Wait For Appliance To Become Pingable	${APPLIANCE_IP}		
+	Wait For Appliance To Be Ready			${APPLIANCE_IP}
+	Log to console and logfile	-Agree to EULA	
+	Fusion Api Save EULA	${APPLIANCE_IP}
+	Log to console and logfile	-Enable service access
+	Fusion Api Set service access	${APPLIANCE_IP}
+
+	#Run Keyword If	${password} is ${null}	Change Initial Administrator Password From Xml	${APPLIANCE_IP}	${DATAFILE}
+	${req} = 		Create Dictionary		newPassword=${password}
+	...										oldPassword=admin
+	...										userName=Administrator
+	#Run Keyword If	${password} is not ${null}	Fusion Api Change Administrator password	host=${APPLIANCE_IP}	body=${req}
+	Fusion Api Change Administrator password	host=${APPLIANCE_IP}	body=${req}
+	Fusion Api Login Appliance 		${APPLIANCE_IP}		${admin_credentials}			
+	
+	#Run Keyword If	${licenses} is ${null}	Add Licenses From Xml							${DATAFILE}
+	#Run Keyword If	${licenses} is not ${null}	Fusion Api Add license						${licenses}
+	#Run Keyword If	${appliance} is ${null}	Configure Interfaces From Xml				${DATAFILE}
+	#Run Keyword If	${appliance} is not ${null}	Fusion Api Configure Interfaces			${appliance}
+	Add licenses from variable		${licenses}
+	Log to console and logfile	-Configuring Appliance Interfaces, Time, Locale
+	${resp} =	Fusion Api Get Appliance Interface Mac	eth0
+	Set to dictionary	${appliance['applianceNetworks'][0]}	macAddress	${resp}	
+	Sleep 	10s			
+	${resp} = 	Fusion Api Configure Appliance Interfaces			${appliance}
+	Wait For Task	${resp}		timeout=200s		interval=5s
+	
+Login all users
+	[Arguments] ${users}
+	Set Log Level	TRACE
+	:FOR	${user}	IN	@{users}
+	\	${user_and_pass} = 	Create Dictionary	userName=${user['userName']}	password=${user['password']}
+	\	Login User	${user}
+
+#######################################
+# TEARDOWN WORFLOWS
+#######################################
+Suite Teardown
+	[Documentation]	Returns appliance to a 'clean' state by removing all resources\enclosures
+	Log to console and logfile	[TEARDOWN]
+	#
+	#Power off ALL Servers
+	#Remove All Server Profiles
+	#Remove ALL Enclosures
+	#Remove ALL Enclosure Groups
+	#Remove ALL LIGs
+	#Remove ALL Ethernet Networks
+	#Remove ALL FC Networks
+	#Remove ALL FCoE Networks	
+	#Remove ALL Network Sets
+	#Remove Users
+
+Remove All Enclosures
+	[Documentation]	Querys the appliance for all Enclosures and then removes them
+	Log to console and logfile  	Removing ENCLOSURES	
+	${encs} = 	Fusion Api Get Enclosures
+	:FOR	${enc}	IN	@{encs['members']}
+	\		${resp} = 	Fusion Api Remove Enclosure		uri=${enc['uri']}
+
+Remove All Enclosure Groups
+	[Documentation]	Querys the appliance for all Enclosure Groups and then removes them
+	Log to console and logfile  	Removing ENCLOSURE GROUPS	
+	${encs} = 	Fusion Api Get Enclosure Groups
+	:FOR	${enc}	IN	@{encs['members']}
+	\		${resp} = 	Fusion Api Delete Enclosure Group		uri=${enc['uri']}
+
+Remove All Ethernet Networks
+	[Documentation]	Querys the appliance for all Ethernet networks and then removes them
+	Log to console and logfile  	Removing ETHERNET NETWORKS	
+	${networks} = 	Fusion Api Get Ethernet Networks
+	:FOR	${net}	IN	@{networks['members']}
+	\		${resp} = 	Fusion Api Delete Ethernet Network		uri=${net['uri']}
+
+Remove All FC Networks
+	[Documentation]	Querys the appliance for all FC networks and then removes them
+	Log to console and logfile  	Removing FC NETWORKS	
+	${networks} = 	Fusion Api Get FC Networks
+	:FOR	${net}	IN	@{networks['members']}
+	\		${resp} = 	Fusion Api Delete FC Network		uri=${net['uri']}
+
+Remove All FCoE Networks
+	[Documentation]	Querys the appliance for all FCoE networks and then removes them
+	Log to console and logfile  	Removing FCoE NETWORKS	
+	${networks} = 	Fusion Api Get FCoE Networks
+	:FOR	${net}	IN	@{networks['members']}
+	\		${resp} = 	Fusion Api Delete FCoE Network		uri=${net['uri']}
+
+Remove All LIGs
+	[Documentation]	Querys the appliance for all LIGs and then removes them
+	Log to console and logfile  	Removing LIGS	
+	${ligs} = 	Fusion Api Get LIG
+	:FOR	${lig}	IN	@{ligs['members']}
+	\		${resp} = 	Fusion Api Delete LIG		uri=${lig['uri']}
+
+Remove All Network Sets
+	[Documentation]	Querys the appliance for all Network Sets and then removes them
+	Log to console and logfile  	Removing NETWORK SETS	
+	${networks} = 	Fusion Api Get Network Sets
+	:FOR	${net}	IN	@{networks['members']}
+	\		${resp} = 	Fusion Api Delete Network Set		uri=${net['uri']}
+
+Power off ALL servers
+	[Documentation]	Querys the appliance for all Servers and then Powers them off
+	Log to console and logfile  	Powering off SERVERS	
+	${body} = 	Create Dictionary	powerState=Off
+	...								powerControl=MomentaryPress
+	${servers} = 	Fusion Api Get Server Hardware
+	:FOR	${server}	IN	@{servers['members']}
+	\		${resp} = 	Fusion Api Edit Server Hardware Power State		body=${body}	uri=${server['uri']}
+	\		${task} =	Wait For Task 	${resp} 	240s	10s
+	
+Remove All Server Profiles
+	[Documentation]	Querys the appliance for all Server Profiles and then removes them
+	Log to console and logfile  	Removing SERVER PROFILES	
+	${profiles} = 	Fusion Api Get Server Profiles
+	:FOR	${profile}	IN	@{profiles['members']}
+	\		${resp} = 	Fusion Api Delete Server Profile		uri=${profile['uri']}
+	
+Remove All Users
+	[Documentation]	Querys the appliance for all Users and then removes them
+	Log to console and logfile  	Removing USERS	
+	${users} = 	Fusion Api Get Users
+	:FOR	${user}	IN	@{users['members']}
+	\		Continue For Loop If	'${user['userName']}'=='Administrator' 	
+	\		Continue For Loop If	'${user['userName']}'=='administrator' 	
+	\		${resp} = 	Fusion Api Delete User		uri=${user['uri']}
+		
+#######################################
+# VALIDATION
+#######################################
+New Validate Response
+    [Documentation]	Validates data in a response body against expected values using REGEX
+    ...	looks up ${validation_code} in codes dicitonary
+    ...	${rc} = 		Convert to Integer	400
+	...	${valDict} = 	Create Dictionary	status_code=${rc}
+	...										errorCode=CRM_DUPLICATE_NETWORK_NAME
+	...	Validate Response	${respDict}	${valDict}
+	[Arguments]    ${resp}	${validation_code}
+	Set Log Level	TRACE
+	${validation} = 	Get From Dictionary	${codes}	${validation_code}
+	${validation_results} = 	Fusion Api Validate Response	${resp}	${validation}
+	# Log results	
+	# Fail if results['passed'] is False
+	[Return]	${validation_results}
+	
+Validate Response
+    [Documentation]	Validates data in a response body against expected values
+    ...	Example:
+    ...	${rc} = 		Convert to Integer	400
+	...	${valDict} = 	Create Dictionary	status_code=${rc}
+	...										errorCode=CRM_DUPLICATE_NETWORK_NAME
+	...	Validate Response	${respDict}	${valDict}
+	[Arguments]    ${resp}	${validation}
+	Set Log Level	TRACE	
+	${response} = 	Copy Dictionary	${resp}	
+	@{vkeys} =	Get Dictionary Keys	${validation}
+	${rkeys} =	Get Dictionary Keys	${response}
+	@{keys} =	Remove all the keys in response that are not in validation	${vkeys}	${rkeys}
+	:FOR	${x}	IN	@{keys}
+	\	Remove From Dictionary	${response}	${x}
+	Dictionaries Should Be Equal	${validation}	${response}	msg=Response does not match validation dictionary	values=True
+    
+Remove all the keys in response that are not in validation
+	[Arguments]	${vkeys}	${rkeys}
+	:FOR	${x}	IN	@{vkeys}
+	\	Remove Values From List	${rkeys}	${x}
+	[Return]	${rkeys}
+	

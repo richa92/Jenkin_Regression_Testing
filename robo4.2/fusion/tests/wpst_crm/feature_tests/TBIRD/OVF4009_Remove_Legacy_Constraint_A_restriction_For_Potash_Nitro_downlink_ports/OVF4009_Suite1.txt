@@ -1,0 +1,1064 @@
+***Settings***
+Documentation       OVF4009 - Remove legacy constraint A restriction for Potash/Nitro downlink ports
+Library         json
+Library         FusionLibrary
+Library         RoboGalaxyLibrary
+#Variables       data_variables_potash.py
+#Variables       data_variables_nitro.py
+Variables       data_variables_nitrorig.py
+Library         Collections
+Library         SSHLibrary
+Library         Telnet
+Library         String
+Library         ServerOperations
+Library         BuiltIn
+Resource            ../../../../../Resources/api/fusion_api_resource.txt
+Suite Setup     Suite Setup Tasks
+Suite Teardown    Suite Teardown Tasks
+
+
+***Test cases***
+###################### Test case-1 verify that one or more Ethernet connections of same networks can be assigned to the same physical port #############################
+1_Create Server profile
+    [Documentation]    Create Server profiles
+    Set Log Level    TRACE
+
+    ${resp}    Fusion Api Login Appliance    ${appliance_ip}    ${admin_credentials}
+    Run Keyword If  '${resp[0]['status_code']}' != '200'  Fail    ELSE  Log       Successfully logged into the appliance    console=True
+
+    ${resp}   Add Server Profiles from variable   ${server_profiles}
+    ${l}    Get Length    ${resp}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Run Keyword If  '${resp[${x}]['status_code']}' == '202'    Wait For Task2    ${resp[${x}]}    20m    1m    ELSE    Fail    Log    failed    console=True
+    \    Power on server    ${server_profiles[${x}]['serverHardwareUri']}
+    Sleep    5min
+
+1_1_Get server IP and pass traffic
+    [Documentation]    Get server IP and Pass traffic
+    Set Log Level    TRACE
+
+    ${IP}    Get Server Ip Windows    ${ilo_details_enc1_bay4}
+    Log    ${IP}    console=true
+
+    ${ip_length}    Get Length    ${IP}
+    ${mac_addr_list}    Get_Mac_Address    ${ilo_details_enc1_bay4}    ${server_profiles}    ${IP}
+    Log    mac address ${mac_addr_list}    console=true
+
+    #Compare mac address with server
+    ${adapter_name_list}=   Create List
+    ${adapter_name_list}    Getting Server Adapter Names     ${server_profiles[0]['name']}    ${Powershell_get_mac}     ${server_credentials['userName']}    ${server_credentials['password']}    ${file1}    ${server_hw_type}     ${IP}    mac_length=${physical_port_conn[0]}
+    Log    \nadapter names list ${adapter_name_list}    console=true
+
+    #Delete Static ip
+    Wait Until Keyword Succeeds    15 min    20s    Delete Static ip interface    ${physical_port_conn[0]}    ${adapter_name_list}   ${delete_static_ip1_same_networks}    ${server_credentials}    ${IP}
+
+    #Set Static ip
+    Wait Until Keyword Succeeds    15 min    20s    Set Static ip interface for all Adapters    ${physical_port_conn[0]}    ${adapter_name_list}   ${Powershell_set_static}    ${server_credentials}    ${IP}
+
+    #Ping ip and validate the traffic flow
+    Ping_Server_ip_validate_packet_loss    ${ilo_details_enc1_bay4}    ${ping_cmd_enc1_bay4}    ${server_credentials}   ${IP}    ${pingfile}
+
+2_Disable and enable downlink
+    [Documentation]    Disable and enable downlink
+    Set Log Level    TRACE
+    Log    Fetching ICM URI    console=True
+    ${ic_uris}    Create List
+    :FOR    ${icm}    IN    @{Interconnect_name}
+    \    ${uri} =    Get IC URI    ${icm}
+    \    Run Keyword If    '${icm}' == '${Interconnect_name[0]}'    Set Suite Variable    ${ICM3_uri}    ${uri}
+    \    ...    ELSE IF    '${icm}' == '${Interconnect_name[1]}'   Set Suite Variable    ${ICM6_uri}    ${uri}
+    \    Append To List    ${ic_uris}    ${uri}
+    Log     ${ICM3_uri}    console=True
+    Log     ${ICM6_uri}    console=True
+    Set Suite Variable    ${ICM_uris}    ${ic_uris}
+
+    ${Resp}    Get IC Port    ${ICM_uris[0]}    ${dw_ports_3[0]}
+    ${enabled_portStatusReason} =    Set Variable If    '${Resp['portStatus']}' == 'Linked'    Ok    Unknown
+    ${enabled_portStatus} =    Set Variable If    '${Resp['portStatus']}' == 'Linked'    Linked    Unlinked
+
+    Log    Disabling the uplink port    console=True
+    Set to Dictionary   ${Resp}   enabled    False
+    ${Return}    Update IC Port    ${Interconnect_name[0]}    ${dw_ports_3[0]}    ${Resp}
+    Wait Until Keyword Succeeds    5 min    20s      IC reached state    ${ICM_uris[0]}    Configured
+    Log    Verifying if Port is disabled    console=True
+    Sleep    200s
+    ${Disabled_Resp}    Get IC Port    ${ICM_uris[0]}    ${dw_ports_3[0]}
+    Should be Equal As Strings    ${Disabled_Resp['portStatusReason']}    AdminDisabled
+
+    # Verifying alerts in Interconnects and profiles
+    Verify Alerts    ${alertstate_ICM}    ${alertType_ICM}    ${interconnect_alert}
+    Verify Alerts    ${alertstate_profiles}    ${alertType_profiles}    ${profile_alert}
+
+2_1_Get server IP and pass traffic
+    [Documentation]    Get server IP and Pass traffic
+    Set Log Level    TRACE
+    Ping_Server_ip_validate_packet_loss_neg    ${ilo_details_enc1_bay4}    ${ping_cmd_enc1_bay4}    ${server_credentials}    ${pingfile}    ${content1}    ${content2}
+
+2_2_Enable downlink
+    [Documentation]    Enabling the downlink port of server
+    Set Log Level    TRACE
+    Log    Enabling the uplink port    console=True
+    ${Resp}    Get IC Port    ${ICM_uris[0]}    ${dw_ports_3[0]}
+    Set to Dictionary   ${Resp}   enabled    True
+    ${Return}    Update IC Port    ${Interconnect_name[0]}    ${dw_ports_3[0]}    ${Resp}
+    Wait Until Keyword Succeeds    5 min    20s      IC reached state    ${ICM_uris[0]}    Configured
+    Log    Verifying if Port is Enabled    console=True
+    Sleep    240s
+
+
+    ##Get server IP and pass traffic
+
+    ${IP}    Get Server Ip Windows    ${ilo_details_enc1_bay4}
+    Log    ${IP}    console=true
+    Ping_Server_ip_validate_packet_loss    ${ilo_details_enc1_bay4}    ${ping_cmd_enc1_bay4}    ${server_credentials}   ${IP}    ${pingfile}
+
+3_Poweroff potash module and verify the traffic
+    [Documentation]    Poweroff/poweron potash module and verify the traffic
+    Set Log Level    TRACE
+    Log    Fetching ICM URI    console=True
+    ${ic_uris}    Create List
+    :FOR    ${icm}    IN    @{Interconnect_name}
+    \    ${uri} =    Get IC URI    ${icm}
+    \    Run Keyword If    '${icm}' == '${Interconnect_name[0]}'    Set Suite Variable    ${ICM3_uri}    ${uri}
+    \    ...    ELSE IF    '${icm}' == '${Interconnect_name[1]}'   Set Suite Variable    ${ICM6_uri}    ${uri}
+    \    Append To List    ${ic_uris}    ${uri}
+    Log     ${ICM3_uri}    console=True
+    Log     ${ICM6_uri}    console=True
+    Set Suite Variable    ${ICM_uris}    ${ic_uris}
+
+    Patch Interconnect     ${Interconnect_dto[0]}    op=replace  path=/powerState  value=Off  timeout=60  interval=10
+    Wait Until Keyword Succeeds    10 min    20s      IC reached state    ${ICM_uris[0]}    Maintenance
+    Sleep    100sec
+    Ping_Server_ip_validate_packet_loss_neg    ${ilo_details_enc1_bay4}    ${ping_cmd_enc1_bay4}    ${server_credentials}     ${pingfile}    ${content1}    ${content2}
+
+
+3_1_Poweron potash module and verify the traffic
+    [Documentation]    Poweron potash module and verify the traffic
+    Set Log Level    TRACE
+    Log    Fetching ICM URI    console=True
+    ${ic_uris}    Create List
+    :FOR    ${icm}    IN    @{Interconnect_name}
+    \    ${uri} =    Get IC URI    ${icm}
+    \    Run Keyword If    '${icm}' == '${Interconnect_name[0]}'    Set Suite Variable    ${ICM3_uri}    ${uri}
+    \    ...    ELSE IF    '${icm}' == '${Interconnect_name[1]}'   Set Suite Variable    ${ICM6_uri}    ${uri}
+    \    Append To List    ${ic_uris}    ${uri}
+    Log     ${ICM3_uri}    console=True
+    Log     ${ICM6_uri}    console=True
+    Set Suite Variable    ${ICM_uris}    ${ic_uris}
+    Patch Interconnect     ${Interconnect_dto[0]}    op=replace  path=/powerState  value=On  timeout=60  interval=10
+    Wait Until Keyword Succeeds    20 min    20s      IC reached state    ${ICM_uris[0]}    Configured
+    Sleep    100sec
+    ${IP}    Get Server Ip Windows    ${ilo_details_enc1_bay4}
+    Log    ${IP}    console=true
+    Log    ${IP[0]}    console=true
+    Ping_Server_ip_validate_packet_loss    ${ilo_details_enc1_bay4}    ${ping_cmd_enc1_bay4}    ${server_credentials}   ${IP}    ${pingfile}
+
+4_Reset potash module and verify the traffic
+    [Documentation]        Reset potash module and verify the traffic
+    Set Log Level    TRACE
+    Log    Reseting interconnect     console=True
+    Patch Interconnect     ${Interconnect_dto[0]}    op=replace  path=/deviceResetState  value=Reset  timeout=600  interval=10
+    Sleep    2min
+
+    Verify Alerts    ${alertstate_ICM}    ${alertType_ICM}    ${interconnect_alert}
+    Verify Alerts    ${alertstate_profiles}    ${alertType_profiles}    ${profile_alert}
+
+    Sleep    2min
+    ${IP}    Get Server Ip Windows    ${ilo_details_enc1_bay4}
+    Log    ${IP}    console=true
+    Log    ${IP[0]}    console=true
+    Ping_Server_ip_validate_packet_loss    ${ilo_details_enc1_bay4}    ${ping_cmd_enc1_bay4}    ${server_credentials}   ${IP}    ${pingfile}
+
+5_Efuseon potash module and verify the traffic
+    [Documentation]    Efuse potash module and verify the traffic
+    Set Log Level    TRACE
+
+    Log    Fetching ICM URI    console=True
+    ${ic_uris}    Create List
+    :FOR    ${icm}    IN    @{Interconnect_name}
+    \    ${uri} =    Get IC URI    ${icm}
+    \    Run Keyword If    '${icm}' == '${Interconnect_name[0]}'    Set Suite Variable    ${ICM3_uri}    ${uri}
+    \    ...    ELSE IF    '${icm}' == '${Interconnect_name[1]}'   Set Suite Variable    ${ICM6_uri}    ${uri}
+    \    Append To List    ${ic_uris}    ${uri}
+    Log     ${ICM3_uri}    console=True
+    Log     ${ICM6_uri}    console=True
+    Set Suite Variable    ${ICM_uris}    ${ic_uris}
+
+    Get EM IP    ${ENCs[0]}
+    Get EM Token    ${ENCs[0]}
+
+
+    Efuse ICM    EFuseOn    ${bay_numbers[0]}
+    Wait Until Keyword Succeeds    10 min    20s      IC reached state    ${ICM_uris[0]}    Absent
+
+    Verify Alerts    ${alertstate_ICM}    ${alertType_ICM}    ${interconnect_alert}
+    Verify Alerts    ${alertstate_profiles}    ${alertType_profiles}    ${profile_alert}
+
+    Ping_Server_ip_validate_packet_loss_neg    ${ilo_details_enc1_bay4}    ${ping_cmd_enc1_bay4}    ${server_credentials}    ${pingfile}    ${content1}    ${content2}
+
+5_1_Efuseoff potash module and verify the traffic
+    [Documentation]    Efuse potash module and verify the traffic
+    Set Log Level    TRACE
+    Log    Fetching ICM URI    console=True
+    ${ic_uris}    Create List
+    :FOR    ${icm}    IN    @{Interconnect_name}
+    \    ${uri} =    Get IC URI    ${icm}
+    \    Run Keyword If    '${icm}' == '${Interconnect_name[0]}'    Set Suite Variable    ${ICM3_uri}    ${uri}
+    \    ...    ELSE IF    '${icm}' == '${Interconnect_name[1]}'   Set Suite Variable    ${ICM6_uri}    ${uri}
+    \    Append To List    ${ic_uris}    ${uri}
+    Log     ${ICM3_uri}    console=True
+    Log     ${ICM6_uri}    console=True
+    Set Suite Variable    ${ICM_uris}    ${ic_uris}
+    Get EM IP    ${ENCs[0]}
+    Get EM Token    ${ENCs[0]}
+    Efuse ICM    EFuseOff    ${bay_numbers[0]}
+    Wait Until Keyword Succeeds    20 min    20s      IC reached state    ${ICM_uris[0]}    Configured
+    ${IP}    Get Server Ip Windows    ${ilo_details_enc1_bay4}
+    Log    ${IP}    console=true
+    Log    ${IP[0]}    console=true
+    Ping_Server_ip_validate_packet_loss    ${ilo_details_enc1_bay4}    ${ping_cmd_enc1_bay4}    ${server_credentials}   ${IP}     ${pingfile}
+
+########################Backup & Restore##########################
+6_Create Backup
+    [Documentation]    Create Backup
+    Set Log Level    TRACE
+    Log     \n - Creating the backup in OV    console=True
+    Power off ALL Servers    PressAndHold
+    Create Backup
+
+6_1_Delete Server Profile
+    [Documentation]    Delete Server Profile
+    Set Log Level    TRACE
+
+    Remove All Server Profiles
+
+6_2_Restore From backup
+    [Documentation]    Restore From backup
+    Set Log Level    TRACEv
+    Log     \n\nRestoring from the backup in the appliance    console=True
+    Restore Appliance
+    Sleep   10 min
+
+6_3_Verify Server profile with same network on same physical port should get displayed and traffic works successfully
+    [Documentation]    Verify Server profile with LAG connections are displayed
+    Set Log Level    TRACE
+
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+
+    ${uprofiles}=    Get Profiles
+    Unassign profiles      ${uprofiles}
+    Re-assign profiles    ${uprofiles}
+    Power on server     ${server_profiles[0]['serverHardwareUri']}
+    Log        Waiting 10 minutes for server to boot...    console=True
+    Sleep   10min
+
+    ${IP}    Get Server Ip Windows    ${ilo_details_enc1_bay4}
+    Ping_Server_ip_validate_packet_loss    ${ilo_details_enc1_bay4}    ${ping_cmd_enc1_bay4}    ${server_credentials}   ${IP}    ${pingfile}
+
+
+############ Test case-7 verify that two or more Ethernet connections of different network can be assigned to same physical port #############
+7_Create Server profile with different networks
+    [Documentation]    Create server profile with different networks
+    Set Log Level    TRACE
+
+    Power off ALL Servers    PressAndHold
+    Remove All Server Profiles
+
+    ${resp}   Add Server Profiles from variable   ${server_profiles1}
+    ${l}    Get Length    ${resp}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Run Keyword If  '${resp[${x}]['status_code']}' == '202'    Wait For Task2    ${resp[${x}]}    20m    #1m    ELSE    Fail    Log    failed    console=True
+    \    Power on server    ${server_profiles1[${x}]['serverHardwareUri']}
+    #Sleep    10min
+
+    ${IP}    Get Server Ip Windows    ${ilo_details_enc1_bay6}
+    Log    ${IP}    console=true
+    Log    ${IP[0]}    console=true
+
+    ${ip_length}    Get Length    ${IP}
+    ${mac_addr_list}    Get_Mac_Address    ${ilo_details_enc1_bay6}    ${server_profiles1}    ${IP}
+    Log    mac address ${mac_addr_list}    console=true
+
+
+    #Compare mac address with server
+    ${adapter_name_list}    Getting Server Adapter Names     ${server_profiles1[0]['name']}    ${Powershell_get_mac}     ${server_credentials['userName']}    ${server_credentials['password']}    ${file1}    ${server_hw_type}     ${IP}    mac_length=${physical_port_conn[1]}
+    Log    \nadapter names list ${adapter_name_list}    console=true
+
+    Wait Until Keyword Succeeds    15 min    20s    Set Static ip interface for all Adapters    ${physical_port_conn[1]}    ${adapter_name_list}   ${Powershell_set_static1}    ${server_credentials}    ${IP}
+
+    #Verify traffic flow should be unsuccessful
+    Ping_Server_ip_validate_packet_loss_neg      ${ilo_details_enc1_bay6}    ${ping_cmd_enc2_bay4}    ${server_credentials}     ${pingfile1}    ${content1}    ${content2}
+
+
+    #Delete static ip
+
+    Wait Until Keyword Succeeds    15 min    20s    Delete Static ip interface    ${physical_port_conn[1]}    ${adapter_name_list}   ${delete_static_ip1_same_networks}    ${server_credentials}    ${IP}
+
+8_Create Server profile with same network set having network vlan401 for both the connections and verify the traffic flow between the connections
+    [Documentation]    Create Server profile with same network set for both the connections and verify the traffic flow between the connections
+    Set Log Level    TRACE
+
+    Power off ALL Servers    PressAndHold
+    Remove All Server Profiles
+
+    ${resp}   Add Server Profiles from variable   ${server_profiles2}
+    ${l}    Get Length    ${resp}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Run Keyword If  '${resp[${x}]['status_code']}' == '202'    Wait For Task2    ${resp[${x}]}    20m    1m    ELSE    Fail    Log    failed    console=True
+    \    Power on server    ${server_profiles2[${x}]['serverHardwareUri']}
+    Sleep    10min
+
+8_1_Get Server Ip & Windows teaming
+    [Documentation]    Get Server Ip & Windows teaming
+    Set Log Level    TRACE
+
+    ${IP}    Get Server Ip Windows    ${ilo_details_enc1_bay6}
+
+    ${ip_length}    Get Length    ${IP}
+    ${mac_addr_list}    Get_Mac_Address    ${ilo_details_enc1_bay6}    ${server_profiles2}    ${IP}
+    Log    mac address ${mac_addr_list}    console=true
+
+
+    #Compare mac address with server
+
+    ${adapter_name_list}    Getting Server Adapter Names     ${server_profiles[0]['name']}    ${Powershell_get_mac}     ${server_credentials['userName']}    ${server_credentials['password']}    ${file1}    ${server_hw_type}     ${IP}    mac_length=${physical_port_conn[1]}
+    Log    \nadapter names list ${adapter_name_list}    console=true
+
+    Wait Until Keyword Succeeds    15 min    20s    Create Teaming windows    ${adapter_name_list[0]}    ${Powershell_get_mac1}    ${server_credentials}    ${IP[0]}    ${Powershell_get_mac2}
+    Wait Until Keyword Succeeds    15 min    20s    Set Static ip interface   ${adapter_name_list[0]}    ${Powershell_set_static_ip}    ${server_credentials}    ${IP[0]}
+    Wait Until Keyword Succeeds    15 min    20s    Create Teaming windows    ${adapter_name_list[1]}    ${Powershell_get_mac3}    ${server_credentials}    ${IP[0]}    ${Powershell_get_mac4}
+    Wait Until Keyword Succeeds    15 min    20s     Set Static ip interface   ${adapter_name_list[1]}    ${Powershell_set_static_ip1}    ${server_credentials}    ${IP[0]}
+    Ping_Server_ip_validate_packet_loss    ${ilo_details_enc1_bay6}    ${ping_cmd_enc1_bay6_1}    ${server_credentials}   ${IP}    ${pingfile2}
+
+8_1_Delete teaming
+    [Documentation]    Delete teaming
+    Set Log Level    TRACE
+
+    ###Delete Teaming
+    ${IP}    Get Server Ip Windows    ${ilo_details_enc1_bay6}
+
+    ${ip_length}    Get Length    ${IP}
+    Wait Until Keyword Succeeds    15 min    20s    Delete Windows Teaming    ${IP[0]}    ${server_credentials}    ${delete_team_cmd0}
+    Wait Until Keyword Succeeds    15 min    20s    Delete Windows Teaming    ${IP[0]}    ${server_credentials}    ${delete_team_cmd1}
+    Sleep    5min
+
+9_Create Server profile with different network set for both the connections and verify the traffic flow between the connections
+    [Documentation]    Create Server profile with network set1(vlan-401) and network set2(vlan401,402) for both the connections and verify the traffic flow between the connections
+    Set Log Level    TRACE
+
+    Power off ALL Servers    PressAndHold
+    Remove All Server Profiles
+
+    ${resp}   Add Server Profiles from variable   ${server_profiles3}
+    ${l}    Get Length    ${resp}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Run Keyword If  '${resp[${x}]['status_code']}' == '202'    Wait For Task2    ${resp[${x}]}    20m    1m    ELSE    Fail    Log    failed    console=True
+    \    Power on server    ${server_profiles3[${x}]['serverHardwareUri']}
+    Sleep    10min
+
+
+9_1_Get Server Ip & Windows teaming
+    [Documentation]    Get Server Ip & Windows teaming
+    Set Log Level    TRACE
+
+    ${IP}    Get Server Ip Windows    ${ilo_details_enc1_bay6}
+    ${ip_length}    Get Length    ${IP}
+    ${mac_addr_list}    Get_Mac_Address    ${ilo_details_enc1_bay6}    ${server_profiles3}    ${IP}
+    Log    mac address ${mac_addr_list}    console=true
+
+    #Compare mac address with server
+
+    ${adapter_name_list}    Getting Server Adapter Names     ${server_profiles3[0]['name']}    ${Powershell_get_mac}     ${server_credentials['userName']}    ${server_credentials['password']}    ${file1}    ${server_hw_type}     ${IP}    mac_length=${physical_port_conn[1]}
+    Log    \nadapter names list ${adapter_name_list}    console=true
+
+    Wait Until Keyword Succeeds    15 min    20s    Create Teaming windows    ${adapter_name_list[0]}    ${Powershell_get_mac1}    ${server_credentials}    ${IP[0]}    ${Powershell_get_mac2}
+
+    Wait Until Keyword Succeeds    15 min    20s    Set Static ip interface    ${adapter_name_list[0]}    ${Powershell_set_static_ip}    ${server_credentials}    ${IP[0]}
+
+    Wait Until Keyword Succeeds    15 min    20s    Create Teaming windows    ${adapter_name_list[1]}    ${Powershell_get_mac3}    ${server_credentials}    ${IP[0]}    ${Powershell_get_mac4}
+    Wait Until Keyword Succeeds    15 min    20s    Set Static ip interface   ${adapter_name_list[1]}    ${Powershell_set_static_ip1}    ${server_credentials}    ${IP[0]}
+
+    Wait Until Keyword Succeeds    15 min    20s    Create Teaming windows    ${adapter_name_list[1]}    ${Powershell_get_mac3}    ${server_credentials}    ${IP[0]}    ${Powershell_get_mac5}
+    Wait Until Keyword Succeeds    15 min    20s    Set Static ip interface    ${adapter_name_list[1]}    ${Powershell_set_static_ip2}    ${server_credentials}    ${IP[0]}
+
+    Ping_Server_ip_validate_packet_loss    ${ilo_details_enc1_bay6}    ${ping_cmd_enc1_bay6_2}    ${server_credentials}   ${IP}    ${pingfile3}
+
+    ${Count}=    Get Length    ${ping_cmd_enc1_bay6_3}
+    :FOR    ${x}    IN RANGE    0   ${Count}
+    \    ${output}=    execute_windows_commands    ${IP[0]}    ${server_credentials['userName']}    ${server_credentials['password']}    ${ping_cmd_enc1_bay6_3[${x}]}
+    \    Sleep    30
+    \    ${contents}=    OperatingSystem.Get File    ${pingfile4[${x}]}
+    \    Should Contain    ${contents}    ${content2}
+
+    ###Delete Teaming
+    Wait Until Keyword Succeeds    15 min    20s    Delete Windows Teaming    ${IP[0]}    ${server_credentials}    ${delete_team_cmd0}
+    Wait Until Keyword Succeeds    15 min    20s    Delete Windows Teaming    ${IP[0]}    ${server_credentials}    ${delete_team_cmd1}
+    Sleep    5min
+
+9_2_Edit networkset and add VLAN 402 to it
+    [Documentation]    Edit networkset and add VLAN 402 to it
+    Set Log Level    TRACE
+    Update Network Set    ${update_network_sets}
+
+9_3_Set Static ip for the newly added network and verify the traffic flow between the connections
+    [Documentation]    Edit networkset and add VLAN 402 to it
+    Set Log Level    TRACE
+    ${IP}    Get Server Ip Windows    ${ilo_details_enc1_bay6}
+    ${ip_length}    Get Length    ${IP}
+    ${mac_addr_list}    Get_Mac_Address    ${ilo_details_enc1_bay6}    ${server_profiles3}    ${IP}
+    Log    mac address ${mac_addr_list}    console=true
+
+    #Compare mac address with server
+    #${adapter_name_list}=   Create List
+    ${adapter_name_list}    Getting Server Adapter Names     ${server_profiles3[0]['name']}    ${Powershell_get_mac}     ${server_credentials['userName']}    ${server_credentials['password']}    ${file1}    ${server_hw_type}     ${IP}    mac_length=${physical_port_conn[1]}
+    Log    \nadapter names list ${adapter_name_list}    console=true
+
+    Wait Until Keyword Succeeds    15 min    20s     Create Teaming windows    ${adapter_name_list[0]}    ${Powershell_get_mac1}    ${server_credentials}    ${IP[0]}    ${Powershell_get_mac2}
+    Wait Until Keyword Succeeds    15 min    20s    Set Static ip interface    ${adapter_name_list[0]}    ${Powershell_set_static_ip}    ${server_credentials}    ${IP[0]}
+
+    Wait Until Keyword Succeeds    15 min    20s     Create Teaming windows    ${adapter_name_list[1]}    ${Powershell_get_mac3}    ${server_credentials}    ${IP[0]}    ${Powershell_get_mac4}
+    Wait Until Keyword Succeeds    15 min    20s    Set Static ip interface    ${adapter_name_list[1]}    ${Powershell_set_static_ip1}    ${server_credentials}    ${IP[0]}
+
+    Wait Until Keyword Succeeds    15 min    20s    Create Teaming windows    ${adapter_name_list[1]}    ${Powershell_get_mac3}    ${server_credentials}    ${IP[0]}    ${Powershell_get_mac5}
+    Wait Until Keyword Succeeds    15 min    20s     Set Static ip interface    ${adapter_name_list[1]}    ${Powershell_set_static_ip2}    ${server_credentials}    ${IP[0]}
+
+    Wait Until Keyword Succeeds    15 min    20s    Create Teaming windows    ${adapter_name_list[0]}    ${Powershell_get_mac1}    ${server_credentials}    ${IP[0]}    ${Powershell_get_mac6}
+    Wait Until Keyword Succeeds    15 min    20s    Set Static ip interface    ${adapter_name_list[0]}    ${Powershell_set_static_ip3}    ${server_credentials}    ${IP[0]}
+
+    Ping_Server_ip_validate_packet_loss    ${ilo_details_enc1_bay6}    ${ping_cmd_enc1_bay6_2}    ${server_credentials}   ${IP}    ${pingfile3}
+    Ping_Server_ip_validate_packet_loss    ${ilo_details_enc1_bay6}    ${ping_cmd_enc1_bay6_4}    ${server_credentials}   ${IP}    ${pingfile5}
+
+    #Delete teaming
+    Wait Until Keyword Succeeds    15 min    20s    Delete Windows Teaming    ${IP[0]}    ${server_credentials}    ${delete_team_cmd0}
+    Wait Until Keyword Succeeds    15 min    20s    Delete Windows Teaming    ${IP[0]}    ${server_credentials}    ${delete_team_cmd1}
+    Sleep    5min
+
+10_Create Server profile with single network and network set having the same network and verify the traffic flow between the connections
+    [Documentation]    Create Server profile with network set1(vlan-401) and network set2(vlan401,402) for both the connections and verify the traffic flow between the connections
+    Set Log Level    TRACE
+
+    Power off ALL Servers    PressAndHold
+    Remove All Server Profiles
+
+    #Delete net-vlan402 in netset1
+    Update Network Set    ${update_network_sets1}
+
+    ${resp}   Add Server Profiles from variable   ${server_profiles4}
+    ${l}    Get Length    ${resp}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Run Keyword If  '${resp[${x}]['status_code']}' == '202'    Wait For Task2    ${resp[${x}]}    20m    1m    ELSE    Fail    Log    failed    console=True
+    \    Power on server    ${server_profiles4[${x}]['serverHardwareUri']}
+    Sleep    10min
+
+10_1_Get Server Ip & Windows teaming
+    [Documentation]    Get Server Ip & Windows teaming
+    Set Log Level    TRACE
+
+    ${IP}    Get Server Ip Windows    ${ilo_details_enc1_bay6}
+    ${ip_length}    Get Length    ${IP}
+
+
+    ${mac_addr_list}    Get_Mac_Address    ${ilo_details_enc1_bay6}    ${server_profiles4}    ${IP}
+    Log    mac address ${mac_addr_list}    console=true
+
+    #Compare mac address with server
+    ${adapter_name_list}    Getting Server Adapter Names     ${server_profiles4[0]['name']}    ${Powershell_get_mac}     ${server_credentials['userName']}    ${server_credentials['password']}    ${file1}    ${server_hw_type}     ${IP}    mac_length=${physical_port_conn[1]}
+    Log    \nadapter names list ${adapter_name_list}    console=true
+
+    ${tmp}    Strip String    ${adapter_name_list[0]}
+    ${replaced_cmd1}    Replace String Using Regexp    ${Powershell_set_static_ip4}    xxxx    ${tmp}
+    Log    \nstrafter strip is ${tmp}    console=true
+    Log    \nreplaced_cmd1 is ${replaced_cmd1}    console=true
+    Wait Until Keyword Succeeds    15 min    20s    Set Static ip interface   ${adapter_name_list[0]}    ${replaced_cmd1}    ${server_credentials}    ${IP[0]}
+
+    Wait Until Keyword Succeeds    15 min    20s    Create Teaming windows    ${adapter_name_list[1]}    ${Powershell_get_mac1}    ${server_credentials}    ${IP[0]}    ${Powershell_get_mac2}
+    Wait Until Keyword Succeeds    15 min    20s    Set Static ip interface    ${adapter_name_list[1]}    ${Powershell_set_static_ip}    ${server_credentials}    ${IP[0]}
+
+    Ping_Server_ip_validate_packet_loss    ${ilo_details_enc1_bay6}    ${ping_cmd_enc1_bay6_5}    ${server_credentials}   ${IP}    ${pingfile6}
+
+    #Delete teaming
+    Wait Until Keyword Succeeds    15 min    20s    Delete Windows Teaming    ${IP[0]}    ${server_credentials}    ${delete_team_cmd0}
+
+    #Delete static ip
+    ${tmp}    Strip String    ${adapter_name_list[0]}
+    ${replaced_cmd1}    Replace String Using Regexp    ${delete_static_ip}    yyyy    ${tmp}
+    Log    \nstrafter strip is ${tmp}    console=true
+    Log    \nreplaced_cmd1 is ${replaced_cmd1}    console=true
+    Wait Until Keyword Succeeds    15 min    20s    Set Static ip interface    ${adapter_name_list[0]}    ${replaced_cmd1}    ${server_credentials}    ${IP[0]}
+
+
+****Keywords*****
+Get IC Port
+    [Documentation]    Returns the port info of the named port of specified interconnect uri
+    [Arguments]     ${uri}    ${portName}
+    Set Log Level    TRACE
+
+    ${return} =    Create List
+    ${resp} =    fusion api get interconnect ports    uri=${uri}
+    ${ports} =    Get From Dictionary    ${resp}    members
+    :FOR    ${port}    IN    @{ports}
+    \    ${return} =    Run Keyword If    '${port['portName']}' == '${portName}'    set variable    ${port}
+    \    Exit for loop if    '${port['portName']}' == '${portName}'
+    [Return]    ${return}
+
+Verify Ports Status
+    [Documentation]    Verify Ports Status
+    Set Log Level    TRACE
+    [Arguments]     ${ICM_uris}    ${port_name}
+    ${len}    Get Length    ${ICM_uris}
+    :FOR    ${x}    IN RANGE    0   ${len}
+    \    ${Port_Resp}    Get IC Port    ${ICM_uris[${x}]}    ${port_name[${x}]}
+    \    Run Keyword If    '${Port_Resp['portStatus']}' != 'Linked'    Fail    msg=Port ${port_name} is unlinked
+    \    ...    ELSE    Log    Successfully verified that ${port_name} is Linked    console=True
+
+Get Server Ip Windows
+    [Documentation]    Gets the valid ip of the server.
+    [Arguments]         ${ilo_details}
+    Set Log Level    TRACE
+    Log    \nstdout is ${ilo_details}    console=true
+    ${serverip_List}=   Create List
+    ${serverip_List1}=   Create List
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=20s
+    ${login}    SSHLibrary.Login               ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Read Until    SAC>
+    Sleep    5sec
+    SSHLibrary.Write    i
+    Sleep    5sec
+    ${stdout}    SSHLibrary.Read
+    Log    \nstdout is ${stdout}    console=true
+    ${cmd_output}=    Get Regexp Matches    ${stdout}    Ip=172\\.16\\.\\d+\\.\\d+
+    Log    \nstdout is ${cmd_output}    console=true
+    ${ip_list_new}    Create List
+    ${len}    Get Length    ${cmd_output}
+    :FOR    ${x}    IN RANGE    ${len}
+    \    ${ip_lists}    Remove String    ${cmd_output[${x}]}    Ip=
+    \    Log    ip is ${ip_lists}    console=true
+    \    Append To List   ${ip_list_new}    ${ip_lists}
+    Log    \n IP's are is ${ip_list_new}    console=true
+    SSHLibrary.Close All Connections
+    [Return]    ${ip_list_new}
+
+Get Server Ip Windows1
+    [Documentation]    Gets the valid ip of the server.
+    [Arguments]         ${ilo_details}
+    Set Log Level    TRACE
+    Log    \nstdout is ${ilo_details}    console=true
+    ${serverip_List}=   Create List
+    ${serverip_List1}=   Create List
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=20s
+    ${login}    SSHLibrary.Login               ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Read Until    SAC>
+    Sleep    5sec
+    SSHLibrary.Write    i
+    Sleep    5sec
+    ${stdout}    SSHLibrary.Read
+    Log    \nstdout is ${stdout}    console=true
+    ${cmd_output}=    Get Regexp Matches    ${stdout}    Ip=172\\d+\\.\\d+\\.\\d+
+    Log    \nstdout is ${cmd_output}    console=true
+    ${ip_list_new}    Create List
+    ${len}    Get Length    ${cmd_output}
+    :FOR    ${x}    IN RANGE    ${len}
+    \    ${ip_lists}    Remove String    ${cmd_output[${x}]}    Ip=
+    \    Log    ip is ${ip_lists}    console=true
+    \    Append To List   ${ip_list_new}    ${ip_lists}
+    Log    \n IP's are is ${ip_list_new}    console=true
+    SSHLibrary.Close All Connections
+    [Return]    ${ip_list_new}
+
+Verify Alerts
+    [Documentation]    Verify Alerts
+    [Arguments]     ${alertState}    ${alertTypeID}    ${alert_message}
+    Set Log Level    TRACE
+    ${Alert_msg}    Create List
+    ${resp}    Fusion Api Get Alerts   /rest/alerts?filter="alertState EQ '${alertState}'"
+    ${mem_resp}    Get From Dictionary    ${resp}    members
+    ${len}    Get Length    ${mem_resp}
+    :FOR   ${x}    IN RANGE    0    ${len}
+    \   Run Keyword If  '${mem_resp[${x}]['alertTypeID']}' !='${alertTypeID}'    Continue For Loop
+    \   ${desc}    Get From Dictionary    ${mem_resp[${x}]}    description
+    \   Append To List    ${Alert_msg}    ${desc}
+
+    ${len}    Get Length    ${Alert_msg}
+    :FOR   ${x}    IN RANGE    0    ${len}
+    \    Should Contain    ${Alert_msg[${x}]}    ${alert_message}
+    Log    \n Successfully verified alert messages    console=True
+
+Get Interconnect StackingDomainRole
+    [Documentation]    Get Interconnect StackingDomainRole
+    [Arguments]     ${ic_name}    ${expected_role}
+    Set Log Level    TRACE
+    ${resp} =   Get Interconnect    ${ic_name}
+    ${Role}    Get From Dictionary    ${resp}    stackingDomainRole
+    Should Be Equal As Strings    ${Role}    ${expected_role}
+    [Return]    ${Role}
+
+Get Profiles
+    [Documentation]    Get Profiles
+    ${resp}    fusion api get server profiles
+    Set Log Level    TRACE
+    ${profiles}    Create List
+    ${profile_list}    Get From Dictionary     ${resp}    members
+    ${l}=    Get Length    ${profile_list}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${profile} =     Get From List   ${profile_list}    ${x}
+    \   ${profile_details} =    Create Dictionary     name=${profile['name']}
+    \   ...                                           uri=${profile['uri']}
+    \   ...                                           state=${profile['state']}
+    \   ...                                           status=${profile['status']}
+    \   ...                                           serverHardwareUri=${profile['serverHardwareUri']}
+    \   append to list    ${profiles}   ${profile_details}
+    [Return]    ${profiles}
+
+Unassign profiles
+    [Documentation]    Unassign profiles
+    [Arguments]     ${profiles}
+    Set Log Level   TRACE
+    Log    \nUnassigning profiles....    console=true
+    :FOR    ${p}    IN    @{profiles}
+    \   Log    ${p}    console=true
+    \   Log    ${p['uri']}    console=true
+    \   ${profile} =    Fusion Api Get Resource    uri=${p['uri']}
+    \   set to dictionary    ${profile}   serverHardwareUri=${None}
+    \   set to dictionary    ${profile}   enclosureBay=${None}
+    \   set to dictionary    ${profile}   enclosureUri=${None}
+    \   remove from dictionary    ${profile}   status_code    headers
+    \   ${resp} =   fusion api edit server profile    uri=${p['uri']}   body=${profile}
+    \   ${task} =   Wait For Task   ${resp}     6m   15s
+    ${valDict} =        Create Dictionary   status_code=${200}
+    ...                                     taskState=Completed
+    Validate Response   ${task}    ${valDict}
+
+Re-assign profiles
+    [Documentation]    Re-assign profiles
+    [Arguments]     ${profiles}
+    Set Log Level   TRACE
+    Log    \nRe-assigning profiles....    console=true
+    :FOR    ${p}    IN    @{profiles}
+    \   ${profile} =    Fusion Api Get Resource    uri=${p['uri']}
+    \   set to dictionary    ${profile}   serverHardwareUri=${p['serverHardwareUri']}
+    \   remove from dictionary    ${profile}   status_code    headers
+    \   ${resp} =   fusion api edit server profile    uri=${p['uri']}   body=${profile}
+    \   ${task} =   Wait For Task   ${resp}     6m   15s
+    ${valDict} =        Create Dictionary   status_code=${200}
+    ...                                     taskState=Completed
+    Validate Response   ${task}    ${valDict}
+
+Clean OV
+    [Documentation]  Clean OV
+    Set Log Level    TRACE
+    Power off ALL Servers    PressAndHold
+    Remove All Server Profiles
+    Remove All LEs
+    Remove All Enclosure Groups
+    Remove All LIGs
+    Remove All Ethernet Networks
+    Remove ALL FCoE Networks
+    Remove All FC Networks
+    Remove ALL Network Sets
+
+Get Profile Details
+    [Documentation]    Get Profile Details
+    [Arguments]       ${resp}    ${profile_name}
+    Set Log Level    TRACE
+    ${profile_len} =    Get Length    ${resp['members']}
+    :FOR    ${x}    IN RANGE   ${profile_len}
+    \   ${y} =    Set Variable    ${resp['members'][${x}]['connectionSettings']}
+    \   ${mac_address} =    Run Keyword If  '${resp['members'][${x}]['name']}' == '${profile_name}'
+    \   ...    Get Mac address Of Server Profile    ${y['connections']}
+    \   ...    ELSE
+    \   ...    Continue For Loop
+    [return]            ${mac_address}
+
+Get Mac address Of Server Profile
+    [Documentation]    Get Mac address Of Server Profile
+    [Arguments]                  ${connections}
+    Set Log Level    TRACE
+    ${mac_address} =    Create List
+    ${connection_length} =    Get Length    ${connections}
+    :FOR    ${x}    IN RANGE    ${connection_length}
+    \   Append To List   ${mac_address}    ${connections[${x}]['mac']}
+    [return]            ${mac_address}
+
+Get Mac Address from server
+    [Documentation]    Get Mac Address from server
+    [Arguments]         ${server_details}    ${IP}    ${Powershell_get_mac}
+    Set Log Level    TRACE
+    Telnet.Open Connection    ${IP}    prompt=>    timeout=30s
+    Sleep    5sec
+    Telnet.Write    a
+    ${login}    Telnet.Login    ${server_details['userName']}    ${server_details['password']}    login_prompt=login:    password_prompt=password:
+    Log    \nLogged in to server    console=true
+    Sleep    10sec
+    ${out}    Telnet.Read
+    Telnet.Write    Powershell
+    Sleep    5sec
+    Telnet.Write    ${Powershell_get_mac}
+    Sleep    60sec
+    ${stdout} =  Telnet.Read
+    Sleep    30sec
+    Telnet.Close Connection
+    Telnet.Close All Connections
+    [Return]    ${stdout}
+
+Set Static ip interface for all Adapters
+    [Documentation]    Set Static ip for interface
+    [Arguments]    ${len}    ${adapter_name_list}   ${Powershell_set_static_ip}    ${server_details}    ${server_ip}
+    Set Log Level    TRACE
+
+    Telnet.Open Connection    ${server_ip[0]}    prompt=>    timeout=20s
+    Log    \nSuccessfully opened connection to the server    console=true
+    Telnet.Write    a
+    ${login}    Telnet.Login    ${server_details['userName']}     ${server_details['password']}    login_prompt=login:    password_prompt=password:
+    Log    \nSuccessfully logged into the server    console=true
+    Sleep    10sec
+    #${Count}=    Get Length    ${adapter_name_list}-1
+    :FOR    ${x}    IN RANGE    0   ${len}
+    \    ${tmp}    Strip String    ${adapter_name_list[${x}]}
+    \    ${replaced_cmd1}    Replace String Using Regexp    ${Powershell_set_static_ip[${x}]}    xxxx    ${tmp}
+    \    Log    \nstrafter strip is ${tmp}    console=true
+    \    Log    \nreplaced_cmd1 is ${replaced_cmd1}    console=true
+    \    Telnet.Write    ${replaced_cmd1}
+    \    Sleep    30sec
+    \    Telnet.Write    y
+    \    Sleep    30sec
+    Telnet.Close Connection
+    Telnet.Close All Connections
+
+Set Static ip interface
+    [Documentation]    Set Static ip for interface
+    [Arguments]    ${adapter_name_1}   ${Powershell_set_static_ip}    ${server_details}    ${server_ip}
+    Set Log Level    TRACE
+
+    Telnet.Open Connection     ${server_ip}     prompt=>     timeout=20s
+    Log    \nSuccessfully opened connection to the server    console=true
+    Telnet.Write    a
+    ${login}    Telnet.Login    ${server_details['userName']}     ${server_details['password']}    login_prompt=login:    password_prompt=password:
+    Log    \nSuccessfully logged into the server    console=true
+    Sleep    10sec
+    Telnet.Write    ${Powershell_set_static_ip}
+    Sleep    30sec
+    Telnet.Write    y
+    Sleep    30sec
+    Telnet.Close Connection
+    Telnet.Close All Connections
+
+Delete Static ip interface
+    [Documentation]    Delete Static ip for interface
+    [Arguments]    ${len}    ${adapter_name_list}   ${Powershell_delete_static_ip}    ${server_details}    ${server_ip}
+    Set Log Level    TRACE
+
+    Telnet.Open Connection    ${server_ip[0]}    prompt=>    timeout=20s
+    Log    \nSuccessfully opened connection to the server    console=true
+    Telnet.Write    a
+    ${login}    Telnet.Login    ${server_details['userName']}     ${server_details['password']}    login_prompt=login:    password_prompt=password:
+    Log    \nSuccessfully logged into the server    console=true
+    Sleep    10sec
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    ${tmp}    Strip String    ${adapter_name_list[${x}]}
+    \    ${replaced_cmd1}    Replace String Using Regexp    ${Powershell_delete_static_ip}    yyyy    ${tmp}
+    \    Log    \nstrafter strip is ${tmp}    console=true
+    \    Log    \nreplaced_cmd1 is ${replaced_cmd1}    console=true
+    \    Telnet.Write    ${replaced_cmd1}
+    \    Sleep    30sec
+    \    Telnet.Write    y
+    \    Sleep    30sec
+    Telnet.Close Connection
+    Telnet.Close All Connections
+
+
+Create Teaming windows
+    [Documentation]    Create Teaming windows
+    [Arguments]         ${adapter_name_1}   ${Powershell_get_mac1}    ${server_details}    ${serverip}    ${Powershell_get_mac2}
+    Set Log Level    TRACE
+    ${tmp}    Strip String    ${adapter_name_1}
+    ${replaced_cmd1}    Replace String Using Regexp    ${Powershell_get_mac1}    pppp    ${tmp}
+    Log    \nstrafter strip is${tmp}    console=true
+    Log    \nreplaced_cmd1 is${replaced_cmd1}    console=true
+    Create Windows Teaming   ${serverip}    ${server_details}    ${replaced_cmd1}    ${Powershell_get_mac2}
+
+Create Windows Teaming
+    [Documentation]    Create Windows Teaming
+    [Arguments]         ${server_ip}    ${server_details}    ${team_cmd}    ${adding_interface_team_cmd}
+    Set Log Level    TRACE
+    Telnet.Open Connection     ${server_ip}     prompt=>     timeout=20s
+    Log    \nSuccessfully opened connection to the server    console=true
+    Telnet.Write    a
+    ${login}    Telnet.Login    ${server_details['userName']}     ${server_details['password']}    login_prompt=login:    password_prompt=password:
+    Log    \nSuccessfully logged into the server    console=true
+    Sleep    10sec
+    Telnet.Write    powershell
+    Log    \n${team_cmd}    console=true
+    Telnet.Write    ${team_cmd}
+    Sleep    30sec
+    Telnet.Write    y
+    Sleep    30sec
+    Log    \n${adding_interface_team_cmd}    console=true
+    Telnet.Write    ${adding_interface_team_cmd}
+    Sleep    30sec
+    Telnet.Write    y
+    Sleep    30sec
+    Telnet.Close Connection
+    Telnet.Close All Connections
+    Log    \nteaming completed    console=true
+
+Delete Windows Teaming
+    [Documentation]    Delete Windows Teaming
+    [Arguments]         ${team_ip}    ${server_details}    ${detlete_team_cmd}
+    Set Log Level    TRACE
+    Telnet.Open Connection     ${team_ip}     prompt=>     timeout=20s
+    Log    \nSuccessfully opened connection to the server    console=true
+    Telnet.Write    a
+    ${login}    Telnet.Login               ${server_details['userName']}     ${server_details['password']}    login_prompt=login:    password_prompt=password:
+    Log    \nSuccessfully logged into the server    console=true
+    Sleep    10sec
+    Telnet.Write    powershell
+    Sleep    10sec
+    Telnet.Write    ${detlete_team_cmd}
+    Log    \n${detlete_team_cmd}    console=true
+    Sleep    30sec
+    Telnet.Write    y
+    Sleep    30sec
+    ${stdout} =  Telnet.Read
+    Log    \nout is ${stdout}    console=true
+    Telnet.Close Connection
+    Telnet.Close All Connections
+    Log    \nteaming deleted
+
+Suite Setup Tasks
+    [Documentation]    Suite Setup Tasks
+    Set Log Level    TRACE
+    #Login
+    Set Log Level   TRACE
+    ${resp}    Fusion Api Login Appliance    ${appliance_ip}    ${admin_credentials}
+    Run Keyword If  '${resp[0]['status_code']}' != '200'  Fail    ELSE  Log       Successfully logged into the appliance    console=True
+
+    Clean OV
+
+    ${start_in} =   Get Variable Value  ${enc_count}    1
+    Set Suite Variable  ${enc_count}    ${start_in}
+    Log    ${enc_count}    console=True
+
+    #Create Ethernet Networks
+    ${resp}    Add Ethernet Networks from variable    ${ethernet_network}
+    ${l} =  Get Length  ${resp}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    Log    ${resp[${x}]}    console=True
+    \    Run keyword unless  ${resp[${x}]['status_code']}== 202    Fail    "Unable to Create Ethernet network"
+    \    ${task} =   Wait For Task   ${resp[${x}]}    5 min    15s
+    \    Run Keyword If  '${task['taskState']}' != 'Completed'    FAIL    ELSE    Log    Ethernet Networks Created Successfully!!    console=True
+
+    #Create Network sets
+    Add Network Sets from variable    ${network_sets}
+
+    #Create LIG
+    Add LIG from variable    ${ligs['${LIG}']}
+
+    #Create EG
+    ${resp}    Add Enclosure Group from variable    ${enc_group}
+    ${task} =   Wait For Task   ${resp}    5 min    15s
+    Run Keyword If  '${task['taskState']}' != 'Completed'    FAIL    ELSE    Log    EG Created Successfully!!    console=True
+    #Create LE
+    Log    \n Creating LE    console=true
+    ${Resp}    Add Logical Enclosure from variable     ${les}
+
+    Log \n Verifying Interconnects In LI ${les['name']}-${LIG}  console=True
+    ${resp}    Get LI member    ${les['name']}-${LIG}
+    :FOR    ${interconnect} IN  @{resp['interconnects']}
+    \   Log    ${interconnect}    console=True
+    \    Wait Until Keyword Succeeds    10 min    20s    IC reached state    ${interconnect}   Configured
+
+
+    Log    Fetching ICM URI    console=True
+    ${ic_uris}    Create List
+    :FOR    ${icm}    IN    @{Interconnect_name}
+    \    ${uri} =    Get IC URI    ${icm}
+    \    Run Keyword If    '${icm}' == '${Interconnect_name[0]}'    Set Suite Variable    ${ICM3_uri}    ${uri}
+    \    ...    ELSE IF    '${icm}' == '${Interconnect_name[1]}'   Set Suite Variable    ${ICM6_uri}    ${uri}
+    \    Append To List    ${ic_uris}    ${uri}
+    Log     ${ICM3_uri}    console=True
+    Log     ${ICM6_uri}    console=True
+    Set Suite Variable    ${ICM_uris}    ${ic_uris}
+
+    Log    Verify if uplink ports are linked    console=True
+    Wait Until Keyword Succeeds    10 min    20s    Verify Ports Status    ${ICM_uris}    ${port_name}
+
+Getting Server Adapter Names
+
+    [Documentation]    Getting Server Adapter Names
+
+    [Arguments]       ${profile_name}    ${Powershell_get_mac_cmd}     ${server_username}    ${server_password}    ${file1}    ${server_hw_type}     ${server_ip}    ${mac_length}=None
+    Set Log Level    TRACE
+
+    #${server_details}    Get IP For All Servers    ${ilo_details_1}    ${server_details}
+    #${server_ip}    Get From Dictionary    ${server_details}    ip
+    ${resp}    Fusion Api Get Server Profiles
+    ${mac_addr_list}    Create List
+    ${mac}    Get Profile Details    ${resp}    ${profile_name}
+    ${mac_length}    Get Length    ${mac}
+    :FOR    ${x}    IN RANGE    ${mac_length}
+    \   ${mac_address}    Replace String Using Regexp    ${mac[${x}]}    :    -
+    \   Append To List   ${mac_addr_list}    ${mac_address}
+    Log    \n mac address ${mac_addr_list}    console=True
+
+    #Compare mac address with server
+    ${adapter_name_list}    Create List
+    :FOR    ${x}    IN RANGE    ${mac_length}
+    \   ${replaced_cmd}    Replace String Using Regexp    ${Powershell_get_mac_cmd}    pppppppp      ${mac_addr_list[${x}]}
+    \   ${output}    execute_windows_commands    ${server_ip[0]}    ${server_username}    ${server_password}    ${replaced_cmd}
+    \   ${contents}    OperatingSystem.Get File    ${file1}
+    \    Log    cont is ${contents}    console=True
+    \    ${adapter_name}    Run Keyword If    '${server_hw_type}' == 'Gen10'    Get Lines Containing String    ${contents}    PCIe    ELSE IF    '${server_hw_type}' == 'Gen9'    Get Lines Containing String    ${contents}    Ethernet    ELSE    Fail    Log    adapter name is not match    console=True
+    \   Append to List   ${adapter_name_list}   ${adapter_name}
+    Log    \nadapter names list${adapter_name_list}    console=True
+    [Return]    ${adapter_name_list}
+
+Get_Adapter_Name
+    [Documentation]    Get_Adapter_Name
+    [Arguments]    ${Powershell_get_mac}    ${server_credentials}    ${mac_addr_list}    ${static_ip}
+    Set Log Level    TRACE
+    ${replaced_cmd} =   Replace String Using Regexp    ${Powershell_get_mac}    pppppppp    ${mac_addr_list}
+    Log    the string is step2 ${replaced_cmd}    console=true
+    #calling Get Mac Address from server
+    Log    the server details is ${server_credentials}
+    ${output}    Get Mac Address from server    ${server_credentials}    ${static_ip}    ${replaced_cmd}
+    ${string}    Convert To String    ${output}
+    ${match}    ${port}     Should Match Regexp    ${string}    (.*PCIe Slot\\s+\\d+.*)
+    Log    \n${match}    console=True
+    Log    \n${port}    console=True
+    #${adapter_name}    Catenate    ${eth}   ${port}
+    [Return]    ${match}
+
+Validate_Traffic_Flow_Between_Connections
+    [Documentation]       Validate_Traffic_Flow_Between_Connections
+    [Arguments]    ${ilo_details}    ${server_profiles}    ${Powershell_get_mac}    ${server_credentials}
+    ${Powershell_delete_static}    ${Powershell_set_static}    ${ping_cmd}
+    Set Log Level    TRACE
+
+    ${IP}    Get Server Ip Windows    ${ilo_details}
+    Log    ${IP}    console=true
+
+    ${resp} =    Fusion Api Get Server Profiles
+    ${mac_addr_list}=   Create List
+    ${mac} =    Get Profile Details    ${resp}    ${server_profiles[0]['name']}
+    ${mac_length} =    Get Length    ${mac}
+    :FOR    ${x}    IN RANGE    ${mac_length}
+    \   ${mac_address}    Replace String Using Regexp    ${mac[${x}]}    :    -
+    \   Append To List   ${mac_addr_list}    ${mac_address}
+    ${ip_length}    Get Length    ${IP}
+    Log    mac address ${mac_addr_list}    console=true
+    #Compare mac address with server
+    ${adapter_name_list}=   Create List
+    :FOR    ${x}    IN RANGE    ${ip_length}+3
+    \    ${adapter_name}=    Get_Adapter_Name    ${Powershell_get_mac}    ${server_credentials}    ${mac_addr_list[${x}]}    ${IP[0]}
+    \    Append to List   ${adapter_name_list}   ${adapter_name}
+    Log    \nadapter names list ${adapter_name_list}    console=true
+    #Delete static ip
+    ${Count}=    Get Length    ${adapter_name_list}
+    :FOR    ${x}    IN RANGE    0   ${Count}
+    \    ${tmp}    Strip String    ${adapter_name_list[${x}]}
+    \    ${replaced_cmd1}    Replace String Using Regexp    ${Powershell_delete_static[${x}]}    yyyy    ${tmp}
+    \    Log    \nstrafter strip is ${tmp}    console=true
+    \    Log    \nreplaced_cmd1 is ${replaced_cmd1}    console=true
+    \    Set Static ip interface    ${adapter_name_list[${x}]}    ${replaced_cmd1}    ${server_credentials}    ${IP[0]}
+
+    ${Count}=    Get Length    ${adapter_name_list}
+    :FOR    ${x}    IN RANGE    0   ${Count}
+    \    ${tmp}    Strip String    ${adapter_name_list[${x}]}
+    \    ${replaced_cmd1}    Replace String Using Regexp    ${Powershell_set_static[${x}]}    xxxx    ${tmp}
+    \    Log    \nstrafter strip is${tmp}    console=true
+    \    Log    \nreplaced_cmd1 is${replaced_cmd1}    console=true
+    \    Set Static ip interface    ${adapter_name_list[${x}]}    ${replaced_cmd1}    ${server_credentials}    ${IP[0]}
+
+
+    ${Count}=    Get Length    ${ping_cmd}
+    :FOR    ${x}    IN RANGE    0   ${Count}
+    \    ${output}=    execute_windows_commands    ${IP[0]}    ${server_credentials['userName']}    ${server_credentials['password']}    ${ping_cmd[${x}]}
+    \    Sleep    30
+    \    ${contents}=    OperatingSystem.Get File    ${pingfile[${x}]}
+    \    Should Not Contain    ${contents}    Destination host unreachable
+    \    ${Lines}=    Get Lines Containing String    ${contents}    ${Ping_Lost}
+    \    Log    \ncontents are ${Lines}    console=true
+    \    ${match}   ${ret1}    Should Match Regexp    ${Lines}    Lost\\s+=\\s+\\d+\\s+\\((\\d+%)\\s+loss\\)
+    \    Log    ${ret1}    console=true
+    \    Run Keyword If  '${ret1}' != '0%'  Fail    ELSE  Log  \n 0 percent packet loss is observed    console=true
+
+Get_Mac_Address
+    [Documentation]       Get_Mac_Address
+    [Arguments]    ${ilo_details}    ${server_profiles}    ${IP}
+    Set Log Level    TRACE
+    ${resp} =    Fusion Api Get Server Profiles
+    ${mac_addr_list}=   Create List
+    ${mac} =    Get Profile Details    ${resp}    ${server_profiles[0]['name']}
+    ${mac_length} =    Get Length    ${mac}
+    :FOR    ${x}    IN RANGE    ${mac_length}
+    \   ${mac_address}    Replace String Using Regexp    ${mac[${x}]}    :    -
+    \   Append To List   ${mac_addr_list}    ${mac_address}
+    ${ip_length}    Get Length    ${IP}
+    Log    mac address ${mac_addr_list}    console=true
+    [Return]    ${mac_addr_list}
+
+Delete_Static_ip
+    [Documentation]    Delete_Static_ip
+    [Arguments]    ${ilo_details}    ${adapter_name_list}    ${Powershell_delete_static}    ${server_credentials}    ${IP}
+    Set Log Level    TRACE
+    ${Count}=    Get Length    ${adapter_name_list}
+    :FOR    ${x}    IN RANGE    0    ${Count}
+    \    Log    ${adapter_name_list[0]}    console=True
+    \    ${tmp}    Strip String    ${adapter_name_list[${x}]}
+    \    ${replaced_cmd1}    Replace String Using Regexp    ${Powershell_delete_static}    yyyy    ${tmp}
+    \    Log    \nstrafter strip is ${tmp}    console=true
+    \    Log    \nreplaced_cmd1 is ${replaced_cmd1}    console=true
+    \    Set Static ip interface    ${adapter_name_list[${x}]}    ${replaced_cmd1}    ${server_credentials}    ${IP[0]}
+
+Set_Static_ip
+    [Documentation]    Set_Static_ip
+    [Arguments]    ${ilo_details}    ${adapter_name_list}    ${Powershell_set_static}    ${server_credentials}   ${IP}
+    Set Log Level    TRACE
+    ${Count}=    Get Length    ${adapter_name_list}
+    :FOR    ${x}    IN RANGE    0   ${Count}
+    \    ${tmp}    Strip String    ${adapter_name_list[${x}]}
+    \    ${replaced_cmd1}    Replace String Using Regexp    ${Powershell_set_static[${x}]}    xxxx    ${tmp}
+    \    Log    \nstrafter strip is ${tmp}    console=true
+    \    Log    \nreplaced_cmd1 is ${replaced_cmd1}    console=true
+    \    Set Static ip interface    ${adapter_name_list[${x}]}    ${replaced_cmd1}    ${server_credentials}    ${IP[0]}
+
+Ping_Server_ip_validate_packet_loss
+    [Documentation]    Ping_Server_ip_validate_packet_loss
+    [Arguments]    ${ilo_details}    ${ping_cmd}    ${server_credentials}   ${IP}    ${pingfile}
+    Set Log Level    TRACE
+    ${Count}=    Get Length    ${ping_cmd}
+    :FOR    ${x}    IN RANGE    0   ${Count}
+    \    ${output}=    execute_windows_commands    ${IP[0]}    ${server_credentials['userName']}    ${server_credentials['password']}    ${ping_cmd[${x}]}
+    \    Sleep    30
+    \    ${contents}=    OperatingSystem.Get File    ${pingfile[${x}]}
+    \    Should Not Contain    ${contents}    Destination host unreachable
+    \    ${Lines}=    Get Lines Containing String    ${contents}    ${Ping_Lost}
+    \    Log    \ncontents are ${Lines}    console=true
+    \    ${match}   ${ret1}    Should Match Regexp    ${Lines}    Lost\\s+=\\s+\\d+\\s+\\((\\d+%)\\s+loss\\)
+    \    Log    ${ret1}    console=true
+    \    Run Keyword If  '${ret1}' != '0%'  Fail    ELSE  Log  \n 0 percent packet loss is observed    console=true
+
+
+Ping_Server_ip_validate_packet_loss_neg
+    [Documentation]    Ping_Server_ip_validate_packet_loss_neg
+    [Arguments]    ${ilo_details}    ${ping_cmd}    ${server_credentials}    ${pingfile}    ${fail_msg}    ${fail_msg1}
+    Set Log Level    TRACE
+    ${IP}    Get Server Ip Windows    ${ilo_details}
+    Log    ${IP}    console=true
+    Log    ${IP[0]}    console=true
+    ${Count}=    Get Length    ${ping_cmd}
+    :FOR    ${x}    IN RANGE    0   ${Count}
+    \    ${output}=    execute_windows_commands    ${IP[0]}    ${server_credentials['userName']}    ${server_credentials['password']}    ${ping_cmd[${x}]}
+    \    Sleep    30
+    \    ${contents}=    OperatingSystem.Get File    ${pingfile[${x}]}
+    \    Should Contain Any    ${contents}    ${fail_msg}    ${fail_msg1}

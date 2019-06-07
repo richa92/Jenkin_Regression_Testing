@@ -1,0 +1,240 @@
+*** Settings ***
+Documentation     Factory Reset CI Manager
+...	= Usage =
+...	 = For Uploading Firmware Bundles =
+...	pybot -v ENCLOSURE:<EnclosureName1,EnclosureName2,...> -v FILEPATHS:<filepath1,filepath2,...> -i upload Upload_Firmware_Bundle.txt
+...	 = For Checking If Uploaded Correctly
+...	pybot -v ENCLOSURE:<EnclosureName1,EnclosureName2,...> -i upload_check Upload_Firmware_Bundle.txt
+...	 = For Removing All Firmware Bundles =
+...	pybot -v ENCLOSURE:<EnclosureName1,EnclosureName2,...> -i remove Upload_Firmware_Bundle.txt
+...
+...	= Variables =
+...	| ENCLOSURE | Required; Contains the addresses and other settings of the applications |
+...	| FILEPATHS | Required; Filepaths to the firmware bundles used for uploading
+...	(It is suggested to store any firmware bundles in the /shared folder)
+...    
+...	= Preconditions =
+...	-Set the enslosure in the ../resources/variables.py file
+...	-Make sure the Firmware Bundle is placed in the location of the FILEPATH variable listed
+...	-Firmware_Bundle_Upload_Code.txt must be in the same directory as this file.
+
+Library		RoboGalaxyLibrary
+Library		FusionLibrary
+Library		OperatingSystem
+Library		robot.api.logger
+Variables	../resources/variables.py    ${ENCLOSURE}
+Resource	../../tbird_hal/resources/fusion_cli.txt
+Resource	../resources/constants.txt
+
+Force Tags        # All test cases get these tags
+
+*** Variables ***
+${username}		${FUSION_USERNAME}
+${password}		${FUSION_FACTORY_PASSWORD}
+${IPv4}			${FUSION_IP}
+${appl}			${FUSION_FQDN}
+
+*** Keywords ***
+Fusion Api Add Firmware Bundle
+  ${FBUploadCode}	OperatingSystem.Get File	Firmware_Bundle_Upload_Template.txt
+  ${ISO image name}	Get Filename From Path		${ISO image path}
+  ${FBUploadCode}	Replace String		${FBUploadCode}		{ISO image name}	${ISO image name}
+  ${FBUploadCode}	Replace String		${FBUploadCode}		{ISO image path}	${ISO image path}
+  ${FBUploadCode}	Replace String		${FBUploadCode}		{appl}			${appl}
+  ${FBUploadCode}	Replace String		${FBUploadCode} 	{userName}		${username}
+  ${FBUploadCode}	Replace String		${FBUploadCode} 	{password}		${password}
+  			Create File		FB_Upload_Code.txt	${FBUploadCode}	
+  			Run			python3 FB_Upload_Code.txt > temp
+  ${lines}		Grep File		temp		[sessionId]
+  ${auth}		Remove String		${lines}	{\"sessionID\":\"	\"}
+
+  ${FBUploadCodeFinal}	Grep File		FB_Upload_Code.txt	\#*
+  ${FBUploadCodeFinal}	Remove String		${FBUploadCodeFinal}		\#
+
+  ${FBUploadCodeFinal}	Replace String		${FBUploadCodeFinal}	{authentication token}	${auth}
+  Run			${FBUploadCodeFinal}
+
+  Remove File		temp
+  Remove File		FB_Upload_Code.txt
+
+Check If Uploaded Correctly
+  Login To OneView
+  Fusion Ui Navigate To Firmware Bundles Page
+  ${FW_Bundles_Number}	Get Number of Firmware Bundles From OneView
+  Wait Until Element Is Visible		xpath=//ol[@class='hp-master-grid hp-active']	timeout=5	error=!!!
+  ${FW_Bundles}		Get Text		xpath=//ol[@class='hp-master-grid hp-active']
+  ${Line_Count}		Get Line Count		${FW_Bundles}
+  Create File		temp1		print(${Line_Count}/2)
+  Run			python temp1 > temp2
+  ${Adj_Line_Count}	OperatingSystem.Get File	temp2
+  Remove Files		temp1	temp2
+  :FOR	${index}	IN RANGE	${Adj_Line_Count}
+	\	Create File		temp1		print(${index}*2)
+	\	Run			python temp1 > temp2
+	\	${Line_Number}		OperatingSystem.Get File	temp2
+	\	Remove Files		temp1 		temp2
+	\	${Line}			Get Line	${FW_Bundles}	${Line_Number}
+	\	Click Element		xpath=//ol[@class='hp-master-grid hp-active']/li/header/div[text()='${Line}']
+	\	Wait Until Done Loading
+	\	${FW_Bundle_Status}	Get Element Attribute	xpath=//div[@id='cic-fwdriver-status']@class
+	\	Run Keyword If		'${FW_Bundle_Status}'=='hp-status hp-status-error'
+	\	...			Set Test Message
+	\	...			\nERROR: There was an upload error with Firmware Bundle: ${Line}	True
+
+Check If Uploaded Correctly 2
+  Login To OneView
+  Fusion Ui Navigate To Firmware Bundles Page
+  ${FW_Bundles_Number}	Get Number of Firmware Bundles From OneView
+  Wait Until Element Is Visible		DataTables_Table_0	timeout=5	error=!!!
+  ${FW_Bundles}		Get Text		DataTables_Table_0
+  ${Line_Count}		Get Line Count		${FW_Bundles}
+  :FOR	${Line_Number}	IN RANGE	1	${Line_Count}
+	\	${Line}			Get Text	xpath=//table[@id='DataTables_Table_0']/tbody/tr[${Line_Number}]
+	\	Click Element		xpath=//table[@id='DataTables_Table_0']/tbody/tr[${Line_Number}]
+	\	Wait Until Done Loading
+	\	${FW_Bundle_Status}	Get Element Attribute
+	\	...			xpath=//table[@id='DataTables_Table_0']/tbody/tr[${Line_Number}]/td[1]/div@class
+	\	Run Keyword If		'${FW_Bundle_Status}'=='hp-status hp-status-error'
+	\	...			Set Test Message
+	\	...			\nERROR: There was an upload error with Firmware Bundle: ${Line}	True
+
+Remove Firmware Bundle
+  Wait Until Done Loading
+  ${FW_Bundle_Status}		Get Element Attribute		xpath=//div[@id='cic-fwdriver-status']@class
+  Should Be True	'${FW_Bundle_Status}'=='hp-status hp-status-error' or '${FW_Bundle_Status}'=='hp-status hp-status-ok'
+  ...			msg=Incorrect Firmware Bundle Status
+
+  Run Keyword If	'${FW_Bundle_Status}'=='hp-status hp-status-error'	Wait Until Element Is Visible
+  ...										xpath=//header[@class='hp-notification-summary']
+  ...										timeout=5
+  ...										error=error!
+  Run Keyword If	'${FW_Bundle_Status}'=='hp-status hp-status-error'	Click Element
+  ...										xpath=//header[@class='hp-notification-summary']
+
+  ${Firmware_Bundle_Name}		Get Firmware Bundle Name
+
+  Wait Until Element Is Visible		cic-fwdriver-actions
+  ...					timeout=5
+  ...					error=Unable to Find action drop-down
+  Click Element				cic-fwdriver-actions
+  Double Click Element			hp-main-menu-control
+  Wait Until Element Is Visible		cic-fwdriver-actions
+  ...					timeout=5
+  ...					error=Unable to Find action drop-down2
+  Double Click Element			cic-fwdriver-actions
+
+  Wait Until Element Is Visible		cic-fwdriver-delete-action
+  ...					timeout=5
+  ...					error= Did not correctly click action drop-down
+  Click Element				cic-fwdriver-delete-action
+  Wait Until Element Is Visible		hp-form-state
+  Click Element				xpath=//div/button[text()='Remove bundle']
+
+  Sleep					6
+  ${Exist_Msg}		Get Text	xpath=//div[@class='hp-not-exist-message']
+  ${Rmv_Msg}		Get Text	xpath=//header[@class='hp-notification-summary']/div[@class='hp-message']/p/span
+  Should Be True	'${Rmv_Msg}'=='Remove' or '${Exist_Msg}'=='This item no longer exists.'
+  ...			msg=Not Correctly Removed: ${Firmware_Bundle_Name}
+
+Wait Until Done Loading
+  Wait Until Element Is Visible		cic-fwdriver-status
+  ...					timeout=10	error=Could not find bundle.
+  
+
+Get Filepaths
+  [Arguments]		${arg}
+  @{filepaths}		Split String		${arg}		,
+  :FOR			${element}		IN		@{filepaths}
+		\	Log Many		${element}	0
+  [Return] 		@{filepaths}
+
+Get Filename From Path
+  [Arguments]		${filepath}
+  ${ISO image name}	Fetch From Right	${ISO image path}	/
+  [Return]		${ISO image name}
+
+Get Firmware Bundle Name
+  ${FW_Bundle_Name}	Get Text	cic-fwdriver-title
+  [Return]	${FW_Bundle_Name}
+
+Get Number of Firmware Bundles From OneView
+  Fusion Ui Navigate To Firmware Bundles Page
+  ${FWBundles}		Get Text	xpath=//div[@class='hp-page-label']/span[@class='hp-page-item-count']
+  [Return]		${FWBundles}
+
+Login To OneView
+  Open Browser To Login Page
+  Wait Until Element Is Visible			xpath=//div[@class='hp-form-content']/input[@id='hp-login-user']
+  ...						timeout=10
+  ...						error=Not at Login page
+  Input Text    				hp-login-user		${username}
+  Input Text    				hp-login-password	${password}
+  Click Element    				xpath=//div/button[@id='hp-login-button' and text()='Login']
+
+Open Browser To Login Page
+  Open Browser		https://${IPv4}/#/login	firefox
+
+Cycle Through Filepaths Upload
+  [Arguments]	@{filepaths}
+  :FOR		${ISO image path}	IN	@{filepaths}
+	\	Fusion Api Add Firmware Bundle
+	\	Sleep	100
+
+Cycle Through Filepaths Remove
+  [Arguments]	${FWBundles}
+  :FOR	${index}	IN RANGE	${FWBundles}
+	\	Sleep 	2
+	\	Fusion Ui Navigate To Dashboard Page
+        \       Sleep	2
+	\	Fusion Ui Navigate To Firmware Bundles Page
+	\	Remove Firmware Bundle
+	\	Sleep	10
+  
+
+*** Test Cases ***
+Upload Firmware Bundles With REST API
+  [Tags]	upload
+  [Documentation]	Uploads the given filename
+  @{LIST}	Get Dictionary Values	${ENCLOSURES}
+  :FOR		${index}	IN	@{LIST}
+	\	${username}=	Get From Dictionary	${index}	FUSION_USERNAME
+	\	${password}=	Get From Dictionary	${index}	FUSION_FACTORY_PASSWORD
+	\	${IPv4}=	Get From Dictionary	${index}	FUSION_IP
+	\	${appl}=	Get From Dictionary	${index}	FUSION_FQDN
+	\	@{filepaths}	Split String		${FILEPATHS}		,
+	\	Cycle Through Filepaths Upload		@{filepaths}
+
+Check Upload Status
+  [Tags]	upload_check
+  [Documentation]	Checks the upload status of the given file.
+  @{LIST}	Get Dictionary Values	${ENCLOSURES}
+  :FOR		${index}	IN	@{LIST}
+	\	${username}=	Get From Dictionary	${index}	FUSION_USERNAME
+	\	${password}=	Get From Dictionary	${index}	FUSION_FACTORY_PASSWORD
+	\	${IPv4}=	Get From Dictionary	${index}	FUSION_IP
+	\	${appl}=	Get From Dictionary	${index}	FUSION_FQDN
+	\	Check If Uploaded Correctly 2
+
+Remove All Firmware Bundles From OneView
+  [Tags]	remove
+  [Documentation]	Removes all the current firmware bundles from OneView.
+  @{LIST}	Get Dictionary Values	${ENCLOSURES}
+  :FOR		${index}	IN	@{LIST}
+	\	${username}=	Get From Dictionary	${index}	FUSION_USERNAME
+	\	${password}=	Get From Dictionary	${index}	FUSION_FACTORY_PASSWORD
+	\	${IPv4}=	Get From Dictionary	${index}	FUSION_IP
+	\	${appl}=	Get From Dictionary	${index}	FUSION_FQDN
+	\	Login To OneView
+	\	${FWBundles}		Get Number of Firmware Bundles From OneView
+	\	Cycle Through Filepaths Remove	${FWBundles}
+	\	Close Browser
+
+Test
+  [Tags]	testing
+  @{LIST}	Get Dictionary Values	${ENCLOSURES}
+  :FOR		${index}	IN	@{LIST}
+	\	${username}=	Get From Dictionary	${index}	FUSION_USERNAME
+	\	${password}=	Get From Dictionary	${index}	FUSION_FACTORY_PASSWORD
+	\	${IPv4}=	Get From Dictionary	${index}	FUSION_IP
+	\	${appl}=	Get From Dictionary	${index}	FUSION_FQDN
+	\	Log Many	${fusion_ip}	${appl}

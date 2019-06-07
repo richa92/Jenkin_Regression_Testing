@@ -1,0 +1,205 @@
+*** Settings ***
+Library              FusionLibrary
+Library              RoboGalaxyLibrary
+Library              OperatingSystem
+Library              BuiltIn
+Library              copy
+Library              Collections
+Library              String
+Library              json
+Resource             ../../../../Resources/api/fusion_api_resource.txt
+Variables            ./Regression_Data.py
+*** Variables ***
+${ssh_server_ip}                15.114.112.61
+${APPLIANCE_IP}                 unknown
+${APPLIANCE_TYPE}               unknown
+${IS_HA_ENABLED}                unknown
+${TBIRD_M1}                     unknown
+${TBIRD_M2}                     unknown
+
+*** Keywords ***
+########################################### OS check ###########################################
+Run SSH CMD2
+    [Documentation]    This Keyword will run ssh commands over jump SSH server -- 15.114.112.61 / root / hpvse1. and return the output to RG
+    ...                  In order to run ssh commands on a CNSA mode appliance, jump server(CentOS7.3) is needed.
+    ...                  On the jump server, sshpass RPM package is required to be installed, this is a tool for ssh command without input username/password manually
+    ...                  If you find jump server is unavailable, contact chongs@hpe.com. Or build SSH server By yourself.
+    ...                  4 arguments are same as Run SSH Cmd. Timeout is 10 seconds.
+    [Arguments]  ${host_ip}  ${username}  ${password}  ${cmd}
+    ${result}=    Run SSH CMD  15.114.112.61  root  hpvse1  sshpass -p ${password} ssh -o ServerAliveInterval=10 ${username}@${host_ip} ${cmd}
+    [Return]  ${result}
+
+SSH Check: Keysotre Type Should Be BKS Not JKS
+    [Documentation]    Keysotre Type Should Be BKS Not JKS
+    [Arguments]  ${MAINTENANCE_IP}
+    ${result0}=    Run SSH CMD2  ${MAINTENANCE_IP}  root  hpvse1  find / -name *.bks
+    Should Not Be Empty  ${result0}
+    ${result1}=    Run SSH CMD2  ${MAINTENANCE_IP}  root  hpvse1  find / -name *.jks
+    Should Be Empty  ${result1}
+    Log To Console  Success 1: Keysotre Type Should Be BKS Not JKS
+
+SSH Check: Random Number Generator Should Use Haveged
+    [Documentation]    Random Number Generator Should Use Haveged
+    [Arguments]  ${MAINTENANCE_IP}
+    ${result}=    Run SSH CMD2  ${MAINTENANCE_IP}  root  hpvse1  ps aux | grep haveged | grep -v grep | awk -F" " '{print $2}'
+    Should Not Be Empty  ${result}
+    Log To Console  Success 2: Haveged PID: ${result}
+
+SSH Check: Kernel Mode Is For Mode:
+    [Documentation]    In LEGACY mode, fips_enalbed=0
+    ...                  In FIPS/CNSAmode, fips_enalbed=1
+    [Arguments]  ${mode}  ${MAINTENANCE_IP}
+    ${result}=    Run SSH CMD2  ${MAINTENANCE_IP}  root  hpvse1  cat /proc/sys/crypto/fips_enabled
+    ${result1}=    Run SSH CMD2  ${MAINTENANCE_IP}  root  hpvse1  sysctl -a | grep fips
+
+    Run Keyword If  "${mode}"=="LEGACY"     Should Be Equal As Numbers  ${result}  0
+    ...             ELSE                    Should Be Equal As Numbers  ${result}  1
+    Run Keyword If  "${mode}"=="LEGACY"     Should Be Equal As Strings  ${result1}  crypto.fips_enabled = 0
+    ...             ELSE                    Should Be Equal As Strings  ${result1}  crypto.fips_enabled = 1
+    Log To Console  Success 3: FIPS Enabled: ${result}
+
+
+SSH Check: OpenSSL Mode Is For Mode:
+    [Documentation]    SSH Check: OpenSSL Mode Is For Mode:
+    [Arguments]  ${mode}  ${MAINTENANCE_IP}
+    ${result}=    Run SSH CMD2  ${MAINTENANCE_IP}  root  hpvse1  openssl md5 /var/log/messages
+
+    Run Keyword If  "${mode}"=="LEGACY"     Should Not Be Empty  ${result}
+    ...             ELSE                    Should Be Empty  ${result}
+    Log To Console  Success 4: MD5 result: ${result}
+
+########################################### Configuration Check ###########################################
+SSH Check: Apache Configuration Is For Mode:
+    [Documentation]    SSH Check: Apache Configuration Is For Mode:
+    [Arguments]  ${mode}  ${MAINTENANCE_IP}
+    ${SSLPROTOCOL}=     Run SSH CMD2  ${MAINTENANCE_IP}  root  hpvse1  cat /etc/httpd/conf.d/crypto/dynamic-ssl.conf | grep SSLProtocol | sed 's/[ \t]*$//g'
+    ${SSLCIPHER}=       Run SSH CMD2  ${MAINTENANCE_IP}  root  hpvse1  cat /etc/httpd/conf.d/crypto/dynamic-ssl.conf | grep SSLCipherSuite | grep -v "#"
+    ${SECURITY_CIPHER}=    Run SSH CMD2  ${MAINTENANCE_IP}  root  hpvse1  /ci/bin/security-standards.sh cipher-suite --mode ${mode} --application APACHE --delimiter , | sed 's/,/:/g'
+    ${EXPECTED_CIPHER}=    Set Variable  SSLCipherSuite ${SECURITY_CIPHER}
+    Run Keyword If  "${mode}"=="LEGACY"     Should Be Equal As Strings  ${SSLPROTOCOL}  SSLProtocol all -SSLv2 -SSLv3
+    Run Keyword If  "${mode}"=="FIPS"       Should Be Equal As Strings  ${SSLPROTOCOL}  SSLProtocol all -SSLv2 -SSLv3 -TLSv1
+    Run Keyword If  "${mode}"=="CNSA"       Should Be Equal As Strings  ${SSLPROTOCOL}  SSLProtocol all -SSLv2 -SSLv3 -TLSv1.1 -TLSv1
+    Should Be Equal As Strings  ${SSLCIPHER}  ${EXPECTED_CIPHER}
+    Log To Console  Success 5: Apache SSLPROTOCOL,SSLCIPHER is correct
+
+##############RabbitMQ Server Configuration##############
+SSH Check: RabbitMQ Server Configuration Is For Mode:
+    [Documentation]    SSH Check: RabbitMQ Server Configuration Is For Mode:
+    [Arguments]  ${mode}  ${MAINTENANCE_IP}
+    ${RABBIT_CONFIG}=    Run SSH CMD2  ${MAINTENANCE_IP}  root  hpvse1  cat /ci/pre-ha-data/messaging/rabbitmq.config | grep "versions" | cut -d'[' -f2 | cut -d']' -f1
+
+    Run Keyword If  "${mode}"=="LEGACY"     Should Be Equal As Strings  ${RABBIT_CONFIG}  'tlsv1.2','tlsv1.1','tlsv1'
+    Run Keyword If  "${mode}"=="FIPS"       Should Be Equal As Strings  ${RABBIT_CONFIG}  'tlsv1.2','tlsv1.1'
+    Run Keyword If  "${mode}"=="CNSA"       Should Be Equal As Strings  ${RABBIT_CONFIG}  'tlsv1.2'
+    Log To Console  Success 6: RABBIT_CONFIG is correct
+
+##############SSH Client Configuration##############
+SSH Check: SSH Client Configuration Is For Mode:
+    [Documentation]    SSH Check: SSH Client Configuration Is For Mode:
+    [Arguments]  ${mode}  ${MAINTENANCE_IP}
+    ${Ciphers}=    Run SSH CMD2  ${MAINTENANCE_IP}  root  hpvse1  cat /etc/ssh/ssh_config | grep Ciphers | grep -v "#"
+    ${MACs}=    Run SSH CMD2  ${MAINTENANCE_IP}  root  hpvse1  cat /etc/ssh/ssh_config | grep MACs | grep -v "#"
+    ${KexAlgorithms}=    Run SSH CMD2  ${MAINTENANCE_IP}  root  hpvse1  cat /etc/ssh/ssh_config | grep KexAlgorithms | grep -v "#"
+    ${HostKeyAlgorithms}=    Run SSH CMD2  ${MAINTENANCE_IP}  root  hpvse1  cat /etc/ssh/ssh_config | grep HostKeyAlgorithms | grep -v "#"
+
+    Run Keyword If  "${mode}"=="LEGACY"    Should Be Equal As Strings  ${Ciphers}  Ciphers aes256-ctr,aes256-cbc,aes192-ctr,aes128-ctr
+    Run Keyword If  "${mode}"=="LEGACY"    Should Be Equal As Strings  ${MACs}  MACs hmac-sha2-512,hmac-sha2-256,hmac-sha1
+    Run Keyword If  "${mode}"=="LEGACY"    Should Be Equal As Strings  ${KexAlgorithms}  KexAlgorithms ecdh-sha2-nistp384,diffie-hellman-group-exchange-sha256,ecdh-sha2-nistp256,ecdh-sha2-nistp521,diffie-hellman-group14-sha1
+    Run Keyword If  "${mode}"=="LEGACY"    Should Be Equal As Strings  ${HostKeyAlgorithms}  HostKeyAlgorithms ssh-rsa,ssh-dss,ecdsa-sha2-nistp384,ecdsa-sha2-nistp256,ecdsa-sha2-nistp521
+
+    Run Keyword If  "${mode}"=="FIPS"    Should Be Equal As Strings  ${Ciphers}  Ciphers aes256-ctr,aes256-cbc,aes192-ctr,aes128-ctr
+    Run Keyword If  "${mode}"=="FIPS"    Should Be Equal As Strings  ${MACs}  MACs hmac-sha2-512,hmac-sha2-256,hmac-sha1
+    Run Keyword If  "${mode}"=="FIPS"    Should Be Equal As Strings  ${KexAlgorithms}   	KexAlgorithms ecdh-sha2-nistp384,diffie-hellman-group-exchange-sha256,ecdh-sha2-nistp256,ecdh-sha2-nistp521,diffie-hellman-group14-sha1
+    Run Keyword If  "${mode}"=="FIPS"    Should Be Equal As Strings  ${HostKeyAlgorithms}  HostKeyAlgorithms ssh-rsa,ecdsa-sha2-nistp384,ecdsa-sha2-nistp256,ecdsa-sha2-nistp521
+
+    Run Keyword If  "${mode}"=="CNSA"    Should Be Equal As Strings  ${Ciphers}  Ciphers aes256-ctr,aes256-cbc
+    Run Keyword If  "${mode}"=="CNSA"    Should Be Equal As Strings  ${MACs}  MACs hmac-sha2-512
+    Run Keyword If  "${mode}"=="CNSA"    Should Be Equal As Strings  ${KexAlgorithms}  KexAlgorithms ecdh-sha2-nistp384,ecdh-sha2-nistp521
+    Run Keyword If  "${mode}"=="CNSA"    Should Be Equal As Strings  ${HostKeyAlgorithms}  HostKeyAlgorithms ssh-rsa,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521
+
+    Log To Console  Success 7: SSH Client Ciphers,MACs,KexAlgorithms,HostKeyAlgorithms is correct
+
+##############SSH Server Configuration##############
+SSH Check: SSH Server Configuration Is For Mode:
+    [Documentation]    SSH Check: SSH Server Configuration Is For Mode:
+    [Arguments]  ${mode}  ${MAINTENANCE_IP}
+    ${Ciphers}=             Run SSH CMD2  ${MAINTENANCE_IP}  root  hpvse1  cat /etc/ssh/sshd_config | grep Ciphers | grep -v "#"
+    ${MACs}=                Run SSH CMD2  ${MAINTENANCE_IP}  root  hpvse1  cat /etc/ssh/sshd_config | grep MACs | grep -v "#"
+    ${KexAlgorithms}=       Run SSH CMD2  ${MAINTENANCE_IP}  root  hpvse1  cat /etc/ssh/sshd_config | grep KexAlgorithms | grep -v "#"
+
+    Run Keyword If  "${mode}"=="LEGACY"     Should Be Equal As Strings  ${Ciphers}  Ciphers aes256-ctr,aes256-cbc,aes192-ctr,aes128-ctr
+    Run Keyword If  "${mode}"=="LEGACY"     Should Be Equal As Strings  ${MACs}  MACs hmac-sha2-512,hmac-sha2-256,hmac-sha1
+    Run Keyword If  "${mode}"=="LEGACY"     Should Be Equal As Strings  ${KexAlgorithms}  KexAlgorithms ecdh-sha2-nistp384,diffie-hellman-group-exchange-sha256,ecdh-sha2-nistp256,ecdh-sha2-nistp521,diffie-hellman-group14-sha1
+
+    Run Keyword If  "${mode}"=="FIPS"       Should Be Equal As Strings  ${Ciphers}  Ciphers aes256-ctr,aes256-cbc,aes192-ctr,aes128-ctr
+    Run Keyword If  "${mode}"=="FIPS"       Should Be Equal As Strings  ${MACs}  MACs hmac-sha2-512,hmac-sha2-256,hmac-sha1
+    Run Keyword If  "${mode}"=="FIPS"       Should Be Equal As Strings  ${KexAlgorithms}  KexAlgorithms ecdh-sha2-nistp384,diffie-hellman-group-exchange-sha256,ecdh-sha2-nistp256,ecdh-sha2-nistp521,diffie-hellman-group14-sha1
+
+    Run Keyword If  "${mode}"=="CNSA"       Should Be Equal As Strings  ${Ciphers}  Ciphers aes256-ctr,aes256-cbc
+    Run Keyword If  "${mode}"=="CNSA"       Should Be Equal As Strings  ${MACs}  MACs hmac-sha2-512
+    Run Keyword If  "${mode}"=="CNSA"       Should Be Equal As Strings  ${KexAlgorithms}  KexAlgorithms ecdh-sha2-nistp384,ecdh-sha2-nistp521
+
+    Log To Console  Success 8: SSH Server Ciphers,MACs,KexAlgorithms is correct
+
+##############CCJ Configuration##############
+SSH Check: CCJ Configuration Is For Mode:
+    [Documentation]    SSH Check: CCJ Configuration Is For Mode:
+    [Arguments]  ${mode}  ${MAINTENANCE_IP}
+    ${CCJ_CERTPATH}=    Run Ssh Cmd2  ${MAINTENANCE_IP}  root  hpvse1  cat /usr/lib/jvm/jre-1.8.0-openjdk.x86_64/lib/security/java.security | grep jdk.certpath | grep -v "#"
+    ${CCJ_TLS_ALGO}=    Run Ssh Cmd2  ${MAINTENANCE_IP}  root  hpvse1  cat /usr/lib/jvm/jre-1.8.0-openjdk.x86_64/lib/security/java.security | grep jdk.tls.disabled | grep -v "#"
+
+    Run Keyword If  "${mode}"=="LEGACY"     Should Be Equal As Strings  ${CCJ_CERTPATH}  jdk.certpath.disabledAlgorithms= MD2, RSA keySize < 1024, EC keySize < 160
+    Run Keyword If  "${mode}"=="LEGACY"     Should Be Equal As Strings  ${CCJ_TLS_ALGO}  jdk.tls.disabledAlgorithms= SSLv3, RC4, DH keySize < 768, EC keySize < 160
+
+    Run Keyword If  "${mode}"=="FIPS"       Should Be Equal As Strings  ${CCJ_CERTPATH}  jdk.certpath.disabledAlgorithms= MD2, MD5, MD5andSHA1, SHA-224, DSA, RSA keySize < 1024, ECDSA < 256, EC keySize < 192
+    Run Keyword If  "${mode}"=="FIPS"       Should Be Equal As Strings  ${CCJ_TLS_ALGO}  jdk.tls.disabledAlgorithms= SSLv3, TLSv1, RC4, MD5withRSA, DSA, DH keySize < 1024, RSA keySize < 1024, ECDH keySize < 256, EC keySize < 192
+
+    Run Keyword If  "${mode}"=="CNSA"       Should Be Equal As Strings  ${CCJ_CERTPATH}  jdk.certpath.disabledAlgorithms= MD2, MD5, MD5andSHA1, SHA-224, DSA, RSA keySize < 1024, ECDSA < 256, EC keySize < 192
+    Run Keyword If  "${mode}"=="CNSA"       Should Be Equal As Strings  ${CCJ_TLS_ALGO}  jdk.tls.disabledAlgorithms= SSLv3, TLSv1, RC4, MD5withRSA, DSA, DH keySize < 1024, RSA keySize < 1024, ECDH keySize < 256, EC keySize < 192
+
+
+    Log To Console  Success 9: CCJ CCJ_CERTPATH,CCJ_TLS_ALGO is correct
+
+##############NSS CURL Configuration##############
+SSH Check: CURL Configuration Is For Mode:
+    [Documentation]    SSH Check: CURL Configuration Is For Mode:
+    ...                  Ignore error if current mode is LEGACY. In LEGACY, 2 extra cipersuites are added beyond security standards.
+    [Arguments]  ${mode}  ${MAINTENANCE_IP}
+    ${SSLPROTOCOL}=     Run SSH CMD2  ${MAINTENANCE_IP}  root  hpvse1  cat /ci/etc/curl-config.cfg | grep TLS
+    ${SSLCIPHER}=       Run SSH CMD2  ${MAINTENANCE_IP}  root  hpvse1  cat /ci/etc/curl-config.cfg | grep "ciphers="
+    ${SECURITY_CIPHER}=    Run SSH CMD2  ${MAINTENANCE_IP}  root  hpvse1  /ci/bin/security-standards.sh cipher-suite --mode ${mode} --application CURL --delimiter ,
+    ${EXPECTED_CIPHER}=    Set Variable  ciphers=${SECURITY_CIPHER}
+
+    Run Keyword If  "${mode}"=="LEGACY"     Should Be Equal As Strings  ${SSLPROTOCOL}  TLSv1.0
+    Run Keyword If  "${mode}"=="FIPS"       Should Be Equal As Strings  ${SSLPROTOCOL}  TLSv1.1
+    Run Keyword If  "${mode}"=="CNSA"       Should Be Equal As Strings  ${SSLPROTOCOL}  TLSv1.2
+
+    Run Keyword If  "${mode}"=="LEGACY"     Run Keyword And Ignore Error    Should Be Equal As Strings  ${SSLCIPHER}  ${EXPECTED_CIPHER}
+    ...              ELSE                   Should Be Equal As Strings  ${SSLCIPHER}  ${EXPECTED_CIPHER}
+
+    Log To Console  Success 10: CURL SSLPROTOCOL,SSLCIPHER is correct
+
+########################################### high leval keywords ###########################################
+SSH Check For Mode:
+    [Documentation]    SSH Check For Mode: LEGACY/FIPS/CNSA
+    [Arguments]  ${mode}  ${MAINTENANCE_IP}
+    Log To Console  ${\n}****** Start To Do SSH Check For Mode:${mode} on Node: ${MAINTENANCE_IP} *******
+    Run Keyword And Continue On Failure    SSH Check: Keysotre Type Should Be BKS Not JKS  ${MAINTENANCE_IP}
+    Run Keyword And Continue On Failure    SSH Check: Random Number Generator Should Use Haveged  ${MAINTENANCE_IP}
+    Run Keyword And Continue On Failure    SSH Check: Kernel Mode Is For Mode:  ${mode}  ${MAINTENANCE_IP}
+    Run Keyword And Continue On Failure    SSH Check: OpenSSL Mode Is For Mode:  ${mode}  ${MAINTENANCE_IP}
+    Run Keyword And Continue On Failure    SSH Check: Apache Configuration Is For Mode:  ${mode}  ${MAINTENANCE_IP}
+    Run Keyword And Continue On Failure    SSH Check: RabbitMQ Server Configuration Is For Mode:  ${mode}  ${MAINTENANCE_IP}
+    Run Keyword And Continue On Failure    SSH Check: SSH Client Configuration Is For Mode:  ${mode}  ${MAINTENANCE_IP}
+    Run Keyword And Continue On Failure    SSH Check: SSH Server Configuration Is For Mode:  ${mode}  ${MAINTENANCE_IP}
+    Run Keyword And Continue On Failure    SSH Check: CCJ Configuration Is For Mode:  ${mode}  ${MAINTENANCE_IP}
+    Run Keyword And Continue On Failure    SSH Check: CURL Configuration Is For Mode:  ${mode}  ${MAINTENANCE_IP}
+
+Synergy And VM SSH Check For Mode:
+    [Documentation]    Extend for both TBIRD and VM appliance
+    [Arguments]  ${mode}
+    Run Keyword If  "${IS_HA_ENABLED}"=="${True}"    SSH Check For Mode:  ${mode}  ${TBIRD_M1}
+    Run Keyword If  "${IS_HA_ENABLED}"=="${True}"    SSH Check For Mode:  ${mode}  ${TBIRD_M2}
+    Run Keyword If  "${IS_HA_ENABLED}"=="${False}"   SSH Check For Mode:  ${mode}  ${APPLIANCE_IP}
+    Log To Console  ****** Synergy And VM SSH Check END ******${\n}
+

@@ -1,0 +1,248 @@
+***Settings ***
+Documentation		Allow Network Set to be associated with an uplink set
+
+Resource		../../../../../resources/api/fusion_api_resource.txt
+Resource		../FVT/fvt-keywords.txt
+Resource		../FVT/Resources/fvt_resource.txt
+	
+Library			FusionLibrary
+Library			../FVT/fvt_api.py
+
+Suite Setup		Login User
+
+*** Keywords ***
+Login User
+    [Documentation]     Login Administrator To OneView
+    Set Log Level    Trace
+    Fusion Api Login Appliance    ${appliance_ip}    ${admin_credentials}
+	Set Suite Variable	${LI}	${les['name']}-${lig['name']}
+	[Return]
+
+Verify Network In Network Sets 
+    [Documentation]     Verify Network Exists In Network Set
+    [Arguments]    ${network}    ${networkset}
+	${network} =	FVT Api Get Ethernet Network By Name	${network}
+	${Network Set} =	FVT Api Get Network Set By Name	${networkset}
+	List Should Contain Value	${networkset['networkUris']}	${network['uri']}
+	[Return]
+
+***Test Cases***	
+Add User Network Administrator	
+	[Documentation]	Creating User Network Administrator
+	#Pass Execution	\Skip Add User Network Administrator	
+	${resp}    Fusion Api Add User      body=${user}
+	Run Keyword If	'${resp['status_code']}' != '200'	Fail	"Create network administrator user failed"
+	Log	User network administrator created successfully
+
+Create Bulk Networks
+	[Documentation]	Creating Bulk Networks
+	#Pass Execution	\n Skip Creating Bulk Networks
+	Set To Dictionary	${bulk_networks}	vlanIdRange	401-501
+	${task} =	Fusion Api Create Ethernet Bulk Networks	${bulk_networks}
+	Run Keyword If	${task['status_code']} != 202	Fail	"Creating bulk networks failed"
+	${task} =	Wait For Task	${task}	timeout=5m	interval=1s	
+	Log	Bulk networks created successully    console=True
+
+Create Network Sets
+	[Documentation]	Creating Network Sets
+	#Pass Execution	\n Skip Creating Network Sets
+	Set To Dictionary	${ns_dto}	networkSetType	Regular
+	${start} =	Set Variable	0
+	${end} =	Set Variable	10
+	:FOR	${i}	IN RANGE	1	6
+	\	Set To Dictionary	${ns_dto}	name	RNS_${i}
+	\	${list} =	Get Slice From List	${networks_list}	${start}	${end}	
+	\	Set To Dictionary	${ns_dto}	networkUris	${list}
+	\	Create Network Set	${ns_dto}	timeout=5m	interval=1s
+	\	${resp} =	Fvt Api Get Network Set By Name	RNS_${i}
+	\	Run keyword if	$resp == None	Fail	"Creating Network Set ${ns_dto['name']} failed"
+	\	${start} =	Evaluate	${start} + 10
+	\	${end} =	Evaluate	${end} + 10
+	Log	Network Sets created successully    console=True
+
+Create Logical Enclosure
+	[Documentation]	Creating Logical Enclosure
+	#Pass Execution	\n Skip Creating Logical Enclosure
+	Add Logical Interconnect Group	${lig}	timeout=10m	interval=1s
+	FVT Add Enclosure Group		${enc_group}
+	Add Logical Enclosure	${les}	timeout=20m	interval=5s
+	Sleep	10s
+	${resp}	Fvt Api Get Logical Enclosure By Name	${les['name']}
+	Run keyword if	$resp == None	Fail	"Logical enclosure ${les['name']} does not exist"
+	Should Be Equal As Strings	${resp['status']}	OK
+	Should Be Equal As Strings	${resp['state']}	Consistent
+	${resp}	Fvt Api Get Logical Interconnect BY Name	${LI}
+	Should Be Equal As Strings	${resp['consistencyStatus']}	CONSISTENT
+	FVT Verify Interconnects In LI	${LI}
+	Log	Logical enclosure created success	console=True   
+
+Add Uplink Set To Logical Interconnect
+	[Documentation]	Adding Uplink Set To Logical Interconnect
+	#Pass Execution	\n Skip Adding Uplink Set To Logical Interconnect
+	Set To Dictionary	${add_uplinkset}	logicalInterconnectUri	${LI}
+	${task} =	Add Uplink Set	${add_uplinkset}	timeout=3m	interval=1s
+	${uplinkset} =	Get Uplink Set By Name	${LI}	${add_uplinkset['name']}
+	Run Keyword If	$uplinkset == None	Fail	"Uplink set ${add_uplinkset['name']} does not exist"
+	${networkset} =	Fvt Api Get Network Set By Name	${add_uplinkset['networkSetUris'][0]}
+	List Should Contain Sub List	${uplinkset['networkUris']}	${networkset['networkUris']}
+	List Should Contain Value	${uplinkset['networkSetUris']}	${networkset['uri']}
+	sleep	2m
+	FVT Verify Interconnects In LI	${LI}
+	Log	Uplink set added to logical interconnect successfully	console=True
+	
+Add Network Set To Uplink Set
+	[Documentation]	Adding Network Set To Uplink Set
+ 	#Pass Execution	\n Skip Adding Network Set To Uplink Set
+	Fusion Api Login Appliance    ${appliance_ip}    ${network_admin}
+	${uplinkset} =	Get Uplink Set By Name	${LI}	${add_uplinkset['name']}
+	Run Keyword If	$uplinkset == None	Fail	"Uplink set ${add_uplinkset['name']} does not exist"
+	${networkset} =	Fvt Api Get Network Set By Name	RNS_2
+	${networkUriList} =	Combine Lists	${uplinkset['networkUris']}	${networkset['networkUris']}
+	Set To Dictionary	${uplinkset}	networkUris	${networkUriList}
+	Append To List	${uplinkset['networkSetUris']}	${networkset['uri']}
+	${task} =	Fusion Api Edit Uplink Set	uri=${uplinkset['uri']}	body=${uplinkset}  
+	Run keyword If	${task['status_code']} != 202	Fail	"Editing Uplink Set ${add_uplinkset['name']} Failed"
+	Wait For Task	${task}	timeout=5m	interval=1s
+	${uplinkset} =	Get Uplink Set By Name	${LI}	${add_uplinkset['name']}
+	List Should Contain Sub List	${uplinkset['networkUris']}	${networkset['networkUris']}
+	List Should Contain Value	${uplinkset['networkSetUris']}	${networkset['uri']}
+	sleep	2m
+	FVT Verify Interconnects In LI	${LI}
+	Log    Added network set to uplink set successfully	console=True
+	 
+Remove Network Set From Uplink Set
+	[Documentation]	Removing Network Set From Uplink Set - Member Networks Should Be Removed From Uplink Set
+	#Pass Execution	\n Skip Removing Network Set From Uplink Set - Member Networks Should Be Removed From Uplink Set
+	${uplinkset} =	Get Uplink Set By Name	${LI}	${add_uplinkset['name']}
+	Run Keyword If	$uplinkset == None	Fail	"Uplink set ${add_uplinkset['name']} does not exist"
+	${networkset} =	Fvt Api Get Network Set By Name	RNS_2
+	Remove Values From List	${uplinkset['networkSetUris']}	${networkset['uri']}
+	${task} =	Fusion Api Edit Uplink Set	uri=${uplinkset['uri']}	body=${uplinkset}  
+	Run keyword If	${task['status_code']} != 202	Fail	"Editing Uplink Set ${uplink_set['name']} Failed"
+	Wait For Task	${task}	timeout=5m	interval=1s
+	${uplinkset} =	Get Uplink Set By Name	${LI}	${uplink_set['name']}
+	List Should Not Contain Value	${uplinkset['networkSetUris']}	${networkset['uri']}
+	sleep	2m
+	FVT Verify Interconnects In LI	${LI}
+	Log	Network set removed from uplink set successfully	console=True
+		
+Add Network Set Containing Internal Networks To Uplink Set
+	[Documentation]	Adding Network Set Containing Internal Networks To Uplink Set
+	#Pass Execution	\n Skip Adding Network Set Containing Internal Networks To Uplink Set
+	${uplinkset} =	Get Uplink Set By Name	${LI}	${add_uplinkset['name']}
+	Run Keyword If	$uplinkset == None	Fail	"Uplink set ${add_uplinkset['name']} does not exist"
+	${networkset} =	Fvt Api Get Network Set By Name	RNS_3
+	${networkUriList} =	Combine Lists	${uplinkset['networkUris']}	${networkset['networkUris']}
+	Set To Dictionary	${uplinkset}	networkUris	${networkUriList}
+	Append To List	${uplinkset['networkSetUris']}	${networkset['uri']}
+	${task} =	Fusion Api Edit Uplink Set	uri=${uplinkset['uri']}	body=${uplinkset}  
+	Run keyword If	${task['status_code']} != 202	Fail	"Editing Uplink Set ${add_uplinkset['name']} Failed"
+	Wait For Task	${task}	timeout=5m	interval=1s
+	${uplinkset} =	Get Uplink Set By Name	${LI}	${add_uplinkset['name']}
+	List Should Contain Sub List	${uplinkset['networkUris']}	${networkset['networkUris']}
+	List Should Contain Value	${uplinkset['networkSetUris']}	${networkset['uri']}
+	${network} =	Fvt Api Get Ethernet Network By Name	net_430
+	${resp}	Fvt Api Get Logical Interconnect BY Name	${LI}
+	List Should Not Contain Value	${resp['internalNetworkUris']}	${network['uri']}
+	sleep	2m
+	FVT Verify Interconnects In LI	${LI}
+	Log    Network set added to uplink set successfully	console=True
+
+Remove Network From Network Set 
+	[Documentation]	Removing Network From Network Set And Verify Network Is Removed From Uplink Set
+	#Pass Execution	\n Skip Removing Network From Network Set And Verify Network Is Removed From Uplink Set
+	${networkset} =	Fvt Api Get Network Set By Name	RNS_1
+	${network} =	Fvt Api Get Ethernet Network By Name	net_410
+	Remove Values From List	${networkset['networkUris']}	${network['uri']}
+	${task} =	Fusion Api Edit Network Set	uri=${networkset['uri']}	body=${networkset}  
+	Run keyword If	${task['status_code']} != 202	Fail	"Editing Network Set ${networkset['name']} Failed"
+	Wait For Task	${task}	timeout=5m	interval=1s
+	${uplinkset} =	Get Uplink Set By Name	${LI}	${add_uplinkset['name']}
+	List Should Not Contain Value	${uplinkset['networkUris']}	${network['uri']}
+	sleep	2m
+	FVT Verify Interconnects In LI	${LI}
+	Log	Network removed from network set and uplink set successfully	console=True
+
+Delete Network Set Associate With Uplink Set Is Not Allowed
+	[Documentation]	Deleting Network Set Associate With A Uplink Set Is Not Allowed
+	#Pass Execution	\n Skip Deleting Network Set Associate With A Uplink Set Is Not Allowed
+	${Network Set} =	Fvt Api Get Network Set By Name	RNS_1
+	${task} =	Fusion Api Delete Network Set	uri=${networkset['uri']}
+	Should Be Equal As Strings	${task['errorCode']}	CRM_NETWORKSET_UPLINKSET_ASSOCIATION_LIG_LI
+	Log	Unable to delete network set associate with uplink set	console=True
+
+Add Same Network Set To Multiple Uplink Sets Is Not Allowed
+	[Documentation]	Adding Same Network Set To Multiple Uplink Set Is Not Allowed
+	#Pass Execution	\n Skip Adding Same Network Set To Multiple Uplink Set Is Not Allowed
+	${uplinkset} =	Get Uplink Set By Name	${LI}	${uplink_set_1['name']}
+	Run Keyword If	$uplinkset == None	Fail	"Uplink set ${uplink_set_1['name']} does not exist"
+	${networkset} =	Fvt Api Get Network Set By Name	${add_uplinkset['networkSetUris'][0]}
+	${networkUriList} =	Combine Lists	${uplinkset['networkUris']}	${networkset['networkUris']}
+	Set To Dictionary	${uplinkset}	networkUris	${networkUriList}
+	Append To List	${uplinkset['networkSetUris']}	${networkset['uri']}
+	${task} =	Fusion Api Edit Uplink Set	uri=${uplinkset['uri']}	body=${uplinkset}  
+	Should Be Equal As Strings	${task['errorCode']}	CRM_NETWORK_ALREADY_ASSIGNED
+	Log	Unable to add same network set to multiple uplink sets	console=True
+	
+Add Uplink Set Contains Duplicate Networks From Multiple Sources Is Not Allowed
+	[Documentation]	Adding Uplink Set With Duplicate Networks Is Allowed
+	#Pass Execution	\n Skip Adding Uplink Set With Duplicate Networks Is Allowed
+	Set To Dictionary	${uplink_set_duplicate_networks}	logicalInterconnectUri	${LI}
+	${task} =	Add Uplink Set	${uplink_set_duplicate_networks}
+	Should Be Equal As Strings	${task['errorCode']}	CRM_NETWORK_ALREADY_ASSIGNED
+	Log	Unable to add uplink set with duplicate networks	console=True
+	
+Add Non Existent Network Set To Uplink Set Is Not Allowed
+	[Documentation]	Adding Non Existent Network Set To Uplink Set Is Allowed
+	#Pass Execution	\n Skip Adding Non Existent Network Set To Uplink Set Is Allowed
+	${uplinkset} =	Get Uplink Set By Name	${LI}	${uplink_set_1['name']}
+	Run Keyword If	$uplinkset == None	Fail	"Uplink set ${uplink_set_1['name']} does not exist"
+	Append To List	${uplinkset['networkSetUris']}	/rest/network-sets/non-existent-network-set
+	${task} =	Fusion Api Edit Uplink Set	uri=${uplinkset['uri']}	body=${uplinkset}  
+	Should Be Equal As Strings	${task['errorCode']}	CRM_ID_NOT_UUID
+	Log	Unable to add non existent network set to uplink set 	console=True
+	
+Add Network Set Contains Duplicate Netowrks To Uplink Set Is Not Allowed
+	[Documentation]	Adding Network Set Contains Netowrk Already Exists In Uplink Set Is Not Allowed
+	#Pass Execution	\n Skip Adding Network Set Contains Netowrk Already Exists In Uplink Set Is Not Allowed
+	Set To Dictionary	${ns_dto}	networkSetType	Regular
+	Set To Dictionary	${ns_dto}	name	RNS_Duplicate_Network
+	${list} =	Create List	net_401	
+	Set To Dictionary	${ns_dto}	networkUris	${list}
+	Create Network Set	${ns_dto}	timeout=5m	interval=1s
+	${networkset} =	Fvt Api Get Network Set By Name	${ns_dto['name']}
+	Run keyword if	$networkset == None	Fail	"Creating Network Set ${ns_dto['name']} failed"
+	${uplinkset} =	Get Uplink Set By Name	${LI}	${add_uplinkset['name']}
+	Run Keyword If	$uplinkset == None	Fail	"Uplink set ${add_uplinkset['name']} does not exist"
+	${network} =	Fvt Api Get Ethernet Network By Name	net_401
+	Append To List	${uplinkset['networkUris']}	${network['uri']}
+	Append To List	${uplinkset['networkSetUris']}	${networkset['uri']}
+	${task} =	Fusion Api Edit Uplink Set	uri=${uplinkset['uri']}	body=${uplinkset}  
+	Should Be Equal As Strings	${task['errorCode']}	CRM_NETWORKSET_NETWORKS_IS_DUPLICATED_WITH_ANOTHER_NETWORKSET_USED_IN_LIG
+	Log	Unable to add network set containing duplicate networks to uplink set	console=True
+	
+Add Duplicate Netwrork To Network Set Associated With Uplink Set Is Not Allowed
+	[Documentation]	Adding Network Already Exists In Uplink Set To Network Set Associated With Uplink
+	#Pass Execution	\n Skip Adding Network Already Exists In Uplink Set To Network Set Associated With Uplink Set Is Not Allowed
+	${uplinkset} =	Get Uplink Set By Name	${LI}	${add_uplinkset['name']}
+ 	${networkset} =	Fvt Api Get Network Set By Name	RNS_1
+ 	${networkset1} =	Fvt Api Get Network Set By Name	RNS_3
+	${network} =	Fvt Api Get Ethernet Network By Name	net_430
+	Append To List	${networkset['networkUris']}	${network['uri']}
+	${task} =	Fusion Api Edit Network Set	uri=${networkset['uri']}	body=${networkset}  
+	Should Be Equal As Strings	${task['errorCode']}	CRM_NETWORK_SET_LIG_DUPLICATE_NETWORKS
+	Log	Unable to add duplicate network to network set used in uplink set	console=True 
+	
+Cleanup 
+    [Documentation]	Delete Resources Created
+	#Pass Execution	\n Skip Deleting Resources Created
+	sleep	2m
+    Fusion Api Login Appliance    ${appliance_ip}    ${admin_credentials}
+ 	${resp}	Fusion Api Remove User	uri=/rest/users/${user['userName']}
+	Run Keyword If	'${resp['status_code']}' != '204'	Fail	"Remove network administrator failed"	
+	Remove All LEs	force=True	interval=10
+	Remove All Enclosure Groups
+	Remove All LIGs
+	Remove All Network Sets
+	Remove All Ethernet Networks
+	Log	Clean up completed

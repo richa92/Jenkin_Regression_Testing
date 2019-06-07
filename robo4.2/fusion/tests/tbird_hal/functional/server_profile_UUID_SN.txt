@@ -1,0 +1,111 @@
+*** Settings ***
+Documentation     Runs various operations relating to setting blade UUID & SN
+...    = Usage =
+...    | pybot | -L DEBUG | server_profile_UUID_SN.txt | 
+...    = Variables =
+...    | ENCLOSURE | Required. Dictionary key from variables.py representing the desired enclosure. |
+...    | FUSION_IP | Required only if using DCS. IP address or hostname of the Fusion 2.0 appliance. |
+...    = Preconditions =
+...    No server profiles exist on the machine (this test will remove them in setup & teardown)
+
+Library           Collections
+Library           RoboGalaxyLibrary            # DVTs Robot Framework extensions
+Library           FusionLibrary                # DVTs Robot Framework extensions
+Library           json
+Variables         ../resources/variables.py    ${ENCLOSURE}
+Resource          ../resources/defaults.txt
+Resource          ../resources/fusion_ssh.txt  # DVT fusion API extensions
+Resource          ../resources/fusion_api.txt  # DVT fusion API extensions
+Resource          ../resources/system_info.txt
+Resource          ../resources/em_api.txt
+Force Tags      API    HW
+
+Suite Setup    Run Keywords
+...    Login To Fusion Via REST
+...    Delete Server Profile if exists
+...    Verify Enclosure in Configured State
+...    Select and Verify Server Hardware
+Suite Teardown    Logout Of Fusion Via REST
+
+
+*** Variables ***
+${Bay}             ${None}
+${InitialState}    ${None}
+
+*** Test Cases ***
+Create Server Profile and verify virtual UUID and SN on SH
+    # Create Server Profile using Server Hardware
+    Create Server Profile    ${SP Name}    ${ServerHardwareName}
+
+    ${Response}=     Fusion API Get Server Profiles    param=?filter="name=${SP name}"
+    Should Be Equal as Strings    ${Response['status_code']}    200    msg=Failed to Get Server Hardware.
+
+    ${ServerProfile}=    Get From List    ${Response['members']}    0
+    ${SP uuid}=            Get From Dictionary    ${ServerProfile}    uuid
+    ${SP serialNumber}=    Get From Dictionary    ${ServerProfile}    serialNumber
+
+    # Get Server Hardware Information
+    ${ServerHardware}=    Get Server Hardware    ${ServerHardwareBay}
+    ${SH uuid}=            Get From Dictionary    ${ServerHardware}    uuid
+    ${SH serialNumber}=    Get From Dictionary    ${ServerHardware}    serialNumber
+
+    # Verify Server Hardware uuid and serialNumber has not changed.
+    Should Be Equal As Strings    ${ServerHardware['uuid']}    ${SH uuid}    msg=Server Hardware UUID has changed.
+    Should Be Equal As Strings    ${ServerHardware['serialNumber']}    ${SH serialNumber}    msg=Server Hardware SerialNumber has changed.
+
+    # Verify Server Hardware virtualUuid and virtualSerialNUmber matches Server Profile uuid and serialNumber.
+    Should Be Equal As Strings    ${ServerHardware['virtualUuid']}    ${SP uuid}    msg=Server Hardware virtualUUID is not set to Server Profile uuid.
+    Should Be Equal As Strings    ${ServerHardware['virtualSerialNumber']}    ${SP serialNumber}    msg=Server Hardware virtualSerialNumber is not set to Server Profile serialNumber.
+
+Delete Server Profile and verify original UUID and SN on SH
+    Delete Server Profile    ${SP Name}
+
+    # Verify Server Hardware virtualUuid and virtualSerialNumber is removed
+    ${ServerHardware}=    Get Server Hardware    ${ServerHardwareBay}
+    ${SH uuid}=            Get From Dictionary    ${ServerHardware}    uuid
+    ${SH serialNumber}=    Get From Dictionary    ${ServerHardware}    serialNumber
+    Log    SH ${ServerHardwareBay} virtualUuid is ${ServerHardware['virtualUuid']}    level=DEBUG
+    Should Be Equal As Strings    ${ServerHardware['virtualUuid']}    ${InitialState}    msg=Server Hardware virtualUUID is not null.
+    Log    SH ${ServerHardwareBay} virtualSerialNumber is ${ServerHardware['virtualSerialNumber']}    level=DEBUG
+    Should Be Equal As Strings    ${ServerHardware['virtualSerialNumber']}    ${InitialState}    msg=Server Hardware virtualSerialNumber is not null.
+
+*** Keywords ***
+Select Server Hardware Bay
+    [Arguments]    ${Bay}
+    [Documentation]     Determine which Server Hardware Bay to use when creating Server Profile based on ${Bay} variable.
+    
+    # Use specified bay if not None
+    Return From Keyword If    '${Bay}'!='${None}'    ${Bay}
+
+    # Randomly select bay from available bays
+    ${Available Blades}    ${Empty Bays}=    Find Filled Bays    /rest/v1/BladeBays
+    ${Bay}=    Select Random Element from List    ${Available Blades}
+    Log To Console    Randomly Selected Server Hardware Bay ${Bay}.
+    
+    [Return]    ${Bay}
+
+Select and Verify Server Hardware
+    # Login to the EM and save session
+    Login to Fusion via SSH
+    ${EM_IP}    ${EMSessionID}    EM Api Create Session
+    ${Auth_Header}    Set Variable    "X-Auth-Token":"${EMSessionID}"
+    Set Suite Variable    ${Auth_Header}
+
+    # Get Random Server Hardware Bay if not specified.
+    ${ServerHardwareBay}=    Select Server Hardware Bay    ${Bay}
+    Set Suite Variable    ${ServerHardwareBay}
+
+    # Get Server Hardware Information
+    ${ServerHardware}=    Get Server Hardware    ${ServerHardwareBay}
+    Log    SH ${ServerHardwareBay} virtualUuid is ${ServerHardware['virtualUuid']}    level=DEBUG
+    Should Be Equal As Strings    ${ServerHardware['virtualUuid']}    ${InitialState}    msg=Server Hardware virtualUUID is not null.
+    Log    SH ${ServerHardwareBay} virtualSerialNumber is ${ServerHardware['virtualSerialNumber']}    level=DEBUG
+    Should Be Equal As Strings    ${ServerHardware['virtualSerialNumber']}    ${InitialState}    msg=Server Hardware virtualSerialNumber is not null.
+    Set Suite Variable    ${ServerHardwareName}    ${ServerHardware['name']}
+
+    # Poweroff Server Hardware if powered on.
+    Run Keyword If    "${ServerHardware['powerState']}"=="On"
+    ...    Power Off Server Hardware ${ServerHardware['uuid']}
+
+Delete Server Profile if exists
+    Run Keyword and Ignore Error    Delete Server Profile

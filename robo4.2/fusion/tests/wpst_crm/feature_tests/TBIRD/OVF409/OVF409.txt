@@ -1,0 +1,159 @@
+*** Settings ***
+Documentation       OVF409_API_TC_Verify the additional port counters on Stacking link ports through REST
+Variables       data_variables.py
+Library         data_variables
+Resource        ../F943/resource.txt
+Library         json
+Library         FusionLibrary
+Library         RoboGalaxyLibrary
+Library         Collections
+Library         String
+Library         SSHLibrary
+Library         Telnet
+
+*** Variables ***
+${APPLIANCE_IP}     15.245.131.222
+${host_ip}    172.30.99.47
+${stat}         statistics
+
+*** Test Cases ***
+1. Login to Appliance
+    [Tags]  add   POSITIVE
+    Set Log Level    TRACE
+    Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+    #Initial Cleanup
+    Cleanup
+
+2. Create Network
+    ${enet_resp} =    Fusion Api Create Ethernet Network    body=${ethnets}
+    Run Keyword If  '${enet_resp['status_code']}' != '202'  Fail    \n\nFailed to create ethernet network    ${enet_resp['message']}
+    ...             ELSE    Log to console  \nSuccessfully created the ethernet network
+    ${uri} =    Get From Dictionary    ${enet_resp['associatedResource']}    resourceUri
+    Set Global Variable    ${enet_uri}    ${uri}
+
+3. Creating LiG
+
+    ${body} =   Build LIG body     ${LIGS_TB}
+    ${resp} =   Fusion Api Create LIG   ${body}
+    ${task} =   Wait For Task    ${resp}    400s    2s
+    log to console      response is:${resp}
+    Run Keyword If  '${resp['status_code']}' != '202'   fail    ELSE    Log to Console  \n-LIG  created successfully
+
+4. Create EG
+    Log to console  \n Creating EG
+    ${Resp} =   Add Enclosure Group from variable       ${enc_group}
+    Run Keyword If  '${Resp['status_code']}' != '201'  Fail    ELSE  log to console   \n-created EG successfully
+
+5. Creating LE
+    Log to console  \n Creating LE
+    ${Resp} =   Add Logical Enclosure from variable     ${Logical_Enclosure[0]}
+    Run Keyword If  '${Resp['status_code']}' != '202'  Fail    ELSE  log to console   \n-created LE successfully
+
+6. Create Server Profile
+    Log to console  \n Creating Server Profile
+    Add Server Profiles from variable   ${server_profiles}
+    Power on server     ${server_profiles[0]['serverHardwareUri']}
+    Log to console    Waiting 10 minutes for server to boot...
+    Sleep   10min
+
+7. Get Server Ip & Pinging the external host from the servers
+    ${IP}    Get Server Ip Windows    ${ilo_details}
+    Log to Console    \n${IP}
+
+    Set To Dictionary    ${server_details}    windows_ip   ${IP}
+    Telnet And Ping External Host From Server    ${server_details}    ${host_ip}
+
+8. Verify that the new counters are displayed
+    # Getting Interconnect uri
+    ${stacking_uri}    Create List
+    ${stacking_uris}    Create List
+    ${IC_uris}    Get IC URI    ${ic_uri}
+    Log to Console    \n${IC_uris}
+
+    ${len} =    Get Length  ${stacking_ports}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    ${ic_uri_stacking} =        catenate    ${IC_uris}/${stat}/${stacking_ports[${x}]}
+    \    Append To List    ${stacking_uri}    ${ic_uri_stacking}
+
+    Log to Console    \n${stacking_uri}
+
+    ${len} =    Get Length  ${stacking_ports}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    ${stacking_uri_list}=    convert_unicode_to_string    ${stacking_uri[${x}]}
+    \    Append To List    ${stacking_uris}    ${stacking_uri_list}
+    Log to console    \n${stacking_uris}
+
+    #For Q7 port
+    ${statistics_data_Q7}    Fusion Api Get Interconnect    ${stacking_uris[0]}
+    Log to console    \n${statistics_data_Q7['commonStatistics']}
+    ${port_counters_Q7}    Get Dictionary Keys    ${statistics_data_Q7['commonStatistics']}
+    Log to console    \n${port_counters_Q7}
+
+    ${len} =    Get Length  ${port_counters}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    List Should Contain Value    ${port_counters_Q7}    ${port_counters[${x}]}
+    \    Log to console    \nPort counter '${port_counters[${x}]}' is displayed
+
+    #For Q8 port
+    ${statistics_data_Q8}    Fusion Api Get Interconnect    ${stacking_uris[1]}
+    Log to console    \n${statistics_data_Q8['commonStatistics']}
+    ${port_counters_Q8}    Get Dictionary Keys    ${statistics_data_Q8['commonStatistics']}
+    Log to console    \n${port_counters_Q8}
+
+    ${len} =    Get Length  ${port_counters}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    List Should Contain Value    ${port_counters_Q8}    ${port_counters[${x}]}
+    \    Log to console    \nPort counter '${port_counters[${x}]}' is displayed
+
+9. Final Cleanup
+   Cleanup
+
+***Keywords***
+Get Server Ip Windows
+    [Documentation]    Gets the valid ip of the server.
+    [Arguments]         ${ilo_details}
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=20s
+    ${login}    SSHLibrary.Login               ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Read Until    SAC>
+    Sleep    5sec
+    SSHLibrary.Write    i
+    Sleep    5sec
+    ${stdout}    SSHLibrary.Read
+    Log to Console    \nstdout is ${stdout}
+    ${string}    Convert To String    ${stdout}
+    ${match}   ${ip}    Should Match Regexp    ${string}    Ip=(\\d+.\\d+.\\d+.\\d+)
+    Log to Console    \nip is ${ip}
+    SSHLibrary.Close All Connections
+    [Return]    ${ip}
+
+Telnet And Ping External Host From Server
+    [Documentation]    Pinging the external host ip from server
+    [Arguments]         ${server_details}    ${host_ip}
+    Telnet.Open Connection     ${server_details['windows_ip']}     prompt=>     timeout=20s
+    ${login}    Telnet.Login    ${server_details['username']}    ${server_details['password']}    login_prompt=login:    password_prompt=password:
+    Telnet.Write    ping -t ${host_ip}
+    Sleep    10sec
+    ${out}    Telnet.Read
+    Log to Console    \nout is ${out}
+    Should Contain    ${out}    TTL=
+    Telnet.Close Connection
+    Telnet.Close All Connections
+
+Cleanup
+    [Documentation] Cleans the appliance
+    Log to console  \nCleaning the OV
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+    Power off ALL Servers
+    Remove All Server Profiles
+    Remove All Logical Enclosures
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove ALL Ethernet Networks
+    Remove ALL FC Networks
+    Remove ALL FCoE Networks
+    Remove ALL Network Sets

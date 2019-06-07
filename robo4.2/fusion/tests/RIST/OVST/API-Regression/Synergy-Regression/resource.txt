@@ -1,0 +1,240 @@
+*** Settings ***
+Documentation        Configures an appliance with resources found in supplied data file. Pass in specific tags with pybot -i <tag(s)> to limit processing
+Library                         FusionLibrary
+Library                         RoboGalaxyLibrary
+Library                         OperatingSystem
+Library                         BuiltIn
+Library                         Collections
+Library                         XML
+Library                         String
+Library                         json
+Library                         SSHLibrary
+
+Resource                        ../../../../../Resources/api/fusion_api_resource.txt
+
+Variables                       tbird_data.py
+
+*** Variables ***
+${X-API-VERSION}               600
+${APPLIANCE_IP}                10.93.1.15
+${DATA}                         tbird_data.py
+${VERIFY}                       ${TRUE}
+${SUITE_LOG_LEVEL}              TRACE
+${FUSION_PROMPT}                \#
+${FUSION_NIC}                   bond0
+${FUSION_IP}                    10.93.1.15
+${FUSION_SSH_USERNAME}          root
+${FUSION_SSH_PASSWORD}          hpvse1
+${FUSION_TIMEOUT}               30
+${TASKSTATE}                   Completed
+${SLEEP_TIME}                  600s
+${ERROR_CODE}                   AUTO_ASSIGN_PORT_UNAVAILABLE
+${EFUSE_SLEEP}                 240s
+
+*** Keywords ***
+
+QUAL Suite Setup
+    [Documentation]  Qual Test Suite Setup Steps
+    [Arguments]     ${credentials}
+    Set Log Level   ${SUITE_LOG_LEVEL}
+    ${response}=   Create List
+    ${resp}=   Fusion Api Login Appliance  ${appliance_ip}     ${credentials}
+    ${response}=  Convert to List  ${resp}
+    Run Keyword If   ${response[0]['status_code']} is not 400  Log  Appliance is logged in
+    Run Keyword If   ${response[0]['status_code']} is 400   Fatal Error   Appliance Credentials are not correct
+
+QUAL Suite Teardown
+    [Documentation]  Qual Test Suite Teardown Steps
+    Fusion Api Logout Appliance
+
+Verify TBird Resource
+    [Documentation]  Verify Resource
+    ...              **kwargs are used to add key value pair to the expected DTO
+    ...              Example:
+    ...                Verify Resource  ${expected_dto}
+    ...                Verify Resource  ${expected_dto}  Status=OK
+    ...              Data Required:
+    ...                Expected Resource DTO
+    [Arguments]  ${expected_dto}  &{kwargs}
+
+    ${status}  ${name} =  Run Keyword and Ignore Error  Get From Dictionary  ${expected_dto}  name
+    Return from keyword if    '${status}'=='FAIL'    ${expected_dto} doesn't contain the key $name
+    ${status}  ${type} =  Run Keyword and Ignore Error  Get From Dictionary  ${expected_dto}  type
+    Return from keyword if    '${status}'=='FAIL'    ${expected_dto} doesn't contain the key $type
+    Log  ${\n}Verifying ${type} ${name}    console=True
+    ${new_expected_dto} =  Add Key Value to DTO  ${expected_dto}  &{kwargs}
+    ${dto} =  Get Resource  ${type}:${name}
+    log  the dto is ${dto}
+    log   the expected is ${expected_dto}    console=True
+    ${validate_status} =  Fusion api validate response follow  ${new_expected_dto}  ${dto}  wordy=${False}
+    ${dict} =  create dictionary
+    set to dictionary   ${dict}  status=${validate_status}
+    set to dictionary   ${dict}  name=${name}
+    Return From Keyword    ${dict}
+
+Create Server Profiles with Too Many Connections Should Fail
+    [Documentation]        Server Profile creation should fail for more than eight connections configured
+    ...                    Appropriate error message should be displayed
+    [Arguments]  ${profiles}
+
+    Power off Servers in Profiles  ${profiles}
+    :FOR    ${profile}  IN  @{profiles}
+    \   ${responses}=  Add Server Profile  ${profile}
+    \   ${task} =   Wait For Task    ${responses}    timeout=2000    interval=10
+    \   ${task_state} =  Get From Dictionary  ${task}  taskState
+    \   @{message} =  Get From Dictionary  ${task}  taskErrors
+    \   ${count}=    Get Length  ${message}
+    \   Run Keyword If  ${count} == 0    Fail  msg=FAILED:Profile is created with more than eight connections
+        :FOR    ${mess}  IN  @{message}
+        \   ${errormsg} =  Get From Dictionary  ${mess}  errorCode
+        \   Log  ${errormsg}    console=True
+        \   ${status}=  Run Keyword And Return Status    Should Match Regexp  ${errormsg}  ${ERROR_CODE}
+        \   Run Keyword If  ${status} == True    Log    SUCCESS:Profile creation with too many connections failed as expected    console=True
+        \   ...    ELSE IF  ${status} == False    Fail  msg=FAILED:Proper Error Message is not displayed for profile creation Failure
+
+Base Profile Template Apply Tests
+    [Documentation]        Add profile template and create server profile from templates
+    ...                    Verify and delete server profile template
+    [Arguments]  ${profile_templates}   ${expected_profile_templates}    ${profiles}    ${expected_profiles}
+
+    Log    Add Server Profiles templates    console=True
+    ${responses}=  Add Non Existing Server Profile Templates  ${profile_templates}
+    Run Keyword If  ${responses} is not ${null}     Wait For Task2   ${responses}   timeout=600    interval=5
+    Verify Resources for List  ${expected_profile_templates}
+    Add Verify Delete Server Profile    ${profiles}    ${expected_profiles}
+    Log    Remove Server Profiles Template    console=True
+    ${responses}=    Remove Server Profile Templates from variable    ${profile_templates}
+    Run Keyword If  ${responses} is not ${null}     Wait For Task2   ${responses}   timeout=600    interval=5
+    Run Keyword If   ${responses} is not ${null}   Server Profile Templates Should Not Exist    ${profile_templates}
+
+Edit Verify Server Profile
+    [Documentation]        Edit Server Profiles
+    [Arguments]  ${profiles}
+
+    Power off Servers in Profiles  ${profiles}
+    ${responses}=  Edit Server Profiles from variable  ${profiles}
+    Run Keyword If  ${responses} is not ${null}  Wait For Task2  ${responses}
+    ...  timeout=2000  interval=10
+    Verify Resources for List  ${profiles}
+
+Add Verify Delete Server Profile
+    [Documentation]        Add Verify and Delete profiles
+    [Arguments]  ${profiles}   ${expected_profiles}    ${edit_flag}=False
+
+    Power off Servers in Profiles  ${profiles}
+    ${responses}=  Add Non Existing Server Profiles  ${profiles}
+    Run Keyword If  ${responses} is not ${null}  Wait For Task2  ${responses}
+    ...  timeout=2000  interval=10
+    Run Keyword If  ${responses} is not ${null}  Get Task Tree From Post Response  ${responses}
+    Verify Resources for List  ${expected_profiles}
+    Run Keyword If  ${edit_flag}=='True'    Edit Verify Server Profile    ${profiles}
+    ${responses}=  Remove Server Profiles from variable    ${profiles}    force=${FALSE}
+    Run Keyword If  ${responses} is not ${null}  Wait For Task2  ${responses}
+    ...  timeout=1200  interval=10
+    Run Keyword If  ${responses} is not ${null}  Server Profile Should Not Exist    ${profiles}
+
+Update Data on Enclosure Through Patch Enclosure
+    [Documentation]  Update Data on Enclosure Through Patch Enclosure
+    [Arguments]    ${update_data}=${update_data}
+
+    Log    Updata Data on Enclosure Thru Patch Enclosure    console=True
+    ${enc_name} =  Get From Dictionary  ${update_data}  name
+    Log    EnclosureName:${enc_name}
+    ${uri} =    Get Enclosure URI   ${enc_name}
+    Remove from Dictionary  ${update_data}  name
+    ${expected_message} =    Get From Dictionary     ${update_data}     msg
+    Remove from Dictionary  ${update_data}  msg
+    ${update_data_list} =   Create List
+    Append To List  ${update_data_list}     ${update_data}
+    ${headers} =    Fusion Api Get Headers
+    ${resp} =   Get Enclosure   ${enc_name}
+    ${etag} =   Get From Dictionary     ${resp}     eTag
+    Set to Dictionary   ${headers}  If-Match    ${etag}
+    ${update_resp}=  Fusion Api Patch Enclosure  ${update_data_list}    ${uri}    headers=${headers}
+    set to dictionary   ${update_data}  msg=${expected_message}
+    set to dictionary   ${update_data}  name=${enc_name}
+    [return]    ${update_resp}
+
+Task Status Should Be
+    [Documentation]  Check If Expected TaskStatus exists
+    [Arguments]    ${update_resp}    ${expected_state}=${expected_state}
+
+    ${task} =   Wait For Task    ${update_resp}    timeout=2000    interval=20
+    ${task_state} =  Get From Dictionary  ${task}  taskState
+    Should Match Regexp  ${task_state}  ((?i)Warning|Completed)
+    Should Match Regexp  ${task_state}  ${expected_state}
+    [return]    ${task}
+
+Task Message Should Be
+    [Documentation]  Check If Expected Message exists
+    [Arguments]    ${task}    ${expected_message}=${expected_message}
+    ${actmsg} =  Get From Dictionary  ${task}  name
+    ${status}=  Run Keyword And Return Status    Should Match Regexp  ${actmsg}  ${expected_message}
+    Run Keyword If  ${status} == False    Fail  msg=FAILED:Proper Message is not displayed
+    Log    SUCCESS:"${actmsg}" message is displayed as expected    console=True
+
+Update Data on Enclosure List
+    [Documentation]  Update Data on List of Enclosures thru Patch Enclosure API
+    [Arguments]    ${update_data}
+
+    :FOR    ${data_up}   IN  @{update_data}
+    \    ${resp}=    Update Data on Enclosure Through Patch Enclosure    ${data_up}
+    \    ${expected_message} =    Get From Dictionary     ${data_up}     msg
+    \    ${task}=    Task Status Should Be    ${resp}    expected_state=${taskstate}
+    \    Run Keyword If  ${task} is not ${null}     Task Message Should Be    ${task}    expected_message=${expected_message}
+
+Get BayResource URI
+    [Documentation]  Get URI from Interconnect or Device Bays
+    [Arguments]    ${data_up}    ${respdata}=${respdata}    ${data_uri}=${data_uri}
+
+    ${slash}=    set variable    /
+    ${datavalue} =    Run Keyword If  '${data_uri}' == 'interconnectBays'    set variable    interconnectUri
+                      ...    ELSE IF  '${data_uri}' == 'deviceBays'    set variable    deviceUri
+    ${uri_list} =   Create List
+    ${line} =    Get From Dictionary    ${data_up}    path
+    ${i_line} =    Get Lines Containing String    ${line}    ${data_uri}
+    @{words} =    Split String    ${i_line}    ${slash}
+    ${baydata} =    Get From Dictionary    ${respdata}    @{words}[1]
+    :FOR    ${connect}   IN  @{baydata}
+    \    ${bayvalue} =    Get From Dictionary    ${connect}    bayNumber
+    \    ${uri} =    Run Keyword If   ${bayvalue} == @{words}[2]    Get From Dictionary    ${connect}    ${datavalue}
+    \    Run Keyword If     '${uri}' != 'None'    Append To List  ${uri_list}     ${uri}
+    \    continue for loop if     '${uri}' == 'None'
+    ${count}=   Get Length    ${uri_list}
+    Run Keyword If     '${count}' != '0'    Return From Keyword    @{uri_list}[0]
+
+E-Fuse Actions on Interconnects and Blades in Enclosure
+    [Documentation]  E-Fuse Actions on Interconnects and Blades in Enclosure
+    ...              ex: E-Fuse Actions on Interconnects and Blades in Enclosure   ${efuse_bay3}  bayType=${interconnectBay}
+    [Arguments]    ${update_data}    ${baytype}=${baytype}
+
+    :FOR    ${data_up}   IN  @{update_data}
+    \    ${name} =     Get From Dictionary  ${data_up}  name
+    \    ${respdata} =    Get Enclosure    ${name}
+    \    ${expected_message} =    Get From Dictionary     ${data_up}     msg
+    \    ${resource_name} =    Get BayResource URI    ${data_up}    ${respdata}    ${baytype}
+    \    ${resourcedata}=    Get Resource by URI    ${resource_name}
+    \    ${bay_state}=    Get From Dictionary     ${resourcedata}     state
+    \    ${resp} =    Run Keyword If   '${bay_state}' == 'NoProfileApplied' or '${bay_state}' == 'Configured'    Update Data on Enclosure Through Patch Enclosure    ${data_up}
+    \    ${task}=    Run Keyword If  ${resp} is not ${null}    Task Status Should Be    ${resp}    expected_state=${taskstate}
+    \    Run Keyword If  ${task} is not ${null}     Task Message Should Be    ${task}    expected_message=${expected_message}
+    \    ${removetask_resp}=    Get task by param  param=?filter="'name'='Remove' AND associatedResource.resourceUri='${resource_name}'"&sort=created:descending&count=1
+    \    Run Keyword If  ${removetask_resp} is not ${null}     Wait For Task2   ${removetask_resp}   timeout=1800    interval=20
+    \    ${addtask_resp}=    Get task by param  param=?filter="'name'='Add' AND associatedResource.resourceUri='${resource_name}'"&sort=created:descending&count=1
+    \    Run Keyword If  ${addtask_resp} is not ${null}     Wait For Task2   ${addtask_resp}   timeout=1800    interval=20
+    # Enclosure takes time to restore connectivity after Efuse.Hence used sleep command
+    Sleep  ${SLEEP_TIME}
+
+EFuse Action Should Fail on Active Enclosure
+    [Documentation]  EFuse Action Should Fail on Active Enclosure
+    [Arguments]    ${update_data}
+
+    :FOR    ${data_up}   IN  @{update_data}
+    \    ${name} =     Get From Dictionary  ${data_up}  name
+    \    ${update_resp} =    Update Data on Enclosure Through Patch Enclosure    ${data_up}
+    \    ${expected_message} =    Get From Dictionary     ${data_up}     msg
+    \    ${task} =   Wait For Task    ${update_resp}    timeout=1200    interval=20
+    \    ${task_state} =  Get From Dictionary  ${task}  taskState
+    \    ${actualmsg} =  Get From Dictionary  ${task}  name
+    \    Should Match Regexp  ${task_state}    Error
+    \    Should Match Regexp  ${actualmsg}    ${expected_message}

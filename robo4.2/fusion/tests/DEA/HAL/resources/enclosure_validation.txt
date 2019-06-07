@@ -1,0 +1,155 @@
+*** Settings ***
+Documentation
+...    enclosure_validation.txt - Validate Enclosure information against stored Info
+...
+...    = Usage =
+...    | Resource | ../resources/enclosure_validation.txt |
+...
+...    = Prerequisites =
+...    - Default 'Enclosure' variables have previously been imported. 
+...      Example:
+...       | Variables | ../resources/variables.py | ${ENCLOSURE} |
+...       | Resource  | ../resources/defaults.txt | |
+...    
+...    = Overview =
+
+...    This resource library operates on data returned from the HP OneView REST
+...    API GET https://{appl}/rest/enclosures and Enclosure information stored on file.
+...
+...    Contains keywords to:
+...      - Validate (compare) enclosure information with that stored on disk,
+...      - display current enclosure information and
+...      - store current enclosure information on disk for future comparisons.  
+
+Library      json
+Library      Collections
+Library      OperatingSystem
+Resource     enclosure_info.txt
+
+*** Variables ***
+@{BayTypes}     applianceBays    deviceBays    fanBays    managerBays    powerSupplyBays    interconnectBays
+${File}         /Users/wpstuser/fusion/tests/tbird_hal/data/enclosure_${Enclosure}_info.json
+
+*** Keywords ***
+
+Validate Enclosure Info
+    [Documentation]
+    ...    Read stored enclosure information and compare it to the current 
+    ...    enclosure info.
+    [Arguments]    ${Enclosure}=${Enclosure}
+    
+    # Fetch the current/actual enclosure info and the stored enclosure for comparison.  
+    ${Enclosure_Info}           Get Updated Enclosure Info    ${Enclosure}
+    ${Stored_Enclosure_Info}    __Read Stored Enclosure Info from File    ${Enclosure}
+    
+    # Without stored info for comparison, we can't validate any further
+    Should Not Be Empty    ${Stored_Enclosure_Info}    Cannot validate enclosure information
+
+    # Compare each bay type individually. 
+    :For    ${BayType}     IN    @{BayTypes}
+    \    ${Stored_Bays_Info}     Get From Dictionary    ${Stored_Enclosure_Info}    ${BayType}
+    \    ${Bays_Info}            Get From Dictionary    ${Enclosure_Info}           ${BayType}
+    \
+    \    # Now compare each individual bay slot for this bay type
+    \    __Validate Bay Info    ${BayType}    ${Stored_Bays_Info}    ${Bays_Info}
+    \
+    \    # Remove the devices we've already checked from the dictionary.
+    \    Remove From Dictionary    ${Stored_Enclosure_Info}    ${BayType}
+    \    Remove From Dictionary    ${Enclosure_Info}           ${BayType}
+
+    # Remove fields we don't really care to compare. (These values change regularly).
+    ${Ignore_List}    Create List    modified    created    eTag    presentInputPowerWatts
+    ...                              deviceBayWatts    lowPowerReserveWatts    maxInputPowerWatts
+    ...                              powerAllocatedWatts    powerAvailableWatts    calibratedMaxPower
+    ...                              enclosureGroupUri    logicalEnclosureUri    powerCapacityBoostWatts
+    ...                              powerAllocationWatts
+    Remove From Dictionary    ${Stored_Enclosure_Info}    @{Ignore_List}
+    Remove From Dictionary    ${Enclosure_Info}           @{Ignore_List}
+
+
+
+    # Compare each of the remaining Keys
+    ${Stored_Enclosure_Info_Keys}    Get Dictionary Keys    ${Stored_Enclosure_Info}
+    ${Enclosure_Info_Keys}    Get Dictionary Keys    ${Enclosure_Info}
+    ${Status}    ${msg}    Run Keyword and Continue on Failure
+    ...    Lists Should Be Equal    ${Stored_Enclosure_Info_Keys}    ${Enclosure_Info_Keys}    
+
+    # Compare each of the remaining Values
+    ${Stored_Enclosure_Info_Values}    Get Dictionary Values    ${Stored_Enclosure_Info}
+    ${Enclosure_Info_Values}    Get Dictionary Values    ${Enclosure_Info}
+    ${Status}    ${msg}    Run Keyword and Continue on Failure
+    ...    Lists Should Be Equal    ${Stored_Enclosure_Info_Values}    ${Enclosure_Info_Values}
+
+    # Finally, compare the whole dictionary
+    ${Status}    ${msg}    Run Keyword and Continue on Failure
+    ...    Dictionaries Should Be Equal    ${Stored_Enclosure_Info}    ${Enclosure_Info}
+    ...    msg=Enclosure ${Enclosure} information does not match stored data
+    [Return]    ${Status}
+
+
+__Validate Bay Info
+    [Documentation]
+    ...    Compare what's in each bay slot for this bay type
+    ...    Not usually called outside this resource. For Internal use.
+    [Arguments]    ${BayType}    ${Stored_Bays_Info}    ${Bays_Info}
+    
+    # List of elements we don't care to compare
+    ${Ignore_List}    Create List    powerAllocationWatts    deviceUri    interconnectUri
+    ...                              logicalInterconnectUri
+
+    ${Count}    Get Enclosure ${BayType} Count
+    :For    ${BayIndex}   In Range    0    ${Count}
+    \    ${Stored_Bay_Info}    Get From List    ${Stored_Bays_Info}    ${BayIndex}
+    \    ${Bay_Info}           Get From List    ${Bays_Info}           ${BayIndex}
+
+    \    # Remove stuff we don't really care about.
+    \    Remove From Dictionary    ${Stored_Bay_Info}    @{Ignore_List}
+    \    Remove From Dictionary    ${Bay_Info}           @{Ignore_List}
+
+    \    ${Status}    ${msg}    Run Keyword and Continue on Failure
+    \    ...    Dictionaries Should Be Equal    ${Stored_Bay_Info}    ${Bay_Info}
+    \    ...    msg=*WARN* ${BayType} at Index ${BayIndex}
+    [Return]    ${Status}    ${msg}
+
+
+__Read Stored Enclosure Info From File
+    [Documentation]
+    ...    Reads a stored enclosure data file (if it exists), converts it to a dictionary.
+    ...    and returns it. File is of the format ..\\data\\enclosure_${Enclosure}_info.json
+    ...    Not usually called outside this resource. For Internal use.
+    [Arguments]    ${Enclosure}=${Enclosure}
+
+    # Check for existence of Stored Enclosure Info file
+    ${Status}    ${Message}    Run Keyword And Ignore Error    File Should Exist    ${File}
+    Run Keyword If    '${Status}'=='FAIL'
+    ...    Log    Stored Enclosure Information file was not found.\n${Message}    level=WARN
+    Return From Keyword If    '${Status}'=='FAIL'    ${Empty}
+
+    # Read the (foundation of truth) data file
+    ${NicelyFormattedJsonString}=    OperatingSystem.Get File    ${File}
+
+    # Reformat json data into a Root Dictionary
+    ${Stored_Enclosure_Info}    json.loads    ${NicelyFormattedJsonString}
+    [Return]    ${Stored_Enclosure_Info}
+
+
+Save Enclosure Info To File
+    [Documentation]
+    ...    Fetches the current enclosure information, reformats it and save to disk. 
+    [Arguments]    ${Enclosure}=${Enclosure}
+    ${Enclosure_Info}    Get Updated Enclosure Info
+    ${NicelyFormattedJsonString}    json.dumps    ${Enclosure_Info}    indent=${4}    sort_keys=${True}
+    OperatingSystem.Create File    ${File}    ${NicelyFormattedJsonString}
+    [Return]    ${File}
+
+
+Display Enclosure Info To Console
+    [Documentation]
+    ...    Fetches the current enclosure information and display it on console. 
+    [Arguments]    ${Enclosure}=${Enclosure}
+
+    ${Enclosure_Info}    Get Updated Enclosure Info    ${Enclosure}
+    ${NicelyFormattedJsonString}    json.dumps    ${Enclosure_Info}    indent=${4}    sort_keys=${True}
+    Log    ${NicelyFormattedJsonString}    console=True
+    
+    

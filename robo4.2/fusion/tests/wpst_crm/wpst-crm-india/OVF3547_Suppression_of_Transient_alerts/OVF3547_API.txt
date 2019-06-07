@@ -1,0 +1,502 @@
+*** Settings ***
+Documentation        Feature Test:  OVF3547
+...                  This set of test cases is to verify the feature OVF3547 Suppression of transient alerts
+...
+Variables              OVF3547_DataVariables.py
+Library                OVF3547_DataVariables
+Resource               ../../../../Resources/api/fusion_api_resource.txt
+
+Library                Collections
+Library                json
+Library                OperatingSystem
+Library                SSHLibrary
+Library                Selenium2Library
+Library                Telnet
+Library                Dialogs
+Library                FusionLibrary
+Library                RoboGalaxyLibrary
+Library                String
+
+
+*** Variables ***
+${APPLIANCE_IP}                 15.115.15.31
+
+*** Test Cases ***
+
+Initial setup
+    [Documentation]    Creating initial setup
+    Set Log Level    TRACE
+    Fusion Api Login Appliance         ${APPLIANCE_IP}        ${admin_credentials}
+
+    Clean OV
+    Clear Alerts
+
+
+    :For    ${Enet}    IN    @{Ethernet}
+    \    ${Enet1_resp}    Fusion Api Create Ethernet Network    ${Enet}
+    \    Run keyword unless    ${Enet1_resp['status_code']}== 202    Fail    "Unable to Create network"
+
+    :For    ${fcnet}    IN    @{fcnets}
+    \    ${fcnet1_resp}    Fusion Api Create FC Network    ${fcnet}
+    \    Run keyword unless    ${Enet1_resp['status_code']}== 202    Fail    "Unable to Create network"
+
+    :For    ${fcoenet}    IN    @{fcoenets}
+    \    ${fcoenet1_resp}    Fusion Api Create FCoE Network    ${fcoenet}
+    \    Run keyword unless    ${Enet1_resp['status_code']}== 202    Fail    "Unable to Create network"
+
+    ${body} =   Build LIG body      ${LIGS_TB['lig_1']}
+
+    ${lig_resp}    Fusion Api Create LIG    ${body}
+    ${task} =   Wait For Task2    ${lig_resp}    timeout=120    interval=3
+    Run Keyword If  '${lig_resp['status_code']}' != '202'   fail    ELSE    Log    LIG created successfully
+
+    ${Enc_Body}     Copy Dictionary     ${enc_group_Tbird}
+    ${eg_resp}    Add Enclosure Group from variable    ${Enc_Body}
+    Run Keyword If  '${eg_resp['status_code']}' != '201'  Fail    ELSE  Log    EG created successfully
+
+    ${LE_Body}     Copy Dictionary     ${Logical_Enclosure[0]}
+    ${le_resp}    Add Logical Enclosure from variable    ${LE_Body}
+
+
+TC1_2_3_4 Create profiles with FC FCoE and Enet connections
+    [Documentation]    Creating profiles with FC FCoE and Enet connection
+    [tags]  create
+
+    set log level   level=TRACE
+
+    Log    Powering off the server ${\n}${server_profiles_redundant_with_fc_conn[0]['serverHardwareUri']}
+    Power off Server    ${server_profiles_redundant_with_fc_conn[0]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${startTime}=   Get OneView Time
+    Clear Alerts
+    Log    Creating server profile for server ${\n}${server_profiles_redundant_with_fc_conn[0]['serverHardwareUri']}
+    ${responses}=   Add Server Profile    ${server_profiles_redundant_with_fc_conn[0]}
+    Wait For Task2    ${responses}    timeout=3000    interval=15
+
+    ${endTime}=   Get OneView Time
+
+    ${resp}=    Get ALL Alerts by Param   param=?filter="created gt ${startTime} OR created lt ${endTime}"
+
+    Alert Should Contains   alerts=${resp}  pattern=Connection deployed on downlink port.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Flex NIC subport.*?
+
+
+TC5_42 Edit profile with fully loaded connection
+    [Documentation]    Editing profile with fully loaded connection
+
+    set log level   level=TRACE
+
+    Log    Powering off the server ${\n}${server_profiles_edit_eight_conn[0]['serverHardwareUri']}
+    Power off Server    ${server_profiles_edit_eight_conn[0]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${startTime}=   Get OneView Time
+    Clear Alerts
+    Log    Editing server profile
+    ${responses}=   Edit Server Profile    ${server_profiles_edit_eight_conn[0]}
+    Wait For Task2    ${responses}    timeout=3000    interval=15
+
+    ${endTime}=   Get OneView Time
+
+    ${resp}=    Get ALL Alerts by Param   param=?filter="created gt ${startTime} OR created lt ${endTime}"
+
+    Alert Should Contains   alerts=${resp}  pattern=Connection deployed on downlink port.*?
+
+    Alert Should Not Contains   alerts=${resp}  pattern=Flex NIC subport.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=An error has occurred on connection \\d+.\\s*Interconnect .*? unlinked.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=An error has occurred on connection \\d+.\\s*Interconnect .*? LAG\\d+.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Connection on downlink port \\d+, subport \\w has failed.\\s*The subport is not an active member of the link aggregation group LAG\\d+.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Connection on downlink port \\d+, subport \\w has failed.\\s*The subport is unlinked.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Administrative state of .*?port d\\d+ changed.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Link Status on .*?port d\\d+ changed .*?
+    Alert Should Not Contains   alerts=${resp}  pattern=FCoE status on.*?changed.*?
+
+
+TC40 SYNERGY_SP_REFRESH_WITH_MIXED_CONNECTION
+    [Documentation]    Refresh server hardware with mixed connection
+    Clear Alerts
+    ${startTime}=   Get OneView Time
+    ${sh_uri}    Get Server Profile URI    ${server_profiles_edit_eight_conn[0]['name']}
+    ${response}    fusion_api_patch_server_profile    uri=${sh_uri}    body=${profile_refresh}
+    Wait For Task2    ${response}    timeout=3000    interval=15
+    ${endTime}=   Get OneView Time
+
+    ${resp}=    Get ALL Alerts by Param   param=?filter="created gt ${startTime} OR created lt ${endTime}"
+
+    Alert Should Not Contains   alerts=${resp}  pattern=Flex NIC subport.*?
+
+    Alert Should Not Contains   alerts=${resp}  pattern=An error has occurred on connection \\d+.\\s*Interconnect .*? LAG\\d+.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Connection on downlink port \\d+, subport \\w has failed.\\s*The subport is not an active member of the link aggregation group LAG\\d+.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Administrative state of .*?port d\\d+ changed.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=An error has occurred on connection \\d+.\\s*Interconnect .*? unlinked.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Connection on downlink port \\d+, subport \\w has failed.\\s*The subport is unlinked.*?
+
+    Alert Should Not Contains   alerts=${resp}  pattern=Link Status on .*?port d\\d+ changed .*?
+    Alert Should Not Contains   alerts=${resp}  pattern=FCoE status on.*?changed.*?
+
+
+TC41 SYNERGY_SP_REAPPLY_WITH_MIXED_CONNECTION
+    [Documentation]    Reapply server profile with mixed connection
+
+    Clear Alerts
+    ${startTime}=   Get OneView Time
+    ${sh_uri}    Get Server Profile URI    ${server_profiles_edit_eight_conn[0]['name']}
+    ${response}    fusion_api_patch_server_profile    uri=${sh_uri}    body=${profile_reapply}
+    Wait For Task2    ${response}    timeout=3000    interval=15
+    ${endTime}=   Get OneView Time
+
+    ${resp}=    Get ALL Alerts by Param   param=?filter="created gt ${startTime} OR created lt ${endTime}"
+
+    Alert Should Not Contains   alerts=${resp}  pattern=Flex NIC subport.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=An error has occurred on connection \\d+.\\s*Interconnect .*? unlinked.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=An error has occurred on connection \\d+.\\s*Interconnect .*? LAG\\d+.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Connection on downlink port \\d+, subport \\w has failed.\\s*The subport is not an active member of the link aggregation group LAG\\d+.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Connection on downlink port \\d+, subport \\w has failed.\\s*The subport is unlinked.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Administrative state of .*?port d\\d+ changed.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Link Status on .*?port d\\d+ changed .*?
+    Alert Should Not Contains   alerts=${resp}  pattern=FCoE status on.*?changed.*?
+    Clear Alerts
+
+
+TC_7 SP_CREATE_MORE_THAN_ONE_SERVER_PROFILE
+    [Documentation]    Creating more than one server profile at a time
+    [tags]  create_more
+
+    set log level   level=TRACE
+
+    Log    Powering off the server ${\n}${server_profiles_multicreate_1[0]['serverHardwareUri']}
+    Power off Server    ${server_profiles_multicreate_1[0]['serverHardwareUri']}    powerControl=PressAndHold
+    Log    Powering off the server ${\n}${server_profiles_multicreate_2[0]['serverHardwareUri']}
+    Power off Server    ${server_profiles_multicreate_2[0]['serverHardwareUri']}    powerControl=PressAndHold
+
+    ${startTime}=   Get OneView Time
+
+    Log    Creating server profile for server ${\n}${server_profiles_multicreate_1[0]['serverHardwareUri']}
+    ${responses1}=   Add Server Profile    ${server_profiles_multicreate_1[0]}
+    Log    Creating server profile for server ${\n}${server_profiles_multicreate_2[0]['serverHardwareUri']}
+    ${responses2}=   Add Server Profile    ${server_profiles_multicreate_2[0]}
+    Wait For Task2    ${responses1}    timeout=3000    interval=15
+    Wait For Task2    ${responses2}    timeout=3000    interval=15
+
+    ${endTime}=   Get OneView Time
+
+    ${resp}=    Get ALL Alerts by Param   param=?filter="created gt ${startTime} AND created lt ${endTime}"
+
+    Alert Should Contains   alerts=${resp}  pattern=Connection deployed on downlink port.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Flex NIC subport.*?
+
+
+
+TC8_9_10_11_20 Power on servers
+    [Documentation]    Powering on servers
+
+    Clear Alerts
+    set log level   level=TRACE
+
+    ${startTime}=   Get OneView Time
+    Power on server   ${server_profiles_multicreate_1[0]['serverHardwareUri']}
+    Sleep   2sec
+    Power on server   ${server_profiles_multicreate_2[0]['serverHardwareUri']}
+    Sleep   5 min
+    ${endTime}=   Get OneView Time
+
+    ${resp}=    Get ALL Alerts by Param   param=?filter="created gt ${startTime} OR created lt ${endTime}"
+
+    Alert Should Not Contains   alerts=${resp}  pattern=Flex NIC subport.*?
+
+    Alert Should Not Contains   alerts=${resp}  pattern=An error has occurred on connection \\d+.\\s*Interconnect .*? LAG\\d+.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Connection on downlink port \\d+, subport \\w has failed.\\s*The subport is not an active member of the link aggregation group LAG\\d+.*?
+
+    Alert Should Not Contains   alerts=${resp}  pattern=Administrative state of .*?port d\\d+ changed.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Link Status on .*?port d\\d+ changed .*?
+    Alert Should Not Contains   alerts=${resp}  pattern=FCoE status on.*?changed.*?
+
+    Alert Should Not Contains   alerts=${resp}  pattern=Connection on downlink port \\d+, subport \\w has failed.\\s*The subport is unlinked.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=An error has occurred on connection \\d+.\\s*Interconnect .*? unlinked.*?
+
+
+TC23_24_25_26_35 Poweroff servers with press and hold option
+    [Documentation]    Powering roff servers with press and hold option
+
+    Clear Alerts
+    set log level   level=TRACE
+
+    ${startTime}=   Get OneView Time
+    Log to console and logfile    Powering off the server ${\n}${server_profiles_edit_eight_conn[0]['serverHardwareUri']}
+    Power off Server    ${server_profiles_edit_eight_conn[0]['serverHardwareUri']}    powerControl=PressAndHold
+
+    Sleep  20sec
+    Log    Powering off the server ${\n}${server_profiles_multicreate_2[0]['serverHardwareUri']}
+    Power off Server    ${server_profiles_multicreate_2[0]['serverHardwareUri']}    powerControl=PressAndHold
+    Sleep  5sec
+    Log    Powering off the server ${\n}${server_profiles_multicreate_1[0]['serverHardwareUri']}
+    Power off Server    ${server_profiles_multicreate_1[0]['serverHardwareUri']}    powerControl=PressAndHold
+    Sleep  20sec
+
+    ${endTime}=   Get OneView Time
+
+    ${resp}=    Get ALL Alerts by Param   param=?filter="created gt ${startTime} OR created lt ${endTime}"
+
+    Alert Should Not Contains   alerts=${resp}  pattern=Flex NIC subport.*?
+
+TC43_34 SYNERGY_SH_RESET_SERVER_WITH_MIXED_CONNECTION
+    [Documentation]    Powering off servers with momentary press and reset server
+    set log level   level=TRACE
+    Clear Alerts
+    ${startTime}=   Get OneView Time
+    Power on server   ${server_profiles_edit_eight_conn[0]['serverHardwareUri']}
+    Sleep   5 min
+    reset server   ${server_profiles_edit_eight_conn[0]['serverHardwareUri']}   powerControl=Reset
+    Sleep   5 min
+    Power off Server    ${server_profiles_edit_eight_conn[0]['serverHardwareUri']}    powerControl=MomentaryPress
+    Sleep  30sec
+
+
+    ${endTime}=   Get OneView Time
+
+    ${resp}=    Get ALL Alerts by Param   param=?filter="created gt ${startTime} OR created lt ${endTime}"
+
+    Alert Should Not Contains   alerts=${resp}  pattern=Flex NIC subport.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=An error has occurred on connection \\d+.\\s*Interconnect .*? unlinked.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=An error has occurred on connection \\d+.\\s*Interconnect .*? LAG\\d+.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Connection on downlink port \\d+, subport \\w has failed.\\s*The subport is not an active member of the link aggregation group LAG\\d+.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Connection on downlink port \\d+, subport \\w has failed.\\s*The subport is unlinked.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Administrative state of .*?port d\\d+ changed.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Link Status on .*?port d\\d+ changed .*?
+    Alert Should Not Contains   alerts=${resp}  pattern=FCoE status on.*?changed.*?
+
+TC14_15_28_29 Disable the downlink ports and power on servers
+    [Documentation]    Disabling the downlink ports and power on servers
+
+    set log level   level=TRACE
+    Clear Alerts
+    ${startTime}=   Get OneView Time
+
+    Power off Server    ${server_profiles_edit_eight_conn[0]['serverHardwareUri']}    powerControl=MomentaryPress
+    Sleep  30sec
+    ##ICM disable port
+    ${l} =  Get Length  ${downlink_port_disable}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Update IC Port   ${downlink_port_disable[${x}]['interconnectName']}    ${downlink_port_disable[${x}]['portName']}      ${downlink_port_disable[${x}]}
+
+    Power on server   ${server_profiles_edit_eight_conn[0]['serverHardwareUri']}
+    Sleep   5 min
+
+    Power off Server    ${server_profiles_edit_eight_conn[0]['serverHardwareUri']}    powerControl=MomentaryPress
+    Sleep  30sec
+
+    ${endTime}=   Get OneView Time
+
+    ${resp}=    Get ALL Alerts by Param   param=?filter="created gt ${startTime} OR created lt ${endTime}"
+
+    Alert Should Not Contains   alerts=${resp}  pattern=Flex NIC subport.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=An error has occurred on connection \\d+.\\s*Interconnect .*? unlinked.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=An error has occurred on connection \\d+.\\s*Interconnect .*? LAG\\d+.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Connection on downlink port \\d+, subport \\w has failed.\\s*The subport is not an active member of the link aggregation group LAG\\d+.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Connection on downlink port \\d+, subport \\w has failed.\\s*The subport is unlinked.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Administrative state of .*?port d\\d+ changed.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Link Status on .*?port d\\d+ changed .*?
+    Alert Should Not Contains   alerts=${resp}  pattern=FCoE status on.*?changed.*?
+
+
+TC16_17_30_31 power off servers and interconnects then power on the servers
+
+    [Documentation]    Disabling the downlink ports and power off servers
+    Clear alerts
+    set log level   level=TRACE
+    ${l} =  Get Length  ${downlink_port_enable}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Update IC Port   ${downlink_port_enable[${x}]['interconnectName']}    ${downlink_port_enable[${x}]['portName']}        ${downlink_port_enable[${x}]}
+    Sleep    30s
+    ${startTime}=   Get OneView Time
+
+    Power off Server    ${server_profiles_edit_eight_conn[0]['serverHardwareUri']}    powerControl=MomentaryPress
+    Sleep  30sec
+
+    Power Off Interconnects from list    ${ICM_list}
+    Wait Until Keyword Succeeds    10min    30s     Verify Interconnects from list    ${ICM_list}    state=Maintenance
+    Power On Interconnects from list    ${ICM_list}
+    Wait Until Keyword Succeeds    10min    30s     Verify Interconnects from list    ${ICM_list}    state=Configured
+    Power on server   ${server_profiles_edit_eight_conn[0]['serverHardwareUri']}
+    Sleep   5 min
+    Power off Server    ${server_profiles_edit_eight_conn[0]['serverHardwareUri']}    powerControl=MomentaryPress
+    Sleep  30sec
+
+    ${endTime}=   Get OneView Time
+
+    ${resp}=    Get ALL Alerts by Param   param=?filter="created gt ${startTime} OR created lt ${endTime}"
+
+    Alert Should Not Contains   alerts=${resp}  pattern=Flex NIC subport.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=An error has occurred on connection \\d+.\\s*Interconnect .*? unlinked.*?
+
+    Alert Should Not Contains   alerts=${resp}  pattern=Connection on downlink port \\d+, subport \\w has failed.\\s*The subport is unlinked.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Administrative state of .*?port d\\d+ changed.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Link Status on .*?port d\\d+ changed .*?
+    Alert Should Not Contains   alerts=${resp}  pattern=FCoE status on.*?changed
+    Alert Should Not Contains   alerts=${resp}  pattern=Connection on downlink port \\d+, subport \\w has failed.\\s*The subport is not an active member of the link aggregation group LAG\\d+.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=An error has occurred on connection \\d+.\\s*Interconnect .*? LAG\\d+.*?
+    Clear alerts
+
+###### Multi LI setup ####
+Multi LI Setup
+    [Documentation]    Creating multi LI setup
+    Wait Until Keyword Succeeds    10min    30s     Verify Interconnects from list    ${ICM_list}    state=Configured
+    Clean OV
+
+
+    :For    ${Enet}    IN    @{Ethernet}
+    \    ${Enet1_resp}    Fusion Api Create Ethernet Network    ${Enet}
+    \    Run keyword unless    ${Enet1_resp['status_code']}== 202    Fail    "Unable to Create network"
+
+    :For    ${fcnet}    IN    @{fcnets}
+    \    ${fcnet1_resp}    Fusion Api Create FC Network    ${fcnet}
+    \    Run keyword unless    ${Enet1_resp['status_code']}== 202    Fail    "Unable to Create network"
+
+    :For    ${fcoenet}    IN    @{fcoenets}
+    \    ${fcoenet1_resp}    Fusion Api Create FCoE Network    ${fcoenet}
+    \    Run keyword unless    ${Enet1_resp['status_code']}== 202    Fail    "Unable to Create network"
+
+    ${body} =   Build LIG body      ${LIG_A_Side['lig_1']}
+
+    ${lig_resp}    Fusion Api Create LIG    ${body}
+    ${task} =   Wait For Task2    ${lig_resp}    timeout=120    interval=3
+    Run Keyword If  '${lig_resp['status_code']}' != '202'   fail    ELSE    Log    LIG created successfully
+
+    ${body} =   Build LIG body      ${LIG_B_Side['lig_2']}
+    ${lig_resp}    Fusion Api Create LIG    ${body}
+    ${task} =   Wait For Task2    ${lig_resp}    timeout=120    interval=3
+    Run Keyword If  '${lig_resp['status_code']}' != '202'   fail    ELSE    Log    LIG created successfully
+
+    ${Enc_Body}     Copy Dictionary     ${enc_group_Tbird_Non_Redundant}
+    ${eg_resp}    Add Enclosure Group from variable    ${Enc_Body}
+    Run Keyword If  '${eg_resp['status_code']}' != '201'  Fail    ELSE  Log    EG created successfully
+    ${LE_Body}     Copy Dictionary     ${Logical_Enclosure[0]}
+    ${resp}    Add Logical Enclosure from variable    ${LE_Body}
+
+
+TC6_12_27 Create server profile with multi mezz mixed connection and power on the server then power off the server using pressandhold once the server is powered on
+    [Documentation]    Creating multimezz mixed connection server profile and power off server
+
+
+    set log level   level=TRACE
+    Wait Until Keyword Succeeds    10min    30s     Verify Interconnects from list    ${ICM_list}    state=Configured
+    Log    Powering off the server ${\n}${server_profiles_edit_eight_conn_multi_mezz_without_lag[0]['serverHardwareUri']}
+    Power off Server    ${server_profiles_edit_eight_conn_multi_mezz_without_lag[0]['serverHardwareUri']}    powerControl=PressAndHold
+    Sleep    30s
+    Clear Alerts
+    ${startTime}=   Get OneView Time
+
+    Log    Creating server profile
+    ${responses}=   Add Server Profile    ${server_profiles_edit_eight_conn_multi_mezz_without_lag[0]}
+    Wait For Task2    ${responses}    timeout=3000    interval=15
+    Power on server   ${server_profiles_edit_eight_conn_multi_mezz_without_lag[0]['serverHardwareUri']}
+    Sleep    3min
+    Power off Server    ${server_profiles_edit_eight_conn_multi_mezz_without_lag[0]['serverHardwareUri']}    powerControl=PressAndHold
+    Sleep    30s
+    ${endTime}=   Get OneView Time
+
+    ${resp}=    Get ALL Alerts by Param   param=?filter="created gt ${startTime} OR created lt ${endTime}"
+
+    Alert Should Contains   alerts=${resp}  pattern=Connection deployed on downlink port.*?
+
+    Alert Should Not Contains   alerts=${resp}  pattern=Flex NIC subport.*?
+
+    Alert Should Not Contains   alerts=${resp}  pattern=An error has occurred on connection \\d+.\\s*Interconnect .*? LAG\\d+.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Connection on downlink port \\d+, subport \\w has failed.\\s*The subport is not an active member of the link aggregation group LAG\\d+.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Connection on downlink port \\d+, subport \\w has failed.\\s*The subport is unlinked.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Administrative state of .*?port d\\d+ changed.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Link Status on .*?port d\\d+ changed .*?
+    Alert Should Not Contains   alerts=${resp}  pattern=FCoE status on.*?changed.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=An error has occurred on connection \\d+.\\s*Interconnect .*? unlinked.*?
+
+
+TC18_19_32_33 Disable the downlink ports and power on the server and power of the server once the server is powered on
+    [Documentation]    Disabling the downlink ports and power on the server and power of the server once the server is powered on
+    set log level   level=TRACE
+    Clear Alerts
+    Wait Until Keyword Succeeds    10min    30s     Verify Interconnects from list    ${ICM_list}    state=Configured
+    ${startTime}=   Get OneView Time
+
+    Power off Server    ${server_profiles_edit_eight_conn_multi_mezz_without_lag[0]['serverHardwareUri']}    powerControl=MomentaryPress
+    Sleep  30sec
+    ##ICM disable port
+    ${l} =  Get Length  ${downlink_port_disable}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Update IC Port   ${downlink_port_disable[${x}]['interconnectName']}    ${downlink_port_disable[${x}]['portName']}      ${downlink_port_disable[${x}]}
+
+    Power on server   ${server_profiles_edit_eight_conn_multi_mezz_without_lag[0]['serverHardwareUri']}
+    Sleep   5 min
+
+    Power off Server    ${server_profiles_edit_eight_conn_multi_mezz_without_lag[0]['serverHardwareUri']}    powerControl=MomentaryPress
+    Sleep  30sec
+
+    ${endTime}=   Get OneView Time
+
+    ${resp}=    Get ALL Alerts by Param   param=?filter="created gt ${startTime} OR created lt ${endTime}"
+
+    Alert Should Not Contains   alerts=${resp}  pattern=Flex NIC subport.*?
+
+    Alert Should Not Contains   alerts=${resp}  pattern=An error has occurred on connection \\d+.\\s*Interconnect .*? LAG\\d+.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Connection on downlink port \\d+, subport \\w has failed.\\s*The subport is not an active member of the link aggregation group LAG\\d+.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Connection on downlink port \\d+, subport \\w has failed.\\s*The subport is unlinked.*?
+
+    Alert Should Not Contains   alerts=${resp}  pattern=Link Status on .*?port d\\d+ changed .*?
+    Alert Should Not Contains   alerts=${resp}  pattern=FCoE status on.*?changed.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=An error has occurred on connection \\d+.\\s*Interconnect .*? unlinked.*?
+    Alert Should Not Contains   alerts=${resp}  pattern=Administrative state of .*?port d\\d+ changed.*?
+    ${l} =  Get Length  ${downlink_port_enable}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Update IC Port   ${downlink_port_enable[${x}]['interconnectName']}    ${downlink_port_enable[${x}]['portName']}        ${downlink_port_enable[${x}]}
+    Sleep    30s
+    Clear alerts
+
+*** Keywords ***
+
+Get OneView Time
+    [Documentation]    Fetching the OneView time
+    ${resp}=    get appliance time and locale
+    ${x}=     Get Variable Value  ${resp['dateTime']}
+    Log      \n\nOneView time : ${x}\n
+    [return]    ${x}
+
+Alert Should Contains
+    [Documentation]    Verifying that the alerts should be available
+    [arguments]  ${alerts}    ${pattern}
+
+    return from keyword if  ${alerts['count']} == 0
+
+    @{alert_desc}=  create list
+    :FOR  ${item}  IN  @{alerts['members']}
+    \   ${desc}=    get variable value  ${item['description']}
+    \   append to list   ${alert_desc}  ${desc}
+
+    Should contain match    ${alert_desc}   regexp=${pattern}
+
+Alert Should Not Contains
+    [Documentation]    Verifying that the alerts should not be available
+    [arguments]  ${alerts}    ${pattern}
+
+    return from keyword if  ${alerts['count']} == 0
+
+    @{alert_desc}=  create list
+    :FOR  ${item}  IN  @{alerts['members']}
+    \   ${desc}=    get variable value  ${item['description']}
+    \   append to list   ${alert_desc}  ${desc}
+    should not contain match    ${alert_desc}   regexp=${pattern}
+
+Clear Alerts
+    [Documentation]    Clear all the alerts
+    ${del_resp} =    Fusion Api Delete Alert
+    ${task}      Wait For Task2     ${del_resp}    120   20
+    #Run keyword unless  ${task['status_code']}== 200    Fail    "Unable to Clear Alert Message"
+
+Clean OV
+    [Documentation]    Cleaning the OV
+    Power off ALL servers
+    Remove All Server Profiles
+    Remove All LEs
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove All Network Sets
+    Remove ALL Ethernet Networks
+    Remove ALL FC Networks
+    Remove ALL FCoE Networks

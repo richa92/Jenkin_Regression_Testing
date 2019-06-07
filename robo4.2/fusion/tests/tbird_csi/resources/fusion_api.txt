@@ -1,0 +1,1064 @@
+*** Settings ***
+Documentation     Fusion Rest API keywords
+...               = Usage =
+...               | Library | ../resources/fusion_api.txt |
+
+Library           Collections
+Library           String
+Library           RoboGalaxyLibrary            # DVTs Robot Framework extensions
+Library           FusionLibrary                # DVTs Robot Framework extensions
+
+*** Variables ***
+
+
+*** Keywords ***
+Login to Fusion Via REST
+    [Documentation]    Connects to the Appliance and creates a session using the Username and Password.
+    [Documentation]    Example:\n| Login to Fusion Via REST | 10.0.12.106 | Administrator | hpvse123 |
+    [Arguments]    ${IP}=${FUSION_IP}    ${USERNAME}=${FUSION_USERNAME}    ${PASSWORD}=${FUSION_PASSWORD}
+    Should Not Be Equal    ${IP}    'unknown'    msg=Please specify a valid Fusion IP address or hostname
+    ${Creds}    Create Dictionary    userName    ${USERNAME}    password    ${PASSWORD}
+    ${Response}    ${SessionID}=    Fusion Api Login Appliance    ${IP}    ${Creds}
+    ${Status}    Get From Dictionary    ${Response}    status_code
+    Return From Keyword If    '${Status}' == '200'    ${Response}    ${SessionID}
+    ${errorCode}    Get From Dictionary    ${Response}    errorCode
+    ${message}      Get From Dictionary    ${Response}    message
+    Fail    msg=Invalid response returned ${Status} ${errorCode} ${message}
+
+Logout of Fusion Via REST
+    [Documentation]    Terminates a session with the REST API.
+    [Documentation]    Example:\n| Logout Of Fusion Via REST |
+    Fusion Api Logout Appliance
+
+Set Fusion Version Metadata
+    [Documentation]    Get the version ident string from Fusion
+    [Arguments]    ${IP}    ${USERNAME}    ${PASSWORD}
+    Login to Fusion via REST    ${IP}    ${USERNAME}    ${PASSWORD}
+    ${Response}=    Fusion Api Get Appliance Version
+    Logout of Fusion Via REST
+    Log    ${Response}
+    ${softwareVersion}=    Get from Dictionary    ${Response}    softwareVersion
+    ${date}=               Get from Dictionary    ${Response}    date
+    Set Suite Metadata     Fusion Version    ${softwareVersion} : ${date}    top=True
+
+Create And Download Support Dump
+    [Documentation]    Create and retrieve a support dump from the current running Fusion image
+    [Arguments]    ${file}=fusion_dump.sdmp
+    Set Log Level     TRACE
+    ${body}=    Create Dictionary                   encrypt=${false}    errorCode=CI
+    ${resp}=    Fusion Api Create Support Dump      ${body}
+    ${uri}=     Get From Dictionary                 ${resp}             uri
+    ${resp}=    Fusion Api Download Support Dump    uri=${uri}          localfile=${file}
+
+Get Id From Uri
+    [Documentation]    Returns the uuid from a REST uri string.
+    [Documentation]    Example:\n| ${Id} | Get Id From Uri | ${Uri} |
+    [Arguments]    ${Uri}
+    ${Id}     Fetch From Right    ${Uri}    /
+    [Return]    ${Id}
+
+Check Response
+    [Arguments]    ${response}
+    Should Not Contain    ${response}    errorCode
+
+# -----------------------------------------------------------------------------
+#		FUSION STATE VERIFICATION
+# -----------------------------------------------------------------------------
+Verify Fusion Factory Setting
+	[Documentation]	 Check for defined Logical Interconnect Groups, Logical Interconnects, Ethernet Networks
+	...				 , and uplink sets.
+	@{ELEMENTS}=	Create List    logical interconnect groups
+	...                            logical interconnects
+	...                            ethernet networks
+	...                            uplink sets
+	${total_count}=		Set Variable  0
+	: For     ${element}     in    @{ELEMENTS}
+    \    ${response}=    run keyword    Fusion Api Get ${element}
+    \    ${count}      Get From Dictionary    ${response}    count
+    \	 Run Keyword If		${count}!=0		Log 	There are defined ${element}.	level=WARN
+    \	 ${total_count}=		Evaluate	${total_count}+${count}
+    ${rc}=		Set Variable If		${total_count}!=0		${False}	${True}
+    [Return]	${rc}
+
+Verify Interconnect created
+	[Documentation]	 Check for defined Logical Interconnect Groups, Logical Interconnects, and Interconnects
+	@{ELEMENTS}=	Create List    logical interconnect groups
+	...							   logical interconnects
+	...                            interconnects
+	${total_count}=		Set Variable	0
+	: For     ${element}     in    @{ELEMENTS}
+    \    ${response}=    run keyword    Fusion Api Get ${element}
+    \	 Log	${response}
+    \    ${count}      Get From Dictionary    ${response}    count
+    \	 Run Keyword If		${count}==0		Log 	There are no defined ${element}.  level=WARN
+    \	 ${total_count}=		Evaluate	${total_count}+${count}
+    ${rc}=		Set Variable If		${total_count}==0		${False}	${True}
+    [Return]	${rc}
+
+CleanUp FusionVM
+    [Documentation]    Remove all entities from a Fusion VM
+    @{Fusion_Entities}    Create List    Uplink Sets
+    ...                                  Ethernet Networks
+    ...                                  Logical Interconnect Groups
+    #...                                 Logical Interconnects
+    #...                                 Network-Sets
+    #...                                 Network Lists
+    #...                                 FC-Networks
+    Login to Fusion via REST
+    : For     ${Entity}     in    @{Fusion_Entities}
+    \    ${Response}=    Run Keyword    Fusion Api Get ${entity}
+    \    ${Members}    Get From Dictionary    ${Response}    members
+    \    ${Count}      Get From Dictionary    ${Response}    count
+    \    Delete Fusion Entity    ${Entity}    ${Count}      ${Members}
+    Logout of Fusion via REST
+
+# -----------------------------------------------------------------------------
+
+Delete Fusion Entity
+    [Documentation]    Removes specified entities (LIG, LI, etc). Helper keyword; See CleanUp FusionVM
+    [Arguments]    ${Entity}    ${Count}    ${Members}
+    : FOR    ${Index}    IN RANGE    0    ${Count}
+    \    ${Member}=    Get From Dictionary    ${Members}    ${Index}
+    \    ${Uri}=       Get From Dictionary     ${Member}    uri
+    \    ${ID}=        Fetch From Right    ${Uri}    /
+    \    ${Result}     Run Keyword    Fusion Api Delete ${Entity} Id     ${ID}
+
+# -----------------------------------------------------------------------------
+#		ETHERNET NETWORKS
+# -----------------------------------------------------------------------------
+Create Ethernet Network
+    [Documentation]    Creates a Network using the supplied Name and vlanId.
+    [Arguments]    ${Name}    ${vlanId}    ${purpose}        ${ethernetNetworkType}
+    ${Payload}=    Create Dictionary    vlanId=${vlanId}
+    ...                                 purpose=${purpose}
+    ...                                 name=${Name}
+    # ...                                 smartLink=${False}
+    # ...                                 privateNetwork=${False}
+    # ...                                 connectionTemplateUri=${None}
+    ...                                 ethernetNetworkType=${ethernetNetworkType}
+    ...                                 type=ethernet-networkV3
+
+    ${Response}=    Fusion API Create Ethernet Network    ${Payload}
+    Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to initiate Create Network.
+
+    # Wait for task to complete
+    ${Response}    Fusion API Wait For Task To Complete    ${Response['uri']}
+
+    # Check for errors
+    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    ${Errors}=    Get Length    ${Errors}
+    Should be True    ${Errors} == 0    msg=Errors encountered while creating Network.
+
+    [Return]    ${Response}
+#Changed here
+
+Create Ethernet Network Bulk
+    [Documentation]    Creates  Networks using the supplied Name and vlanId.
+    [Arguments]    ${Name}    ${vlanId1}    ${vlanId2}     ${Preffered_Speed}     ${Maximum_Speed}
+    ${vlanId_bulk}    Catenate 
+    ...		SEPARATOR=-    ${vlanId1}    ${vlanId2}
+    ${CustomSpeed}=    Create Dictionary    maximumBandwidth=${Maximum_Speed}
+    ...                                     typicalBandwidth=${Preffered_Speed}
+    
+    ${Payload}=        Create Dictionary    vlanIdRange=${vlanId_bulk}
+    ...                                     purpose=General
+    ...                                     namePrefix=${Name}
+    ...                                     bandwidth=${CustomSpeed}
+    ...                                     type=bulk-ethernet-network
+
+    #Log    ${Payload}
+    ${Response}=    Fusion API Create Ethernet Bulk Networks      ${Payload}
+    #Log To Console    ${Response}
+    Run Keyword If    ${Response['status_code']}==400    Log    \nNetwork by name \"${Name}_${vlanId1}\" already exist.\n  level=WARN 
+    ...    ELSE IF    ${Response['status_code']}==202    Log to Console    \nCreated Network \"${Name}_${vlanId1}\"\n
+    
+#################################################################################################################################    
+    #Log To Console    ${Response}
+    #...    ${Response}=    Fusion API Wait For Task To Complete    ${Response['uri']}
+    #...    Log    ${Response}
+    #...   ${Errors}    Set Variable    ${Response["taskErrors"]}   
+    #...   ${Errors}=    Get Length    ${Errors}
+    #...   Should be True    ${Errors} == 0    msg=Errors encountered while creating Network.
+    #...   ELSE    Log To Console    Failed to initiate Create Network \"${Name}_${vlanId1}\"
+    #Should Be Equal as Strings    ${Response['status_code']}    400    msg=Some network names already exist by the name ${Name}_${vlanId1}
+    #Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to initiate Create Network.
+    
+
+    # Wait for task to complete
+    ##${Response}    Fusion API Wait For Task To Complete    ${Response['uri']}
+
+    # Check for errors
+    ##${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    ##${Errors}=    Get Length    ${Errors}
+    ##Should be True    ${Errors} == 0    msg=Errors encountered while creating Network.
+################################################################################################################################
+    [Return]    ${Response}    
+
+#Changed here
+    
+
+Get Ethernet Networks
+    [Documentation]    Get all existing ethernet networks
+    ${Response}=    Fusion API Get Ethernet Networks
+    Should Be Equal as Strings    ${Response['status_code']}    200    msg=Failed to Get Ethernet Networks.
+    [Return]    ${Response['members']}
+
+Delete Ethernet Network
+    [Documentation]    Removes an existing Network by name.
+    [Arguments]    ${Name}
+    Log To Console    Deleting Ethernet Network ${Name}.
+    ${Response}=    Fusion API Delete Ethernet Network    name=${Name}
+    Should Match Regexp    '${Response['status_code']}'    (200|202)     Failed to Delete Ethernet Network ${Name}.
+    [Return]    ${Response}
+#------------------------------------------------------------------------------
+#   SAN manager
+#------------------------------------------------------------------------------
+Create SAN Manager
+    [Documentation]    Creates SAN manager by adding the SAN switch.
+    [Arguments]    ${SAN_Payload}
+    Log    ${SAN_Payload}
+    ${Response}=    Fusion API Add San Manager   ${SAN_Payload}
+    
+    Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to initiate Create Network.
+
+    # Wait for task to complete
+    ${Response}    Fusion API Wait For Task To Complete    ${Response['uri']}
+
+    # Check for errors
+    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    ${Errors}=    Get Length    ${Errors}
+    Should be True    ${Errors} == 0    msg=Errors encountered while creating Network.
+
+    [Return]    ${Response}
+    
+
+# -----------------------------------------------------------------------------
+#		INTERCONNECT-TYPES
+# -----------------------------------------------------------------------------
+Get Interconnect Type Uri List
+    [Documentation]    Return a list of Uris for the given list of named Interconnect-types.
+    [Arguments]    @{ResourceNamesList}
+    ${InterconnectTypeUriList}    Create List
+    : FOR    ${Index}    IN RANGE    0    8
+    \    ${ResourceName}    Get From List    ${ResourceNamesList}    ${Index}
+    \    ${InterconnectTypeUri}    Get Interconnect Type Uri    ${ResourceName}
+    \    Insert into List    ${InterconnectTypeUriList}    ${Index}    ${InterconnectTypeUri}
+    [Return]   @{InterconnectTypeUriList}
+
+Get Interconnect Type Uri
+    [Documentation]    Return the Uri for a Interconnect-type name.
+    [Arguments]    ${ResourceName}
+    Return From Keyword If    '${ResourceName}' == '${None}'    ${None}
+    ${InterconnectTypeCollection}    Fusion Api Get Interconnect Types
+    ${Members}    Get From Dictionary    ${InterconnectTypeCollection}    members
+    ${Count}      Get From Dictionary    ${InterconnectTypeCollection}    count
+    : FOR    ${Index}    IN RANGE    0    ${Count}
+    \    ${InterconnectType}    Get From List    ${Members}    ${Index}
+    \    ${Name}    Get From Dictionary    ${InterconnectType}    name
+    \    ${Uri}     Get From Dictionary    ${InterconnectType}    uri
+    \    Return From Keyword If    '${Name}' == '${ResourceName}'    ${Uri}
+    Fail    msg=No Interconnect type ${ResourceName} was found
+
+# ------------------------------------------------------------------------------------
+#		LOGICAL INTERCONNECTS
+# ------------------------------------------------------------------------------------
+Create Logical Interconnect
+    [Documentation]    Creates a new Logical Interconnect
+    [Arguments]    ${LiName}    ${LigUri}    ${IP}=${SWITCH_IP}    ${USERNAME}=${SWITCH_USERNAME}    ${PASSWORD}=${SWITCH_PASSWORD}
+    Log Many    ${LiName}    ${LIGUri}    ${IP}    ${USERNAME}    ${PASSWORD}
+    ${LogicalInterconnect}    Build Logical Interconnect Payload    ${LiName}    ${LigUri}    ${IP}    ${USERNAME}    ${PASSWORD}
+    ${Response}    Fusion Api Add Logical Interconnects    ${LogicalInterconnect}
+    ${Status}      Get From Dictionary    ${Response}    status
+    Return From Keyword If    '${Status}' == '200'    ${Response}
+    ${errorCode}    Get From Dictionary    ${Response}    errorCode
+    ${message}      Get From Dictionary    ${Response}    message
+    Fail    msg=Invalid response returned ${Status} ${errorCode} ${message}
+    [Return]    ${Response}
+
+Build Logical Interconnect Payload
+    [Documentation]    Returns a LogicalInterconnect payload (for subsequent use in creating a Logical Interconnect)
+    [Arguments]    ${LiName}    ${LIGUri}    ${IP}=${SWITCH_IP}    ${USERNAME}=${SWITCH_USERNAME}    ${PASSWORD}=${SWITCH_PASSWORD}
+    ${entry0}    Create Dictionary    value=${IP}          type=Ip
+    ${entry1}    Create Dictionary    value=${USERNAME}    type=UserId
+    ${entry2}    Create Dictionary    value=${PASSWORD}    type=Password
+    ${locationList}    Create List    ${entry0}    ${entry1}    ${entry2}
+    ${locationEntries}    Create Dictionary    locationEntries=${locationList}
+    ${location}    Create Dictionary    location=${locationEntries}
+    ...                                 interconnectUri=${null}
+    ...                                 permittedInterconnectTypeUri=${null}
+    ...                                 logicalDownlinkUri=${null}
+    ${interconnectMapList}    Create List    ${location}
+    ${interconnectMapEntries}    Create Dictionary    interconnectMapEntries=${InterconnectMapList}
+    ${LogicalInterconnect}    Create Dictionary    type=logical-interconnect
+    ...                                            enclosureUris=${null}
+	...                                            telemetryConfiguration=${null}
+	...                                            snmpConfiguration=${null}
+	...                                            portMonitor=${null}
+	...                                            consistencyStatus=${null}
+	...                                            ethernetSettings=${null}
+	...                                            stackingHealth=${null}
+    ...                                            logicalInterconnectGroupUri=${LIGUri}
+    ...                                            interconnectMap=${interconnectMapEntries}
+    ...                                            interconnects=${null}
+	...                                            fusionDomainUri=${null}
+    ...                                            name=${LiName}
+	...                                            state=${null}
+	...                                            description=${null}
+	...                                            status=${null}
+	...                                            uri=${null}
+    ...                                            category=logical-interconnect
+	...                                            eTag=${null}
+	...                                            created=${null}
+	...                                            modified=${null}
+    Log    ${LogicalInterconnect}
+    [Return]    ${LogicalInterconnect}
+
+Get Logical Interconnect
+    [Documentation]    Return a Logical Interconnect by Name
+    [Arguments]    ${LiName}
+    ${LogicalInterconnectCollection}    Fusion Api Get Logical Interconnects
+    ${Members}    Get From Dictionary    ${LogicalInterconnectCollection}    members
+    ${Count}      Get From Dictionary    ${LogicalInterconnectCollection}    count
+    : FOR    ${Index}    IN RANGE    0    ${Count}
+    \    ${LogicalInterconnect}    Get From List    ${Members}    ${Index}
+    \    ${Name}    Get From Dictionary    ${LogicalInterconnect}    name
+    \    Return From Keyword If    '${Name}' == '${LiName}'    ${LogicalInterconnect}
+    Fail    msg=No Logical Interconnect ${LiName} was found
+
+Get Logical Interconnect Uri
+    [Documentation]    Return the Uri for a Logical Interconnect by Name.
+    [Arguments]    ${LiName}
+    ${Li}    Get Logical Interconnect    ${LiName}
+    ${Uri}    Get From Dictionary    ${Li}    uri
+    [Return]    ${Uri}
+
+Delete Logical Interconnect
+    [Documentation]    Remove the named Logical Interconnect
+    [Arguments]    ${LiName}
+    ${Uri}    Get Logical Interconnect Uri    ${LiName}
+    ${Id}     Get Id From Uri    ${Uri}
+    # Delete the Li using the Id and check the result
+    ${Response}    Fusion Api Delete Logical Interconnects Id    ${Id}
+    ${Status}      Get From Dictionary    ${Response}    status
+    Should Be Equal As Integers    ${Status}    200    msg=Couldn't delete ${LiName}, status : ${Status}
+    [Return]    ${Response}
+
+# -----------------------------------------------------------------------------
+#       LOGICAL ENCLOSURES
+# -----------------------------------------------------------------------------
+###########################################################################not using###############################################################
+Create Logical Enclosure
+    [Arguments]     ${LE NAME}=${ENC Name}   ${EG Name}=${ENC_GROUP_NAME}
+    [Documentation]    Updated for fusion API v200
+
+    # Get enclosureGroupUri
+    ${Response}=            Fusion Api Get Enclosure Groups     # param=?filter="name=${EG NAME}"
+    ${members}=             Get From Dictionary                 ${Response}     members
+    ${member}=              Get From List                       ${members}      0
+    ${enclosureGroupUri}=   Get From Dictionary                 ${member}       uri
+
+    # Get enclosureUri
+    ${Response}=        Fusion Api Get Enclosures
+    ${members}=         Get From Dictionary     ${Response}     members
+    ${member}=          Get From List           ${members}      0
+    ${enclosureUri}=    Get From Dictionary     ${member}       uri
+    ${enclosureUris}=   Create List             ${enclosureUri}
+
+    # Build Payload
+    ${LE Payload}=      Fusion API Create Logical Enclosure Payload     name=${LE Name}
+    ...                 enclosureGroupUri=${enclosureGroupUri}
+    ...                 enclosureUris=${enclosureUris}
+
+    ${NicelyFormattedJsonString}    dumps   ${LE Payload}      indent=${4}     sort_keys=${True}
+    Log     ${NicelyFormattedJsonString}
+
+    # Create Logical Enclosure
+    ${Response}=        Fusion Api Create Logical Enclosure         body=${LE Payload}
+    Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to initiate Create Logical Enclosure.
+
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number    120
+    ${Retries}           Convert To Integer    40
+    ${Response}=    Fusion API Wait For Task To Complete    ${Response['uri']}    sleep_time=${Retry Interval}    retries=${Retries}
+
+    # Check for errors
+    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    ${Errors}=    Get Length    ${Errors}
+    Should be True    ${Errors} == 0    msg=Errors encountered while creating Logical Enclosure.
+
+    [Return]    ${Response}
+########################################################not using##################################################################################
+
+Create LE
+    [Arguments]    ${LE_name}
+    [Documentation]    Updated for fusion API v300 and multi enclosure
+    ${enclosureUri}    Create List
+
+    
+    # Get enclosureGroupUri
+    ${Response}=            Fusion Api Get Enclosure Groups     
+    ${members}=             Get From Dictionary                 ${Response}     members
+    ${member}=              Get From List                       ${members}      0
+    ${enclosureGroupUri}=   Get From Dictionary                 ${member}       uri
+    
+    
+    # Get enclosureUri
+    ${Response}=        Fusion Api Get Enclosures
+    @{members}          Set Variable    ${Response["members"]}
+    :For    ${member}    IN    @{members}
+    \  ${Uri}=    Get From Dictionary     ${member}       uri
+    \  Append To List    ${enclosureUri}    ${Uri}
+    
+    
+    ${LE_Payload}    Create Dictionary    name    ${LE_name}    enclosureUris    ${enclosureUri}    
+    ...   enclosureGroupUri    ${enclosureGroupUri}    firmwareBaselineUri    ${None}    forceInstallFirmware    ${False}
+    Log    ${LE_Payload}
+    
+    ${Response}=        Fusion Api Create Logical Enclosure         body=${LE_Payload}
+    Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to initiate Create Logical Enclosure.
+    
+    ${Retry Interval}    Convert To Number    120
+    ${Retries}           Convert To Integer    40
+    ${Response}=    Fusion API Wait For Task To Complete    ${Response['uri']}    sleep_time=${Retry Interval}    retries=${Retries}
+
+    # Check for errors
+    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    ${Errors}=    Get Length    ${Errors}
+    Should be True    ${Errors} == 0    msg=Errors encountered while creating Logical Enclosure.
+
+    [Return]    ${Response}
+    
+    
+    
+    
+    
+    
+Delete Logical Enclosure
+    [Arguments]    ${Name}=${ENC Name}
+
+    Log To Console    \nDeleting Logical Enclosure ${name}.
+    [Documentation]    Updated for fusion API v200
+    ${Response}=        Fusion Api Delete Logical Enclosure         name=${Name}
+    Should Not Be Equal    ${Response}    ${None}    msg=Logical Enclosure ${Name} not found.
+    Should Be Equal as Strings    ${Response['status_code']}    202    msg=Failed to initiate Delete Logical Enclosure ${Name}.
+
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number    60
+    ${Retries}           Convert To Integer    25
+    ${Response}    Fusion API Wait For Task To Complete    ${Response['uri']}    sleep_time=${Retry Interval}    retries=${Retries}
+
+    # Check for errors
+    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    ${Errors}=    Get Length    ${Errors}
+    Should be True    ${Errors} == 0    msg=Errors encountered while deleting Logical Enclosure ${Name}.
+
+    # Verify Delete
+    ${Response}=    Fusion API Get Logical Enclosure    param=?name="${NAME}"
+    Should Be Equal as Integers    ${Response['count']}    0    msg=Failed to delete Logical Enclosure ${Name}.
+
+Get Logical Enclosure
+    [Arguments]    ${Name}=${LE Name}
+
+    ${Response}=    Fusion API Get Logical Enclosure    param=?name="${NAME}"
+    Should Be Equal as Strings     ${Response['status_code']}    200    msg=Failed to get Logical Enclosure ${Name}.
+    Should Be Equal as Integers    ${Response['count']}    1    msg=Failed to find Logical Enclosure ${Name}.
+
+    [Return]    ${Response}
+
+# -----------------------------------------------------------------------------
+#		LOGICAL INTERCONNECT GROUPS
+# -----------------------------------------------------------------------------
+
+Get LIG
+    ${Response}=    Fusion Api Get Lig
+    [Return]    ${Response["members"]}
+    
+Create LIG
+    [Arguments]         ${NAME}=${LIG NAME}     ${TYPE}=SY12000    ${REDUNDANCY_TYPE}=HighlyAvailable    ${UPLINK_SETS}=${None}    ${ICM_BAY_SET}=3
+    [Documentation]     Determine available Interconnects and create a Logical Interconnect Group
+    ...                 Updated for fusion API v299
+
+    ${LIG Payload}=    Build Logical Interconnect Group Payload    ${NAME}    ${TYPE}    ${REDUNDANCY_TYPE}    ${UPLINK_SETS}    ${ICM_BAY_SET}
+
+    # Create Logical Interconnect Group
+    ${Response}=                    Fusion Api Create LIG   body=${LIG Payload}
+    Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to initiate Create LIG.
+    
+    Log    ${Response}
+
+    # Wait for task to complete
+    ${Response}    Fusion API Wait For Task To Complete    ${Response['uri']}
+
+    # Check for errors
+    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    ${Errors}=    Get Length    ${Errors}
+    Should be True    ${Errors} == 0    msg=Errors encountered while creating LIG.
+
+    [Return]    ${Response}
+
+Build Logical Interconnect Group Payload
+    [Documentation]    Create Payload for LogicalInterconnectGroup
+    ...    = Params =
+    ...    | NAME             | LIG Name |
+    ...    | TYPE             | Defaults to SY12000 for tbird. |
+    ...    | REDUNDANCY_TYPE  | HightlyAvailable, NonRedundantASide, NonRedundantbSide, or Redundant. |
+    ...    | UPLINK_SETS      | JSON payload to add an uplink set to LIG |
+    ...    | ICM_BAY_SET      | Interconnect Bay Set. 1 for bays 1&4, 2 for bays 2&5, or 3 for bays 3&6. |
+    [Arguments]    ${NAME}     ${TYPE}    ${REDUNDANCY_TYPE}    ${UPLINK_SETS}    ${ICM_BAY_SET}
+    # Build Interconnect Map using existing Interconnect information.
+    ${InterconnectMapTemplate}=     Create List
+    ${EnclosureIndexes}=            Create List
+    ${EMPTY_LIST}=            Create List
+    ${UPLINK_SETS}=    Set Variable If    ${UPLINK_SETS}==${NONE}    ${EMPTY_LIST}    ${UPLINK_SETS}
+
+    # Determine available Interconnects
+    ${Response}=                    Fusion API Get Interconnect
+    ${status_code}=                 Get From Dictionary     ${Response}     status_code
+    Should Be Equal as Strings      ${status_code}          200             msg=Failed to get Interconnects.
+    ${members}=                     Get From Dictionary     ${Response}     members
+
+    ${count}=           Get Length      ${members}
+    Should be True      ${count} > 0    msg=One more more Interconnects are required.
+
+    # Determine expected bays based on ICM_BAY_SET and REDUNDANCY_TYPE
+    ${A_side_Bay}    Evaluate    ${ICM_BAY_Set}
+    ${B_side_Bay}    Evaluate    ${A_side_bay} + 3
+    ${Bays}     Run Keyword If    "${REDUNDANCY_TYPE}"=="NonRedundantASide"    Create List    ${A_side_Bay}
+    ...    ELSE IF    "${REDUNDANCY_TYPE}"=="NonRedundantBSide"    Create List    ${B_side_Bay}
+    ...    ELSE IF    "${REDUNDANCY_TYPE}"=="HighlyAvailable"    Create List    ${A_side_Bay}    ${B_side_Bay}
+    ...    ELSE IF    "${REDUNDANCY_TYPE}"=="Redundant"    Create List    ${A_side_Bay}    ${B_side_Bay}
+    ...    ELSE       Create List
+
+    # Add interconnect into InterconnectMapTemplate
+    :FOR    ${member}                   IN                      @{members}
+    #\       Log    ${member}
+    \       ${locationEntries}=         Get From Dictionary     ${member['interconnectLocation']}       locationEntries
+    \       Log    ${locationEntries}
+    \       # Set Enclosure details. (Will need update for Multi Enclosures)
+    \       ${enclosureIndex}=          Convert To Integer    1
+    \       ${enclosure}=               Convert To Integer    1
+    \
+    \       # Check both location entries to find Bay Location information
+    \       ${location1}=    Get Location info    ${locationEntries}    'Bay'
+    \       ${location2}=    Get Location info    ${locationEntries}    'Enclosure'
+    #\       ${location1}=               Get From List           ${locationEntries}        0
+    #\      ${location2}=               Get From List           ${locationEntries}        1
+    #\       Log  To Console    ${location2}
+    \       ${bay}=                     Set Variable If    "${location1['type']}"=="Bay"    ${location1['value']}
+    \       ...    "${location2['type']}"=="Bay"    ${location2['value']}
+    \       ...    ${None}
+    \
+    \       # Check if interconnect bay matches expected bays
+    \       ${bay}=               Convert To Integer    ${bay}
+    \       ${usable_bay}=    Run Keyword and Return Status
+    \       ...    List Should Contain Value    ${Bays}    ${bay}
+    \       Continue For Loop If    "${usable_bay}"=="${FALSE}"
+    \       Remove Values From List    ${Bays}    ${bay}
+    \
+    \       # Map Interconnect to Template
+    \       ${Interconnect}=            Create Dictionary       bay=${bay}
+    \       ...                                                 type=${member['model']}
+    \       ...                                                 enclosure=${enclosure}
+    \       ...                                                 enclosureIndex=${enclosureIndex}
+    \       ...                                                 interconnectTypeUri=${member['interconnectTypeUri']}
+    \       Append To List              ${InterconnectMapTemplate}              ${Interconnect}
+    \
+    \       # Maintain list of enclosure indexes
+    \       Append To List              ${EnclosureIndexes}                     ${enclosureIndex}
+
+
+    # Verify InterconnectMapTemplate contains at least one interconnect
+    Should Not Be Empty    ${InterconnectMapTemplate}    msg=No Interconnects found matching given parameters.
+
+    # Verify we did not miss any expected bays
+    Should be Empty    ${Bays}    msg=Failed to find all expected bays.
+
+    # Build LIG Payload
+    ${LIG Payload}=     Fusion API Create LIG Payload   name=${NAME}
+    ...                 enclosureType=${TYPE}
+    ...                 interconnectBaySet=${ICM_BAY_SET}
+    ...                 redundancyType=${REDUNDANCY_TYPE}
+    ...                 interconnectMapTemplate=${InterconnectMapTemplate}
+    ...                 enclosureIndexes=${EnclosureIndexes}
+    ...                 uplinkSets=${UPLINK_SETS}
+
+    ${NicelyFormattedJsonString}    dumps   ${LIG Payload}      indent=${4}     sort_keys=${True}
+    Log     ${NicelyFormattedJsonString}
+
+    [Return]    ${LIG Payload}
+
+Get Location info
+    [Documentation]    Returns location1 and location2 to LIG payload
+    [Arguments]    ${locationEntries}    ${type}
+    #Log To Console    ${type}
+    :FOR    ${locationEntry}                   IN                      @{locationEntries}
+    \  ${return_location}=    Set Variable If    '${locationEntry['type']}'==${type}    ${locationEntry}
+    \  Run Keyword If    ${return_location}!=${None}    Exit For Loop
+    [Return]    ${return_location}
+    
+    
+    
+Get Logical Interconnect Group
+    [Documentation]    Return a Logical Interconnect Group by Name
+    [Arguments]    ${Name}
+    ${LogicalInterconnectGroupCollection}    Fusion Api Get Logical Interconnect Groups    param=filter="name=${Name}"
+    ${Count}    Get From Dictionary    ${LogicalInterconnectGroupCollection}    count
+    Should Be Equal As Numbers    ${Count}    1    msg=Cant find lig named ${Name}
+    ${Members}    Get From Dictionary    ${LogicalInterconnectGroupCollection}    members
+    ${Lig}    Get From List    ${Members}    0
+    ${LigName}    Get From Dictionary    ${Lig}    name
+    Should Be Equal As Strings    ${Name}    ${LigName}
+    [Return]    ${Lig}
+
+Get Logical Interconnect Group Uri
+    [Documentation]    Return a Logical Interconnect Groups' Uri by Name
+    [Arguments]    ${Name}
+    ${Lig}    Get Logical Interconnect Group    ${Name}
+    ${Uri}    Get From Dictionary    ${Lig}    uri
+    [Return]    ${Uri}
+
+Delete LIG
+    [Arguments]    ${Name}=${LIG Name}
+    [Documentation]    Updated for fusion API v200
+    ${Response}=        Fusion Api Delete LIG         name=${Name}
+    Should Not Be Equal    ${Response}    ${None}    msg=LIG ${Name} not found.
+    Should Be Equal as Strings    ${Response['status_code']}    202    msg=Failed to initiate Delete LIG ${Name}.
+
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number    10
+    ${Retries}           Convert To Integer    6
+    ${Response}    Fusion API Wait For Task To Complete    ${Response['uri']}    sleep_time=${Retry Interval}    retries=${Retries}
+
+    # Check for errors
+    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    ${Errors}=    Get Length    ${Errors}
+    Should be True    ${Errors} == 0    msg=Errors encountered while deleting LIG ${Name}.
+#--------------------------------------------------------------------------------
+        SAS INTERCONNECT
+#--------------------------------------------------------------------------------
+Get SAS_LIG
+    ${Response}=    Fusion Api Get SAS Lig
+    [Return]    ${Response}
+#---------------------------------------------------------------------------------
+#        UPLINKSETS
+#---------------------------------------------------------------------------------
+
+Create Port_config 
+    [Arguments]    ${ICM_Bay}    ${ICM_PORT}
+    [Documentation]    The Keyword creates port mapping for Create Uplink_Set Keyword
+    ${logicalPortConfigInfos}    Create List
+    ${Total_elements}=    Get Length    ${ICM_Bay}
+    : FOR    ${Index}    IN Range    0    ${Total_elements}
+    \  ${logicalPortConfigInfo}    Create Dictionary    port    ${ICM_PORT[${Index}]}    bay    ${ICM_Bay[${Index}]}
+    \  Append To List    ${logicalPortConfigInfos}    ${logicalPortConfigInfo}
+    [Return]    ${logicalPortConfigInfos}
+
+
+
+Create Network_uris
+    [Arguments]    ${Uplink_network_name}
+    [Documentation]    The Keyword creates Network URI List for Create Uplink_Set Keyword
+    ${Networks}=    Get Ethernet Networks
+    ${networkUri}    Create List
+    : FOR    ${Network}    IN    @{Networks}
+    \  ${networkUris}=    Get Uris    ${Network}    ${Uplink_network_name}    ${networkUri}
+    [Return]    ${networkUris} 
+
+Get Uris
+    [Arguments]    ${Network}    ${Uplink_network_name}    ${networkUri}
+    [Documentation]    Parsing  Uplink_network_name
+    ${Total_networks}=    Get Length    ${Uplink_network_name}
+    : FOR    ${Index}    IN Range    0    ${Total_networks}
+    \  Run Keyword If    "${Network["name"]}"=="${Uplink_network_name[${Index}]}"    Append To List      ${networkUri}    ${network['uri']}
+    [Return]     ${networkUri}
+
+
+
+Create Uplink Set Payload
+    [Arguments]    ${port}    ${Bay}=${None}    ${Name}=${US_NAME}    ${Uplink_network_name}=${None}    
+
+    # Initialize payload variables.
+    Log    ${Uplink_network_name}
+    ${networkUris}    Create List
+    ${UplinkSets}     Create List
+    ${logicalPortConfigInfos}    Evaluate    json.loads('''[{"bay":${Bay}, "port":"${port}"}]''')    json
+
+    # Add Networks
+    ${Networks}=    Get Ethernet Networks
+    : FOR    ${network}    IN    @{Networks}
+    \  Run Keyword If    ${network["name"]}==${Uplink_network_name}    Append To List    ${NetworkUris}    ${network['uri']}
+     
+
+    # Create Payload
+    ${UplinkSet}=    Create Dictionary    mode=Auto
+    ...                                   name=${Name}
+    ...                                   ethernetNetworkType=Tagged
+    ...                                   networkType=Ethernet
+    ...                                   networkUris=${networkUris}
+    ...                                   logicalPortConfigInfos=${logicalPortConfigInfos}
+    Append To List    ${UplinkSets}    ${UplinkSet}
+
+    [Return]    ${UplinkSets}
+
+#---------------------------------------------------------------------------------
+#        FIRMWARE
+#---------------------------------------------------------------------------------
+Get Firmware Driver Uri
+    [Documentation]    Get Firmware Driver Uri By Name
+    [Arguments]    ${FwBundleName}
+    ${FirmwareDriverCollection}=    Fusion Api Get Firmware Drivers    filter="name='${FwBundleName}'"
+    ${count}=    Get From Dictionary      ${FirmwareDriverCollection}    count
+    Should not be Equal as Integers       ${count}            0          msg=Failed to find Firmware Driver ${FwBundleName}
+    ${members}=    Get From Dictionary    ${FirmwareDriverCollection}    members
+    ${member}=     Get From List          ${members}                     0
+    ${name}=       Get From Dictionary    ${member}                      name
+    Should Be Equal as Strings            ${FwBundleName}    ${name}    msg=Firmwre Driver Name did not match.
+    ${uri}=        Get From Dictionary    ${member}           uri
+    [Return]    ${uri}
+
+#---------------------------------------------------------------------------------
+#        ENCLOSURE GROUPS
+#---------------------------------------------------------------------------------
+Get Enclosure Group
+    [Documentation]    Get Enclosure Group by Name
+    [Arguments]    ${EncGroupName}
+    ${EnclosureGroupCollection}=    Fusion Api Get Enclosure Groups      param=filter="name=${EncGroupName}"
+    ${count}=    Get From Dictionary      ${EnclosureGroupCollection}    count
+    Should not be Equal as Integers       ${count}      0                msg=Failed to find Enclosure ${EncGroupName}
+    ${members}=    Get From Dictionary    ${EnclosureGroupCollection}    members
+    ${member}=     Get From List          ${members}                     0
+    [Return]    ${member}
+
+Get Enclosure Group Uri
+    [Documentation]    Get Enclosure Group Uri by Name
+    [Arguments]    ${EncGroupName}
+    ${EnclosureGroupCollection}=    Fusion Api Get Enclosure Groups      param=filter="name=${EncGroupName}"
+    ${count}=    Get From Dictionary      ${EnclosureGroupCollection}    count
+    Should not be Equal as Integers       ${count}           0           msg=Failed to find Enclosure Group ${EncGroupName}
+    ${members}=    Get From Dictionary    ${EnclosureGroupCollection}    members
+    ${member}=     Get From List          ${members}                     0
+    ${name}=       Get From Dictionary    ${member}                      name
+    Should Be Equal as Strings            ${EncGroupName}    ${name}     msg=Enclosure Group Name did not match.
+    ${uri}=        Get From Dictionary    ${member}          uri
+    [Return]    ${uri}
+
+
+Create EnclosureGroup    
+    [Arguments]    ${EG Name}    ${ipAddressingMode}    ${Total_count}
+    @{Temp}=    Get LIG                ####Getting LIG
+    # Parsing the LIG payload to get the interconnect list and its corresponding List
+    ${LIG_Payload}    Create List
+    :For    ${index}    IN    @{Temp}
+    \  ${category}    Set Variable    ${index["category"]}
+    \  ${EnclosureIndex}    Set Variable    ${index["enclosureIndexes"]}
+    \  ${EG-uri}    Set Variable    ${index["uri"]}
+    \  ${interconnectBaySet}    Set Variable    ${index["interconnectBaySet"]}
+    \  ${interconnectMapTemplate}    Set Variable    ${index["interconnectMapTemplate"]}
+    \  @{interconnectMapEntryTemplates}    Set Variable   ${interconnectMapTemplate["interconnectMapEntryTemplates"]}
+    \  ${Response}=    Create LIG_Dict    ${interconnectMapEntryTemplates}   
+    \  ...    "${EG-uri}"    ${LIG_Payload}    ${category}    
+    ${LIG_Payload}    Set Variable    ${Response}    
+   
+    
+    ${full_body}=    Get SAS_LIG        
+    @{Temp}    Set Variable    ${full_body["members"]}   #####Getting LIG-SAS
+    # Parsing the SAS_LIG payload to get the interconnect list and its corresponding List
+    :For    ${index}    IN    @{Temp}
+    \  ${category}    Set Variable    ${index["category"]}
+    \  ${EnclosureIndex}    Set Variable    ${index["enclosureIndexes"]}
+    \  ${EG-uri}    Set Variable    ${index["uri"]}
+    \  ${interconnectBaySet}    Set Variable    ${index["interconnectBaySet"]}
+    \  ${interconnectMapTemplate}    Set Variable    ${index["interconnectMapTemplate"]}
+    \  @{interconnectMapEntryTemplates}    Set Variable   ${interconnectMapTemplate["interconnectMapEntryTemplates"]}
+    \  ${Response}=    Create LIG_Dict    ${interconnectMapEntryTemplates}   
+    \  ...    "${EG-uri}"    ${LIG_Payload}    ${category}    
+    ${LIG_Payload}    Set Variable    ${Response} 
+
+    
+    ##Payload for EG
+    ${Payload}    Create Dictionary    type    EnclosureGroupV300    enclosureTypeUri    /rest/enclosure-types/SY12000
+    ...  name    ${EG Name}    stackingMode    Enclosure    ipAddressingMode    ${ipAddressingMode}
+    ...  interconnectBayMappings    ${LIG_Payload}    enclosureCount    ${Total_count}
+        
+    ${Response}=                    Fusion API Create Enclosure Group   body=${Payload}
+    Should Be Equal as Strings    ${Response['status_code']}    200    msg=Failed to create Enclosure Group.
+
+    [Return]    ${Response}
+
+Create LIG_DICT
+    [Arguments]    ${Interconnect_map}    ${EG_uri}    ${LIG_Payload}    ${category}    
+    :For    ${index}    IN    @{Interconnect_map}
+    \  ${enclosureIndex}    Set Variable    ${index["enclosureIndex"]}
+    \  ${logicalLocation}    Set Variable    ${index["logicalLocation"]}
+    \  @{locationEntries}    Set Variable    ${logicalLocation["locationEntries"]}
+    \  ${Temp}=    Get Location info    ${locationEntries}    'Bay'
+    \  ${Bay_number}    Set Variable       ${Temp["relativeValue"]}
+    \  ${Lig_Body}    Run Keyword IF    "${category}"=="sas-logical-interconnect-groups"    Create Dictionary    enclosureIndex    ${enclosureIndex}    	
+    \  ...  interconnectBay    ${Bay_number}    logicalInterconnectGroupUri    ${EG-uri}
+    \  ...  ELSE      Create Dictionary    interconnectBay    ${Bay_number}    logicalInterconnectGroupUri    ${EG-uri}
+    \  Append To List    ${LIG_Payload}    ${Lig_Body}
+    [Return]    ${LIG_Payload}
+    
+    
+
+   
+    
+    
+
+Create Enclosure Groups
+    [Arguments]             ${EG Name}=${ENC_GROUP_NAME}   ${LIG Name}=${LIG Name}    ${LIG Map}=NONE
+    [Documentation]    Updated for fusion API v200
+    # Get enclosureTypeUri
+    ${Response}=            Fusion Api Get Enclosures
+    ${members}=             Get From Dictionary     ${Response}     members
+    ${member}=              Get From List           ${members}      0
+
+    # Create EG Payload
+    ${EG args}=     Create Dictionary   name=${EG Name}
+    ...             enclosureTypeUri=${member['enclosureTypeUri']}
+    ...             ipAddressingMode=External
+
+    # ${LIG Bay}=    Convert to Integer    ${Bay}
+    # ${LIG Map}=    Create Dictionary    ${LIG Bay}    ${LIG Name}
+    ${EG Payload}=      Fusion API Create Enclosure Group Payload   body=${EG args}
+    ...                 lig_map=${LIG Map}
+
+    ${NicelyFormattedJsonString}    dumps   ${EG Payload}   indent=${4}     sort_keys=${True}
+    Log     ${NicelyFormattedJsonString}
+
+    # Create Enclosure Group
+    ${Response}=                    Fusion API Create Enclosure Group   body=${EG Payload}
+    Should Be Equal as Strings    ${Response['status_code']}    200    msg=Failed to create Enclosure Group.
+
+    [Return]    ${Response}
+
+Delete Enclosure Group
+    [Arguments]    ${Name}=${ENC_GROUP_NAME}
+    [Documentation]    Updated for fusion API v200
+    ${Response}=        Fusion Api Delete Enclosure Group         name=${Name}
+    Should Not Be Equal    ${Response}    ${None}    msg=Enclosure Group ${Name} not found.
+    Should Be Equal as Strings    ${Response.status_code}    204    msg=Failed to Delete Enclosure Group ${Name}.
+
+#---------------------------------------------------------------------------------
+#        ENCLOSURES
+#---------------------------------------------------------------------------------
+
+Create Enclosure
+    [Documentation]    Creates a new Enclosure Group
+    [Arguments]    ${EncIP}    ${EncUsername}    ${EncPassword}    ${EncGroupUri}    ${Force}=${False}    ${FwBundleUri}=${EMPTY}    ${UpdateFwOn}=EnclosureOnly    ${ForceInstallFw}=${False}
+
+    # Build Payload
+    ${Enc Payload}=    Create Dictionary    hostname=${ENC IP}
+    ...                                     username=${ENC USERNAME}
+    ...                                     password=${ENC PASSWORD}
+    ...                                     force=${FORCE}
+    ...                                     enclosureGroupUri=${ENC GROUP URI}
+    ...                                     firmwareBaselineUri=${FW BUNDLE URI}
+    ...                                     updateFirmwareOn=${UPDATE FW ON}
+    ...                                     forceInstallFirmware=${FORCE INSTALL FW}
+    Log Dictionary      ${Enc Payload}
+
+    # Add Enclosure
+    ${Response}=     Fusion API Add Enclosure    ${Enc Payload}    timeout=${TIMEOUT}
+    Log Dictionary    ${Response}
+    ${Status}       Get From Dictionary    ${Response}    status
+    Return From Keyword If    '${Status}' == '200'    ${Response}
+    ${errorCode}    Get From Dictionary    ${Response}    errorCode
+    ${message}      Get From Dictionary    ${Response}    message
+    Fail    msg=Invalid response returned ${Status} ${errorCode} ${message}
+
+Get Enclosure
+    [Documentation]    Get Enclosure by Name
+    [Arguments]    ${EncName}
+    ${EnclosureCollection}=    Fusion Api Get Enclosures            param=?filter="name='${EncName}'"
+    ${count}=    Get From Dictionary      ${EnclosureCollection}    count
+    Should not be Equal as Integers       ${count}      0           msg=Failed to find Enclosure ${EncName}
+    ${members}=    Get From Dictionary    ${EnclosureCollection}    members
+    ${member}=     Get From List          ${members}                0
+    [Return]    ${member}
+
+Get Enclosure State
+    [Documentation]    Updated for fusion API v200
+    [Arguments]     ${Name}=${ENC SERIAL NUMBER}
+
+    ${Response}=                    Fusion API Get Enclosures   # param=?filter="uuid=${ENC_UUID}"
+    ${status_code}=                 Get From Dictionary         ${Response}     status_code
+    Should Be Equal as Strings      ${status_code}              200             msg=Failed to get Enclosures.
+
+    ${enclosures}=     Get From Dictionary     ${Response}     members
+    ${enclosure}=      Get From List           ${enclosures}      0
+
+    Should Be Equal As Strings    ${Name}    ${enclosure['name']}    msg=Enclosure name did not match.
+
+    [Return]    ${enclosure['state']}
+
+Verify Enclosure in ${state} State
+    ${current state}=             Get Enclosure State     ${ENC SERIAL NUMBER}
+    Should be Equal as Strings    ${current state}        ${state}   msg=Enclosure ${ENC SERIAL NUMBER} not in ${state} state.
+
+#---------------------------------------------------------------------------------
+#        LLDP
+#---------------------------------------------------------------------------------
+Get Port Neighbor Data From Fusion
+    ${Id}    Fusion API Get Interconnects
+	${First}=    Get From Dictionary    ${Id}    members
+	${Myfirst}=    Get From List    ${First}    0
+	${PayloadUri}=    Get From Dictionary    ${Myfirst}    uri
+	${Uri}    Get Id From Uri    ${PayloadUri}
+    ${Ports}    Fusion Api Get Interconnects Ports    ${Uri}
+    @{Members}    Get From Dictionary    ${Ports}    members
+	${Dict}    Create Dictionary
+    : FOR    ${Member}    IN    @{Members}
+	\    ${PortName}    Get From Dictionary    ${Member}    portName
+	\    ${Neighbor}    Get From Dictionary    ${Member}    neighbor
+	\    @{temp}=    Split String    ${portName}    separator=GE
+	\    Run Keyword If    "${Neighbor}" != "None"    Set To Dictionary    ${Dict}    @{temp}[-1]    ${Neighbor}
+    [Return]    ${Dict}
+
+#-----------------------------------------------------------------------
+# SERVER HARDWARE KEYWORDS
+#-----------------------------------------------------------------------
+Get Server Hardware
+    [Arguments]    ${Bay}
+    ${Response}=    Fusion API Get Server Hardware    param=?filter="position=${Bay}"
+    Should Be Equal as Strings    ${Response['status_code']}          200             msg=Failed to Get Server Hardware.
+
+    Should Not Be Equal as Integers    ${Response['count']}    0    msg=Failed to find Server Hardware in bay ${Bay}.
+
+    ${SH}=    Get From List    ${Response['members']}    0
+    [Return]    ${SH}
+
+Get Server Hardware from URI
+    [Arguments]    ${URI}
+    ${Response}=    Fusion API Get Server Hardware    uri=${URI}
+    Should Be Equal as Strings    ${Response['status_code']}          200             msg=Failed to Get Server Hardware.
+    [Return]    ${Response}
+
+Power ${state} Server Hardware ${uuid}
+    Log To Console    \nPowering ${state} Server Hardware
+
+    # Create Attributes
+    ${Payload}=    Create Dictionary    powerState=${state}    powerControl=MomentaryPress
+    ${URI}=    Set Variable    /rest/server-hardware/${uuid}
+
+    # Call Fusion API
+    ${Response}=    Fusion API Edit Server Hardware Power State    ${Payload}    ${URI}
+    Should Be Equal as Strings    ${Response['status_code']}    202    msg=Failed to Initiate Power ${state} Server Hardware.
+
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number     60
+    ${Retries}           Convert To Integer    15
+    ${Response}=    Fusion API Wait For Task To Complete    ${Response['uri']}    sleep_time=${Retry Interval}    retries=${Retries}
+
+    # Check for errors
+    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    ${Errors}=    Get Length    ${Errors}
+    Should be True    ${Errors} == 0    msg=Errors encountered while Powering ${state} Server Hardware.
+
+    [Return]    ${Response}
+
+#-----------------------------------------------------------------------
+# SERVER PROFILE KEYWORDS
+#-----------------------------------------------------------------------
+########################### Can import ${Network_Name}, ${Port_id} and  ${Network_requested_speed}  as List from varibales lsit
+Create ServerProfile
+  [Arguments]    ${SP_Name}    ${SP_affinity}    ${HideUnusedFlexNics}    ${Network_Name}    
+  ...  ${Port_id}    ${Network_requested_speed}    ${Bay_No}    ${Boot_Mode}    ${SP_connection_name}
+  @{Ethernet_uris}    Create List
+  @{Temp}=    Get Ethernet Networks                ####Getting Ethernet networks
+### Parsing the get ethernet network to get the Network URIs and its corresponding List
+  ${total_network}=    Get Length    ${Network_Name}
+  : For    ${Index}    IN RANGE    0    ${total_network}
+  \  Append To List    ${Ethernet_uris}       ${Index}
+  
+  :For    ${index}    IN    @{Temp} 
+  \  ${name}    Set Variable    ${index["name"]}
+  \  ${Ethernet_uris}=    get network_uri    ${index}    ${Network_Name}    ${Ethernet_uris}
+  ${Response}=    Create Connection_List    ${Ethernet_uris}    ${Port_id}    ${Network_requested_speed}    ${SP_connection_name}
+
+### Creating Boot mode   
+  ${Boot_body}    Create Dictionary    manageMode    ${True}    mode    ${Boot_Mode} 
+  
+  ${Server}=    Get Server Hardware    ${Bay_No}
+  
+  Run Keyword If    "${Server['powerState']}"=="On"
+    ...    Power Off Server Hardware ${Server['uuid']}
+  
+  ${Server_uri}    Set Variable    ${Server["uri"]}
+  ${SP_Payload}    Create Dictionary    type    ServerProfileV6    name    ${SP_Name}    serverHardwareUri     ${Server_uri}
+  ...  affinity    ${SP_affinity}    macType    Virtual    serialNumberType    Virtual    wwnType    Virtual
+  ...  hideUnusedFlexNics    ${HideUnusedFlexNics}    connections    ${Response}    bootMode    ${Boot_body}
+
+  ${response}=     Fusion Api Create Server Profile    ${SP_Payload}
+  Should Be Equal as Strings    ${response['status_code']}          202             msg=Failed to Create Server Profile.
+  [Return]    ${response}
+
+
+
+Create Connection_List
+    [Arguments]    ${Ethernet_uris}    ${Port_id}    ${Network_requested_speed}    ${SP_connection_name}
+    ${Connection_Payload}    Create List
+    ${id}    Set Variable    0
+    ${total_networks}=    Get Length    ${Port_id}
+    :For    ${network}    IN RANGE    0    ${total_networks}
+    \  ${id}=    Evaluate    ${id} + 1
+    \  ${net_speed}    Set Variable if    ${Network_requested_speed[${network}]}==0    2500    ${Network_requested_speed[${network}]}
+    \  ${Temp}    Create Dictionary         id    ${id}    name    ${SP_connection_name[${network}]}    functionType    Ethernet
+    \  ...  portId    ${Port_id[${network}]}    requestedMbps    ${net_speed}    networkUri     ${Ethernet_uris[${network}]}
+    \  Append To List    ${Connection_Payload}     ${Temp}
+    [Return]    ${Connection_Payload} 
+
+###getting  uri of network
+get network_uri
+  [Arguments]    ${ethernet_body}    ${Network_Name}    ${Ethernet_uris}
+  Log    ${Ethernet_uris}
+  Log    ${Network_Name}
+  ${total_network}=    Get Length    ${Network_Name}
+  Log   ${total_network}
+  : For    ${Index}    IN RANGE    0    ${total_network}
+  \  Run Keyword If    "${ethernet_body["name"]}"=="${Network_Name[${Index}]}"    Set List Value    ${Ethernet_uris}    ${Index}    ${ethernet_body["uri"]}
+  [Return]    ${Ethernet_uris}
+  
+
+    
+
+#-----------------------------------------------------------------------
+# SAN MANAGER KEYWORDS
+#----------------------------------------------------------------------- 
+
+Get SAN Manager
+	[Arguments]    ${Name}=${SM_IP}
+	
+	${Response}=    Fusion Api Get San Manager    param=?name="${NAME}"
+    Should Be Equal as Strings     ${Response['status_code']}    200    msg=Failed to get Delete San Manager ${Name}.
+    Should Be Equal as Integers    ${Response['count']}    1    msg=Failed to find San Manager ${Name}.
+
+    [Return]    ${Response}
+
+
+Delete SAN manager
+	[Arguments]    ${NAME}=${NAME}
+    Log To Console    \nDeleting San Manager ${NAME}.
+    ${Response}=    Fusion API Delete San Manager    ${NAME}
+    Should Not Be Equal    ${Response}    ${None}    msg=San Manager Profile ${Name} not found.
+    Should Be Equal as Strings    ${Response['status_code']}          202             msg=Failed to initiate Delete San Manager ${Name}.
+
+    # Wait for task to complete
+    ${Retry Interval}    Convert To Number     60
+    ${Retries}           Convert To Integer    5
+    ${Response}=    Fusion API Wait For Task To Complete    ${Response['uri']}    sleep_time=${Retry Interval}    retries=${Retries}
+
+    # Check for errors
+    ${Errors}=    Get From Dictionary    ${Response}    taskErrors
+    ${Errors}=    Get Length    ${Errors}
+    Run Keyword If    ${Errors} != 0
+    ...    Log    Errors encountered while deleting San Manager.    level=WARN
+
+    ${Response}=    Fusion API Get San Manager    param=?name="${NAME}"
+    Should Be Equal as Integers    ${Response['count']}    0    msg=Failed to delete San Manager ${Name}.
+
+    [Return]    ${Response}
+
+	
+#========================================================================================================================================	
+	

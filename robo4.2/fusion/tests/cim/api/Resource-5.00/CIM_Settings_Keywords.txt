@@ -1,0 +1,145 @@
+*** Settings ***
+Library           RoboGalaxyLibrary
+Library           FusionLibrary
+Library           String
+Library           Collections
+Library           XML
+Library           json
+Library           DateTime
+Library           RoboGalaxyLibrary\\utilitylib\\file_utils.py
+
+*** Keywords ***
+
+#### Certificate Keywords ####
+Set Certificate Alternate Name
+    [Documentation]    Keyword creates dictionary for alternate name based on argument
+    ...                Arguments accepts 'FQDN' and 'IPAddress' as inputs
+    ...                Returns appliance host name or IPAddress to alternateName dictionary
+    [arguments]    ${alternateName}
+    ${alternateName} =    Run Keyword if    '${alternateName}' == 'FQDN'    Get Appliance Host Name
+    ...                   ELSE IF    '${alternateName}' == 'IPAddress'    Get Appliance IP Address
+    ${alternativeName}=    Create Dictionary    alternativeName    ${alternateName}
+    [Return]    ${alternativeName}
+
+Create Self Signed Certificate
+    [Documentation]    Update payload with given data,
+    ...                create self signed certificate with new payload
+    ...                verify certificate creation task
+    ...                Accepts data to be updated in json format
+    ...                e.g.,Create Self Signed Certificate    "alternativeName": "xyz.com"
+    [Arguments]    ${NewValue}
+    ${payload} =    Create Self Signed Certificate Payload
+    ${payload} =    Update Dictionary Subset    ${payload}    ${NewValue}
+    Log    Payload is ${payload}    console=True
+    ${response} =    Fusion Api Create Appliance Selfsigned Certificate    body=${payload}
+    Log    ${response}    console=True
+    Run Keyword If    ${response['status_code']}==202
+    ...    Wait For Task2   ${response}   timeout=600    interval=5
+    ...    ELSE    Log   Failed to Create Self Signed Certificate   console=True
+    Verify Task Details    ${response['uri']}    ${ADMIN_CREDENTIALS['userName']}    ${TASK_STATE}
+
+Create Self Signed Certificate Payload
+    [Documentation]    Create payload for self signed certificate fetching values from appliance
+    ...                This keyword updates given payload fields in Self signed certificate payload
+    ...                Returns the payload for create self signed certificate request
+    ${cert} =    Fusion Api Get Appliance Certificate
+    log    Appliance certificate details are ${cert}    console=True
+    ${payload} =  create dictionary   type=CertificateDtoV3
+    ...                               alternativeName=${cert['alternativeName']}
+    ...                               commonName=${cert['commonName']}
+    ...                               contactPerson=${cert['contactPerson']}
+    ...                               country=${cert['country']}
+    ...                               dnQualifier=${cert['dnQualifier']}
+    ...                               email=${cert['email']}
+    ...                               givenName=${cert['givenName']}
+    ...                               initials=${cert['initials']}
+    ...                               locality=${cert['locality']}
+    ...                               organization=${cert['organization']}
+    ...                               organizationalUnit=${cert['organizationalUnit']}
+    ...                               state=${cert['state']}
+    ...                               surname=${cert['surname']}
+    Log    Payload is ${payload}    console=True
+    [Return]    ${payload}
+
+Verify Self Signed Certificate
+    [Documentation]  Verifies appliance self signed certificate against the given set of data
+    ...              Example:
+    ...                Verify Self Signed Certificate    ${certificate}
+    ...              Data Required:
+    ...                Certificate details to be verified
+    [Arguments]    ${certificate}    ${uri}=/rest/certificates/https  &{kwargs}
+    ${status}  ${name} =  Run Keyword and Ignore Error  Get From Dictionary  ${appliance}  type
+    Return from keyword if    '${status}'=='FAIL'    ${certificate} doesn't contain the key ${name}
+    Log    Verifying appliance certificate  console=yes
+    ${new_expected_dto} =  Add Key Value to DTO  ${certificate}  &{kwargs}
+    ${dto} =    Get Resource by URI     ${uri}
+    ${validate_status} =  Fusion api validate response follow  ${new_expected_dto}  ${dto}  wordy=${False}
+    Run Keyword If  '${validate_status}'=='False'  Fail  Verify appliance cert ${name} failed
+    Log    Verify appliance certificate ${name} succeeded  console=yes
+
+Verify Certificate Validity
+    [Documentation]    Verify the appliance certificate validity period
+    ...                Match the expected validity period to that shown up in appliance certificate
+    ...                Expected validity to be passed as argument
+    ...                Default Certificate validity is 10 years
+    [Arguments]    ${expectedValidity}
+    ${response} =    Fusion Api Get Appliance Certificate
+    ${ValidFrom} =    Get From Dictionary    ${response}    validFrom
+    Log    Valid from:${ValidFrom}    console=True
+    ${ValidUntil} =    Get From Dictionary    ${response}    validUntil
+    Log    Valid until:${ValidUntil}    console=True
+    ${temp} =    Fetch From Left    ${ValidFrom}    -
+    ${temp1} =    Fetch From Left    ${ValidUntil}    -
+    ${currentValidity} =    Evaluate    ${temp1}-${temp}
+    Log    Current appliance certificate validity period: ${currentValidity} years    console=True
+    ${expectedValidity} =    Convert to Integer    ${expectedValidity}
+    Log    Expected appliance certificate validity period: ${expectedValidity} years   console=True
+    Should Be Equal    ${currentValidity}    ${expectedValidity}
+    ...    msg=The current certificate validity is not as expected
+
+Verify Certificate Alternate Name
+    [Documentation]    Verify alternate name in appliance certificate
+    ...                Check Appliance hostname is listed in certificate alternate name field
+    ${response} =    Fusion Api Get Appliance Certificate
+    ${currentAlternateName} =    Get From Dictionary    ${response}    alternativeName
+    Log    Alternate name in appliance certificate is ${currentAlternateName}    console=True
+    ${IPAddress} =    Get Appliance IP Address
+    ${hostName} =    Get Appliance Host Name
+    Should Contain    ${currentAlternateName}    ${hostName}
+    ...    msg=The current certificate alternate name does not contain appliance Hostname
+    Should Contain    ${currentAlternateName}    ${IPAddress}
+    ...    msg=The current certificate alternate name does not contain appliance IPAddress
+
+#### Audit Log Keywords ####
+Download and unzip Audit Log
+    [Documentation]   Download audit log file and unzip
+    ...                Includes Audit log file download from appliance using API
+    ...                Returns:
+    ...                  Absolute Download path of the Audit log file
+    Download Audit Log
+    ${logFile} =     OperatingSystem.List Files In Directory    ${downloadPath}    *.zip
+    ${logFile} =      Get From List     ${logFile}    0
+    ${unzipFilePath} =      Set Variable      ${downloadPath}/${logFile}
+    unzip    ${unzipFilePath}    ${downloadPath}
+    ${auditlogFiles} =      OperatingSystem.List Files In Directory    ${downloadPath}    *.log
+    ${auditlogFile} =    Get From List     ${auditlogFiles}    0
+    ${auditlogFilepath} =   Set Variable      ${downloadPath}/${auditlogFile}
+    [Return]          ${auditlogFilepath}
+
+Search entry in audit log file
+    [Documentation]    Search the given string in audit log file
+    ...                Fail if the entry is not present
+    ...                Data Required:
+    ...                  Audit log file path and Search text
+    [Arguments]    ${auditLogFilepath}    ${searchText}
+    ${bln_logentry_exists} =    file_contains    ${auditLogFilepath}    ${searchText}
+    Should Be Equal As Strings    ${bln_logentry_exists}    ${True}
+    ...    msg=Entry ${searchText} not available in log file
+
+Download and verify entry in Audit log file
+    [Documentation]    Downloads the audit log file and search given string in audit log file
+    ...                Data Required:
+    ...                  Audit log file path and Search text
+    [Arguments]       ${downloadPath}    ${searchText}
+    ${filePath}=    Download and unzip Audit Log
+    Search entry in audit log file      ${filePath}    ${searchText}

@@ -1,0 +1,160 @@
+*** Settings ***
+Library              FusionLibrary
+Library              RoboGalaxyLibrary
+Library              OperatingSystem
+Library              BuiltIn
+Library              copy
+Library              Collections
+Library              String
+Library              json
+Resource             ./keywords_compliance_validator.txt
+Resource             ../000_OVF2300_C7000_original/keywords_ssh_commands.txt
+Resource             ../../../../Resources/api/fusion_api_resource.txt
+Variables            ./Regression_Data.py
+
+*** Variables ***
+${ssh_server_ip}        15.114.112.61
+${APPLIANCE_IP}         unknown
+
+*** Keywords ***
+Import Gobaba Root CA And Intermediate CA
+    [Documentation]  import the specific gobaba root ca and intermediate ca
+    Log To Console  \n******Import the specific gobaba root ca and intermediate ca******
+    ${cert_rootca}=    Run Ssh Cmd  ${ssh_server_ip}  root  hpvse1  cat /root/automation_tools/rootca_gobaba/rootca.crt
+    ${cert_interm}=    Run Ssh Cmd  ${ssh_server_ip}  root  hpvse1  cat /root/automation_tools/rootca_gobaba/intermediate1/intermediate1.crt
+    ${body_rootca}=    Create Cert Body For Import CA  ${cert_rootca}  root_gobaba  ${cert_body_example}
+    ${body_interm}=    Create Cert Body For Import CA  ${cert_interm}  intermediate1  ${cert_body_example}
+    ${response1}=    Fusion Api Import External Ca Certificates  ${body_rootca}
+    Wait For Task2  ${response1}  timeout=60  interval=5
+    ${response2}=    Fusion Api Import External Ca Certificates  ${body_interm}
+    Wait For Task2  ${response2}  timeout=60  interval=5
+
+Delete Gobaba Root CA And Intermediate CA
+    [Documentation]  delete the specific gobaba root ca and intermediate ca
+    Log To Console  \n******Delete the specific gobaba root ca and intermediate ca******
+    ${resp1}=    Fusion Api Remove External Ca Certificates  root_gobaba
+    ${resp2}=    Fusion Api Remove External Ca Certificates  intermediate1
+    Wait For Task2  ${resp1}  timeout=60  interval=5
+    Wait For Task2  ${resp2}  timeout=60  interval=5
+
+Sign Certificate By Gobaba Intermediate CA
+    [Documentation]  Sign Certificate By Gobaba Intermediate CA, return the singed certificate
+    ...                 signature algorithm can choose: sha1rsa / sha256rsa / sha384rsa
+    [Arguments]  ${csr}  ${sig_algo}
+    Run Ssh Cmd  ${ssh_server_ip}  root  hpvse1  echo "${csr}" > /root/automation_tools/rootca_gobaba/intermediate1/ov/in.csr
+    Run Ssh Cmd  ${ssh_server_ip}  root  hpvse1  /root/automation_tools/rootca_gobaba/intermediate1/sign_ov.sh ${sig_algo}
+    ${signed_cer}=    Run Ssh Cmd  ${ssh_server_ip}  root  hpvse1  cat /root/automation_tools/rootca_gobaba/intermediate1/ov/out.crt
+    [Return]  ${signed_cer}
+
+Get Internal CA Certificate
+    [Documentation]  Return Base64 Internal CA Certificate
+    ${response}=    Fusion Api Get Ca Certificate  param=?filter=certType:INTERNAL
+    ${cert}=    Get From Dictionary  ${response['members'][0]['certificateDetails']}  base64Data
+    [Return]  ${cert}
+
+Show Server Certificate FingerPrint
+    [Documentation]    Show Server Certificate FingerPrint
+    [Arguments]    ${server_ip}  ${server_port}
+    ${fingerprint}=    Run Ssh Cmd  ${ssh_server_ip}  root  hpvse1  /root/automation_tools/sctest/check_cert_fingerprint.sh ${server_ip} ${server_port}
+    Log To Console  FingerPrint:${fingerprint}
+    [Return]  ${fingerprint}
+
+Show Internal CA Certificate FingerPrint
+    [Documentation]    Show Internal CA Certificate FingerPrint
+    ${cert}=    Get Internal CA Certificate
+    Run Ssh Cmd  ${ssh_server_ip}  root  hpvse1  echo "${cert}" > /tmp/inter
+    ${fingerprint}=    Run Ssh Cmd  ${ssh_server_ip}  root  hpvse1  /root/automation_tools/sctest/check_cert_fingerprint.sh /tmp/inter
+    Log To Console  FingerPrint:${fingerprint}
+    [Return]  ${fingerprint}
+
+Show Certificate FingerPrint
+    [Documentation]    Show Internal CA Certificate FingerPrint
+    [Arguments]  ${cert}
+    Run Ssh Cmd  ${ssh_server_ip}  root  hpvse1  echo "${cert}" > /tmp/cert
+    ${fingerprint}=    Run Ssh Cmd  ${ssh_server_ip}  root  hpvse1  /root/automation_tools/sctest/check_cert_fingerprint.sh /tmp/cert
+    Log To Console  FingerPrint:${fingerprint}
+    [Return]  ${fingerprint}
+
+Apache And Rabbitmq Server Certificate Should Be Same
+    [Documentation]  this keyword is for test apache and rabbitmq server certificate should be same.
+    ...                 In some situation. it needs run for 2 min by Wait Until Keyword Succeeds
+    ${apache_srv_cert_finger_original}=    Show Server Certificate FingerPrint  ${APPLIANCE_IP}  443
+    ${rabbit_srv_cert_finger_original}=    Show Server Certificate FingerPrint  ${APPLIANCE_IP}  5671
+    Should Be Equal As Strings  ${apache_srv_cert_finger_original}  ${rabbit_srv_cert_finger_original}
+
+Server Certificate Should Not Be Changed
+    [Documentation]    Server Certificate is not changed
+    [Arguments]    ${finger_original}  ${finger_current}
+    Should Be Equal As Strings  ${finger_original}  ${finger_current}
+
+Server Certificate Should Be Changed
+    [Documentation]    Server Certificate is changed
+    [Arguments]    ${finger_original}  ${finger_current}
+    Should Not Be Equal As Strings  ${finger_original}  ${finger_current}
+
+Check Current Apache Server Certificate Is Compliant After Mode Switch To:
+    [Documentation]  Check Current Server Certificate Is Compliant After Mode Switch To: LEGACY/FIPS/CNSA
+    ...                 If before mode switching, the server/certificate is compliant with target mode, certificate will not be changed
+    ...                 Otherwise, certificate should be changed.
+    ...                 ${target_mode} is the mode will be switched to.
+    ...                 ${original_is_compliant} should be True or False
+    ...                 ${original_fingerprint} should be the input fingerprint that will be compared with the current one.
+    [Arguments]  ${target_mode}  ${original_fingerprint}  ${original_is_compliant}
+    ${current_fingerprint}=    Show Server Certificate FingerPrint  ${APPLIANCE_IP}  443
+    Run Keyword If  ${original_is_compliant}==True    Server Certificate Should Not Be Changed  ${original_fingerprint}  ${current_fingerprint}
+    Run Keyword If  ${original_is_compliant}==False    Server Certificate Should Be Changed  ${original_fingerprint}  ${current_fingerprint}
+    Run Keyword If  ${original_is_compliant}==False    Apache Server Is Compliant For Mode:  ${target_mode}
+
+Check Current RabbitMQ Server Certificate Is Compliant After Mode Switch To:
+    [Documentation]  Check Current Server Certificate Is Compliant After Mode Switch To: LEGACY/FIPS/CNSA
+    ...                 If before mode switching, the server/certificate is compliant with target mode, certificate will not be changed
+    ...                 Otherwise, certificate should be changed.
+    ...                 ${target_mode} is the mode will be switched to.
+    ...                 ${original_is_compliant} should be True or False
+    ...                 ${original_fingerprint} should be the input fingerprint that will be compared with the current one.
+    ...                 ${rabbit_server_cert} is the input certificate
+    [Arguments]  ${target_mode}  ${original_fingerprint}  ${original_is_compliant}  ${rabbit_server_cert}
+    ${current_fingerprint}=    Show Certificate FingerPrint  ${rabbit_server_cert}
+    Run Keyword If  ${original_is_compliant}==True    Server Certificate Should Not Be Changed  ${original_fingerprint}  ${current_fingerprint}
+    Run Keyword If  ${original_is_compliant}==False    Server Certificate Should Be Changed  ${original_fingerprint}  ${current_fingerprint}
+    Run Keyword If  ${original_is_compliant}==False    Certificate Is Compliant For Mode:  ${target_mode}  ${rabbit_server_cert}
+
+Check Current RabbitMQ Client Certificate Is Compliant After Mode Switch To:
+    [Documentation]  Check Current Server Certificate Is Compliant After Mode Switch To: LEGACY/FIPS/CNSA
+    ...                 If before mode switching, the server/certificate is compliant with target mode, certificate will not be changed
+    ...                 Otherwise, certificate should be changed.
+    ...                 ${target_mode} is the mode will be switched to.
+    ...                 ${original_is_compliant} should be True or False
+    ...                 ${original_fingerprint} should be the input fingerprint that will be compared with the current one.
+    ...                 ${rabbit_client_cert} is the input certificate
+    [Arguments]  ${target_mode}  ${original_fingerprint}  ${original_is_compliant}  ${rabbit_client_cert}
+    ${current_fingerprint}=    Show Certificate FingerPrint  ${rabbit_client_cert}
+    Run Keyword If  ${original_is_compliant}==True    Server Certificate Should Not Be Changed  ${original_fingerprint}  ${current_fingerprint}
+    Run Keyword If  ${original_is_compliant}==False    Server Certificate Should Be Changed  ${original_fingerprint}  ${current_fingerprint}
+    Run Keyword If  ${original_is_compliant}==False    Certificate Is Compliant For Mode:  ${target_mode}  ${rabbit_client_cert}
+
+Check Current Internal CA Is Compliant After Mode Switch To:
+    [Documentation]  Check Current Server Certificate Is Compliant After Mode Switch To: LEGACY/FIPS/CNSA
+    ...                 If before mode switching, the server/certificate is compliant with target mode, certificate will not be changed
+    ...                 Otherwise, certificate should be changed.
+    ...                 ${target_mode} is the mode will be switched to.
+    ...                 ${original_is_compliant} should be True or False
+    ...                 ${original_fingerprint} should be the input fingerprint that will be compared with the current one.
+    ...                 ${internal_ca_cert} is the input certificate
+    [Arguments]  ${target_mode}  ${original_fingerprint}  ${original_is_compliant}  ${internal_ca_cert}
+    ${current_fingerprint}=    Show Certificate FingerPrint  ${internal_ca_cert}
+    Run Keyword If  ${original_is_compliant}==True    Server Certificate Should Not Be Changed  ${original_fingerprint}  ${current_fingerprint}
+    Run Keyword If  ${original_is_compliant}==False    Server Certificate Should Be Changed  ${original_fingerprint}  ${current_fingerprint}
+    Run Keyword If  ${original_is_compliant}==False    Certificate Is Compliant For Mode:  ${target_mode}  ${internal_ca_cert}
+
+Change Appliance Certificates To Gobaba CA Signed
+    [Documentation]  Change Appliance Certificates To Gobaba CA Signed,
+    ...     before run this keyword, import Gobaba Root CA and intermediate CA first.
+    ...     key_len_mode should be FIPS or CNSA, FIPS will create 2048 public key, CNSA will create 3072 public key.
+    ...     sig_algo should be sha1rsa / sha256rsa / sha384rsa
+    [Arguments]  ${key_len_mode}  ${sig_algo}
+    ${is_cnsa}=    Set Variable If  '${key_len_mode}'=='CNSA'  ${True}  ${False}
+    ${csr}=    Generate Appliance CSR  ${is_cnsa}
+    ${signed_cer}=    Sign Certificate By Gobaba Intermediate CA  ${csr}  ${sig_algo}
+    Import Appliance Certificate  ${signed_cer}
+    Wait Until Keyword Succeeds  2 min  5 sec  Apache And Rabbitmq Server Certificate Should Be Same

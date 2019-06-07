@@ -1,0 +1,214 @@
+*** Settings ***
+Documentation     Common Altair Test Source
+
+Library    String
+Library    Collections
+Library    Selenium2Library
+Library    robot.api.logger
+Library    AltairLibrary
+Library    RoboGalaxyLibrary
+Library    OperatingSystem
+
+
+*** Keywords ***
+
+Power Off Server Via iLO
+    [Documentation]    Power off Server
+    [Arguments]    ${server}
+    ${ILO_IP} =    Get From Dictionary    ${server}    ilo_ip
+    ${ILO_USERNAME} =    Get From Dictionary    ${server}    username
+    ${ILO_PASSWORD} =    Get From Dictionary    ${server}    password
+    Execute iLO Command    ${ILO_IP}    ${ILO_USERNAME}    ${ILO_PASSWORD}    power off server
+
+Power On Server Via iLO
+    [Documentation]    Power on Server
+    [Arguments]    ${server}
+    ${ILO_IP} =    Get From Dictionary    ${server}    ilo_ip
+    ${ILO_USERNAME} =    Get From Dictionary    ${server}    username
+    ${ILO_PASSWORD} =    Get From Dictionary    ${server}    password
+    Execute iLO Command    ${ILO_IP}    ${ILO_USERNAME}    ${ILO_PASSWORD}    power on
+
+Force Power Off Server Via iLO
+    [Documentation]    Force Power off Server
+    [Arguments]    ${server}
+    ${ILO_IP} =    Get From Dictionary    ${server}    ilo_ip
+    ${ILO_USERNAME} =    Get From Dictionary    ${server}    username
+    ${ILO_PASSWORD} =    Get From Dictionary    ${server}    password
+    Execute iLO Command    ${ILO_IP}    ${ILO_USERNAME}    ${ILO_PASSWORD}    hold power button
+
+Power on Server and PXE Boot
+    [Documentation]    Power on Server from list and apply configuration from Server Profile to PXE boot
+    [Arguments]    ${bay_list}
+    :FOR    ${bay}  IN  @{bay_list}
+    \    Power ON Server Blade Bay    ${bay}
+    \    Wait for Server Power on    ${bay}
+
+Get Enclosure Bay from Variable
+    [Documentation]    Create List from Variable for enclosure bay
+    [Arguments]    ${profiles}
+    ${bay_list} =    Create List
+    :FOR    ${profile}  IN  @{profiles}
+    \    ${bay} =     Get From Dictionary    ${profile}   enclosureBay
+    \    Append to List    ${bay_list}  ${bay}
+    [Return]    ${bay_list}
+
+Validate Server PXE
+    [Documentation]    Validate server has successfully PXE into Altair appliance and download Operating System
+    [Arguments]    ${OVsn_list}    ${Asn_list}
+    :For     ${sn}  IN  @{OVsn_list}
+    \    ${status} =  Run Keyword and Return Status    List should contain value    ${Asn_list}  ${sn}
+    [Return]    ${status}
+
+Wait for Server to PXE and Validate
+    [Documentation]    Waits for the server registeration in Altair based on a list of serial numbers
+    [Arguments]    ${OVsn_list}
+    :FOR    ${index}    In Range    1    30
+    \    ${Asn_list}=    Get Server Serial Number and Operating System from Altair
+    \    ${status} =  Compare Lists Value  ${OVsn_list}  ${Asn_list}
+    \    Run Keyword If    ${status}    Exit For Loop
+    ...    ELSE    Sleep    40
+    Should not be empty    ${status}   msg=Unit failed to PXE boot
+
+Log into Altair and Verify Server PXE
+    [Documentation]    Log into Altair and verify server PXE successfuly
+    [Arguments]    ${result_list}
+    Altair API Login
+    ${OVsn_list} =    Get Server Serial Number from List   ${result_list}
+    Remove Server from Altair    ${OVsn_list}
+    Power on Server and PXE Boot    ${result_list}
+    Log to Console    Wait for server to apply configuration and boot up
+    Wait for Server to PXE and Validate  ${OVsn_list}
+
+Altair API Login
+    [Documentation]    Log into the Altair appliance as Administrator
+    ${rsp}      ${admin_session}=           Altair API Login Appliance      ${ALTAIR_IP}        ${ALTAIR_ADMIN_USERNAME}            ${AlTAIR_ADMIN_PASSWORD}
+    ${status}=  Get From Dictionary     ${rsp}      status
+    Run Keyword If   ${status}==400   Fail
+    Set Global Variable             ${admin_session}            ${admin_session}
+    
+Altair API Logout
+    [Documentation]    Logout of Altair appliance
+    Altair API Logout Appliance
+
+Remove All Servers from Altair
+    [Documentation]    Query the appliance for all servers and delete them
+    ${servs} =   Altair Api Get Servers
+    :FOR    ${serv}  IN  @{servs['members']}
+    \       ${resp} =      Altair Api Delete Server      ${serv['uri']}
+
+Remove Server from Altair via SerialNumber
+    [Documentation]    Deletes the server form Altair based on serial number
+    [Arguments]    ${serial_num}
+    ${servs} =   Altair Api Get Servers
+    :FOR    ${serv}  IN  @{servs['members']}
+    \    ${sn}=  Get From Dictionary     ${serv}    serialNumber
+    \    Run Keyword If    '${sn}'!='${serial_num}'    Continue For Loop
+    \    ${task} =    Altair Api Delete Server    ${serv['uri']}
+
+Verify Server Profiles Status from Variable
+    [Documentation]    Obtain bay info from variable and query Fusion for status
+    [Arguments]    ${bay_list}
+    Log to console and logfile    Verifying Server Profiles Status
+    :FOR    ${bay}    IN    @{bay_list}
+    \    ${server_info} =    Get Server Info    ${bay}
+    \    ${serverProfileUri}=    Get From Dictionary    ${server_info}    serverProfileUri
+    \    ${profile_info}=    fusion_api_get_server_profiles    uri=${serverProfileUri}
+    \    ${status}=    Get From Dictionary    ${profile_info}    status
+    \    Should Be Equal    ${status}    OK
+    [Return]    ${status}
+
+Get Server Serial Number from Variable/Fusion
+    [Documentation]    Obtain bay info from variable and query Fusion for serial number
+    [Arguments]    ${profiles}
+    ${OVsn_list}=    Create List
+    :FOR    ${profile}  IN  @{profiles}
+    \    ${bay} =    Get From Dictionary    ${profile}   enclosureBay
+    \    ${uri}=     Get Server HW URI    ${bay}
+    \    ${server_info}=    fusion api get server hardware    uri=${uri}
+    \    ${OVsn}=    Get From Dictionary    ${server_info}    serialNumber
+    \    Append to list    ${OVsn_list}  ${OVsn}
+    [Return]    ${OVsn_list}
+
+Get Server Serial Number and Operating System from Altair
+    [Documentation]    Query Altair appliance for serial numbers for all servers
+    ${Asn_list} =    Create List
+    ${servs} =   Altair Api Get Servers
+    :FOR    ${serv}  IN  @{servs['members']}
+    \       ${Asn}=  Get From Dictionary     ${serv}      serialNumber
+    \       ${OS}=  Get From Dictionary     ${serv}      operatingSystem
+    \       Run Keyword If   '${OS}'=='${Operating_System}'    Append to List    ${Asn_list}  ${Asn}
+    [Return]    ${Asn_list}
+
+Compare list between Altair and OV
+    [Documentation]    Compare serial number list between Altair and Fusion
+    [Arguments]    ${Asn_list}    ${OVsn_list}
+    ${result} =   Create List
+    :For     ${sn}  IN  @{Asn_list}
+    \    ${status} =  Run Keyword and Return Status    List should contain value    ${OVsn_list}  ${sn}
+    \    Run Keyword If    ${status}    Append to List    ${result}  ${sn}
+    [Return]    ${result}
+
+Remove Server from Altair
+    [Documentation]    Obtain serial number from variable and delete server from Altair
+    [Arguments]    ${OVsn_list}
+    ${servs} =   Altair Api Get Servers
+    :FOR    ${serv}  IN  @{servs['members']}
+    \       ${Asn}=  Get From Dictionary     ${serv}      serialNumber
+    \       ${status} =  Run Keyword and Return Status   List should contain value    ${OVsn_list}  ${Asn}
+    \       ${task} =  Run Keyword If    ${status}    Altair Api Delete Server     ${serv['uri']}
+
+Execute iLO Command
+    [Documentation]    Execute iLO Command
+    [Arguments]     ${ILO_IP}       ${ILO_USERNAME}     ${ILO_PASSWORD}     ${ILO_COMMAND}
+    Console    \nExecuting iLO Command ${ILO_COMMAND}
+    ${Command}=    Catenate    java
+    ...    -classpath
+    ...    ${ILO_TOOLS}
+    ...    mpconfig
+    ...    --host
+    ...    ${ILO_IP}
+    ...    --username
+    ...    ${ILO_USERNAME}
+    ...    --password
+    ...    ${ILO_PASSWORD}
+    ...    --cmd
+    ...    ${ILO_COMMAND}
+
+    Log    ${Command}
+    ${RC}    ${Output}=    Run and Return Rc and Output    ${Command}
+    Run Keyword Unless    '${RC}' == '0'    Fatal Error    msg=Could not run iLO command ${Output}
+    [Return]    ${Output}
+
+Is Altair Job Complete
+    [Documentation]	Altair API Test:: Build Plans -> Add Build Plans, List it  and delete Build Plans
+    [Arguments]    ${job_uri}  
+    ${response}=    Altair API Get Task Status    ${job_uri}
+    :FOR    ${index}   In Range    1    51
+    \    common.Log to console and logfile    Waiting for job to complete for iteration: ${index}
+    \    ${stat}  ${response}=    Run Keyword and Ignore Error    Altair API Get Task Status    ${job_uri}
+    \    Run Keyword If     '${stat}'=='FAIL'    Run Keywords    Altair API Logout    AND    Altair API Login    AND    Continue For Loop
+    \    ${state}=    Get From Dictionary    ${response}    state
+    \    ${status}=    Run Keyword If    '${state}'=='STATUS_FAILURE'    Run Keywords    Set Variable    False    AND    Exit For Loop
+    \    ${status}=    Set Variable If    '${state}'=='STATUS_SUCCESS'    True
+    \    Run Keyword If    ${status}    Exit For Loop
+    ...    ELSE    Sleep    150
+    [Return]    ${status}
+
+Is Server Registered in Altair via SerialNumber
+    [Documentation]    Checks for the server registeration in Altair based on serial number
+    [Arguments]    ${serial_num}
+    ${reg_status}=    Set Variable     False
+    ${servs} =   Altair Api Get Servers
+    :FOR    ${serv}  IN  @{servs['members']}
+    \    ${sn}=  Get From Dictionary     ${serv}    serialNumber
+    \    ${reg_status}=     Set Variable If    '${sn}'=='${serial_num}'    True    False
+    \    Run Keyword If    ${reg_status}    Exit For Loop
+    [Return]    ${reg_status}
+
+Wait for Server Register in Altair via SerialNumber
+    [Documentation]    Waits for the server registeration in Altair based on serial number
+    [Arguments]    ${serial_num}
+    :FOR    ${index}    In Range    1    26
+    \    ${status}=    Is Server Registered in Altair via SerialNumber    ${serial_num}
+    \    Run Keyword If    ${status}    Exit For Loop
+    ...    ELSE    Sleep    30

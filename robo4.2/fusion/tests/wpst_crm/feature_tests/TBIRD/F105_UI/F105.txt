@@ -1,0 +1,201 @@
+*** Settings ***
+Documentation    F105
+Resource    F105Config.txt
+Force Tags    Buildup
+Suite Setup    Load Test Data and Open Browser
+Suite Teardown    Logout And Close All Browsers
+Library    Dialogs
+Library    String
+Library    Collections
+Library    SSHLibrary
+Library    OperatingSystem
+Library    Process
+Library    serveroperations
+Library    BuiltIn
+Variables    data_variables.py
+
+*** Variables ***
+${APPLIANCE_IP}    15.245.131.62
+${module_file_path}    ${CURDIR}\\performio.py
+${module_file_path1}    ${CURDIR}\\getdisk.py
+${module_file_path2}    ${CURDIR}\\fetchio.py
+
+*** Test Cases ***
+
+1 Log into fusion as Administrator
+    #Log into fusion as Administrator
+    [Documentation]    Log into Appliance as Administrator
+    Log To Console    *********Log into Appliance as Administrator****************
+    ${user} =    Get Data By Property    ${TestData.users}    name    Administrator
+    fusion_ui_login_to_appliance    ${user[0].name}
+    Log to Console    Successfully logged in as Administrator
+
+Initial cleanup
+    [Documentation]    Initial Cleanup
+    Log To Console    *********Initial Cleanup**********
+
+    Fusion UI Power Off All Servers
+    Fusion UI Delete All Appliance Server Profiles
+    Fusion UI Delete Logical Enclosure    @{TestData.le_Tbird}
+    Fusion UI Remove All Enclosure Groups
+    Fusion UI Remove All Logical Interconnect Groups
+    Fusion UI Delete All Appliance Networks
+
+2 Create Enet, FC and FCoE networks
+    [Documentation]    Create Enet FC and FcoE networks
+    Log To Console    *********Create Enet FC and FcoE networks**********
+    ${Status_enet}  Fusion UI Create Ethernet Network    @{TestData.networks_add}
+    Run Keyword If  '${Status_enet}' == 'True'  Log to Console  'Enet Netoworks created sucessfully'    ELSE    fail
+    Fusion UI Create FCOE Network   @{TestData.fcoenetworks}
+    Fusion UI Create fc Network   @{TestData.fcnetworks}
+
+3 Create LIG with 3 uplinksets
+    #Create LIG
+    Log To Console    ******CREATE LIG**********
+    ${Status}=    Fusion UI Create Tbird Logical Interconnect Group         @{TestData.ligs_Tbird}
+    Run Keyword If  '${Status}' == 'True'   Log to console  \nLIG is Created Successfully     ELSE    Fail
+    # Verifying multiple ICM ports are not allowed when fcoe network is available
+    ${Status1}=    fusion_ui_edit_logical_interconnect_group_tbird      @{TestData.ligs_Tbird_multi}
+    Should Contain     ${Status1}     ${multiple_ICM_select}
+    Log to Console    \n Verified multiple ICM ports are not allowed when fcoe network is available
+    # Verifying same VLAN id is not allowed in uplinksets
+    ${Status1}=    fusion_ui_edit_logical_interconnect_group_tbird      @{TestData.ligs_Tbird_vlan_verify}
+    Should Contain     ${Status1}     ${multiple_ICM_select}
+    Log to Console    \n Verified same VLAN id is not allowed in uplinksets
+    ${Status}=    Fusion UI edit logical interconnect group tbird       @{TestData.ligs_Tbird_edit}
+    Run Keyword If  '${Status}' == 'True'   Log to console  \nLIG is edited Successfully     ELSE    Fail
+
+4 Create EG and LE
+    [Documentation]    Create EG and LE
+    Log To Console    ******Create EG and LE**********
+    ${Return}    Fusion UI Create TBird Enclosure Group  @{TestData.encgroups_Tbird}
+    Run Keyword If  '${Return}' == 'True'   Log to console  \nSuccessfully created EG     ELSE    Fail
+    Fusion UI Create Logical Enclosure      @{TestData.le_Tbird}
+
+5 Create server profile
+    [Documentation]    Create Server Profiles
+    Log To Console    ******Create Server Profiles**********
+    ${len} =    Get Length      ${TestData.profiles}
+    :For    ${i}   IN Range    0   ${len}
+    \    ${Status1}  fusion_ui_create_server_profile  ${TestData.profiles[${i}]}
+    \    Log to Console    \n${Status1}
+    :For    ${i}   IN Range    0   ${len}
+    \    fusion_ui_power_on_server_profile     ${TestData.profiles[${i}]}
+
+6 Disable/Enable ports
+    [Documentation]    Disable/Enable ports and verify LUN discovery
+    Log To Console    ******Disable/Enable ports and verify LUN discovery**********
+    fusion_ui_power_off_server_profile     ${TestData.profiles[0]}
+    ${len} =    Get Length      ${TestData.interconnects_disable}
+    :For    ${i}   IN Range    0   ${len}
+    \    ${Return}    fusion_ui_edit_interconnect    ${TestData.interconnects_disable[${i}]}
+    ${len} =    Get Length      ${TestData.profile_conn_error}
+    :For    ${i}   IN Range    0   ${len}
+    \   ${alert_msg}    fusion_ui_get_server_profile_error_message    ${TestData.profile_conn_error[${i}].name}
+    \   Should Contain     ${alert_msg}     ${TestData.profile_conn_error[${i}].error_msg}
+    # verify error in interconnect
+    ${len} =    Get Length      ${TestData.interconnect_connect_error}
+    :For    ${i}   IN Range    0   ${len}
+    \   ${alert_msg}    fusion_ui_get_interconnect_error_message   ${TestData.interconnect_connect_error[${i}].name}
+    \   Should Contain     ${alert_msg}     ${TestData.interconnect_connect_error[${i}].error_msg}
+    Log to Console    Identifying lun un availability after port disable in ${TestData.profiles[1].name
+    ${lun_disk} =       lun_discovery       ${linux_details}    ${ilo_details[1]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${lun_disk[1]}' == '0'     Log to console  \nVerified luns are not discovered after disabling uplink ports    ELSE    Fail
+    ${len} =    Get Length      ${TestData.interconnects_enable}
+    :For    ${i}   IN Range    0   ${len}
+    \    ${Return}    fusion_ui_edit_interconnect    ${TestData.interconnects_enable[${i}]}
+    fusion_ui_power_on_server_profile     ${TestData.profiles[0]}
+    Log to Console    Lun discovery in ${TestData.profiles[1].name}
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[1]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '1'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+    ${cmd}    ${out_file}    ${msg} =       executes        ${linux_details}    ${ilo_details[1]}   ${server_details1[1]}   ${module_file_path} "${diskspd_cmd_60s}"
+    Run keyword If    '${msg}' == 'PASS'     Log to console  \nSucccessfully started IO     ELSE    Fail
+    Log to Console    \nVerifying IO traffic\n
+    ${cmd}  ${exeout}   ${msg} =        ioresults       ${linux_details}    ${ilo_details[1]}   ${server_details1[1]}   ${module_file_path2}    "${out_file}"
+    Run keyword unless  '${msg}'== 'PASS'   Fail    "Unable to Finish the IO Traffic"   Log To Console   \nThe IO Traffic Details are as follows:\n
+    Log to Console   \nIO traffic Success!!\nCommand--${cmd}\nOutput--${exeout}\n
+    Log to Console    Lun discovery in ${TestData.profiles[0].name}
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[0]}   ${server_details1[0]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '2'     Log to console  \nSuccessfully verified lun availability ${lun_disk}     ELSE    Fail
+    ${cmd}    ${out_file}    ${msg} =       executes        ${linux_details}    ${ilo_details[0]}   ${server_details1[0]}   ${module_file_path} "${diskspd_cmd_60s}"
+    Run keyword If    '${msg}' == 'PASS'     Log to console  \nSucccessfully started IO     ELSE    Fail
+    Log to Console    \nVerifying IO traffic\n
+    ${cmd}  ${exeout}   ${msg} =        ioresults       ${linux_details}    ${ilo_details[0]}   ${server_details1[0]}   ${module_file_path2}    "${out_file}"
+    Run keyword unless  '${msg}'== 'PASS'   Fail    "Unable to Finish the IO Traffic"   Log To Console   \nThe IO Traffic Details are as follows:\n
+    Log to Console   \nIO traffic Success!!\nCommand--${cmd}\nOutput--${exeout}\n
+
+7 Remove/add networks
+    [Documentation]    Remove/add networks and verify LUN discovery
+    Log To Console    ******Remove/add networks and verify LUN discovery**********
+    fusion_ui_power_off_server_profile     ${TestData.profiles[0]}
+    fusion_ui_delete_fc_network    @{TestData.fcoenetworks}
+    ${Result}   fusion_ui_delete_fc_network    @{TestData.fcnetworks}
+    Run Keyword If  '${Result}' == 'True'   Log to console  \n Deleted network  successfully    ELSE    Fail
+    # verify error in profile
+    ${len} =    Get Length      ${TestData.profile_conn_error1}
+    :For    ${i}   IN Range    0   ${len}
+    \   ${alert_msg}    fusion_ui_get_server_profile_error_message    ${TestData.profile_conn_error[${i}].name}
+    \   Should Contain     ${alert_msg}     ${TestData.profile_conn_error[${i}].error_msg}
+    ##verify error in interconnect
+    ${len} =    Get Length      ${TestData.interconnect_connect_error}
+    :For    ${i}   IN Range    0   ${len}
+    \   ${alert_msg}    fusion_ui_get_interconnect_error_message    ${TestData.interconnect_connect_error[${i}].name}
+    \   Should Contain     ${alert_msg}     ${TestData.interconnect_connect_error[${i}].error_msg}
+    Log to Console    Identifying lun un availability after network deletion
+    ${lun_disk} =       lun_discovery       ${linux_details}    ${ilo_details[1]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${lun_disk[1]}' == '0'     Log to console  \nVerified luns are not discovered after deleting networks    ELSE    Fail
+    # add networks
+    ${Status}   Fusion UI Create FCOE Network    @{TestData.fcoenetworks_add}
+    ${Status}   Fusion UI Create FC Network    @{TestData.fcnetworks_add}
+    #add network in uplinkset
+    fusion_ui_edit_logical_interconnect_group_tbird   @{TestData.ligs_Tbird_addnet}
+    #update from group
+    ${Status}   fusion_ui_update_logical_interconnect_from_group    @{TestData.li_update}
+    Run Keyword If  '${Status}' == 'True'   Log to Console  Update from Group successful    ELSE    fail
+    ${len}    Get Length    ${TestData.Profiles_add}
+    :For    ${i}    IN Range    0    ${len}
+    \    fusion_ui_power_off_server_profile    ${TestData.Profiles_add[${i}]}
+    \    fusion_ui_edit_server_profile    ${TestData.Profiles_add[${i}]}
+    \    fusion_ui_power_on_server_profile    ${TestData.Profiles_add[${i}]}
+    Log to Console    Identifying lun availability after adding network
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[1]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '1'     Log to console  \nVerified luns are discovered     ELSE    Fail
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[0]}   ${server_details1[0]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '2'     Log to console  \nVerified luns are discovered     ELSE    Fail
+
+8 Remove/add uplinks and verify lun
+    [Documentation]    Remove/add uplinks and verify LUN discovery
+    Log To Console    ******Remove/add uplinks and verify LUN discovery**********
+    fusion_ui_power_off_server_profile     ${TestData.profiles[0]}
+    ${Status}   fusion_ui_edit_logical_interconnect_group_tbird   @{TestData.ligs_Tbird_removeuplinks}
+    Run Keyword If  '${Status}' == 'True'   Log to Console  Edited uplink set successfully  ELSE    fail
+    #update from group
+    ${Status}   fusion_ui_update_logical_interconnect_from_group    @{TestData.li_update}
+    Run Keyword If  '${Status}' == 'True'   Log to Console  Update from Group successful    ELSE    fail
+    #verify connection error msg in server profile
+    ${len} =    Get Length      ${TestData.profile_conn_error}
+    :For    ${i}   IN Range    0   ${len}
+    \   ${alert_msg}    fusion_ui_get_server_profile_error_message   ${TestData.profile_conn_error[${i}].name}
+    \   Should Contain    ${alert_msg}    ${TestData.profile_conn_error[${i}].error_msg}
+    #verify error in interconnect
+    ${len} =    Get Length      ${TestData.interconnect_connect_error}
+    :For    ${i}   IN Range    0   ${len}
+    \   ${alert_msg}    fusion_ui_get_interconnect_error_message    ${TestData.interconnect_connect_error[${i}].name}
+    \   Should Contain     ${alert_msg}     ${TestData.interconnect_connect_error[${i}].error_msg}
+    # lun unavailabilty check
+    Log to Console    Identifying lun un availability after uplink removal
+    ${lun_disk} =       lun_discovery       ${linux_details}    ${ilo_details[1]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${lun_disk[1]}' == '0'     Log to console  \nVerified luns are not discovered after uplink removal    ELSE    Fail
+    # add uplinksets
+    ${Status}   fusion_ui_edit_logical_interconnect_group_tbird   @{TestData.ligs_Tbird_adduplinks}
+    Run Keyword If  '${Status}' == 'True'   Log to Console  Edited uplink set successfully  ELSE    fail
+    #update from group
+    ${Status}   fusion_ui_update_logical_interconnect_from_group    @{TestData.li_update}
+    Run Keyword If  '${Status}' == 'True'   Log to Console  Update from Group successful    ELSE    fail
+    ${Status}=    fusion_ui_power_on_server_profile     ${TestData.profiles[0]}
+    #Lun discovery
+    Log to Console    Identifying lun availability after adding uplinks
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[1]}   ${server_details1[1]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '1'     Log to console  \nVerified luns are discovered     ELSE    Fail
+    ${lun_disk}    ${disk_count} =      lun_discovery       ${linux_details}    ${ilo_details[0]}   ${server_details1[0]}   ${module_file_path1}    "${list_disk_cmd}"
+    Run keyword If    '${disk_count}' == '2'     Log to console  \nVerified luns are discovered     ELSE    Fail

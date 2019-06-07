@@ -1,0 +1,806 @@
+*** Settings ***
+Documentation
+...     Regression test work flow after changing cryptographic mode.
+Resource                        ../../../../Resources/api/fusion_api_resource.txt
+Variables                       ./data_variables_carbon32.py
+
+*** Variables ***
+${APPLIANCE_IP}                 192.168.144.142
+${app_ipv6}                      2001:0:0:0:92ba:da32:66b2:169e
+${bay1_icm}                       FVTVP30010, interconnect 1
+${bay4_icm}                       FVTVP30010, interconnect 4
+${ICM_Prompt}                    root>
+${Bayset}                        1
+${li_name}                        LE-LIG_Nitro
+
+
+*** Keywords ***
+Read Canmic
+    [Documentation]    Reading CANMIC block
+    [Arguments]     ${ic}   ${blk}
+    ${temp1}=  Split String    ${ic}    ,
+    ${enc_name}=  Get From List    ${temp1}     0
+    ${temp2}=  Get From List    ${temp1}     1
+    ${temp3}=  Split String    ${temp2}
+    ${bayno}=  Get From List    ${temp3}  -1
+    Open Connection And Log In      ${APPLIANCE_IP}
+    ${em_ip}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}"
+    ${xauth}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}" -o t
+    ${out}=  Execute Command    curl -g -x "" -k -i -H "x-auth-token:${xauth}" https://[${em_ip}%bond0]/rest/v1/InterconnectManager/${bayno} -d '{"Action":"ReadCanmicBlocks","List":[${blk}]} ' | grep } | python -m json.tool | grep Data | cut -d "\\"" -f 4 | base64 -d | hexdump -e '/1 "%_Ax) "' -e '/1 "%02X" "\\n"'
+    Close Connection
+    [Return]      ${out}
+
+Edit LIG body for SNMP
+    [Documentation]    Edit LIG for SNMPv3
+    [Arguments]    ${LIG1}    ${snmpusers}    ${trapdestination}
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    ${lig_get}    Fusion Api Get Lig    param=?filter=name=${LIG1}
+    ${lig_snmp}    Get Variable Value    ${lig_get['members'][0]['snmpConfiguration']}
+    Set To Dictionary    ${lig_snmp}    v3Enabled=true
+    Set To Dictionary    ${lig_snmp}    snmpUsers=${snmpusers}
+    Set To Dictionary    ${lig_snmp}    trapDestinations=${trapdestination}
+    [Return]    ${lig_snmp}
+
+Get IC
+    [Documentation]    GET on IC
+    [Arguments]                   ${ICM_NAME}
+    ${resp} =   fusion api get interconnect
+    Log           ${resp}
+    ${ics} =     Get From Dictionary     ${resp}    members
+    ${l} =      Get Length  ${ics}
+    :FOR  ${x}  IN RANGE    0     ${l}
+    \    ${ic} =     Get From List   ${ics}    ${x}
+    \    Exit For Loop If     '${ic['name']}' == '${ICM_NAME}'
+    [Return]    ${ic}
+
+Efuse ICM
+    [Documentation]    Efusing ICM
+    [Arguments]     ${ic}   ${action}
+    ${temp1}=  Split String    ${ic}    ,
+    ${enc_name}=  Get From List    ${temp1}     0
+    ${temp2}=  Get From List    ${temp1}     1
+    ${temp3}=  Split String    ${temp2}
+    ${bayno}=  Get From List    ${temp3}  -1
+    Open Connection And Log In      ${APPLIANCE_IP}
+    ${em_ip}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}"
+    ${xauth}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}" -o t
+    ${ret}=  Execute Command    curl -g -x "" -k -i -H "x-auth-token:${xauth}" -X POST https://[${em_ip}%bond0]/rest/v1/InterconnectBays/${bayno} -d '{"Action":"${action}"}'
+    Should Contain    ${ret}    { "Action": "${action}" }
+    ...    msg=EFuse action failed \n${ret}
+
+Get LE URI
+    [Documentation]    Get LE URI
+    [Arguments]          ${le}
+    ${resp} =     Fusion Api Get Logical Enclosure
+    ${l} =        Get Length    ${resp['members']}
+    :FOR   ${x}   IN RANGE      0      ${l}
+    \      Run Keyword If       '${resp['members'][${x}]['name']}' != '${le}'          Continue For Loop
+    \      ${uri} =      Get From Dictionary        ${resp['members'][${x}]}   uri
+    [Return]      ${uri}
+
+*** Test Cases ***
+Login
+    [Documentation]    Setup
+    Set Log Level    TRACE
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+
+#Creating FC networks
+    Add FC Networks from variable     ${fc_networks}
+
+#Creating LIG
+    Add LIG from variable       ${lig_carbon_32}
+    ${lig_edit}=    Get LIG member    ${lig_carbon_32['name']}
+    ${lig_uri}=  Get LIG URI    ${lig_carbon_32['name']}
+    ${lig_snmp}=    Edit LIG body for SNMP    ${lig_carbon_32['name']}    ${lig_carbon_32_snmp_config['snmpUsers']}    ${lig_carbon_32_snmp_config['trapDestinations']}
+    Set To Dictionary    ${lig_edit}    eTag=
+    Set To Dictionary    ${lig_edit}    snmpConfiguration=${lig_snmp}
+    ${resp}=    fusion_api_edit_lig    body=${lig_edit}    uri=${lig_uri}
+    Run Keyword If  '${resp['status_code']}' == '202'    Log to console  \nEdited LIG Successfully!!
+    ...    ELSE    FAIL
+    ${task} =    Wait For Task     ${resp}     180 s    10 s
+    ${valDict} =     Create Dictionary    status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response    ${task}    ${valDict}
+
+#Creating EG
+    ${responses}=  Add Enclosure Group from variable      ${enc_groups_me}
+    Wait For Task2    ${responses}    timeout=300    interval=15
+
+#Creating LE
+    #Add Logical Enclosure from variable     ${logical_enclosure_multi}
+    Open Connection And Log In    ${APPLIANCE_IP}
+    ${after_le_create} =  Execute Command    cat /ci/data/crm/* | wc -l
+    Should be equal as numbers   ${after_le_create}   2
+
+#Configuring Remote Syslog
+    ${resp}=  fusion_api_update_remote_syslog_configuration    body=${remote_syslog}
+    Wait For Task2    ${resp}    timeout=300    interval=15
+
+#Adding Storage Systems,Pool & Volume
+    Add Storage System     ${storage_systems_fc}
+    Sleep    30s
+    Run Keyword And Ignore Error   Edit Storage System    ${storage_systems_fc}
+    Sleep    30s
+    Run Keyword And Ignore Error   Edit Storage System    ${storage_systems_desc_fc}
+    Sleep    30s
+    Edit Storage Pool       ${storage_pool_fc}
+    sleep  2m
+    Add Existing Storage Volumes Async     ${storage_volumes_fc}
+
+#Adding server profile
+    Log to console and logfile    \nPowering off the server ${\n}${server_profile['serverHardwareUri']}
+    Power off Server    ${server_profile['serverHardwareUri']}
+    ${responses}=  Add Server Profile    ${server_profile}
+    Wait For Task2    ${responses}    timeout=3000    interval=15
+    Power on server     ${server_profile['serverHardwareUri']}
+
+Compatibility report for FIPS mode without incompatibilities
+   [Documentation]    Compatibility report for FIPS mode without incompatibilities
+   Log   \n Creating compatibility report for FIPS mode    console=True
+   ${targetMode} =  Set Variable    FIPS
+   ${currentMode} =  Set Variable    LEGACY
+   #${response} =  Create Cryptography Mode Compatibility Report    ${currentMode}    ${targetMode}
+   ${response} =  Update Cryptography Mode Compatibility Report    ${currentMode}    ${targetMode}
+   Log      \n Getting the generated compatibility report for FIPS mode    console=True
+   ${response} =  Get Cryptography Mode Compatibility Report
+   ${incomp_list} =  Create Dictionary
+   :FOR  ${mem}  IN  @{response['members']}
+   \    Run Keyword If  '${mem['resourceCategory']}' != 'interconnects'  Continue For Loop
+   \    ${device_name} =  Get From Dictionary    ${mem}    deviceName
+   \    Log      \n\n DEVICE NAME : ${device_name}    console=True
+   \    ${device_type} =  Get From Dictionary    ${mem}    deviceType
+   \    Log      DEVICE TYPE : ${mem['deviceType']}    console=True
+   \    ${detail} =  Get From Dictionary    ${mem}    nonCompatibilityDetails
+   \    ${detail_dict} =  Get From List    ${detail}    0
+   \    ${reason} =  Get From Dictionary    ${detail_dict}    nonCompatibilityKey
+   \    ${resolution} =  Get From Dictionary    ${detail_dict}    nonCompatibilityAction
+   \    Log      REASON : ${detail_dict['nonCompatibilityKey']}   console=True
+   \    Log      RESOLUTION : ${detail_dict['nonCompatibilityAction']}    console=True
+   \    Set to Dictionary   ${incomp_list}   ${device_name}   ${reason}
+   ${resp} =  Get Interconnect    FVTVP30010, interconnect 1
+   ${s_no} =  Get From Dictionary    ${resp}    serialNumber
+   ${icm} =  Catenate   SEPARATOR=:    ${sno}    FVTVP30010, interconnect 1
+   Run Keyword And Expect Error    Dictionary does not contain key '${icm}'.    Get From Dictionary    ${incomp_list}    ${icm}
+   ${resp} =  Get Interconnect    FVTVP30010, interconnect 4
+   ${s_no} =  Get From Dictionary    ${resp}    serialNumber
+   ${icm} =  Catenate   SEPARATOR=:    ${sno}    FVTVP30010, interconnect 4
+   Run Keyword And Expect Error    Dictionary does not contain key '${icm}'.    Get From Dictionary    ${incomp_list}    ${icm}
+
+Edit LIG enablev1
+    [Documentation]    Edit LIG enablev1
+    #Add LIG from variable       ${lig_carbon_32}
+    ${lig_edit}=    Get LIG member    ${lig_carbon_32['name']}
+    ${lig_uri}=  Get LIG URI    ${lig_carbon_32['name']}
+    Set To Dictionary    ${lig_edit}    eTag=
+    Set To Dictionary    ${lig_edit}    snmpConfiguration=${lig_enablev1_v2}
+    ${resp}=    fusion_api_edit_lig    body=${lig_edit}    uri=${lig_uri}
+    Run Keyword If  '${resp['status_code']}' == '202'    Log to console  \nEdited LIG Successfully!!
+    ...    ELSE    FAIL
+    ${task} =    Wait For Task     ${resp}     180 s    10 s
+    ${valDict} =     Create Dictionary    status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response    ${task}    ${valDict}
+    Update Logical Enclosure from Group   ${logical_enclosure_multi}
+
+Compatibility report for FIPS mode when SNMPv1 is enabled
+   [Documentation]    Compatibility report for FIPS mode when SNMPv1 is enabled
+   Log   \n Creating compatibility report for FIPS mode    console=True
+   ${targetMode} =  Set Variable    FIPS
+   ${currentMode} =  Set Variable    LEGACY
+   #${response} =  Create Cryptography Mode Compatibility Report    ${currentMode}    ${targetMode}
+   ${response}=   Update Cryptography Mode Compatibility Report    ${currentMode}    ${targetMode}
+   Log      \n Getting the generated compatibility report for FIPS mode    console=True
+   ${response} =  Get Cryptography Mode Compatibility Report
+   ${incomp_list} =  Create Dictionary
+   :FOR  ${mem}  IN  @{response['members']}
+   \    Run Keyword If  '${mem['resourceCategory']}' != 'interconnects'  Continue For Loop
+   \    ${device_name} =  Get From Dictionary    ${mem}    deviceName
+   \    Log      \n\n DEVICE NAME : ${device_name}    console=True
+   \    ${device_type} =  Get From Dictionary    ${mem}    deviceType
+   \    Log      DEVICE TYPE : ${mem['deviceType']}    console=True
+   \    ${detail} =  Get From Dictionary    ${mem}    nonCompatibilityDetails
+   \    ${detail_dict} =  Get From List    ${detail}    0
+   \    ${reason} =  Get From Dictionary    ${detail_dict}    nonCompatibilityKey
+   \    ${resolution} =  Get From Dictionary    ${detail_dict}    nonCompatibilityAction
+   \    Log      REASON : ${detail_dict['nonCompatibilityKey']}   console=True
+   \    Log      RESOLUTION : ${detail_dict['nonCompatibilityAction']}    console=True
+   \    Set to Dictionary   ${incomp_list}   ${device_name}   ${reason}
+
+   Log    \nChecking for incompatible ICMS in the list...    console=True
+   Log    \n INCOMPATIBLE ICM - Nitro :   console=True
+   Log    Is FVTVP30010, interconnect 1 existing in the list?   console=True
+   ${resp} =  Get Interconnect    FVTVP30010, interconnect 1
+   ${s_no} =  Get From Dictionary    ${resp}    serialNumber
+   ${icm} =  Catenate   SEPARATOR=:    ${sno}    FVTVP30010, interconnect 1
+   ${icm_reason} =  Get From Dictionary    ${incomp_list}    ${icm}
+   Should Be Equal    ${icm_reason}    SNMPv1/v2 configurations are not supported in FIPS mode.
+   Log    Is FVTVP30010, interconnect 4 existing in the list?    console=True
+   ${resp} =  Get Interconnect    FVTVP30010, interconnect 4
+   ${s_no} =  Get From Dictionary    ${resp}    serialNumber
+   ${icm} =  Catenate   SEPARATOR=:    ${sno}    FVTVP30010, interconnect 4
+   ${icm_reason} =  Get From Dictionary    ${incomp_list}    ${icm}
+   Should Be Equal    ${icm_reason}    SNMPv1/v2 configurations are not supported in FIPS mode.
+
+Edit LIG unsupported snmpv3 user
+    [Documentation]    Edit LIG unsupported snmpv3 user
+    #Add LIG from variable       ${lig_carbon_32}
+    ${lig_edit}=    Get LIG member    ${lig_carbon_32['name']}
+    ${lig_uri}=  Get LIG URI    ${lig_carbon_32['name']}
+    Set To Dictionary    ${lig_edit}    eTag=
+    Set To Dictionary    ${lig_edit}    snmpConfiguration=${lig_snmp_unsupported_users}
+    ${resp}=    fusion_api_edit_lig    body=${lig_edit}    uri=${lig_uri}
+    Run Keyword If  '${resp['status_code']}' == '202'    Log to console  \nEdited LIG Successfully!!
+    ...    ELSE    FAIL
+    ${task} =    Wait For Task     ${resp}     180 s    10 s
+    ${valDict} =     Create Dictionary    status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response    ${task}    ${valDict}
+    Sleep    1m
+    Update Logical Enclosure from Group   ${logical_enclosure_multi}
+
+Compatibility report for FIPS mode for unsupported snmpv3 user
+   [Documentation]    Compatibility report for FIPS mode for unsupported snmpv3 user
+   Log      \n Creating compatibility report for FIPS mode    console=True
+   ${targetMode} =  Set Variable    FIPS
+   ${currentMode} =  Set Variable    LEGACY
+   ${response} =  Update Cryptography Mode Compatibility Report   ${currentMode}    ${targetMode}
+
+   Log      \n Getting the generated compatibility report for FIPS mode    console=True
+   ${response} =  Get Cryptography Mode Compatibility Report
+   ${incomp_list} =  Create Dictionary
+   :FOR  ${mem}  IN  @{response['members']}
+   \    Run Keyword If  '${mem['resourceCategory']}' != 'interconnects'  Continue For Loop
+   \    ${device_name} =  Get From Dictionary    ${mem}    deviceName
+   \    Log      \n\n DEVICE NAME : ${device_name}    console=True
+   \    ${device_type} =  Get From Dictionary    ${mem}    deviceType
+   \    Log      DEVICE TYPE : ${mem['deviceType']}    console=True
+   \    ${detail} =  Get From Dictionary    ${mem}    nonCompatibilityDetails
+   \    ${detail_dict} =  Get From List    ${detail}    0
+   \    ${reason} =  Get From Dictionary    ${detail_dict}    nonCompatibilityKey
+   \    ${resolution} =  Get From Dictionary    ${detail_dict}    nonCompatibilityAction
+   \    Log      REASON : ${detail_dict['nonCompatibilityKey']}   console=True
+   \    Log      RESOLUTION : ${detail_dict['nonCompatibilityAction']}    console=True
+   \    Set to Dictionary   ${incomp_list}   ${device_name}   ${reason}
+
+   Log    \nChecking for incompatible ICMS in the list...    console=True
+   Log    \n INCOMPATIBLE ICM - Nitro :   console=True
+   Log    Is FVTVP30010 interconnect 1 existing in the list?    console=True
+   ${resp} =  Get Interconnect    FVTVP30010, interconnect 1
+   ${s_no} =  Get From Dictionary    ${resp}    serialNumber
+   ${icm} =  Catenate   SEPARATOR=:    ${sno}    FVTVP30010, interconnect 1
+   ${icm_reason} =  Get From Dictionary    ${incomp_list}    ${icm}
+   Should Be Equal    ${icm_reason}     SNMP users [snmptestuser3, snmptestuser2] are not supported in FIPS mode as they have authentication and privacy protocols specified that are not compatible with FIPS mode.
+   Log    Is FVTVP30010 interconnect 5 existing in the list?     console=True
+   ${resp} =  Get Interconnect    FVTVP30010, interconnect 4
+   ${s_no} =  Get From Dictionary    ${resp}    serialNumber
+   ${icm} =  Catenate   SEPARATOR=:    ${sno}    FVTVP30010, interconnect 4
+   ${icm_reason} =  Get From Dictionary    ${incomp_list}    ${icm}
+   Should Be Equal    ${icm_reason}     SNMP users [snmptestuser3, snmptestuser2] are not supported in FIPS mode as they have authentication and privacy protocols specified that are not compatible with FIPS mode.
+
+
+Reading CANMIC Block 19 to verify LEGACY mode
+   [Documentation]    Reading CANMIC Block 19 to verify LEGACY mode
+   ${block} =  Set Variable    19
+   ${ret}=  Read Canmic    ${bay1_icm}    ${block}
+   ${str} =  Split String    ${ret}    \n
+   ${l2} =  Get From List  ${str}   1
+   ${l2_bin} =  Convert To Binary   ${l2}   base=16     length=8
+   Log to console and logfile     \n ${l2}Binary is ${l2_bin}
+   ${FIPS_bit} =  Get Substring    ${l2_bin}    3    4
+   Log to console and logfile     \n Checking if ICM is in legacy mode
+   Should Be Equal As Integers    ${FIPS_bit}   0
+
+
+FIPS mode change
+    [Documentation]    FIPS mode change
+    ${mode_name} =  Set Variable   FIPS
+    Change Cryptography Mode    ${mode_name}    ${APPLIANCE_IP}
+    sleep  40m
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+
+Reading CANMIC Block 19 to verify FIPS mode
+   [Documentation]    Reading CANMIC Block 19 to verify FIPS mode
+   ${block} =  Set Variable    19
+   ${ret}=  Read Canmic    ${bay1_icm}    ${block}
+   ${str} =  Split String    ${ret}    \n
+   ${l2} =  Get From List  ${str}   1
+   ${l2_bin} =  Convert To Binary   ${l2}   base=16     length=8
+   ${FIPS_bit} =  Get Substring    ${l2_bin}    3    4
+   Log to console and logfile     \n Checking if ICM is in FIPS mode
+   Should Be Equal As Integers    ${FIPS_bit}   1
+
+Ping Test in FIPS mode
+    [Documentation]    Ping Test in FIPS mode
+    ${temp1}=  Split String    ${bay1_icm}    ,
+    ${enc_name}=  Get From List    ${temp1}     0
+    ${temp2}=  Get From List    ${temp1}     1
+    ${temp3}=  Split String    ${temp2}
+    ${bayno}=  Get From List    ${temp3}  -1
+    Open Connection And Log In      ${APPLIANCE_IP}
+    ${em_ip}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}"
+    ${xauth}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}" -o t
+    ${out}=  Execute Command    curl -g -x "" -k -i -H "x-auth-token:${xauth}" https://[${em_ip}%bond0]/rest/v1/InterconnectManager/${bayno} -d '{"Action":"ReadCanmicBlocks","List":[191]} ' | grep } | python -m json.tool | grep Data | cut -d "\\"" -f 4 | base64 -d | hexdump -C
+    #${temp}=  Split String    ${out}    |
+    #${passwd}=  Get From List  ${temp}  1
+    #Log to console and logfile     \n Password is ${passwd}
+    ${ICM_out} =  Get Interconnect  ${bay1_icm}
+    ${ip_list} =  Get From Dictionary   ${ICM_out}   ipAddressList
+    ${ipv4_dict} =  Get From List  ${ip_list}  0
+    ${ipv4_addr} =  Get From Dictionary   ${ipv4_dict}  ipAddress
+    Log to console and logfile      \n ${bay1_icm} IPv4 address is ${ipv4_addr}
+
+    ${output}=  Execute Command   ping -c 4 ${ipv4_addr}
+    ${match}    ${group1}=  Should Match Regexp   ${output}    (\\d+)% packet loss
+    Should Be Equal As Integers  ${group1}   0   msg="Packets lost percent not zero!!!"
+
+    ${ipv6_lla_dict} =  Get From List  ${ip_list}  1
+    ${ipv6_lla_addr} =  Get From Dictionary   ${ipv6_lla_dict}  ipAddress
+    Log to console and logfile      \n ${bay1_icm} IPv6 LLA address is ${ipv6_lla_addr}
+    ${icm_ipv6_lla} =  Catenate  SEPARATOR=%   ${ipv6_lla_addr}    bond0
+    ${output}=  Execute Command   ping6 -c 4 ${icm_ipv6_lla}
+    ${match}    ${group1}=  Should Match Regexp   ${output}    (\\d+)% packet loss
+    Should Be Equal As Integers  ${group1}   0   msg="Packets lost percent not zero!!!"
+
+Verifying rysylog,ipfilters and SNMP
+    [Documentation]    Verifying rysylog,ipfilters and SNMP
+    ${temp1}=  Split String    ${bay1_icm}    ,
+    ${enc_name}=  Get From List    ${temp1}     0
+    ${temp2}=  Get From List    ${temp1}     1
+    ${temp3}=  Split String    ${temp2}
+    ${bayno}=  Get From List    ${temp3}  -1
+    Open Connection And Log In      ${APPLIANCE_IP}
+    ${em_ip}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}"
+    ${xauth}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}" -o t
+    ${out}=  Execute Command    curl -g -x "" -k -i -H "x-auth-token:${xauth}" https://[${em_ip}%bond0]/rest/v1/InterconnectManager/${bayno} -d '{"Action":"ReadCanmicBlocks","List":[191]} ' | grep } | python -m json.tool | grep Data | cut -d "\\"" -f 4 | base64 -d | hexdump -C
+    #${temp}=  Split String    ${out}    |
+    #${passwd}=  Get From List  ${temp}  1
+    #Log to console and logfile     \n Password is ${passwd}
+    ${ICM_out} =  Get Interconnect  ${bay1_icm}
+    ${ip_list} =  Get From Dictionary   ${ICM_out}   ipAddressList
+    ${ipv4_dict} =  Get From List  ${ip_list}  0
+    ${ipv4_addr} =  Get From Dictionary   ${ipv4_dict}  ipAddress
+    Log to console and logfile      \n IPv4 address is ${ipv4_addr}
+    Open Connection               ${ipv4_addr}
+    Login                   root        GPyEb3cCqhlzsjuG
+    ${output}=   Execute Command    snmpconfig --show snmpv3
+    Log to console and logfile     \n SNMPv3 output ${output}
+    Should Contain   ${output}   SNMPv3 = Enabled
+
+    ${output}=   Execute Command    snmpconfig --show snmpv1
+    Log to console and logfile     \n SNMPv1 output is ${output}
+    Should Contain   ${output}   SNMPv1:Disabled
+
+    ${output}=   Execute Command    ipfilter --show
+    Log to console and logfile     \nIPfilter output is ${output}
+    Should Contain   ${output}   Name: default_ipv4, Type: ipv4, State: active
+    Should Contain   ${output}   Name: default_ipv6, Type: ipv6, State: active
+
+    ${output}=   Execute Command    syslogadmin --show -ip
+    Log to console and logfile     \n Remote syslog IP configured is ${output}
+    ${resp_rsyslog}=  fusion_api_get_remote_syslog_configuration
+    ${rsys_ip}=  Get From Dictionary  ${resp_rsyslog}    remoteSyslogDestination
+    Should Contain  ${output}  ${rsys_ip}
+
+    Close All Connections
+
+SNMP v1/v2 enable in FIPS mode
+    [Documentation]    SNMP v1/v2 enable in FIPS mode
+    ${li_list} =  Get All Logical Interconnect Uris
+    ${li_uri}=  Get From List  ${li_list}  0
+    ${resp} =  fusion_api_update_snmp_configuration  body=${li_snmp_v1_v2_enable}  uri=${li_uri}
+    ${task} =    Wait For Task     ${resp}     180 s    10 s
+    ${valDict} =     Create Dictionary    status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response    ${task}    ${valDict}
+
+Verifying SNMPv1 config in ICM
+    [Documentation]    Verifying SNMPv1 config in ICM
+    ${temp1}=  Split String    ${bay1_icm}    ,
+    ${enc_name}=  Get From List    ${temp1}     0
+    ${temp2}=  Get From List    ${temp1}     1
+    ${temp3}=  Split String    ${temp2}
+    ${bayno}=  Get From List    ${temp3}  -1
+    Open Connection And Log In      ${APPLIANCE_IP}
+    ${em_ip}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}"
+    ${xauth}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}" -o t
+    ${out}=  Execute Command    curl -g -x "" -k -i -H "x-auth-token:${xauth}" https://[${em_ip}%bond0]/rest/v1/InterconnectManager/${bayno} -d '{"Action":"ReadCanmicBlocks","List":[191]} ' | grep } | python -m json.tool | grep Data | cut -d "\\"" -f 4 | base64 -d | hexdump -C
+    #${temp}=  Split String    ${out}    |
+    #${passwd}=  Get From List  ${temp}  1
+    #Log to console and logfile     \n Password is ${passwd}
+    ${ICM_out} =  Get Interconnect  ${bay1_icm}
+    ${ip_list} =  Get From Dictionary   ${ICM_out}   ipAddressList
+    ${ipv4_dict} =  Get From List  ${ip_list}  0
+    ${ipv4_addr} =  Get From Dictionary   ${ipv4_dict}  ipAddress
+    Log to console and logfile      \n IPv4 address is ${ipv4_addr}
+    Open Connection               ${ipv4_addr}
+    Login                   root        GPyEb3cCqhlzsjuG
+    ${output}=   Execute Command    snmpconfig --show snmpv3
+    Log to console and logfile     \n SNMPv3 output ${output}
+    Should Contain   ${output}   SNMPv3 = Enabled
+
+    ${output}=   Execute Command    snmpconfig --show snmpv1
+    Log to console and logfile     \n SNMPv1 output is ${output}
+    Should Contain   ${output}   SNMPv1:Enabled
+    Close All Connections
+
+SNMP v1/v2 disable in FIPS mode
+    [Documentation]    SNMP v1/v2 disable in FIPS mode
+    ${li_list} =  Get All Logical Interconnect Uris
+    ${li_uri}=  Get From List  ${li_list}  0
+    ${resp} =  fusion_api_update_snmp_configuration  body=${li_snmp_v1_v2_disable}  uri=${li_uri}
+    ${task} =    Wait For Task     ${resp}     180 s    10 s
+    ${valDict} =     Create Dictionary    status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response    ${task}    ${valDict}
+
+Verifying SNMPv1 disabled in ICM
+    [Documentation]    Verifying SNMPv1 disabled in ICM
+    ${temp1}=  Split String    ${bay1_icm}    ,
+    ${enc_name}=  Get From List    ${temp1}     0
+    ${temp2}=  Get From List    ${temp1}     1
+    ${temp3}=  Split String    ${temp2}
+    ${bayno}=  Get From List    ${temp3}  -1
+    Open Connection And Log In      ${APPLIANCE_IP}
+    ${em_ip}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}"
+    ${xauth}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}" -o t
+    ${out}=  Execute Command    curl -g -x "" -k -i -H "x-auth-token:${xauth}" https://[${em_ip}%bond0]/rest/v1/InterconnectManager/${bayno} -d '{"Action":"ReadCanmicBlocks","List":[191]} ' | grep } | python -m json.tool | grep Data | cut -d "\\"" -f 4 | base64 -d | hexdump -C
+    #${temp}=  Split String    ${out}    |
+    #${passwd}=  Get From List  ${temp}  1
+    #Log to console and logfile     \n Password is ${passwd}
+    ${ICM_out} =  Get Interconnect  ${bay1_icm}
+    ${ip_list} =  Get From Dictionary   ${ICM_out}   ipAddressList
+    ${ipv4_dict} =  Get From List  ${ip_list}  0
+    ${ipv4_addr} =  Get From Dictionary   ${ipv4_dict}  ipAddress
+    Log to console and logfile      \n IPv4 address is ${ipv4_addr}
+    Open Connection               ${ipv4_addr}
+    Login                   root        GPyEb3cCqhlzsjuG
+    ${output}=   Execute Command    snmpconfig --show snmpv3
+    Log to console and logfile     \n SNMPv3 output ${output}
+    Should Contain   ${output}   SNMPv3 = Enabled
+
+    ${output}=   Execute Command    snmpconfig --show snmpv1
+    Log to console and logfile     \n SNMPv1 output is ${output}
+    Should Contain   ${output}   SNMPv1:Disabled
+    Close All Connections
+
+Test SSH from another appliance
+    [Documentation]    Test SSH from another appliance
+    ${ICM_out} =  Get Interconnect  ${bay1_icm}
+    ${ip_list} =  Get From Dictionary   ${ICM_out}   ipAddressList
+    ${ipv4_dict} =  Get From List  ${ip_list}  0
+    ${ipv4_addr} =  Get From Dictionary   ${ipv4_dict}  ipAddress
+    Log to console and logfile      \n ${bay1_icm} IPv4 address is ${ipv4_addr}
+
+    ${remote_app_ip}=  Set Variable  192.168.144.176
+    Open Connection And Log In      ${remote_app_ip}
+    Write     \r\n
+    Write     ssh -o StrictHostKeyChecking=no root@${ipv4_addr}
+    Sleep  5s
+    ${cmdoutput}=    Read
+    Log to console and logfile      \n SSH output is ${cmdoutput}
+    Should Contain   ${cmdoutput}   password:
+
+    ${ipv6_lla_dict} =  Get From List  ${ip_list}  1
+    ${ipv6_lla_addr} =  Get From Dictionary   ${ipv6_lla_dict}  ipAddress
+    Log to console and logfile      \n ${bay1_icm} IPv6 LLA address is ${ipv6_lla_addr}
+    ${icm_ipv6_lla} =  Catenate  SEPARATOR=%   ${ipv6_lla_addr}    bond0
+    Write     ssh -o StrictHostKeyChecking=no root@${icm_ipv6_lla}
+    Sleep  5s
+    ${cmdoutput}=    Read
+    Log to console and logfile      \n SSH output is ${cmdoutput}
+    Should Contain   ${cmdoutput}   password:
+
+    Close All Connections
+
+Validation of Known host entry file during Power cycle
+    [Documentation]    Validation of Known host entry file during Power cycle
+    Open Connection And Log In    ${APPLIANCE_IP}
+    ${dict1} =   Create Dictionary
+    ${out} =  Execute Command    cat /ci/data/crm/*
+    ${data} =  Split String    ${out}    \n
+    :FOR    ${mem}  IN  @{data}
+    \     ${item} =  Split String    ${mem}
+    \     ${addr} =  Get From List    ${item}    0
+    \     ${algo} =  Get From List    ${item}    1
+    \     ${key} =  Get From List    ${item}    2
+    \     Set To Dictionary    ${dict1}    ${addr}    ${key}
+
+    Log to console and logfile      \n Powering Off ${bay1_icm}
+    ${Carbon_IC} =    Create Dictionary    name=${bay1_icm}
+    Patch Interconnect  ${Carbon_IC}  op=replace  path=/powerState  value=Off  timeout=60  interval=5
+    Sleep   2m
+    Log to console and logfile      \n Checking ICM Power State after Power Off
+    ${ic_resp} =     Get IC    ${bay1_icm}
+    ${ic_powerState} =     Get From IC    ${ic_resp}   powerState
+    Should Be Equal  ${ic_powerState}    Off
+    Log to console and logfile      \n Powering On ${bay1_icm}
+    Patch Interconnect  ${Carbon_IC}  op=replace  path=/powerState  value=On  timeout=60  interval=5
+    Sleep  20m
+    Log to console and logfile      \n Checking ICM State after Power On
+    ${Carbon_URI}=  Get IC URI  ${bay1_icm}
+    IC reached state  ${Carbon_URI}  Configured
+
+    ${ICM_out} =  Get Interconnect  ${bay1_icm}
+    ${ip_list} =  Get From Dictionary   ${ICM_out}   ipAddressList
+    ${ipv6_dict} =  Get From List  ${ip_list}  1
+    ${ipv6_addr} =  Get From Dictionary   ${ipv6_dict}  ipAddress
+    Log to console and logfile      \n IPv6 address of Master Potash is ${ipv6_addr}
+    ${ipv4_dict} =  Get From List  ${ip_list}  0
+    ${ipv4_addr} =  Get From Dictionary   ${ipv4_dict}  ipAddress
+    Log to console and logfile      \n IPv4 address of Master Potash is ${ipv4_addr}
+
+    ${dict2} =   Create Dictionary
+    ${out} =  Execute Command    cat /ci/data/crm/*
+    ${data} =  Split String    ${out}    \n
+    :FOR    ${mem}  IN  @{data}
+    \     ${item} =  Split String    ${mem}
+    \     ${addr} =  Get From List    ${item}    0
+    \     ${algo} =  Get From List    ${item}    1
+    \     ${key} =  Get From List    ${item}    2
+    \     Set To Dictionary    ${dict2}    ${addr}    ${key}
+
+    ${ip_log} =  Execute Command   cat /ci/logs/ciDebug.log | grep "HostKey Changed for switchIp" | tail -1
+    ${ip_log1} =  Remove String    ${ip_log}  , hence requesting canmic block to get the host key fingerprint to validate
+    ${list_temp} =  Split String    ${ip_log1}
+    ${ip_changed} =  Get From List   ${list_temp}   -1
+
+    Log to console and logfile      \n HostKey has been changed for ${ip_changed}
+
+    ${dict1_ip_val} =  Get From Dictionary    ${dict1}    ${ip_changed}
+    Log to console and logfile      \n HostKey before power off ${dict1_ip_val}
+    ${dict2_ip_val} =  Get From Dictionary    ${dict2}    ${ip_changed}
+    Log to console and logfile      \n HostKey after power on ${dict2_ip_val}
+
+    Should Not Be Equal As Strings    ${dict1_ip_val}    ${dict2_ip_val}
+    Log to console and logfile      \n Verified that Host Key are different
+    Close All Connections
+
+Validation of Known host entry after efuse
+    [Documentation]    Validation of Known host entry after efuse
+    Open Connection And Log In    ${APPLIANCE_IP}
+
+    ${ln_cnt_b4} =  Execute Command    cat /ci/data/crm/* | wc -l
+
+    Log to console and logfile      \n Removing Interconnect ${bay1_icm}
+    Efuse ICM  ${bay1_icm}  EFuseOn
+    Sleep   2m
+    Log to console and logfile      \n Checking ICM state
+    ${ic_resp} =     Get IC    ${bay1_icm}
+    ${ic_State} =      Get From IC    ${ic_resp}   state
+    Should Be Equal  ${ic_State}    Absent
+
+    ${ln_cnt_remove} =  Execute Command    cat /ci/data/crm/* | wc -l
+    ${count}=  Evaluate  ${ln_cnt_b4} - 1
+    Should be equal as numbers   ${count}   ${ln_cnt_remove}
+
+    Log to console and logfile      \n Inserting Interconnect ${bay1_icm}
+    Efuse ICM  ${bay1_icm}  EFuseOff
+    Sleep  20m
+    Log to console and logfile      \n Checking ICM State after inserting
+    ${Carbon_URI}=  Get IC URI  ${bay1_icm}
+    IC reached state  ${Carbon_URI}  Configured
+
+    ${ln_cnt_add} =  Execute Command    cat /ci/data/crm/* | wc -l
+    Should be equal as numbers   ${ln_cnt_b4}   ${ln_cnt_add}
+
+     Close All Connections
+
+LE support Dump
+    [Documentation]    LE support Dump
+    ${le_uri}=  Get LE URI  ${logical_enclosure_multi['name']}
+    ${le_uri}=  Replace String   ${le_uri}    /rest/logical-enclosures/    ${EMPTY}
+    ${resp}=  fusion_api_get_logical_enclosure_support_dump   ${le_sd_body_enc}  ${le_uri}
+    ${task} =       Wait For Task       ${resp}    60min    1min
+    ${uri}=     Get From Dictionary        ${task['associatedResource']}       resourceUri
+    ${resp}=    Fusion Api Download Support Dump    ${uri}     ./le_supportdump_fips.sdmp
+
+Verifying self test in FIPS mode
+    [Documentation]    Verifying self test in FIPS mode
+    ${temp1}=  Split String    ${bay1_icm}    ,
+    ${enc_name}=  Get From List    ${temp1}     0
+    ${temp2}=  Get From List    ${temp1}     1
+    ${temp3}=  Split String    ${temp2}
+    ${bayno}=  Get From List    ${temp3}  -1
+    Open Connection And Log In      ${APPLIANCE_IP}
+    ${em_ip}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}"
+    ${xauth}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}" -o t
+    ${out}=  Execute Command    curl -g -x "" -k -i -H "x-auth-token:${xauth}" https://[${em_ip}%bond0]/rest/v1/InterconnectManager/${bayno} -d '{"Action":"ReadCanmicBlocks","List":[191]} ' | grep } | python -m json.tool | grep Data | cut -d "\\"" -f 4 | base64 -d | hexdump -C
+    ${temp}=  Split String    ${out}    |
+    ${passwd}=  Get From List  ${temp}  1
+    Log to console and logfile     \n Password is ${passwd}
+    ${ICM_out} =  Get Interconnect  ${bay1_icm}
+    ${ip_list} =  Get From Dictionary   ${ICM_out}   ipAddressList
+    ${ipv4_dict} =  Get From List  ${ip_list}  0
+    ${ipv4_addr} =  Get From Dictionary   ${ipv4_dict}  ipAddress
+    Log to console and logfile      \n IPv4 address is ${ipv4_addr}
+    Open Connection               ${ipv4_addr}
+    Login                   root        ${passwd}
+    ${output}=   Execute Command     canmic -r 60
+    Log to console and logfile     \n canmic 60 output ${output}
+    ${op} =  Replace String Using Regexp   ${output}  \\s+   ${EMPTY}
+    Should Contain   ${op}   0000000000
+
+    Close All Connections
+
+Deleting SP
+    [Documentation]    Deleting SP
+     Log to console and logfile    Powering off the server ${\n}${server_profile['serverHardwareUri']}
+     Power off Server    ${server_profile['serverHardwareUri']}
+     Remove All Server Profiles
+     ${sp_resp} =   Fusion Api Get Server Profiles      param=?filter="'name'=='${server_profile['name']}'"
+     ${count} =  Get From Dictionary  ${sp_resp}  count
+     Should Be Equal As Integers   ${count}   0
+
+Deleting LE
+    [Documentation]    Deleting LE
+      Remove All LEs
+      ${le_resp}=  Get Logical Enclosure By Name   ${logical_enclosure_multi['name']}
+      ${error_code}=  Get From Dictionary   ${le_resp}   errorCode
+      Should Be Equal   ${error_code}   GENERIC_HTTP_404
+      Open Connection And Log In    ${APPLIANCE_IP}
+      ${after_le_delete} =  Execute Command    cat /ci/data/crm/* | wc -l
+      Should be equal as numbers   ${after_le_delete}   0
+
+Compatibility report for CNSA mode
+    [Documentation]    Compatibility report for CNSA mode
+       Log   \n Creating compatibility report for FIPS mode    console=True
+       ${targetMode} =  Set Variable    FIPS
+       ${currentMode} =  Set Variable    LEGACY
+       #${response} =  Create Cryptography Mode Compatibility Report    ${currentMode}    ${targetMode}
+       ${response} =  Update Cryptography Mode Compatibility Report    ${currentMode}    ${targetMode}
+       Log      \n Getting the generated compatibility report for FIPS mode    console=True
+       ${response} =  Get Cryptography Mode Compatibility Report
+       ${incomp_list} =  Create Dictionary
+       :FOR  ${mem}  IN  @{response['members']}
+       \    Run Keyword If  '${mem['resourceCategory']}' != 'interconnects'  Continue For Loop
+       \    ${device_name} =  Get From Dictionary    ${mem}    deviceName
+       \    Log      \n\n DEVICE NAME : ${device_name}    console=True
+       \    ${device_type} =  Get From Dictionary    ${mem}    deviceType
+       \    Log      DEVICE TYPE : ${mem['deviceType']}    console=True
+       \    ${detail} =  Get From Dictionary    ${mem}    nonCompatibilityDetails
+       \    ${detail_dict} =  Get From List    ${detail}    0
+       \    ${reason} =  Get From Dictionary    ${detail_dict}    nonCompatibilityKey
+       \    ${resolution} =  Get From Dictionary    ${detail_dict}    nonCompatibilityAction
+       \    Log      REASON : ${detail_dict['nonCompatibilityKey']}   console=True
+       \    Log      RESOLUTION : ${detail_dict['nonCompatibilityAction']}    console=True
+       \    Set to Dictionary   ${incomp_list}   ${device_name}   ${reason}
+
+       Log    \nChecking for incompatible ICMS in the list...    console=True
+       Log    \n INCOMPATIBLE ICM - Nitro :   console=True
+       Log    Is FVTVP30010, interconnect 1 existing in the list?   console=True
+       ${resp} =  Get Interconnect    FVTVP30010, interconnect 1
+       ${s_no} =  Get From Dictionary    ${resp}    serialNumber
+       ${icm} =  Catenate   SEPARATOR=:    ${sno}    FVTVP30010, interconnect 1
+       ${icm_reason} =  Get From Dictionary    ${incomp_list}    ${icm}
+       Should Be Equal    ${icm_reason}    Oneview cannot manage ${icm} in CNSA mode.
+       Log    Is FVTVP30010, interconnect 4 existing in the list?    console=True
+       ${resp} =  Get Interconnect    FVTVP30010, interconnect 4
+       ${s_no} =  Get From Dictionary    ${resp}    serialNumber
+       ${icm} =  Catenate   SEPARATOR=:    ${sno}    FVTVP30010, interconnect 4
+       ${icm_reason} =  Get From Dictionary    ${incomp_list}    ${icm}
+       Should Be Equal    ${icm_reason}    Oneview cannot manage {icm} in CNSA mode.
+
+
+CNSA mode change
+    [Documentation]    CNSA mode change
+    ${mode_name} =  Set Variable   CNSA
+    Change Cryptography Mode    ${mode_name}    ${APPLIANCE_IP}
+    sleep  5m
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+
+Unmanaged Carbon Alert
+    [Documentation]    Unmanaged Carbon Alert
+    ${resp} =  Get Alert by Param    param=?filter="alertState EQ 'Active'"&filter="healthCategory EQ 'interconnect'"&filter="associatedResource.resourceName EQ 'FVTVP30012, interconnect 1'"
+    ${desc} =  Get from Dictionary    ${resp}    description
+    Log to console and logfile      \n DESCRIPTION : ${desc}
+    Should Be Equal As Strings    ${desc}   The interconnect type is not compatible with CNSA cryptography mode.
+    ${action} =  Get from Dictionary    ${resp}    correctiveAction
+    Log to console and logfile      \n ACTION : ${action}
+    #Should Be Equal As Strings    ${action}    Remove the switch from configuration.
+    Should Be Equal As Strings    ${action}    Remove the interconnect or choose a less strict cryptography mode.
+
+    ${resp} =  Get Alert by Param    param=?filter="alertState EQ 'Active'"&filter="healthCategory EQ 'interconnect'"&filter="associatedResource.resourceName EQ 'FVTVP30012, interconnect 4'"
+    ${desc} =  Get from Dictionary    ${resp}    description
+    Log to console and logfile      \n DESCRIPTION : ${desc}
+    Should Be Equal As Strings    ${desc}   The interconnect type is not compatible with CNSA cryptography mode.
+    ${action} =  Get from Dictionary    ${resp}    correctiveAction
+    Log to console and logfile      \n ACTION : ${action}
+    #Should Be Equal As Strings    ${action}    Remove the switch from configuration.
+    Should Be Equal As Strings    ${action}    Remove the interconnect or choose a less strict cryptography mode.
+
+    ${resp} =  Get Alert by Param    param=?filter="alertState EQ 'Active'"&filter="healthCategory EQ 'logical-interconnect'"&filter="associatedResource.resourceName EQ 'LE-lig_carbon_32-1'"&filter="alertTypeID EQ 'crm.securitymode'"
+    ${desc} =  Get from Dictionary    ${resp}    description
+    Log to console and logfile      \n DESCRIPTION : ${desc}
+    #Should Be Equal As Strings    ${desc}    The type of one or more interconnects which are part of logical interconnect is not compatible with CNSA #cryptography mode.
+    Should Be Equal As Strings    ${desc}    One or more interconnect modules are not compatible with CNSA cryptography mode. OneView will not be able to manage these interconnects which are part of the logical interconnect.
+    ${action} =  Get from Dictionary    ${resp}    correctiveAction
+    Log to console and logfile      \n ACTION : ${action}
+
+
+########################
+Efuse Legacy to FIPS
+    [Documentation]    Efuse Legacy to FIPS
+    ${mode_name} =  Set Variable   LEGACY
+    Change Cryptography Mode    ${mode_name}    ${APPLIANCE_IP}
+    sleep  30m
+    Log to console and logfile      \n Removing Interconnect in LEGACY mode ${bay1_icm}
+    Efuse ICM  ${bay1_icm}  EFuseOn
+    Sleep   2m
+    Log to console and logfile      \n Checking ICM state
+    ${ic_resp} =     Get IC    ${bay1_icm}
+    ${ic_State} =      Get From IC    ${ic_resp}   state
+    Should Be Equal  ${ic_State}    Absent
+
+    ${mode_name} =  Set Variable   FIPS
+    Change Cryptography Mode    ${mode_name}    ${APPLIANCE_IP}
+    sleep  30m
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+
+
+    Log to console and logfile      \n Inserting Interconnect in FIPS mode ${bay1_icm}
+    Efuse ICM  ${bay1_icm}  EFuseOff
+    Sleep  15m
+    Log to console and logfile      \n Checking ICM State after inserting
+    ${Carbon_URI}=  Get IC URI  ${bay1_icm}
+    IC reached state  ${Carbon_URI}  Configured
+
+#######################
+Edit LIG SNMP invalid users
+    [Documentation]    Edit LIG SNMP invalid users
+    ${mode_name} =  Set Variable   LEGACY
+    Change Cryptography Mode    ${mode_name}    ${APPLIANCE_IP}
+    sleep  30m
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+    ${lig_edit}=    Get LIG member    ${lig_carbon_32['name']}
+    ${lig_uri}=  Get LIG URI    ${lig_carbon_32['name']}
+    ${lig_snmp}=    Edit LIG body for SNMP    ${lig_carbon_32['name']}    ${lig_carbon_32_invalid_users['snmpUsers']}    ${lig_carbon_32_invalid_users['trapDestinations']}
+    Set To Dictionary    ${lig_edit}    eTag=
+    Set To Dictionary    ${lig_edit}    snmpConfiguration=${lig_snmp}
+    ${resp}=    fusion_api_edit_lig    body=${lig_edit}    uri=${lig_uri}
+    Run Keyword If  '${resp['status_code']}' == '202'    Log to console  \nEdited LIG Successfully!!
+    ...    ELSE    FAIL
+    ${task} =    Wait For Task     ${resp}     180 s    10 s
+    ${valDict} =     Create Dictionary    status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response    ${task}    ${valDict}
+    Sleep  1m
+    Update Logical Enclosure from Group   ${logical_enclosure_multi}
+
+Compatibility report for FIPS mode for invalid snmpv3 user
+   [Documentation]    Compatibility report for FIPS mode for unsupported snmpv3 user
+   Log      \n Creating compatibility report for FIPS mode    console=True
+   ${targetMode} =  Set Variable    FIPS
+   ${currentMode} =  Set Variable    LEGACY
+   ${response} =  Update Cryptography Mode Compatibility Report   ${currentMode}    ${targetMode}
+
+   Log      \n Getting the generated compatibility report for FIPS mode    console=True
+   ${response} =  Get Cryptography Mode Compatibility Report
+   ${incomp_list} =  Create Dictionary
+   :FOR  ${mem}  IN  @{response['members']}
+   \    Run Keyword If  '${mem['resourceCategory']}' != 'interconnects'  Continue For Loop
+   \    ${device_name} =  Get From Dictionary    ${mem}    deviceName
+   \    Log      \n\n DEVICE NAME : ${device_name}    console=True
+   \    ${device_type} =  Get From Dictionary    ${mem}    deviceType
+   \    Log      DEVICE TYPE : ${mem['deviceType']}    console=True
+   \    ${detail} =  Get From Dictionary    ${mem}    nonCompatibilityDetails
+   \    ${detail_dict} =  Get From List    ${detail}    0
+   \    ${reason} =  Get From Dictionary    ${detail_dict}    nonCompatibilityKey
+   \    ${resolution} =  Get From Dictionary    ${detail_dict}    nonCompatibilityAction
+   \    Log      REASON : ${detail_dict['nonCompatibilityKey']}   console=True
+   \    Log      RESOLUTION : ${detail_dict['nonCompatibilityAction']}    console=True
+   \    Set to Dictionary   ${incomp_list}   ${device_name}   ${reason}
+
+   Log    \nChecking for incompatible ICMS in the list...    console=True
+   Log    \n INCOMPATIBLE ICM - Nitro :   console=True
+   Log    Is FVTVP30010 interconnect 1 existing in the list?    console=True
+   ${resp} =  Get Interconnect    FVTVP30010, interconnect 1
+   ${s_no} =  Get From Dictionary    ${resp}    serialNumber
+   ${icm} =  Catenate   SEPARATOR=:    ${sno}    FVTVP30010, interconnect 1
+   ${icm_reason} =  Get From Dictionary    ${incomp_list}    ${icm}
+   Should Be Equal    ${icm_reason}     SNMP users [snmptestuser3, snmptestuser4, snmptestuser2] are not supported in FIPS mode as they have authentication and privacy protocols specified that are not compatible with FIPS mode.
+   Log    Is FVTVP30010 interconnect 4 existing in the list?     console=True
+   ${resp} =  Get Interconnect    FVTVP30010, interconnect 4
+   ${s_no} =  Get From Dictionary    ${resp}    serialNumber
+   ${icm} =  Catenate   SEPARATOR=:    ${sno}    FVTVP30010, interconnect 4
+   ${icm_reason} =  Get From Dictionary    ${incomp_list}    ${icm}
+   Should Be Equal    ${icm_reason}     SNMP users [snmptestuser3, snmptestuser4, snmptestuser2] are not supported in FIPS mode as they have authentication and privacy protocols specified that are not compatible with FIPS mode.

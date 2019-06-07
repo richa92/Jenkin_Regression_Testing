@@ -1,0 +1,813 @@
+*** Settings ***
+Documentation    ...     OVF5320 Regression test work flow for Carbon 16 Initial Trust.
+Resource                        ../../../../../Resources/api/fusion_api_resource.txt
+Variables                       ./data_variables_carbon_ME_16_420.py
+
+*** Variables ***
+${APPLIANCE_IP}                 192.168.144.142
+${SSH_PASS}                     hpvse1
+${Bayset}                       2
+#${NITRO_IC_TYPE}     Virtual Connect SE 100Gb F32 Module for Synergy
+${CARBON16_IC_TYPE}     Virtual Connect SE 16Gb FC Module for Synergy
+${State_Absent}     Absent
+${State_Configured}     Configured
+${State_Maintenance}    Maintenance
+${State_Unmanaged}      Unmanaged
+${State_Monitored}      Monitored
+#${EMPTY}                This interconnect module is a company owned asset and provided for the exclusive use of authorized personnel. Unauthorized use or abuse of this system may lead to corrective action including termination, civil and/or criminal penalties.
+${Bayset}               2
+
+*** Keywords ***
+Verify Interconnect State
+    [Documentation]     Verify Interconnect State
+    [Arguments]    ${ICM_NAME}    ${POWER_STATE}
+    ${ic}    Get IC    ${ICM_NAME}
+    ${State}    Get From IC    ${ic}    state
+    Log    \nICM state is ${ICM_NAME}:${State}    console=True
+    Should Be Equal As Strings    ${State}    ${POWER_STATE}
+
+Write Canmic
+    [Documentation]     Write Canmic
+    [Arguments]     ${ic}   ${blk}   ${data}
+    ${temp1}=  Split String    ${ic}    ,
+    ${enc_name}=  Get From List    ${temp1}     0
+    ${temp2}=  Get From List    ${temp1}     1
+    ${temp3}=  Split String    ${temp2}
+    ${bayno}=  Get From List    ${temp3}  -1
+    Open Connection And Log In      ${APPLIANCE_IP}
+    ${em_ip}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}"
+    ${xauth}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}" -o t
+    ${out}=  Execute Command    curl -g -x "" -k -i -H "x-auth-token:${xauth}" -X POST https://[${em_ip}%bond0]/rest/v1/InterconnectManager/${bayno} -d '{ "Action": "WriteCanmicBlocks","List": [ { "Block": ${blk}, "Data" : "${data}", "Format" : "Base64" }]}'
+    ${regex_match}=  Should Match Regexp   ${out}    "Result": "Success"
+
+Read Canmic
+    [Documentation]     Read Canmic
+    [Arguments]     ${ic}   ${blk}
+    ${temp1}=  Split String    ${ic}    ,
+    ${enc_name}=  Get From List    ${temp1}     0
+    ${temp2}=  Get From List    ${temp1}     1
+    ${temp3}=  Split String    ${temp2}
+    ${bayno}=  Get From List    ${temp3}  -1
+    Open Connection And Log In      ${APPLIANCE_IP}
+    ${em_ip}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}"
+    ${xauth}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}" -o t
+    ${out}=  Execute Command    curl -g -x "" -k -i -H "x-auth-token:${xauth}" https://[${em_ip}%bond0]/rest/v1/InterconnectManager/${bayno} -d '{"Action":"ReadCanmicBlocks","List":[${blk}]}'
+    ${regex_match}=  Should Match Regexp   ${out}    "Data": ".+"
+    ${regex_match}=  Replace String Using Regexp   ${regex_match}   : "    :"
+    ${regex_match}=  Remove String  ${regex_match}   "
+    ${temp}=   Split String   ${regex_match}   :
+    ${value}=   Get From List   ${temp}   1
+    [Return]      ${value}
+
+Efuse ICM
+    [Documentation]     Efuse ICM
+    [Arguments]     ${ic}   ${action}
+    ${temp1}=  Split String    ${ic}    ,
+    ${enc_name}=  Get From List    ${temp1}     0
+    ${temp2}=  Get From List    ${temp1}     1
+    ${temp3}=  Split String    ${temp2}
+    ${bayno}=  Get From List    ${temp3}  -1
+    Open Connection And Log In      ${APPLIANCE_IP}
+    ${em_ip}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}"
+    ${xauth}=  Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s "${enc_name}" -o t
+    ${ret}=  Execute Command    curl -g -x "" -k -i -H "x-auth-token:${xauth}" -X POST https://[${em_ip}%bond0]/rest/v1/InterconnectBays/${bayno} -d '{"Action":"${action}"}'
+    Should Contain    ${ret}    { "Action": "${action}" }
+    ...    msg=EFuse action failed \n${ret}
+
+Get LI URI
+    [Documentation]     Get LI URI
+    [Arguments]          ${li}
+    ${resp} =     Fusion Api Get LI
+    ${l} =        Get Length    ${resp['members']}
+    :FOR   ${x}   IN RANGE      0      ${l}
+    \      Run Keyword If       '${resp['members'][${x}]['name']}' != '${li}'          Continue For Loop
+    \      ${uri} =      Get From Dictionary        ${resp['members'][${x}]}   uri
+    [Return]      ${uri}
+
+Get Li Name
+    [Documentation]     Get Li Name
+    [Arguments]     ${Bayset}
+    ${LIs} =   Get Li Names
+    ${desired_li}=    set variable   test
+    :FOR  ${x}  IN    @{LIs}
+    \    ${desired_li} =    Get ICM BayNo in LI    ${x}  ${Bayset}
+    \    Exit For Loop If    '${desired_li}'!='test'
+    Log to Console    \n\nDesired LI: ${desired_li}\n
+    [return]    ${x}
+
+
+Get ICM BayNo in LI
+    [Documentation]     Get ICM BayNo in LI
+    [Arguments]     ${LI}  ${Bayset}
+    @{ICMS} =    ICMs in LI    ${LI}
+    ${BayNo_list} =    Create List
+    :FOR  ${ICM_name}  IN  @{ICMS}
+    \    ${icm_split} =     Split String  ${ICM_name}  ,
+    \    ${bay_no} =       Get from List    ${icm_split}    1
+    \    ${bay_no1} =    Remove String Using Regexp   ${bay_no}   [interconnect ]
+    \    run keyword if   '${bay_no1}'=='${Bayset}'    Return From Keyword   ${LI}
+    ...         ELSE   Return From Keyword   test
+    [return]    ${BayNo_list}
+
+Get IC
+    [Documentation]     Get IC
+    [Arguments]                   ${ICM_NAME}
+    ${resp} =   fusion api get interconnect
+    Log           ${resp}
+    ${ics} =     Get From Dictionary     ${resp}    members
+    ${l} =      Get Length  ${ics}
+    :FOR  ${x}  IN RANGE    0     ${l}
+    \    ${ic} =     Get From List   ${ics}    ${x}
+    \    Exit For Loop If     '${ic['name']}' == '${ICM_NAME}'
+    [Return]    ${ic}
+    Log         ${ic}
+
+Get IC From URI
+    [Documentation]     Get IC From URI
+    [Arguments]                   ${ic_uri}
+    ${resp} =   fusion api get interconnect
+    Log           ${resp}
+    ${ics} =     Get From Dictionary     ${resp}    members
+    ${l} =      Get Length  ${ics}
+    :FOR  ${x}  IN RANGE    0     ${l}
+    \    ${ic} =     Get From List   ${ics}    ${x}
+    \    Exit For Loop If     '${ic['uri']}' == '${ic_uri}'
+    [Return]    ${ic}
+    Log         ${ic}
+
+Get from IC
+    [Documentation]     Get from IC
+    [Arguments]     ${ic}   ${element}
+    ${return} =     Get From Dictionary     ${ic}   ${element}
+    [Return]    ${return}
+
+Get Le Name
+    [Documentation]     Get Le Name
+    ${resp} =   Fusion Api Get Logical Enclosure
+    Log           ${resp}
+    ${Le_name} =    Get From Dictionary  ${resp['members'][0]}  name
+    Log to Console   \n\nLE Name: ${Le_name}\n
+    Log           ${Le_name}
+    [return]    ${Le_name}
+
+Get Li Names
+    [Documentation]     Get Li Names
+    ${resp} =    Fusion Api Get Li
+    Log           ${resp}
+    ${lis} =     Get From Dictionary     ${resp}    members
+    ${l} =      Get Length  ${lis}
+    ${li_list} =    Create List
+    :FOR  ${x}  IN RANGE    0     ${l}
+    \    ${li} =     Get From List   ${lis}    ${x}
+    \    ${li_name} =     Get from IC    ${li}    name
+    \    Append To List   ${li_list}   ${li_name}
+    Log to Console    \n\nLI Names : ${li_list}\n
+    [return]    ${li_list}
+
+List Carbon 16 ICM Names In LI
+    [Documentation]     List Carbon 16 ICM Names In LI
+    [Arguments]     ${LI}
+    ${li_uri}=    Get LI URI    ${LI}
+    Log to Console   \nli_uri:${li_uri}\n
+    ${resp} =     fusion_api_get_li     uri=${li_uri}
+    ${x}=    Get Variable Value  ${resp['interconnects']}
+    ${l} =      Get Length  ${x}
+    ${icm_list} =    Create List
+    :FOR  ${y}  IN RANGE    0     ${l}
+    \    ${ic_uri} =     Get From List   ${x}    ${y}
+    \    ${ic} =  Get IC From URI   ${ic_uri}
+    \    ${ic_name} =     Get from IC    ${ic}    name
+    \    ${ic_type} =     Get from IC    ${ic}    productName
+    \    run keyword if   '${ic_type}'=='${CARBON16_IC_TYPE}'    Append To List   ${icm_list}   ${ic_name}
+    Log to Console    \n\n Carbon 16 ICM Names in LI: ${icm_list}\n
+    [return]    ${icm_list}
+
+ICMs in LI
+    [Documentation]     ICMs in LI
+    [Arguments]     ${LI}
+    ${li_uri}=    Get LI URI    ${LI}
+    Log to Console   \nli_uri:${li_uri}\n
+    ${resp} =     fusion_api_get_li     uri=${li_uri}
+    ${x}=    Get Variable Value  ${resp['interconnects']}
+    ${l} =      Get Length  ${x}
+    ${icm_list} =    Create List
+    :FOR  ${y}  IN RANGE    0     ${l}
+    \    ${ic_uri} =     Get From List   ${x}    ${y}
+    \    ${ic} =  Get IC From URI   ${ic_uri}
+    \    ${ic_name} =     Get from IC    ${ic}    name
+    \    Append To List   ${icm_list}   ${ic_name}
+    Log to Console    \n\nICM Names in ${LI}: ${icm_list}\n
+    [return]    ${icm_list}
+
+Validate ICM Power
+    [Documentation]     Validate ICM Power
+    [Arguments]     ${POWER}    @{ICMS}
+    ${ICM_POWERS} =    Create List
+    :for    ${ICM}    in     @{ICMS}
+    \    ${Carbon16_ic_powerState} =    Get IC        ${ICM}
+    \    ${Carbon16_ic_powerState_from_ov} =      Get From IC    ${Carbon16_ic_powerState}   powerState
+    \    Append to List    ${ICM_POWERS}    ${Carbon16_powerState_from_ov}
+    \    Log to Console      \nICM ${ICM} Power from OneView API : ${Carbon16_ic_powerState_from_ov}
+    :for    ${ICM_POWER}    in     @{ICM_POWERS}
+    \    run keyword if   '${ICM_POWER}'!='${POWER}'      Fatal error    \n\nOne or more ICM Power is Off
+
+Get LE URI
+    [Documentation]     Get LE URI
+    [Arguments]          ${le}
+    ${resp} =     Fusion Api Get Logical Enclosure
+    ${l} =        Get Length    ${resp['members']}
+    :FOR   ${x}   IN RANGE      0      ${l}
+    \      Run Keyword If       '${resp['members'][${x}]['name']}' != '${le}'          Continue For Loop
+    \      ${uri} =      Get From Dictionary        ${resp['members'][${x}]}   uri
+    [Return]      ${uri}
+
+Build LE SPP Body
+    [Documentation]     Build LE SPP Body
+    [Arguments]       ${le_spp}
+
+    ${firmwareBaselineUri} =           Get Variable Value  ${le_spp['firmwareBaselineUri']}
+    ${forceInstallFirmware} =              Get Variable Value  ${le_spp['forceInstallFirmware']}
+    ${firmwareUpdateOn} =              Get Variable Value  ${le_spp['firmwareUpdateOn']}
+    ${logicalInterconnectUpdateMode} =              Get Variable Value  ${le_spp['logicalInterconnectUpdateMode']}
+
+    ${validateIfLIFirmwareUpdateIsNonDisruptive} =              Get Variable Value  ${le_spp['validateIfLIFirmwareUpdateIsNonDisruptive']}
+    ${value_dict} =   Create Dictionary       firmwareBaselineUri=${firmwareBaselineUri}
+    ...                                             forceInstallFirmware=${forceInstallFirmware}
+    ...                                             firmwareUpdateOn=${firmwareUpdateOn}
+    ...                                             logicalInterconnectUpdateMode=${logicalInterconnectUpdateMode}
+    ...                                          validateIfLIFirmwareUpdateIsNonDisruptive=${validateIfLIFirmwareUpdateIsNonDisruptive}
+    ${value} =     Create list     ${value_dict}
+    Log To Console                ${value_dict}
+    ${body} =   Create Dictionary   op=replace
+    ...                             path=/firmware
+    ...                             value=${value_dict}
+    ${body} =     Create list     ${body}
+    [Return]    ${body}
+
+Get Le eTag
+    [Documentation]     Get Le eTag
+    ${resp} =   Fusion Api Get Logical Enclosure
+    Log           ${resp}
+    ${Le_eTag} =    Get From Dictionary  ${resp['members'][0]}  eTag
+    Log to Console   \n\nLE eTag: ${Le_eTag}\n
+    Log           ${Le_eTag}
+    [return]    ${Le_eTag}
+
+Validate ICM State
+    [Documentation]     Validate ICM State
+    [Arguments]     ${STATE}    @{ICMS}
+    ${ICM_STATES} =    Create List
+    :for    ${ICM}    in     @{ICMS}
+    \    ${Carbon16_ic_state} =    Get IC        ${ICM}
+    \    ${Carbon16_ic_state_from_ov} =      Get From IC    ${Carbon16_ic_state}   state
+    \    Append to List    ${ICM_STATES}    ${Carbon16_ic_state_from_ov}
+    \    Log to Console     \n${ICM} State from OneView API : ${Carbon16_ic_state_from_ov}
+    :for    ${ICM_STATE}    in     @{ICM_STATES}
+    \    run keyword if   '${ICM_STATE}'!='${STATE}'    Fatal error    \nOne or more ICM state is not Configured
+
+
+Validate LI Consistency State
+    [Documentation]     Validate LI Consistency State
+    [Arguments]       ${LI}
+    ${LI_URI} =    Get LI        ${LI}
+    ${li_consistency_state} =    Get From LI    ${LI_URI}   consistencyStatus
+    Log to Console   \nLogicalInterconnect ${LI} consistency state is: ${li_consistency_state}
+    run keyword if   '${li_consistency_state}'=='CONSISTENT'    Log To console    \nlogical interconnect consistency state: Consistent   ELSE    Fatal error    \n\nlogical interconnect is Not Consistent
+
+Get LI
+    [Documentation]     Get LI
+    [Arguments]                   ${LI_NAME}
+    ${resp} =   Fusion Api Get Li
+    Log           ${resp}
+    ${lis} =     Get From Dictionary     ${resp}    members
+    ${l} =      Get Length  ${lis}
+    :FOR  ${x}  IN RANGE    0     ${l}
+    \    ${li} =     Get From List   ${lis}    ${x}
+    \    Exit For Loop If     '${li['name']}' == '${LI_NAME}'
+    [Return]    ${li}
+    Log         ${li}
+
+Get from LI
+    [Documentation]     Get from LI
+    [Arguments]     ${li}   ${element}
+    ${return} =     Get From Dictionary     ${li}   ${element}
+    [Return]    ${return}
+
+Reboot appliance via API
+    [Documentation]     Reboot appliance via API
+    [Arguments]  ${APPLIANCE_IP}    ${admin_credentials}
+    Fusion API Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+    ${resp} =  Fusion Api Appliance Shutdown        REBOOT
+    ${task} =  wait for task2   ${resp}     10min   5   None Expected   Completed
+    sleep  10m
+    Log      -- Waiting for OneView state to change to "STARTING"
+    Wait For Appliance State To Be STARTING
+    Log      -- Waiting for OneView state to change to "OK"
+    Wait For Appliance State To Be OK
+
+Populate the role and reboot
+    [Documentation]     Populate the role and reboot
+    [Arguments]  ${APPLIANCE_IP}    ${admin_credentials}    ${ssh_credentials}      ${populateCMDs}
+    Run Multi Cmd  ${APPLIANCE_IP}      ${ssh_credentials["userName"]}     ${ssh_credentials["password"]}   ${populateCMDs}
+    Reboot appliance via API    ${APPLIANCE_IP}     ${admin_credentials}
+
+Wait For Appliance State To Be STARTING
+    [Documentation]     Wait For Appliance State To Be STARTING
+    [Arguments]                     ${timeout}=20 min   ${interval}=30 s
+    Wait Until Keyword Succeeds     ${timeout}  ${interval}     Appliance State Should Be STARTING
+
+Wait For Appliance State To Be OK
+    [Documentation]     Wait For Appliance State To Be OK
+    [Arguments]                     ${timeout}=20 min   ${interval}=30 s
+    Wait Until Keyword Succeeds     ${timeout}  ${interval}     Appliance State Should Be OK
+
+Appliance State Should Be STARTING
+    [Documentation]     Appliance State Should Be STARTING
+    ${state} =  Fusion Api Get Resource     /controller-state.json
+    Log  -Appliance state: ${state['state']}
+    Should Match Regexp     ${state['state']}   ((?i)STARTING)
+
+Appliance State Should Be OK
+    [Documentation]     Appliance State Should Be OK
+    ${state} =  Fusion Api Get Resource     /controller-state.json
+    Log  -Appliance state: ${state['state']}
+    Should Match Regexp     ${state['state']}   ((?i)OK)
+
+Write CANMIC test
+    [Documentation]     Write CANMIC test
+    ${out}=  Write Canmic   ${Nitro_IC_FIPS['name']}   33    AAAAAQ==
+    Log      \n Canmic Data is ${out}
+    ${regex_match}=  Should Match Regexp   ${out}    "Result": "Success"
+    Log      \n Result is ${regex_match}
+
+Reading CANMIC 53,54 & 57
+    [Documentation]     Reading CANMIC 53,54 & 57
+    [Arguments]  ${LI}
+    @{ICMS} =    ICMs in LI    ${LI}
+    Validate ICM State     Configured    @{ICMS}
+    @{ICMS} =    List Carbon 16 ICM Names In LI     ${LI}
+    :for    ${ICM}    in     @{ICMS}
+    \   Log      \n Reading block 53
+    \   ${out1}=  Read Canmic   ${ICM}   53
+    \   Should Be Equal  ${out1}   Ag==
+    \   Log   ${out1}
+    \   Log      \n Reading block 54
+    \   ${out2}=  Read Canmic   ${ICM}   54
+    \   Should Be Equal  ${out2}   AgsAAAw=
+    \   Log   ${out2}
+    \   Log      \n Reading block 57
+    \   ${out3}=  Read Canmic   ${ICM}   57
+    \   Log   ${out3}
+    \   Should Not Be Empty   ${out3}
+
+Check Host Entry Key value
+    [Documentation]     Check Host Entry Key value
+    [Arguments]    ${flag}=0
+    Log    \n Checking the Host Key Entries
+    ${ipv6_addr_list}    Create List
+    ${ipv4_addr_list}    Create List
+    ${LIs} =    Get Li Names
+    SortList    ${LIs}
+    ${LI} =    Get From List   ${LIs}    0
+    @{ICMS} =    ICMs in LI    ${LI}
+    @{ICMS} =    List Carbon 16 ICM Names In LI     ${LI}
+    Run Keyword If    ${flag} != 1    Open Connection And Log In    ${APPLIANCE_IP}
+    ${out}    Run Keyword If    ${flag} != 1    Execute Command    cat /ci/data/crm/*
+    Run Keyword If    ${flag} != 1    Log      \n known host entries ${out}
+    :for    ${ICM}    in     @{ICMS}
+    \  ${ICM_out} =  Get Interconnect  ${ICM}
+    \  ${ip_list} =  Get From Dictionary   ${ICM_out}   ipAddressList
+    \  ${ipv6_dict} =  Get From List  ${ip_list}  1
+    \  ${ipv6_addr} =  Get From Dictionary   ${ipv6_dict}  ipAddress
+    \  Log      \n IPv6 address is ${ipv6_addr}
+    \  ${ipv4_dict} =  Get From List  ${ip_list}  0
+    \  ${ipv4_addr} =  Get From Dictionary   ${ipv4_dict}  ipAddress
+    \  Log      \n IPv4 address is ${ipv4_addr}
+    \  Append to List    ${ipv6_addr_list}    ${ipv6_addr}
+    \  Append to List    ${ipv4_addr_list}    ${ipv4_addr}
+    \  Run Keyword If    ${flag} != 1    Should Contain Any      ${out}  ${ipv6_addr}   ${ipv4_addr}
+    Return From Keyword If    ${flag} == 1    ${ipv6_addr_list}    ${ipv4_addr_list}    @{ICMS}
+    Close Connection
+    [return]
+
+
+*** Test Cases ***
+Login
+    [Documentation]     SETUP
+    Set Log Level    TRACE
+    #Login
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+
+#SETUP
+    #Creating Ethernet networks
+    Add Ethernet Networks from variable    ${ethernet_networks}
+    #Creating FC networks
+    Add FC Networks from variable     ${fc_networks}
+    #Creating FCoE networks
+    Add FCoE Networks from variable    ${fcoe_networks}
+
+#CREATE LIG
+    #Creating LIG
+    ${resp}=    Run Keyword If    ${lig_carbon_16} is not ${null}   Add LIG from variable async    ${lig_carbon_16}
+    Wait For Task2    ${resp}    timeout=200    interval=10
+
+#CREATE EG
+    #Creating EG
+    ${responses}=  Add Enclosure Group from variable      ${enc_groups_me}
+    Wait For Task2    ${responses}    timeout=300    interval=15
+
+#CREATE LE
+    #Creating LE
+    Add Logical Enclosure from variable     ${logical_enclosure_multi}
+    Sleep  15m
+
+OVF5320_API_TC_49_CARBON_16_4_XX_5_XX_FW_Update_LEGACY
+    [Documentation]     CARBON_16_4_XX_5_XX_FW_Update_LEGACY
+    ${LI} =    Get Li Name    ${Bayset}
+    Log    \n LI for update: ${LI}
+    ${li_uri} =     Get LI URI       ${LI}
+    Log   "Performing LI Firmware Upgrade"
+    ${resp1} =    Fusion Api Li Upgrade Firmware      body=${LI_fwupdate_orchestrated}    uri=${li_uri}
+    ${task} =       Wait For Task       ${resp1}    7200s    10s
+    ${valDict} =    Create Dictionary    status_code=${200}
+    ...                                  taskState=Completed
+    Validate Response   ${task}     ${valDict}
+    Log to Console    \n LI Firmware Upgrade complete
+    Sleep    5m
+
+OVF5320_API_TC_01_CARBON_16_5_XX_CREATE_LE_INITIAL_TRUST_LEGACY
+    [Documentation]     CARBON_16_5_XX_CREATE_LE_INITIAL_TRUST_LEGACY
+    Log     \n Checking Carbon ICM going to Configured state
+    Log     \n Checking for Bay 5
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_4}    ${State_Configured}
+    Log     \n Checking for Bay 2
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_1}    ${State_Configured}
+    ${resp}=    Check Host Entry Key value
+
+OVF5320_API_TC_04_CARBON_16_5_XX_EFFUSE_ON_INITIAL_TRUST_LEGACY
+    [Documentation]     CARBON_16_5_XX_EFFUSE_ON_INITIAL_TRUST_LEGACY
+    #Carbon Efuse on
+    Log      \n Removing Interconnect
+    Efuse ICM  ${ICM_4}  EFuseOn
+    Sleep   5m
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_4}    ${State_Absent}
+    ${resp}=    Check Host Entry Key value
+
+OVF5320_API_TC_05_CARBON_16_5_XX_EFFUSE_OFF_INITIAL_TRUST_LEGACY
+    [Documentation]     CARBON_16_5_XX_EFFUSE_OFF_INITIAL_TRUST_LEGACY
+    Log      \n Inserting Interconnect
+    Efuse ICM  ${ICM_4}  EFuseOff
+    Sleep  5m
+    Log      \n Checking ICM State after inserting
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_4}    ${State_Configured}
+    ${resp}=    Check Host Entry Key value
+
+OVF5320_API_TC_06_CARBON_16_5_XX_RESET_INITIAL_TRUST_LEGACY
+    [Documentation]     CARBON_16_5_XX_RESET_INITIAL_TRUST_LEGACY
+    #Carbon16 Reset
+    Log     \n Reseting the Carbon at Bay 5
+    ${carbon_IC} =    Create Dictionary    name=${ICM_4}
+    Patch Interconnect  ${carbon_IC}  op=replace  path=/deviceResetState  value=Reset  timeout=60  interval=5
+    Sleep  4m
+    Log      \n Checking ICM State after Reset
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_4}    ${State_Configured}
+    ${resp}=    Check Host Entry Key value
+
+OVF5320_API_TC_02_CARBON_16_5_XX_POWER_OFF_ON_INITIAL_TRUST_LEGACY
+    [Documentation]     CARBON_16_5_XX_POWER_OFF_ON_INITIAL_TRUST_LEGACY
+    ${ipv6_addr_list}    Create List
+    ${ipv4_addr_list}    Create List
+    ${ipv6_addr_list}    ${ipv4_addr_list}    @{ICMS}    Check Host Entry Key value    1
+    Log      \n Powering Off ${ICM_4}
+    ${carbon_IC} =    Create Dictionary    name=${ICM_4}
+    Patch Interconnect  ${carbon_IC}  op=replace  path=/powerState  value=Off  timeout=60  interval=5
+    Sleep   2m
+    Log      \n Checking ICM Power State after Power Off
+    ${ic_resp} =     Get IC    ${ICM_4}
+    ${ic_powerState} =     Get From IC    ${ic_resp}   powerState
+    Should Be Equal  ${ic_powerState}    Off
+    Log     \n Check ICM state should be Maintenence
+    Wait Until Keyword Succeeds    300 s    30 s    Verify Interconnect State    ${ICM_4}    ${State_Maintenance}
+    Open Connection And Log In    ${APPLIANCE_IP}
+    ${out} =  Execute Command    cat /ci/data/crm/*
+    Log      \n known host entries ${out}
+    ${count}    Get Length    ${ICMS}
+    :for    ${x}    in range    0    ${count}
+    \   Should Contain Any      ${out}  ${ipv6_addr_list[${x}]} ${ipv4_addr_list[${x}]}
+    Close Connection
+    
+OVF5320_API_TC_03_CARBON_16_5_XX_POWER_OFF_OFF_INITIAL_TRUST_LEGACY
+    [Documentation]     CARBON_16_5_XX_POWER_OFF_OFF_INITIAL_TRUST_LEGACY
+    Log      \n Powering On ${ICM_4}
+    ${carbon_IC} =    Create Dictionary    name=${ICM_4}
+    Patch Interconnect  ${carbon_IC}  op=replace  path=/powerState  value=On  timeout=60  interval=5
+    Sleep  3m
+    Log      \n Checking ICM State after Power On
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_4}    ${State_Configured}
+    ${resp}=    Check Host Entry Key value
+
+OVF5320_API_TC_07_CARBON_16_5_XX_DELETE_LE_INITIAL_TRUST_LEGACY
+    [Documentation]     CARBON_16_5_XX_DELETE_LE_INITIAL_TRUST_LEGACY
+    #Deleting LE
+    Remove All LEs    force=${True}
+    ${le_resp}=  Get Logical Enclosure By Name   ${logical_enclosure_multi['name']}
+    ${error_code}=  Get From Dictionary   ${le_resp}   errorCode
+    Should Be Equal   ${error_code}   GENERIC_HTTP_404
+    #Known host entry check after LE delete
+    Open Connection And Log In    ${APPLIANCE_IP}
+    ${out} =  Execute Command    cat /ci/data/crm/jsch_known_hosts
+    Log      \n known host entries ${out}
+    Should Contain Any      ${out}  ${EMPTY}
+    #Should Be Empty   ${out}
+
+#Creating LE
+    
+    Add Logical Enclosure from variable     ${logical_enclosure_multi}
+    Sleep  15m
+
+#FIPS TEST CASES ############################################################
+
+Legacy mode to FIPS change
+    [Documentation]     Legacy mode to FIPS change
+    ${mode_name} =  Set Variable   FIPS
+    Change Cryptography Mode    ${mode_name}    ${APPLIANCE_IP}    35 min   30 s
+    Log     \n Mode Changed. Waiting for Appliance to come up....
+    sleep  15m
+
+OVF5320_API_TC_17_CARBON_16_5_XX_LEGACY_TO_FIPS
+    [Documentation]     CARBON_16_5_XX_LEGACY_TO_FIPS
+    Log     \n Checking Carbon ICM going to Configured state
+    Log     \n Checking for Bay 5
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_4}    ${State_Configured}
+    Log     \n Checking for Bay 2
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_1}    ${State_Configured}
+    ${resp}=    Check Host Entry Key value
+
+OVF5320_API_TC_11_CARBON_16_5_XX_EFFUSE_ON_INITIAL_TRUST_FIPS
+    [Documentation]     CARBON_16_5_XX_EFFUSE_ON_INITIAL_TRUST_FIPS
+    #Carbon Efuse
+    Log      \n Removing Interconnect
+    Efuse ICM  ${ICM_4}  EFuseOn
+    Sleep   5m
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_4}    ${State_Absent}
+    ${resp}=    Check Host Entry Key value
+
+
+OVF5320_API_TC_12_CARBON_16_5_XX_EFFUSE_OFF_INITIAL_TRUST_FIPS
+    [Documentation]     CARBON_16_5_XX_EFFUSE_OFF_INITIAL_TRUST_FIPS
+    Log      \n Inserting Interconnect
+    Efuse ICM  ${ICM_4}  EFuseOff
+    Sleep  5m
+    Log      \n Checking ICM State after inserting
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_4}    ${State_Configured}
+    ${resp}=    Check Host Entry Key value
+
+OVF5320_API_TC_13_CARBON_16_5_XX_RESET_INITIAL_TRUST_FIPS
+    [Documentation]     CARBON_16_5_XX_RESET_INITIAL_TRUST_FIPS
+    #Carbon16 Reset
+    Log     \n Reseting the Carbon at Bay 5
+    ${carbon_IC} =    Create Dictionary    name=${ICM_4}
+    Patch Interconnect  ${carbon_IC}  op=replace  path=/deviceResetState  value=Reset  timeout=60  interval=5
+    Sleep  4m
+    Log      \n Checking ICM State after Reset
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_4}    ${State_Configured}
+    ${resp}=    Check Host Entry Key value
+
+OVF5320_API_TC_09_CARBON_16_5_XX_POWER_OFF_ON_INITIAL_TRUST_FIPS -
+    [Documentation]     CARBON_16_5_XX_POWER_OFF_ON_INITIAL_TRUST_FIPS 
+    #Validation of Known host entry file during Power cycle
+    ${ipv6_addr_list}    Create List
+    ${ipv4_addr_list}    Create List
+    ${ipv6_addr_list}    ${ipv4_addr_list}    @{ICMS}    Check Host Entry Key value    1
+    Log      \n Powering Off ${ICM_4}
+    ${carbon_IC} =    Create Dictionary    name=${ICM_4}
+    Patch Interconnect  ${carbon_IC}  op=replace  path=/powerState  value=Off  timeout=60  interval=5
+    Sleep   2m
+    Log      \n Checking ICM Power State after Power Off
+    ${ic_resp} =     Get IC    ${ICM_4}
+    ${ic_powerState} =     Get From IC    ${ic_resp}   powerState
+    Should Be Equal  ${ic_powerState}    Off
+    Log     \n Check ICM state should be Maintenence
+    Wait Until Keyword Succeeds    300 s    30 s    Verify Interconnect State    ${ICM_4}    ${State_Maintenance}
+    Open Connection And Log In    ${APPLIANCE_IP}
+    ${out} =  Execute Command    cat /ci/data/crm/*
+    Log      \n known host entries ${out}
+    ${count}    Get Length    ${ICMS}
+    :for    ${x}    in range    0    ${count}
+    \   Should Contain Any      ${out}  ${ipv6_addr_list[${x}]} ${ipv4_addr_list[${x}]}
+    Close Connection
+
+OVF5320_API_TC_10_CARBON_16_5_XX_POWER_OFF_OFF_INITIAL_TRUST_FIPS
+    [Documentation]     CARBON_16_5_XX_POWER_OFF_OFF_INITIAL_TRUST_FIPS
+    Log      \n Powering On ${ICM_4}
+    ${carbon_IC} =    Create Dictionary    name=${ICM_4}
+    Patch Interconnect  ${carbon_IC}  op=replace  path=/powerState  value=On  timeout=60  interval=5
+    Sleep  3m
+    Log      \n Checking ICM State after Power On
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_4}    ${State_Configured}
+    ${resp}=    Check Host Entry Key value
+
+OVF5320_API_TC_14_CARBON_16_5_XX_DELETE_LE_INITIAL_TRUST_FIPS
+    [Documentation]     CARBON_16_5_XX_DELETE_LE_INITIAL_TRUST_FIPS
+    #Deleting LE
+    Remove All LEs    force=${True}
+    ${le_resp}=  Get Logical Enclosure By Name   ${logical_enclosure_multi['name']}
+    ${error_code}=  Get From Dictionary   ${le_resp}   errorCode
+    Should Be Equal   ${error_code}   GENERIC_HTTP_404
+    #Known host entry check after LE delete
+    Open Connection And Log In    ${APPLIANCE_IP}
+    ${out} =  Execute Command    cat /ci/data/crm/jsch_known_hosts
+    Log      \n known host entries ${out}
+    Should Contain Any      ${out}  ${EMPTY}
+
+OVF5320_API_TC_08_CARBON_16_5_XX_CREATE_LE_INITIAL_TRUST_FIPS
+    [Documentation]     CARBON_16_5_XX_CREATE_LE_INITIAL_TRUST_FIPS
+    Add Logical Enclosure from variable     ${logical_enclosure_multi}
+    Sleep  15m
+
+#FIPS TO CNSA TEST CASES############################################################
+
+FIPS mode to CNSA change
+    [Documentation]     FIPS mode to CNSA change
+    ${mode_name} =  Set Variable   CNSA
+    Change Cryptography Mode    ${mode_name}    ${APPLIANCE_IP}    35 min   30 s
+    Log     \n Mode Changed. Waiting for Appliance to come up....
+    sleep  15m
+
+OVF5320_API_TC_21_CARBON_16_5_XX_FIPS_TO_CNSA
+    [Documentation]     CARBON_16_5_XX_FIPS_TO_CNSA
+    Log     \n Checking Carbon ICM going to Unmanaged state
+    Log     \n Checking for Bay 5
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_4}    ${State_Unmanaged}
+    Log     \n Checking for Bay 2
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_1}    ${State_Unmanaged}
+
+#Deleting LE
+    
+    Remove All LEs    force=${True}
+    ${le_resp}=  Get Logical Enclosure By Name   ${logical_enclosure_multi['name']}
+    ${error_code}=  Get From Dictionary   ${le_resp}   errorCode
+    Should Be Equal   ${error_code}   GENERIC_HTTP_404
+
+OVF5320_API_TC_15_CARBON_16_5_XX_INITIAL_TRUST_CNSA
+    [Documentation]     CARBON_16_5_XX_INITIAL_TRUST_CNSA
+    Add Logical Enclosure from variable     ${logical_enclosure_multi}
+    Sleep  15m
+    Log     \n Checking Carbon ICM going to Unmanaged state
+    Log     \n Checking for Bay 5
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_4}    ${State_Unmanaged}
+    Log     \n Checking for Bay 2
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_1}    ${State_Unmanaged}
+
+#CNSA TO LEGACY TEST CASES############################################################
+
+CNSA mode to LEGACY change
+    [Documentation]     CNSA mode to LEGACY change
+    ${mode_name} =  Set Variable   LEGACY
+    Change Cryptography Mode    ${mode_name}    ${APPLIANCE_IP}    35 min   30 s
+    Log     \n Mode Changed. Waiting for Appliance to come up....
+    sleep  15m
+
+
+OVF5320_API_TC_19_CARBON_16_5_XX_CNSA_TO_LEGACY
+    [Documentation]     CARBON_16_5_XX_CNSA_TO_LEGACY
+    Log     \n Checking Carbon ICM going to Configured state
+    Log     \n Checking for Bay 5
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_4}    ${State_Configured}
+    Log     \n Checking for Bay 2
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_1}    ${State_Configured}
+    ${resp}=    Check Host Entry Key value
+
+#LEGACY TO CNSA TEST CASES############################################################
+
+LEGACY mode to CNSA change
+    [Documentation]     LEGACY mode to CNSA change
+    ${mode_name} =  Set Variable   CNSA
+    Change Cryptography Mode    ${mode_name}    ${APPLIANCE_IP}    35 min   30 s
+    Log     \n Mode Changed. Waiting for Appliance to come up....
+    sleep  15m
+
+OVF5320_API_TC_16_CARBON_16_5_XX_LEGACY_TO_CNSA
+    [Documentation]     CARBON_16_5_XX_LEGACY_TO_CNSA
+    Log     \n Checking Carbon ICM going to Unmanaged state
+    Log     \n Checking for Bay 5
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_4}    ${State_Unmanaged}
+    Log     \n Checking for Bay 2
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_1}    ${State_Unmanaged}
+
+#CNSA TO FIPS TEST CASES############################################################
+CNSA mode to FIPS change
+    [Documentation]     CNSA mode to FIPS change
+    ${mode_name} =  Set Variable   FIPS
+    Change Cryptography Mode    ${mode_name}    ${APPLIANCE_IP}    35 min   30 s
+    Log     \n Mode Changed. Waiting for Appliance to come up....
+    sleep  15m
+
+OVF5320_API_TC_18_CARBON_16_5_XX_CNSA_TO_FIPS
+    [Documentation]     CARBON_16_5_XX_CNSA_TO_FIPS
+    Log     \n Checking Carbon ICM going to Configured state
+    Log     \n Checking for Bay 5
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_4}    ${State_Configured}
+    Log     \n Checking for Bay 2
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_1}    ${State_Configured}
+    ${resp}=    Check Host Entry Key value
+
+#FIPS TO LEGACY TEST CASES############################################################
+FIPS mode to LEGACY change
+    [Documentation]     FIPS mode to LEGACY change
+    ${mode_name} =  Set Variable   LEGACY
+    Change Cryptography Mode    ${mode_name}    ${APPLIANCE_IP}    35 min   30 s
+    Log     \n Mode Changed. Waiting for Appliance to come up....
+    sleep  15m
+
+OVF5320_API_TC_20_CARBON_16_5_XX_FIPS_TO_LEGACY
+    [Documentation]     CARBON_16_5_XX_FIPS_TO_LEGACY
+    Log     \n Checking Carbon ICM going to Configured state
+    Log     \n Checking for Bay 5
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_4}    ${State_Configured}
+    Log     \n Checking for Bay 2
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_1}    ${State_Configured}
+    ${resp}=    Check Host Entry Key value
+
+#FW Downgrade to 4.x.x
+LI FW Downgrade to 4_xx
+    [Documentation]     LI FW Downgrade to 4_xx
+    ${LI} =    Get Li Name    ${Bayset}
+    Log    \n LI for update: ${LI}
+    ${li_uri} =     Get LI URI       ${LI}
+    Log   "Performing LI Firmware Downgrade"
+    ${resp1} =    Fusion Api Li Upgrade Firmware      body=${LI_downgrade}    uri=${li_uri}
+    ${task} =       Wait For Task       ${resp1}    7200s        10s
+    ${valDict} =    Create Dictionary    status_code=${200}
+    ...                                  taskState=Completed
+    Validate Response   ${task}     ${valDict}
+    Log to Console    \n LI Firmware Downgrade complete
+
+OVF5320_API_TC_43_CARBON_16_4_XX_LE_DELETE_LEGACY
+    [Documentation]     CARBON_16_4_XX_LE_DELETE_LEGACY
+    ${resp}=    Check Host Entry Key value
+    #Deleting LE
+    Remove All LEs    force=${True}
+    ${le_resp}=  Get Logical Enclosure By Name   ${logical_enclosure_multi['name']}
+    ${error_code}=  Get From Dictionary   ${le_resp}   errorCode
+    Should Be Equal   ${error_code}   GENERIC_HTTP_404
+    ${resp}=    Check Host Entry Key value
+
+OVF5320_API_TC_46_CARBON_16_4_XX_LE_CREATE_LEGACY
+    [Documentation]     CARBON_16_4_XX_LE_CREATE_LEGACY
+    Add Logical Enclosure from variable     ${logical_enclosure_multi}
+    Sleep  10m
+    ${resp}=    Check Host Entry Key value
+
+Change to FIPS
+    [Documentation]     Change to FIPS
+    ${mode_name} =  Set Variable   FIPS
+    Change Cryptography Mode    ${mode_name}    ${APPLIANCE_IP}    35 min   30 s
+    Log     \n Mode Changed. Waiting for Appliance to come up....
+    sleep  15m
+
+OVF5320_API_TC_44_CARBON_16_4_XX_LE_DELETE_FIPS
+    [Documentation]     CARBON_16_4_XX_LE_DELETE_FIPS
+    #Deleting LE
+    Remove All LEs    force=${True}
+    ${le_resp}=  Get Logical Enclosure By Name   ${logical_enclosure_multi['name']}
+    ${error_code}=  Get From Dictionary   ${le_resp}   errorCode
+    Should Be Equal   ${error_code}   GENERIC_HTTP_404
+    ${resp}=    Check Host Entry Key value
+
+OVF5320_API_TC_47_CARBON_16_4_XX_LE_CREATE_FIPS
+    [Documentation]     CARBON_16_4_XX_LE_CREATE_FIPS
+    Add Logical Enclosure from variable     ${logical_enclosure_multi}
+    Sleep  10m
+    ${resp}=    Check Host Entry Key value
+
+Change to CNSA
+    [Documentation]     Change to CNSA
+    ${mode_name} =  Set Variable   CNSA
+    Change Cryptography Mode    ${mode_name}    ${APPLIANCE_IP}    35 min   30 s
+    Log     \n Mode Changed. Waiting for Appliance to come up....
+    sleep  15m
+
+OVF5320_API_TC_45_CARBON_16_4_XX_LE_DELETE_CNSA
+    [Documentation]     CARBON_16_4_XX_LE_DELETE_CNSA
+    ${resp} =   Fusion Api Delete Logical Enclosure       ${logical_enclosure_multi['name']}
+    Wait For Task2    ${resp}    timeout=300    interval=15
+    ${le_resp}=  Get Logical Enclosure By Name   ${logical_enclosure_multi['name']}
+    Log     ${le_resp}
+    ${error_code}=  Get From Dictionary   ${le_resp}   errorCode
+    Should Be Equal   ${error_code}   GENERIC_HTTP_404
+    Log     \n Checking Carbon ICM going to Monitored state
+    Log     \n Checking for Bay 5
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_4}    ${State_Monitored}
+    Log     \n Checking for Bay 2
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_1}    ${State_Monitored}
+
+OVF5320_API_TC_48_CARBON_16_4_XX_LE_CREATE_CNSA
+    [Documentation]     CARBON_16_4_XX_LE_CREATE_CNSA
+    Add Logical Enclosure from variable     ${logical_enclosure_multi}
+    Sleep  10m
+    Log     \n Checking Carbon ICM going to Unmanaged state
+    Log     \n Checking for Bay 5
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_4}    ${State_Unmanaged}
+    Log     \n Checking for Bay 2
+    Wait Until Keyword Succeeds    300 s    20 s    Verify Interconnect State    ${ICM_1}    ${State_Unmanaged}

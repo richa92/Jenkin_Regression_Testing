@@ -1,0 +1,244 @@
+*** Settings ***
+Documentation    Test suite to validate blade related events on OneView and FLM
+...    It covers testing of:
+...        BladeInsufficientCooling
+...        BladeInsufficientCoolingCleared
+...        BladeThermalCritical
+...        BladeThermalOk (Cannot verify this event with automation)
+...        BladeThermalWarning
+...    = GENERIC USAGE =
+...    | pybot | -v ENC_SERIAL_NO:[enclosure serial #] | -v APPLIANCE_IP:<ipv4> | -v CIM_Linux_IP:<ipv4> |-v GIT_REPO_ROOT: | Blade_thermal_event.txt |
+...    = Variables =
+...    | GIT_REPO_ROOT |      Required: Repo root path if NOT defined in environment variable this is mgmtfw root location|
+...    | ENC_SERIAL_NO |      Optional: If omitted, will use the 1st enclosure detected in OV |
+...    | APPLIANCE_IP |       Required: OneView IPv4 address |
+...    | CIM_Linux_IP |       Required:CI Manager ipv4 under test |
+
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Library           RoboGalaxyLibrary
+Library           MgmtFWLibrary
+Library           json
+
+Suite Setup       Configure Events Test Environment
+Suite Teardown    Run Keywords  Logout of EM RIS   AND    Logout of Fusion Via REST
+
+*** Test Case ***
+TC 01: Verify BladeInsufficientCooling Event 
+    [Documentation]    Fail 2 random fans from enclosure and verify insufficient cooling alert for blade
+    [Tags]    Blade    FLM2.00    Automated    OVD22712
+    ${fan_initial_status}=    Get ThermalMetrics Health Status
+    Should Be Equal    ${fan_initial_status}    ${HEALTH_OK}
+    ${Blade_Bays}=    Get List of Occupied iLO Blade Bays
+    ${occupied_fan_list}=    Get List of Occupied Bottom Row Fan Bays
+    # Run 3 iterations of the test, each time randomly removing 2 fans and attempt to power on a random blade
+    : FOR  ${index}  IN RANGE  1  4
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    Log to Console    Running iteration number: ${index}
+    \    ${fan1}  ${fan2}=    Get Two Random Item From List  ${occupied_fan_list}
+    \    Log To Console    Failing 1st fan in bay ${fan1} from enclosure
+    \    RIS EM Efuse On Fan  ${fan1}
+    \    Sleep  2
+    \    Log To Console    Failing 2nd fan in bay ${fan2} from enclosure
+    \    RIS EM Efuse On Fan  ${fan2}
+    \    Sleep  10
+    \    ${fan_list}=    Create List  ${fan1}  ${fan2}
+    \    Sort List    ${fan list}
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Change Thermalmetrics Critical Event    ${Status_Change_Test_Event}    ${EL_Thermal_Critical}    ${fan_list}    90
+    \    Verify Audit Log Change Thermalmetrics Critical Event    ${Alert_Test_Event}    ${EL_Thermal_Insufficient_Critical}    ${fan_list}    90
+    \    Verify Fusion Event Sent By EM    ${EL_Thermal_Insufficient_Critical}    ${last_fusion_event_id}    ${Enclosure_category}
+    \    ${blade}=    Get Random Item From List  ${Blade_Bays}
+    \    Log To Console    Remove and insert the Blade after removing the fans
+    \    RIS EM Efuse Blade    ${blade}    8
+    \    Sleep    100    #Wait for Blade to be re-inserted
+    \    Wait for Device Degraded    ${Blade_Device}    ${blade}
+    \    Sleep    600
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_Blade_Insufficient_Cooling}    ${Blade_Device}    ${blade}    900 
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_Insufficient_Cooling}    ${last_fusion_event_id}   # ${Server_category}
+    \    ${listOfDuplicateAlerts}=    Get Duplicate Alerts From Fusion    ${EL_Blade_Insufficient_Cooling}    ${last_fusion_event_id}
+    \    ${resourceURIstatus}=    Get Resource URI Status From Alerts    ${Server_category}    ${listOfDuplicateAlerts}
+    \    Should Be True    ${resourceURIstatus}
+    \    ${em_event}=    em api get last event by message ID    ${EL_Blade_Insufficient_Cooling}
+    \    Should Not Be Empty    ${em_event}
+    \    ${missing_fan_list_blade}=    Get Fan List From Trap Message  ${em_event['message']['Events'][0]}
+    \    Run Keyword And Continue On Failure    Lists Should Be Equal    ${fan_list}  ${missing_fan_list_blade}
+    \    Sleep  3
+    \    RIS EM Efuse Off All Empty Fan Bays
+    \    Wait for Device Ok    ${Blade_Device}    ${blade}
+    [Teardown]    Run Keyword If Test Failed    RIS EM Efuse Off All Empty Fan Bays
+
+TC 02: Verify BladeInsufficientCooling and BladeInsufficientCoolingCleared Event
+    [Documentation]    Fail/recover fans and verify the device list is updated for blade insufficient cooling alerts
+    [Tags]    Blade    FLM2.00    Automated    OVD22712    Disabled
+    ${fan_initial_status}=    Get ThermalMetrics Health Status
+    Should Be Equal    ${fan_initial_status}    ${HEALTH_OK}
+    ${Blade_Bays}=    Get List of Occupied iLO Blade Bays
+    ${occupied_fan_list}=    Get List of Occupied Top Row Fan Bays
+    # Fail 2 random fans and verify insufficient cooling alerts contain the correct fan list
+    ${last_fusion_event_id}=    get last fusion event ID
+    ${fan1}  ${fan2}=    Get Two Random Item From List  ${occupied_fan_list}
+    Remove Values From List  ${occupied_fan_list}  ${fan1}  ${fan2}
+    Log To Console    Failing 1st fan in bay ${fan1} from enclosure
+    RIS EM Efuse On Fan  ${fan1}
+    Sleep  2
+    Log To Console    Failing 2nd fan in bay ${fan2} from enclosure
+    RIS EM Efuse On Fan  ${fan2}
+    Sleep  10
+    ${fan_list}=    Create List  ${fan1}  ${fan2}
+    Sort List    ${fan list}
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Change Thermalmetrics Critical Event    ${Status_Change_Test_Event}    ${EL_Thermal_Critical}    ${fan_list}    90
+    Verify Audit Log Change Thermalmetrics Critical Event    ${Alert_Test_Event}    ${EL_Thermal_Insufficient_Critical}    ${fan_list}    90
+    Verify Fusion Event Sent By EM    ${EL_Thermal_Insufficient_Critical}    ${last_fusion_event_id}    ${Enclosure_category}
+    ${blade}=    Get Random Item From List  ${Blade_Bays}
+    Log To Console    Remove and insert the Blade after removing the fans
+    RIS EM Efuse Blade    ${blade}    8
+    Sleep    8    #Wait for Blade to be re-inserted
+    Wait for Device Degraded    ${Blade_Device}    ${blade}
+    Sleep    5
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_Blade_Insufficient_Cooling}    ${Blade_Device}    ${blade}    250
+    Verify Fusion Event Sent By EM    ${EL_Blade_Insufficient_Cooling}    ${last_fusion_event_id}    ${Enclosure_category}
+    ${em_event}=    em api get last event by message ID    ${EL_Blade_Insufficient_Cooling}
+    Should Not Be Empty    ${em_event}
+    ${missing_fan_list_blade}=    Get Fan List From Trap Message  ${em_event['message']['Events'][0]}
+    Run Keyword And Continue On Failure    Lists Should Be Equal    ${fan_list}  ${missing_fan_list_blade}
+    Sleep  3
+    # Fail 3rd fan and verify insufficient cooling alerts update the missing fan list
+    ${fan3}=    Get Random Item From List    ${occupied_fan_list}
+    Insert Into List  ${fan_list}  -1  ${fan3}
+    Sort List    ${fan list}
+    Log To Console    Failing 3rd fan in bay ${fan3} from enclosure
+    ${last_fusion_event_id}=    get last fusion event ID
+    RIS EM Efuse On Fan  ${fan3}
+    Sleep  50    # Wait for event to be logged to Audit log.  Normally takes 20 secs for this event to be updated w/ the new fan list.
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_Blade_Insufficient_Cooling}    ${Blade_Device}    ${blade}    250
+    Verify Fusion Event Sent By EM    ${EL_Blade_Insufficient_Cooling}    ${last_fusion_event_id}    #${Server_category}
+    ${listOfDuplicateAlerts}=    Get Duplicate Alerts From Fusion    ${EL_Blade_Insufficient_Cooling}    ${last_fusion_event_id}
+    ${resourceURIstatus}=    Get Resource URI Status From Alerts    ${Server_category}    ${listOfDuplicateAlerts}
+    Should Be True    ${resourceURIstatus}
+    ${em_event}=    em api get last event by message ID    ${EL_Blade_Insufficient_Cooling}
+    Should Not Be Empty    ${em_event}
+    ${missing_fan_list_blade}=    Get Fan List From Trap Message  ${em_event['message']['Events'][0]}
+    Run Keyword And Continue On Failure    Lists Should Be Equal    ${fan_list}  ${missing_fan_list_blade}
+    Sleep  3
+    # Insert a fan back into the enclosure and verify insufficient cooling alerts update the missing fan list
+    ${fan4}=    Get Random Item From List  ${fan_list}
+    Remove Values From List  ${fan_list}  ${fan4}
+    Log To Console    Inserting fan in bay ${fan4} into the enclosure
+    ${last_fusion_event_id}=    get last fusion event ID
+    EM Clear Fan Status No Sleep   ${fan4}
+    Wait for Device OK   ${Fan_Device}   ${fan4}
+    Sleep  120    # Wait for event to be logged to Audit log.  Normally takes 20 secs for this event to be updated w/ the new fan list.
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_Blade_Insufficient_Cooling}    ${Blade_Device}    ${blade}    250
+    Verify Fusion Event Sent By EM    ${EL_Blade_Insufficient_Cooling}    ${last_fusion_event_id}    #${Server_category}
+    ${listOfDuplicateAlerts}=    Get Duplicate Alerts From Fusion    ${EL_Blade_Insufficient_Cooling}    ${last_fusion_event_id}
+    ${resourceURIstatus}=    Get Resource URI Status From Alerts    ${Server_category}    ${listOfDuplicateAlerts}
+    Should Be True    ${resourceURIstatus}
+    ${em_event}=    em api get last event by message ID    ${EL_Blade_Insufficient_Cooling}
+    Should Not Be Empty    ${em_event}
+    ${missing_fan_list_blade}=    Get Fan List From Trap Message  ${em_event['message']['Events'][0]}
+    Run Keyword And Continue On Failure    Lists Should Be Equal    ${fan_list}  ${missing_fan_list_blade}
+    Sleep  3
+    # Insert all fans back into the enclosure and verify insufficient cooling alerts are cleared and blade and ICM powers on
+    Log To Console    Inserting all removed fans into the enclosure
+    ${last_fusion_event_id}=    get last fusion event ID
+    RIS EM Efuse Off All Empty Fan Bays
+    Sleep  5
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    ${status}=    Em Api Is Event By Messageid   ${EL_Thermal_OK}
+    Should be true    ${status}
+    #Verify Fusion Event Sent By EM    ${EL_Thermal_OK}    ${last_fusion_event_id}
+    #${status}=    Em Api Is Event By Messageid   ${EL_Thermal_Insufficient_OK}
+    #Should be true    ${status}
+    Verify Audit Log Alert Event    ${EL_Blade_Insufficient_Cooling_Cleared}    ${Blade_Device}    ${blade}    250
+    Verify Fusion Event Sent By EM    ${EL_Blade_Insufficient_Cooling_Cleared}    ${last_fusion_event_id}    ${Server_category}
+    [Teardown]    Run Keyword If Test Failed    RIS EM Efuse Off All Empty Fan Bays
+
+TC 03: Validate BladeThermalCritical event is generated
+    [Documentation]    This test is to verify BladeThermalCritical event is generated when thermal.bin file is customized
+    [Tags]    Blade    FLM1.01    FRU    Automated    Disabled
+    ${blade_present_list}=    Get List of Occupied Bigbird Blade Bays
+    Should Not Be Empty    ${blade_present_list}    msg=No Bigbird Blades present in the enlcosure
+    : FOR    ${blade_bay}    IN    @{blade_present_list}
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${blade_health}=    Get Blade Health    ${blade_bay}
+    \    Should Be Equal    ${blade_health}    ${HEALTH_OK}
+    
+    # Flash customized FRU to inject BladeThermalCritical fault
+    \    Flash Blade Fru    ${blade_bay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\${Custom_Bigbird_Critical_Fru_Path}
+    \    Sleep    5
+    \    ${efuse_status_code}=    RIS EM Efuse Blade    ${blade_bay}    8
+    \    Sleep    8
+    \    Should Be Equal As Integers    ${efuse_status_code}    ${EM_Accept_Request}
+    \    Wait for Device Critical    ${Blade_Device}    ${blade_bay}
+    \    Sleep    5
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_Blade_Thermal_Critical}    ${Blade_Device}    ${blade_bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_Thermal_Critical}    ${last_fusion_event_id}    ${Drive_enclosure_Category}
+    \    ${blade_health}=    Get Blade Health    ${blade_bay}
+    \    Should Be Equal    ${blade_health}    ${HEALTH_CRITICAL}
+    
+    # Flash Good FRU to clear BladeThermalCritical fault
+    \    Flash Blade Fru    ${blade_bay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\Fru_Files\\${CAT}\\Good_Fru\\BLADE\\${blade_bay}\\fru.bin
+    \    ${efuse_status_code}=    RIS EM Efuse Blade    ${blade_bay}    ${EM_EFUSE_Duration}
+    \    Should Be Equal As Integers    ${efuse_status_code}    ${EM_Accept_Request}
+    \    Wait for Device OK    ${Blade_Device}    ${blade_bay}
+    \    ${blade_health}=    Get Blade Health    ${blade_bay}
+    \    Should Be Equal    ${blade_health}    ${HEALTH_OK}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Flash Blade Fru    ${blade_bay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\Fru_Files\\${CAT}\\Good_Fru\\BLADE\\${blade_bay}\\fru.bin    AND
+    ...    RIS EM Efuse Blade    ${blade_bay}    ${EM_EFUSE_Duration}    AND    EM Clear Blade Status    ${blade_bay}
+
+TC 04: Validate BladeThermalWarning event is generated
+    [Documentation]    This test is to verify BladeThermalWarning event is generated when thermal.bin file is customized
+    [Tags]    Blade    FLM1.01    FRU    Automated    Disabled
+    ${blade_present_list}=    Get List of Occupied Bigbird Blade Bays
+    Should Not Be Empty    ${blade_present_list}    msg=No Bigbird Blades present in the enlcosure
+    : FOR    ${blade_bay}    IN    @{blade_present_list}
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${blade_health}=    Get Blade Health    ${blade_bay}
+    \    Should Be Equal    ${blade_health}    ${HEALTH_OK}
+    
+    # Flash customized FRU to inject BladeThermalWarning fault
+    \    Flash Blade Fru    ${blade_bay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\${Custom_Bigbird_Degrade_Fru_Path}
+    \    Sleep    5
+    \    ${efuse_status_code}=    RIS EM Efuse Blade    ${blade_bay}    8
+    \    Sleep    8
+    \    Should Be Equal As Integers    ${efuse_status_code}    ${EM_Accept_Request}
+    \    Wait for Device Degraded    ${Blade_Device}    ${blade_bay}
+    \    Sleep    5
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_Blade_Thermal_Warning}    ${Blade_Device}    ${blade_bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_Thermal_Warning}    ${last_fusion_event_id}    ${Drive_enclosure_Category}
+    \    ${blade_health}=    Get Blade Health    ${blade_bay}
+    \    Should Be Equal    ${blade_health}    ${HEALTH_WARNING}
+    
+    # Flash Good FRU to clear BladeThermalWarning fault
+    \    Flash Blade Fru    ${blade_bay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\Fru_Files\\${CAT}\\Good_Fru\\BLADE\\${blade_bay}\\fru.bin
+    \    ${efuse_status_code}=    RIS EM Efuse Blade    ${blade_bay}    ${EM_EFUSE_Duration}
+    \    Should Be Equal As Integers    ${efuse_status_code}    ${EM_Accept_Request}
+    \    Sleep    120
+    \    Wait for Device OK    ${Blade_Device}    ${blade_bay}
+    \    ${blade_health}=    Get Blade Health    ${blade_bay}
+    \    Should Be Equal    ${blade_health}    ${HEALTH_OK}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Flash Blade Fru    ${blade_bay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\Fru_Files\\${CAT}\\Good_Fru\\BLADE\\${blade_bay}\\fru.bin    AND
+    ...    RIS EM Efuse Blade    ${blade_bay}    ${EM_EFUSE_Duration}    AND    EM Clear Blade Status    ${blade_bay}

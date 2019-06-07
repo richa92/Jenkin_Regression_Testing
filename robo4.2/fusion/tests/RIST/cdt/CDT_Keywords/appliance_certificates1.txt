@@ -1,0 +1,78 @@
+*** Settings ***
+Library              FusionLibrary
+Library              RoboGalaxyLibrary
+Library              OperatingSystem
+Library              BuiltIn
+Library              copy
+Library              Collections
+Library              String
+Library              json
+Resource            ../../../../Resources/api/fusion_api_resource.txt
+
+*** Variables ***
+${ssh_server_ip}                unknown    # Was hard-coded to 15.114.112.61
+${APPLIANCE_IP}                 unknown
+
+*** Keywords ***
+Show Server Certificate FingerPrint
+    [Documentation]    Show Server Certificate FingerPrint
+    [Arguments]    ${server_ip}  ${server_port}
+    ${fingerprint}=    Run Ssh Cmd  ${ssh_server_ip}  root  hpvse1  /root/automation_tools/sctest/check_cert_fingerprint.sh ${server_ip} ${server_port}
+    Log To Console  FingerPrint:${fingerprint}
+    [Return]  ${fingerprint}
+
+Apache And Rabbitmq Server Certificate Should Be Same
+    [Documentation]  this keyword is for test apache and rabbitmq server certificate should be same.
+    ...                 In some situation. it needs run for 2 min by Wait Until Keyword Succeeds
+    ${apache_srv_cert_finger_original}=    Show Server Certificate FingerPrint  ${APPLIANCE_IP}  443
+    ${rabbit_srv_cert_finger_original}=    Show Server Certificate FingerPrint  ${APPLIANCE_IP}  5671
+    Should Be Equal As Strings  ${apache_srv_cert_finger_original}  ${rabbit_srv_cert_finger_original}
+
+Sign Certificate By Gobaba Intermediate CA
+    [Documentation]  Sign Certificate By Gobaba Intermediate CA, return the singed certificate
+    ...                 signature algorithm can choose: sha1rsa / sha256rsa / sha384rsa
+    [Arguments]  ${csr}  ${sig_algo}
+    Run Ssh Cmd  ${ssh_server_ip}  root  hpvse1  echo "${csr}" > /root/automation_tools/rootca_gobaba/intermediate1/ov/in.csr
+    Run Ssh Cmd  ${ssh_server_ip}  root  hpvse1  /root/automation_tools/rootca_gobaba/intermediate1/sign_ov.sh ${sig_algo}
+    ${signed_cer}=    Run Ssh Cmd  ${ssh_server_ip}  root  hpvse1  cat /root/automation_tools/rootca_gobaba/intermediate1/ov/out.crt
+    [Return]  ${signed_cer}
+
+Change Appliance Certificates To Gobaba CA Signed
+    [Documentation]  Change Appliance Certificates To Gobaba CA Signed,
+    ...     before run this keyword, import Gobaba Root CA and intermediate CA first.
+    ...     key_len_mode should be FIPS or CNSA, FIPS will create 2048 public key, CNSA will create 3072 public key.
+    ...     sig_algo should be sha1rsa / sha256rsa / sha384rsa
+    [Arguments]  ${key_len_mode}  ${sig_algo}
+    ${is_cnsa}=    Set Variable If  '${key_len_mode}'=='CNSA'  ${True}  ${False}
+    ${csr}=    Generate Appliance CSR  ${is_cnsa}
+    ${signed_cer}=    Sign Certificate By Gobaba Intermediate CA  ${csr}  ${sig_algo}
+    Import Appliance Certificate  ${signed_cer}
+
+Import Gobaba Root CA And Intermediate CA
+    [Documentation]  import the specific gobaba root ca and intermediate ca.
+    ...                ${cert_body_example} should be in your variables.py
+    ...                    cert_body_example = {
+    ...                        "members": [{
+    ...                            "type": "CertificateAuthorityInfo",
+    ...                            "certificateDetails": {"base64Data": "", "type": "CertificateDetailV2", "aliasName": ""}
+    ...                        }],
+    ...                        "type": "CertificateAuthorityInfoCollection"
+    ...                    }
+    [Arguments]  ${cert_body_example}
+    Log To Console  \n******Import the specific gobaba root ca and intermediate ca******
+    ${cert_rootca}=    Run Ssh Cmd  ${ssh_server_ip}  root  hpvse1  cat /root/automation_tools/rootca_gobaba/rootca.crt
+    ${cert_interm}=    Run Ssh Cmd  ${ssh_server_ip}  root  hpvse1  cat /root/automation_tools/rootca_gobaba/intermediate1/intermediate1.crt
+    ${body_rootca}=    Create Cert Body For Import CA  ${cert_rootca}  root_gobaba  ${cert_body_example}
+    ${body_interm}=    Create Cert Body For Import CA  ${cert_interm}  intermediate1  ${cert_body_example}
+    ${response1}=    Fusion Api Import External Ca Certificates  ${body_rootca}
+    Wait For Task2  ${response1}  timeout=60  interval=5
+    ${response2}=    Fusion Api Import External Ca Certificates  ${body_interm}
+    Wait For Task2  ${response2}  timeout=60  interval=5
+
+Delete Gobaba Root CA And Intermediate CA
+    [Documentation]  delete the specific gobaba root ca and intermediate ca
+    Log To Console  \n******Delete the specific gobaba root ca and intermediate ca******
+    ${resp1}=    Fusion Api Remove External Ca Certificates  root_gobaba
+    ${resp2}=    Fusion Api Remove External Ca Certificates  intermediate1
+    Wait For Task2  ${resp1}  timeout=60  interval=5
+    Wait For Task2  ${resp2}  timeout=60  interval=5

@@ -1,0 +1,109 @@
+*** Settings ***
+Documentation   US35826:  Verifies Blade Module Configuration Action via HAL
+...             = Usage =
+...             | pybot | -L DEBUG | hal_blade_configuration.txt |
+...             = Variables =
+...             | FUSION IP     | Required; IP address of the FusionVM to use |
+...             | ENCLOSURE     | Required; Enclosure name to run on (tesla, etc) |
+...             = Preconditions =
+...             None
+
+Library             RoboGalaxyLibrary               # RoboGalaxy Robot Framework extensions
+Library             FusionLibrary                   # RoboGalaxy Fusion extensions
+Variables           ../resources/variables.py       ${ENCLOSURE}    # Variables file
+Resource            ../resources/hal_webapp.txt     # AM-DVT HAL webapp extensions
+Resource            ../resources/system_info.txt    # System Information keywords to look up enclosure details
+Resource            ../resources/defaults.txt       # AM-DVT default variables
+Resource            ../resources/perm_api.txt       # AM-DVT PERM webapp extensions
+
+Force Tags          HAL  HW
+
+Suite Setup         Run Keywords
+...                 Login to Fusion Via REST
+...                 Verify Claimed EM
+...                 Select Random Populated Bay
+Suite Teardown      Logout of Fusion Via REST
+
+*** Variables ***
+${Invalid Bay}      25
+
+# Error message is received due to the empty response when attempting to get information from an empty bay
+# Currently this is not handled correctly and an empty JSON structure is returned. (#AM47)
+${Error Message}     Failed to get Blade Configuration information.: ERROR != SUCCESS
+
+@{Bad Config}=      BAD_PROPERTY
+
+*** Test Cases ***
+Verify Blade Properties
+    # Currently, the only configuration property available from RIS is the iLo IP Address.  Therefore,
+    # validate this is what we return from the HAL call.
+    ${Response}=    Get Blade Configuration    ${Bay}
+    ${status}    ${OpResult}=               Run Keyword and Ignore Error    Get From Dictionary    ${Response}              OperationResult
+    ${status}    ${iLO_BC}=         Run Keyword and Ignore Error    Get From Dictionary    ${OpResult}           iLO
+    Log    ${iLO_BC}
+
+    ${Response}=    Get EM Blade Manager Resource    ${Bay}
+    ${Resource}=    Get Resource From Response       ${Response}
+    ${status}    ${OEM Resource}=               Run Keyword and Ignore Error    Get From Dictionary    ${Resource}              Oem
+    ${status}    ${HP Resource}=                Run Keyword and Ignore Error    Get From Dictionary    ${OEM Resource}          Hp
+    ${status}    ${iLO_RIS}=         Run Keyword and Ignore Error    Get From Dictionary    ${HP Resource}           iLO
+    Log    ${iLO_RIS}
+    Dictionaries Should Be Equal    ${iLO_BC}    ${iLO_RIS}    msg=HAL Blade Configuration does not compare to RIS output
+
+
+#-----------------------------------------------------------------------
+# NEGATIVE TEST CASES
+#-----------------------------------------------------------------------
+Get Blade Configuration for Empty Bay
+    ${Bay}=             Select Random Empty Blade Bay
+    Log To Console      \nTesting on Blade in Bay ${Bay}
+    # Error message is received due to the empty response when attempting to get information from an empty bay
+    Run Keyword and Expect Error                ${Error Message}
+    ...                 Get Blade Configuration   ${Bay}
+
+Get Blade Configuration for Invalid Bay
+    Log To Console      \nTesting on Blade in Bay ${Invalid Bay}
+    # Error message is received due to the empty response when attempting to get information from an invalid bay
+    Run Keyword and Expect Error                ${Error Message}
+    ...                 Get Blade Configuration   ${Invalid Bay}
+
+Get Blade Configuration with Invalid Property
+    Log To Console    \nTesting on Blade in Bay ${Bay} using bad property.
+    # Error message is received due to the empty response when attempting to get information from an invalid bay
+    Run Keyword and Expect Error                ${Error Message}
+    ...                 Get Blade Configuration   ${Bay}    @{Bad Config}
+
+
+
+*** Keywords ***
+#-----------------------------------------------------------------------
+# RESOURCE KEYWORDS
+#-----------------------------------------------------------------------
+Select Random Populated Bay
+	[Documentation]    Select Random Blade Bay Number and set as Suite variable.
+	# Blade Bay Number is selected based on BLADE_DATA information in variables.py
+    ${Bay}=                 Select Random Populated Blade Bay
+    Log To Console          Testing on Blade in Bay ${Bay}
+    Set Suite Variable      ${Bay}      ${Bay}
+
+Get Blade Configuration
+    [Documentation]     Returns Blade Configuration information from HAL Webapp
+    ...                 Example:
+    ...                 | ${Response}= | Get Blade Configuration | 1 |
+    [Arguments]         ${Bay}    ${Config}=${Empty}
+
+    # Build Parameters
+    ${Bay}=             Convert To Integer      ${Bay}
+    ${Parameters}=      Create Dictionary       BayNumber        ${Bay}
+    Run Keyword Unless    '${Config}'=='${Empty}'    Set To Dictionary       ${Parameters}    Properties     ${Config}
+
+    # Get Blade Configuration
+    ${Response}=        HAL API Perform Post Action     ${FUSION_IP}    BladeManagerGetConfig     ${Parameters}
+    ${status}=          Get From Dictionary             ${Response}     CallStatus
+    ${FormattedDictionary}    Evaluate    json.dumps(${Response}, indent=${4}, sort_keys=${True})    json
+    Log      ${FormattedDictionary}
+    Should Be Equal as Strings                          ${Status}       SUCCESS
+    ...                 msg=Failed to get Blade Configuration information.
+
+    [Return]    ${Response}
+

@@ -1,0 +1,279 @@
+*** Settings ***
+Documentation    OVF243 FC DirectAttach on Potash User Story
+...              - Keywords file
+
+Resource         ../../../../resource/fusion_api_all_resource_files.txt
+Resource         ../FVT/fvt-keywords.txt
+Resource         ../FVT/Resources/fvt_resource.txt	
+
+Library          FusionLibrary
+Library          ../FVT/fvt_api.py
+
+
+*** Keywords ***
+Verify ErrorCode in taskError
+    [Documentation]    Verify taskErrors contain specified errorCode
+    [Arguments]    ${taskErrors}    ${expected_errorcode}
+
+    :FOR    ${taskerror}    IN    @{taskErrors}
+    \    ${errorCode} =    Get From Dictionary    ${taskError}    errorCode
+    \    Exit For Loop If    '${errorCode}' == '${expected_errorcode}'
+
+    Should Be Equal As Strings    ${errorCode}    ${expected_errorcode}
+
+
+Get IC Port
+    [Documentation]    Returns the port info of the named port of specified interconnect uri
+    [Arguments]	    ${uri}    ${portName}
+
+    ${return} =    Create List
+    ${resp} =    fusion api get interconnect ports    uri=${uri}
+    ${ports} =    Get From Dictionary    ${resp}    members
+    :FOR    ${port}    IN    @{ports}
+    \    ${return} =    Run Keyword If    '${port['portName']}' == '${portName}'    set variable    ${port}
+    \    Exit for loop if    '${port['portName']}' == '${portName}'
+
+    [Return]    ${return}
+
+
+Verify Port
+    [Documentation]    Verify the named port of specified interconnect uri has the optional expected attribute values
+    [Arguments]    ${uri}    ${portName}    ${status}=${None}    ${portStatus}=${None}
+    ...            ${portStatusReason}=${None}    ${opSpeed}=${None}    ${enabled}=${None}
+    ...            ${loginsCount}=${None}    ${connectedTo}=${None}
+
+    ${resp} =    Get IC Port    ${uri}    ${portName}
+    Should Not Be Empty    ${resp}
+
+    # for optional kw arguments. If not specified, do not check
+    Run Keyword IF    '${status}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['status']}    ${status}
+    Run Keyword IF    '${portStatus}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['portStatus']}    ${portStatus}
+    Run Keyword IF    '${portStatusReason}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['portStatusReason']}    ${portStatusReason}
+    Run Keyword IF    '${opSpeed}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['operationalSpeed']}    ${opSpeed}
+    Run Keyword IF    '${enabled}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['enabled']}    ${enabled}
+    Run Keyword IF    '${loginsCount}' != '${None}'
+    ...               should be equal as Integers    ${resp['fcPortProperties']['loginsCount']}    ${loginsCount}
+    Run Keyword IF    '${connectedTo}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['fcPortProperties']['principleInterconnectName']}
+    ...                                             ${connectedTo}
+
+Verify Interconnect
+    [Documentation]    Verify the named interconnect has the optional expected attribute values
+    [Arguments]	    ${ic_name}    ${status}=${None}    ${state}=${None}
+
+    # for optional kw arguments. If not specified, do not check
+    ${resp} =    Fvt Api Get Interconnect By Name    ${ic_name}
+    Run Keyword IF    '${status}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['status']}    ${status}
+
+    Run Keyword IF    '${state}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['state']}    ${state}
+
+
+Verify Uplinkset Status
+    [Documentation]    Verify the named uplinkset has the expected status
+    [Arguments]	    ${li_name}    ${us_name}    ${status}
+
+    ${resp} =    fvt-keywords.Get Uplink Set By Name    ${li_name}    ${us_name}
+    Should be Equal As Strings    ${resp['status']}    ${status}
+
+
+Efuse IC and Wait
+    [Documentation]    Remove/Insert named interconnect based on input action EFuseOn/EFuseOff
+    ...                Wait for the IC to reach the expected state based on the action
+    [Arguments]     ${ic_name}    ${action}
+
+    Set Log Level    TRACE
+    ${enc} =    Fetch from left    ${ic_name}    ,
+    ${bay} =    Fetch from right    ${ic_name}    ${SPACE}
+    ${ic_uri} =    Get IC URI    ${ic_name}
+    ${expected_state} =    Set Variable if    '${action}' == 'EFuseOn'    Absent    Configured
+
+    Run Keyword and Ignore Error    fusion_api_appliance_logging.Write To ciDebug Log    [Efuse ${ic_name} with ${action}]
+
+    Get EM IP       ${enc}
+    Get EM Token    ${enc}
+    Efuse ICM    ${action}    ${bay}
+
+    fusion_api_appliance_setup.Log to console and logfile    \tWaiting for ${ic_name} to reach state: ${expected_state}
+    Wait Until Keyword Succeeds    30 min    20s      IC reached state    ${ic_uri}    ${expected_state}
+
+
+Power IC and Wait
+    [Documentation]    Power off/on of the interconnect based on the input interconnect uri and action
+    ...                Wait for the interconnect to reach the expected state based on the action
+    [Arguments]     ${ic_uri}    ${action}
+
+    Set Log Level	TRACE
+    ${data} =    Create Dictionary    op=replace
+    ...                               path=/powerState
+    ...                               value=${action}
+    ${body} =    Create List     ${data}
+    ${expected_state} =	    Set Variable if    '${action}' == 'Off'   Maintenance    Configured
+
+    Run Keyword and Ignore Error    Write To ciDebug Log    ${\n}Powering ${action}: ${ic_uri}
+
+    # sometime took more than 2min to invoke add and more than 3min to finish adding
+    # PB102 took 2min to invoke and 9min to add
+    ${resp} =    fusion api patch interconnect    body=${body}    uri=${ic_uri}
+    ${task} =    Wait for Task    ${resp}    10m    10s
+    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+    fusion_api_appliance_setup.Log to console and logfile  	\t Waiting for ${ic_uri} to reach ${expected_state}
+    Wait Until Keyword Succeeds     20 min   20s      IC reached state    ${ic_uri}    ${expected_state}
+
+
+Verify Server Profiles Status
+    [Documentation]    Verify the named profiles have the expected status
+    [Arguments]	    ${sp_names}    ${expected_status}
+
+    :FOR    ${sp}    IN    @{sp_names}
+    \    ${sp_resp} =    Fvt Api Get Server Profile By Name    ${sp}
+    \    Should Be Equal As Strings    ${sp_resp['status']}    ${expected_status}
+
+
+Get IC NameServers
+    [Documentation]    Returns DirectAttach nameServers info of specified interconnect
+    [Arguments]    ${ic_uri}
+
+    ${resp} =     fusion api get interconnect nameservers    ${ic_uri}
+    Should Be Equal As Integers    ${resp['status_code']}    ${200}
+
+    # workaround FusionLibrary request problem that it does not return proper format when response is not a dict
+    # Get the response from key _content
+    ${json_string} =    Set Variable    ${resp['_content']}
+    #log to console     ${\n}The returned name server string: ${json_string}
+
+    ${nameservers} =    evaluate    json.loads('''${json_string}''')    json
+
+    [Return]  ${nameservers}
+
+
+Verify Server DA Connection
+    [Documentation]    Verify server connections through input server downlink and expected connected ports
+    [Arguments]    ${nameservers}    ${dl}    ${expected_conn_map}
+
+    ${conn_map_from_ns} =     Create List
+    :FOR    ${ns}    IN     @{nameservers}
+    \    ${conn_map_from_ns} =    Set Variable IF    '${ns['portName']}' == '${dl}'    ${ns['connectionMap']}
+    \    Exit for loop if    '${ns['portName']}' == '${dl}'
+
+    # The order is not guaranteed
+    Sort List     ${conn_map_from_ns}
+    Sort List     ${expected_conn_map}
+    Lists Should Be Equal    ${conn_map_from_ns}    ${expected_conn_map}
+
+
+Verify Uplink DA Port
+    [Documentation]    Verify DA uplinkport connected 3par portwwn through the nameServer entries
+    ...                argument ul_da is a dictionary of uplink name and its expected DA 3par portWwn
+    [Arguments]     ${nameservers}    ${ul_da}
+
+    # Go through nameServers list and check against the input uplink and its expected da portww
+    :FOR    ${ns}    IN    @{nameservers}
+    \    ${ns_da_portwwn} =    Set Variable IF    '${ns['portName']}' == '${ul_da['uplink']}'
+    \    ...                ${ns['portWwn']}    ${EMPTY}
+    \    Exit For Loop If    '${ns['portName']}' == '${ul_da['uplink']}'
+
+    # ul_da contains uplink to be checked in nameservers, this check ensures nameservers not missing uplinks
+    Should Be Equal As Strings    ${ns_da_portwwn}    ${ul_da['da_portwwn']}
+
+
+Verify Port Not In nameServers
+    [Documentation]    Verify there is no nameServer entry for the named port
+    ...                When a port is disabled, there is no entry in the nameServers
+    [Arguments]	    ${nameservers}    ${portName}
+
+    :FOR    ${ns}    IN    @{nameservers}
+    \    Should Not Be Equal As Strings    ${ns['portName']}    ${portName}
+
+
+Disable Enable Ports
+    [Documentation]    Disable or Enable the port in the portname list of the specified interconnect uri
+    ...                action values - 'enable' or 'disable'
+    ...                It waits for the stabilized_time and verify the port status
+    [Arguments]	    ${ic_uri}    ${portnames}    ${stabilize_time}    ${action}
+
+
+    ${body} =    Create List
+    ${enabled_value} =    Set Variable If    '${action}' == 'enable'    ${true}    ${false}
+    ${expected_portStatus} =    Set Variable If    '${action}' == 'enable'    Linked    Unlinked
+
+    :FOR    ${portname}    IN    @{portnames}
+    \    ${resp} =     Get IC Port    ${ic_uri}    ${portname}
+    \    Set to Dictionary   ${resp}   enabled    ${enabled_value}
+    \    Append to list    ${body}    ${resp}
+
+	${resp} =    fusion api edit interconnect ports    uri=${ic_uri}   body=${body}
+	${task} =    Wait For Task 	${resp} 	5 min	20s
+	Should Be Equal As Strings    ${task['taskState']}    Completed
+
+    Log to Console    ${\n}Wait for portStatus and enabled properties change
+    sleep    ${stabilize_time}
+
+    Log to Console    ${\n}Verify portStatus and enabled properties
+    :FOR    ${portname}    IN    @{portnames}
+    \    Verify Port    ${ic_uri}    ${portname}    portStatus=${expected_portStatus}    enabled=${enabled_value}
+
+
+Disable Ports
+    [Documentation]    Disable the ports in the portname list of the specified interconnect uri
+    [Arguments]    ${ic_uri}    ${portnames}    ${stabilize_time}
+
+    Run Keyword And Continue On Failure    Disable Enable Ports    ${ic_uri}    ${portnames}    ${stabilize_time}
+    ...                                    disable
+
+
+Enable Ports
+    [Documentation]    Enable the ports in the portname list of the specified interconnect uri
+    [Arguments]    ${ic_uri}    ${portnames}    ${stabilize_time}
+
+    Run Keyword And Continue On Failure    Disable Enable Ports    ${ic_uri}    ${portnames}    ${stabilize_time}
+    ...                                    enable
+
+Get Port loginsCount
+    [Documentation]    return the loginsCount of specified FC uplinkport
+    [Arguments]    ${ic_uri}    ${portName}
+
+    ${resp} =    Get IC Port    ${ic_uri}    ${portName}
+    Should Not Be Empty    ${resp}
+
+    ${fcPortProperties} =    ${resp['fcPortProperties']}
+    Should Not Be Empty    ${fcPortProperties}
+
+    [Return]    ${fcPortProperties['loginsCount']}
+
+My Open Connection And Log In
+    [Documentation]    Opens an SSH session to an appliance and logs in
+    [Arguments]        ${host}=localhost   ${user}=root   ${pass}=hpvse1    ${prompt}=#
+
+    # The ssh prompt may be set by other Fusion keywords through Set Default Configuration
+    # set the expected ssh prompt for this connection
+    Open Connection    ${host}    timeout=120s    prompt=${prompt}
+    Login               ${user}    ${pass}
+
+SSH to host and ping others
+    [Documentation]    SSH's to a given Linux host, then pings from the host to other target servers IPs
+    [Arguments]        ${source}    ${targets}    ${source_user}    ${source_pwd}    ${prompt}
+
+    My Open Connection And Log In    ${source}    ${source_user}    ${source_pwd}    ${prompt}
+
+    :FOR    ${target}    IN     @{targets}
+    \    ${Output}=    Execute Command    ping -c 4 ${target}    return_stdout=True    return_rc=False
+    \    Log to console and logfile    ${Output}
+    \    Should Contain    ${Output}    ttl=
+
+    Close All Connections
+
+Delete a profile
+    [Documentation]    delete the specified profile
+    [Arguments]        ${sp_uri}    ${timeout}=4min    ${interval}=20s
+
+    ${resp} =    Fusion Api Delete Server Profile    uri=${sp_uri}
+    ${task} =    Wait For Task   ${resp}    ${timeout}    ${interval}
+    Should Be Equal As Strings    ${task['taskState']}    Completed

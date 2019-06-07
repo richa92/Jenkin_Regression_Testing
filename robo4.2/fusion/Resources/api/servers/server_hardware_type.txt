@@ -1,0 +1,116 @@
+*** Settings ***
+Library				RoboGalaxyLibrary
+Library				FusionLibrary
+Library				OperatingSystem
+Library				BuiltIn
+Library				Collections
+Library				XML
+Library		        SSHLibrary
+Library				String
+Library				Dialogs
+Library             ./SHTByMezz.py
+
+*** Keywords ***
+Get Server Hardware Type URI
+    [Documentation]    Get Server Hardware Type URI
+	[Arguments]		${sht}
+	Set Log Level	TRACE
+
+    # this section added to support supplying of Mezz card info as Multiple blades can create multiple similar SHTs
+    # caller can specify a name similar to:
+    #       SY 480 Gen9:1:Smart Array P542D Controller:3:HPE Synergy 3520C 10/20Gb Converged Network Adapter
+    #   syntax is Blade_Model:Slot #:Adapter_Model[:Slot #:Adapter_Model]
+    #   default is to assume Mezz for Slot numbers.  :1: -> Mezz 1
+    #   To specify FlexLOM for C7000 use Flb# or for Embedded use Lom#
+    #   BL465c Gen8:Flb1:HP Flex-10 10Gb 2-port 530FLB Adapter:1:HP FlexFabric 10Gb 2-port 554M Adapter:2:HP LPe1205A 8Gb FC HBA for BladeSystem c-Class
+    #   BL685c G7:Lom1:FlexFabric Embedded Ethernet:1:HP NC532m Dual Port Flex-10 10GbE Multifunction BL-c Adapter
+    #
+    #   SHT can be performed by indirect loookup by simply specifying the actual blade and get the sht uri
+    #   as in:  SH:CN750163KD, bay 1
+    #
+	@{temp} =    Split String    ${sht}    :
+    ${length} =    Get Length    ${temp}
+    # user specifed lookup by Mezz/Flb slots and adapters
+    Run Keyword and Return if    ${length}>1 and '${temp[0]}'!='SH'    Get Server Hardware Type URI By Name And Mezz    ${sht}
+    # or did user specified lookup by Server Hardware
+    Run Keyword and Return if    '${temp[0]}'=='SH'    Get Server Hardware Type URI By Server Hardware    ${temp[1]}
+
+	${resp} = 	Fusion Api Get Server Hardware Types    param=?filter="'name'=='${sht}'"
+	${count} =  Get From Dictionary  ${resp}  count
+	Return from keyword if  ${count}==0  '/bad_sht_uri'
+	${uri} = 	Get From dictionary 	${resp['members'][0]}	uri
+	[Return]	${uri}
+
+Get Server Hardware Type URI By Server Hardware
+    [Documentation]   Get the DTO for a Server Hardware and return the serverHardwareTypeUri
+    [Arguments]     ${name}
+
+    ${server} =    Get Resource    SH:${name}
+    ${status}    ${uri} =    Run Keyword And Ignore Error    Get From Dictionary    ${server}  serverHardwareTypeUri
+    # if Server Hardware not found, then return /BadUri
+    Return From Keyword If    '${status}'=='FAIL'    /BadUri
+    [Return]    ${uri}
+
+Remove All Server Hardware Types
+    [Documentation]	Querys the appliance for all Server Hardware Types and then removes them
+    Log    Removing SERVER Hardwre Types    console=True
+    ${shts} =    Fusion Api Get Server Hardware Types
+    :FOR    ${sht}    IN    @{shts['members']}
+    \       ${resp} =    Fusion Api Delete Server Hardware Types  uri=${sht['uri']}
+    \       ${task} =    Wait For Task   ${resp}    240s    10s
+
+
+Get Server Hardware Type URI By Name And Mezz with Dict
+    [Documentation]  Returns the URI of the SHT by name and mezz cards.
+    ...  name is the type of HW as in "SY 480 Gen9", "SY 660 Gen 9".
+    ...  Mezz cards specified by Slot and Model using a dictionary where Slot is the key, Model is the value.
+    ...  Examples:
+    ...           ${mezz} =    Create Dictionary    1=Smart Array P542D Controller    3=HPE Synergy 3520C 10/20Gb Converged Network Adapter
+    ...           ${uri} =    Get Server Hardware Type URI By Name And Mezz    SY 480 Gen9    ${mezz}
+    ...
+    ...           ${mezz} =    Create Dictionary    1=Smart Array P542D Controller    3=HP Synergy 3820C 10/20Gb CNA    4=Smart Array P542D Controller
+    ...           ${uri} =    Get Server Hardware Type URI By Name And Mezz    SY 660 Gen9    ${mezz}
+
+	[Arguments]		${name}    ${mezz}
+	Set Log Level	DEBUG
+	${shts} = 	Fusion Api Get Server Hardware Types    param=?filter="'name' regex '${name}'"
+
+	${uri} =    SHTByMezz.get    ${shts['members']}    ${mezz}
+	[Return]    ${uri}
+
+Get Server Hardware Type URI By Name And Mezz
+    [Documentation]  Returns the URI of the SHT by name and mezz cards.  (Called in "Common URI lookup by name" format
+    ...  name defines everything: Name, Slots, Models
+    ...  Examples:
+    ...           ${uri} =    Get Server Hardware Type URI By Name And Mezz    SY 480 Gen9:1:Smart Array P542D Controller:3:HPE Synergy 3520C 10/20Gb Converged Network Adapter
+    ...           ${uri} =    Get Server Hardware Type URI By Name And Mezz    BL465c Gen8:Flb1:HP Flex-10 10Gb 2-port 530FLB Adapter:1:HP FlexFabric 10Gb 2-port 554M Adapter
+    ...         Note:  Mezz is implied for the slot.  For FlexLOM use 'Flb#'  For FlexLOM use 'Flb#' and for Embeded use 'Lom#'
+
+	[Arguments]		${metaName}
+	Set Log Level	DEBUG
+
+	# Need to break up metaName into name and a mezz dict of Slot=Model
+	${name}    @{temp} =    Split String    ${metaName}    :
+	Log    Name is: ${name}    console=True
+
+    &{mezz} =    Create Dictionary
+    ${length} =    Get Length    ${temp}
+    ${length} =    Evaluate    ${length} - 1
+    :FOR    ${index}    In Range    0    ${length}    2
+    \    ${next} =    Evaluate    ${index} + 1
+    \    Set To Dictionary    ${mezz}    ${temp[${index}]}=${temp[${next}]}
+
+	${shts} = 	Fusion Api Get Server Hardware Types    param=?filter="'name' regex '${name}'"
+
+	${uri} =    SHTByMezz.get    ${shts['members']}    ${mezz}
+	[Return]    ${uri}
+
+Get All Server hardware Type Uris
+    [Documentation]    Get All Server Hardware Type Uris list and return it
+    ${resp} =    Fusion Api Get Server Hardware Types
+    ${memb_list} =    Get From Dictionary    ${resp}    members
+    ${uri_list} =    Create List
+    :FOR    ${memb}    IN    @{memb_list}
+    \       ${uri} =    Get From Dictionary    ${memb}    uri
+    \       Append To List    ${uri_list}    ${uri}
+    [Return]      ${uri_list}

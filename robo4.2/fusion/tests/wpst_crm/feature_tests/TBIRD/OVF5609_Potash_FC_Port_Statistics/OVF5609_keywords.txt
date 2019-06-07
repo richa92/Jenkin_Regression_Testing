@@ -1,0 +1,278 @@
+*** Settings ***
+Documentation    OVF5608_keywords
+Library             RoboGalaxyLibrary
+Library             FusionLibrary
+Library             OperatingSystem
+Library             BuiltIn
+Library             Collections
+Library             SSHLibrary
+Library             String
+Library             Telnet
+Resource            ../../../../../Resources/api/fusion_api_resource.txt
+Library             FusionLibrary
+Library          ../FVT/fvt_api.py
+
+*** Keywords ***
+
+Get Server Ip Windows
+    [Documentation]    Gets the valid ip of the server.
+    [Arguments]         ${ilo_details}
+    Log to Console    \nstdout is ${ilo_details}
+    ${serverip_List}=   Create List
+    ${serverip_List1}=   Create List
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=20s
+    ${login}    SSHLibrary.Login               ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Read Until    SAC>
+    Sleep    5sec
+    SSHLibrary.Write    i
+    Sleep    5sec
+    ${stdout}    SSHLibrary.Read
+    Log to Console    \nstdout is ${stdout}
+    ${cmd_output}=    Get Regexp Matches    ${stdout}    Ip=10\\.\\d+\\.\\d+\\.\\d+
+    Log to Console    \nstdout is ${cmd_output}
+    ${ip_list_new}    Create List
+    ${len}    Get Length    ${cmd_output}
+    :FOR    ${x}    IN RANGE    ${len}
+    \    ${ip_lists}    Remove String    ${cmd_output[${x}]}    Ip=
+    \    Log to console    ip is ${ip_lists}
+    \    Append To List   ${ip_list_new}    ${ip_lists}
+    Log to Console    \n IP's are is ${ip_list_new}
+    ${cmd_output1}=    Get Regexp Matches    ${stdout}    Gateway=10\\.\\d+\\.\\d+\\.\\d+
+    Log to Console    \nstdout is ${cmd_output1}
+    ${gateway_ip}    Remove String    ${cmd_output1[0]}    Gateway=
+    SSHLibrary.Close All Connections
+    [Return]    ${ip_list_new}    ${gateway_ip}
+
+checking existing and additional counters
+    [Documentation]    checking existing and additional FC counters
+    [Arguments]     ${IC_uri}    ${uplinkport}    ${counters}
+    [Tags]  add   POSITIVE
+    Set Log Level    TRACE
+
+    ${resp}    get_interconnect_statistics    ${IC_uri}    ${uplinkport}
+    ${fc_keys}    Get From Dictionary    ${resp}    fcStatistics
+    Log    \n\n fcport statistics${fc_keys}    console=True
+    ${fc_extendedstat}    Get From Dictionary    ${fc_keys}     extendedStatistics
+    Log    \n\n fcport extended statistics${fc_extendedstat}    console=True
+    ${keys}    Get Dictionary Keys    ${fc_extendedstat}
+    Log    \n\n fcport keys${keys}    console=True
+    ${l}    Get Length    ${counters}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    List Should Contain Value    ${keys}    ${counters[${x}]}
+    [Return]    ${fc_extendedstat}
+
+Validating FC Counter Values
+    [Documentation]    Fetching the fc counter values for validation
+    [Arguments]     ${IC_uri}    ${uplinkport}    ${counters}    ${FC_counters}
+    [Tags]  add   POSITIVE
+    Set Log Level    TRACE
+    ${counter_values}    Create List
+    ${len}    Get Length     ${FC_counters}
+    ${fc_keys}    checking existing and additional counters     ${IC_uri}    ${uplinkport}    ${counters}
+    : FOR    ${x}    IN RANGE    0    ${len}
+    \    Append To List    ${counter_values}    ${fc_keys['${FC_counters[${x}]}']}
+    \    Log    Value of ${FC_counters[${x}]} is ${counter_values[${x}]}    console=True
+    [Return]     ${counter_values}
+
+Verify If Counters are Increased
+    [Documentation]    Verifying if counter values are increasing from previous value
+    [Arguments]     ${counter_values_initial}    ${counter_values_final}
+    [Tags]  add   POSITIVE
+    Set Log Level    TRACE
+    ${len}    Get Length    ${counter_values_initial}
+    : FOR    ${x}    IN RANGE    0    ${len}
+    \    ${diff}    Evaluate    ${counter_values_final[${x}]} - ${counter_values_initial[${x}]}
+    \    Run Keyword If    ${diff} > 10000        Log    \n\nThe counter values are increased after passing traffic    console=True    ELSE    Fail    Log    \n\nthe values are not increased after passing traffic   console=True
+
+Validate If Counters are not increased
+    [Documentation]    Verifying if counter values are not increasing from previous value
+    [Arguments]     ${IC_ports}    ${Interconnect_name}    ${counters}    ${FC_counters}    ${stats}    ${IC_uri}
+
+    ${counter_values_initial}    Validating FC Counter Values    ${IC_uri}    ${IC_ports}    ${counters}    ${FC_counters}
+    Sleep    120sec
+    ${counter_values_final}    Validating FC Counter Values    ${IC_uri}    ${IC_ports}    ${counters}    ${FC_counters}
+    ${len}    Get Length    ${counter_values_initial}
+    : FOR    ${x}    IN RANGE    0    ${len}
+    \    Run Keyword If    ${counter_values_final[${x}]} <= ${counter_values_initial[${x}]}        Log    \n\nThe counter values are not increased    console=True    ELSE    Fail    Log    \n\nthe values are not increased after passing traffic   console=True
+
+
+Validate If Counters Are Zero
+    [Documentation]    Verifying if counter values are remaining zero
+
+    [Arguments]     ${IC_ports}    ${Interconnect_name}    ${counters}    ${FC_counters}    ${stats}    ${IC_uri}
+    ${counter_values}    Validating FC Counter Values    ${IC_uri}    ${IC_ports}    ${counters}    ${FC_counters}
+    ${len}    Get Length    ${counter_values}
+    : FOR    ${x}    IN RANGE    0    ${len}
+    \    Run Keyword If    ${counter_values[${x}]} == 0    Log    \n\nThe counter values are zero    console=True
+    \    ...    ELSE    Fail    Log    \n\nthe values are increased   console=True
+
+Verify Port Status
+    [Documentation]    Verifying the port status
+    [Arguments]     ${uri}    ${portName}    ${verify}    ${status}
+    ${port_status}    Get IC Port    ${uri}    ${portName}
+    Should be Equal As Strings    ${port_status['${verify}']}    ${status}
+
+Get IC Port
+    [Documentation]    Returns the port info of the named port of specified interconnect uri
+    [Arguments]     ${uri}    ${portName}
+
+    ${return} =    Create List
+    ${resp} =    fusion api get interconnect ports    uri=${uri}
+    ${ports} =    Get From Dictionary    ${resp}    members
+    :FOR    ${port}    IN    @{ports}
+    \    ${return} =    Run Keyword If    '${port['portName']}' == '${portName}'    set variable    ${port}
+    \    Exit for loop if    '${port['portName']}' == '${portName}'
+    [Return]    ${return}
+
+
+Verify Port
+    [Documentation]    Verify the named port of specified interconnect uri has the optional expected attribute values
+    [Arguments]    ${uri}    ${portName}    ${status}=${None}    ${portStatus}=${None}
+    ...            ${portStatusReason}=${None}    ${opSpeed}=${None}    ${enabled}=${None}
+    ...            ${loginsCount}=${None}    ${connectedTo}=${None}
+
+    ${resp} =    Get IC Port    ${uri}    ${portName}
+    Should Not Be Empty    ${resp}
+
+    # for optional kw arguments. If not specified, do not check
+    Run Keyword IF    '${status}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['status']}    ${status}
+    Run Keyword IF    '${portStatus}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['portStatus']}    ${portStatus}
+    Run Keyword IF    '${portStatusReason}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['portStatusReason']}    ${portStatusReason}
+    Run Keyword IF    '${opSpeed}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['operationalSpeed']}    ${opSpeed}
+    Run Keyword IF    '${enabled}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['enabled']}    ${enabled}
+    Run Keyword IF    '${loginsCount}' != '${None}'
+    ...               should be equal as Integers    ${resp['fcPortProperties']['loginsCount']}    ${loginsCount}
+    Run Keyword IF    '${connectedTo}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['fcPortProperties']['principleInterconnectName']}
+    ...                                             ${connectedTo}
+
+Get Interconnect StackingDomainRole
+    [Documentation]    Get Interconnect StackingDomainRole
+    [Arguments]     ${ic_name}    ${expected_role}
+    ${resp} =   Get Interconnect    ${ic_name}
+    ${Role}    Get From Dictionary    ${resp}    stackingDomainRole
+    Should Be Equal As Strings    ${Role}    ${expected_role}
+    [Return]    ${Role}
+
+Counter Value Validation
+    [Documentation]    Fetching the counter values after every 3 minutes
+    [Arguments]     ${IC_ports}    ${Interconnect_name}    ${counters}    ${FC_counters}    ${sample_interval_time}    ${ICM_uri}
+    ${len}    Get Length    ${IC_ports}
+    :For    ${x}    IN RANGE    0    ${len}
+    \    ${fcport_keys}    checking existing and additional counters    ${ICM_uri}    ${IC_ports[${x}]}    ${counters}
+    \    Log    \n\n successfully validated existing and additional counters    console=True
+
+    ${len}    Get Length    ${IC_ports}
+    :For    ${x}    IN RANGE    0    ${len}
+    \    ${counter_values_initial}    Validating FC Counter Values    ${ICM_uri}    ${IC_ports[${x}]}    ${counters}    ${FC_counters}
+    \    Sleep     ${sample_interval_time}
+    \    ${counter_values_final}    Validating FC Counter Values    ${ICM_uri}    ${IC_ports[${x}]}    ${counters}    ${FC_counters}
+    \    Verify If Counters are Increased    ${counter_values_initial}    ${counter_values_final}
+    \    Sleep    60sec
+
+Get IP In a List
+    [Documentation]    Fetching server IP's for multiple servers that captures IP in separate list for different interconnects
+    [Arguments]     ${ilo_details}
+    ${ip_list1}    Create List
+    ${ip_list2}    Create List
+    ${l}     Get Length    ${ilo_details}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    ${IP}    ${gate_ip}    Get Server Ip Windows    ${ilo_details[${x}]}
+    \    Append to List    ${ip_list1}    ${IP[0]}
+    \    Append to List    ${ip_list2}    ${IP[1]}
+    [Return]    ${ip_list1}    ${ip_list2}
+
+Execute Traffic In Servers
+    [Documentation]    Passing FC traffic in the servers after killing the existing traffic
+    [Arguments]     ${ilo_details}    ${ip_list}    ${server_details}    ${kill_diskspd}    ${diskspd_cmd}
+
+    ${l}     Get Length    ${ilo_details}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    ${out}    execute_traffic    ${ip_list[${x}]}    ${server_details[${x}]['username']}    ${server_details[${x}]['password']}    ${kill_diskspd}
+    \    Sleep    60sec
+    \    execute_traffic    ${ip_list[${x}]}    ${server_details[${x}]['username']}    ${server_details[${x}]['password']}    ${diskspd_cmd[${x}]}
+
+Restore From Backup
+    [Documentation]    Restore From Backup
+    ${status}=    Set Variable    ${EMPTY}
+    ${Response}=    Fusion Api Get Backup
+    Run keyword If    ${Response['status_code']} != 200    Fail     msg="Failed to Get the latest backup"
+    ${restore_body}=   Create Dictionary    type=RESTORE
+    ...                                     uriOfBackupToRestore=${Response['members'][0]['uri']}
+    ${output}=    Fusion Api Restore Backup    ${restore_body}
+    Run keyword If    ${output['status_code']} != 202    Fail      msg="Failed to perform the restore from backup operation"
+    Sleep    10min
+    ${restore_resp}=     Fusion Api Get Restore Status
+    Run keyword If    ${restore_resp['status_code']} != 200    fail    msg="Failed to get the restore details"
+    :FOR   ${index}   IN RANGE   ${restore_resp['count']}
+    \   Run Keyword If    '${restore_resp['members'][${index}]['backupIdToRestore']}' != '${Response['members'][0]['id']}'   Continue For Loop
+    \   ${restore_id} =    Set Variable    ${restore_resp['members'][${index}]['id']}
+    :FOR   ${index}   IN RANGE   200
+    \   sleep   100sec
+    \   log      "Restoring is in Progress..."
+    \   ${resp}=    Fusion Api Get Restore Status    param=?filter="'id'=='${restore_id}'"
+    \   Run keyword If     ${resp['status_code']}!= 200     Fail      msg="Unable to get the restore id details"
+    \   Run Keyword If     '${resp['members'][0]['restorePhase']}' != 'COMPLETED'    Continue For Loop
+    \   ${status} =    Set Variable    ${resp['members'][0]['status']}
+    \   Run Keyword If   '${resp['members'][0]['restorePhase']}' == 'COMPLETED'    Exit For Loop
+    Should Be Equal    ${status}    SUCCEEDED
+    log     \nRestore process got succeeded
+
+
+Clear Port Counters
+    [Documentation]    Clear Port Counters
+    [Arguments]     ${IC}
+    ${IC_uri}    Get IC URI    ${IC}
+    Log to console    ${IC_uri}
+    ${body}    Create Dictionary
+    ${Resp}    Fusion Api clear Interconnect Ports    ${body}    ${IC_uri}
+    ${task} =   Wait For Task   ${resp}     6m   15s
+    Wait Until Keyword Succeeds    10 min    20s      IC reached state    ${IC_uri}    Configured
+    Sleep    ${wait_for_clear_counter}
+
+Verify Server Profiles Status
+    [Documentation]    Verify the named profiles have the expected status
+    [Arguments]     ${sp_names}    ${expected_status}
+
+    :FOR    ${sp}    IN    @{sp_names}
+    \    ${sp_resp} =    Fvt Api Get Server Profile By Name    ${sp}
+    \    Should Be Equal As Strings    ${sp_resp['status']}    ${expected_status}
+
+Get Profiles
+    [Documentation]    Get Profiles
+    ${resp} =             fusion api get server profiles
+    ${profiles} =         Create List
+    ${profile_list} =     Get From Dictionary     ${resp}    members
+    ${l} =  Get Length  ${profile_list}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${profile} =     Get From List   ${profile_list}    ${x}
+    \   ${profile_details} =    Create Dictionary     name=${profile['name']}
+    \   ...                                           uri=${profile['uri']}
+    \   ...                                           state=${profile['state']}
+    \   ...                                           status=${profile['status']}
+    \   ...                                           serverHardwareUri=${profile['serverHardwareUri']}
+    \   append to list    ${profiles}   ${profile_details}
+    [Return]    ${profiles}
+
+Clean OV
+    [Documentation]    Initial cleanup
+    Power off ALL Servers    PressAndHold
+    Remove All Server Profiles
+    Remove All LEs
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove ALL Ethernet Networks
+    Remove ALL FC Networks
+    Remove ALL FCoE Networks
+    Remove ALL Network Sets
+    Remove ALL Users

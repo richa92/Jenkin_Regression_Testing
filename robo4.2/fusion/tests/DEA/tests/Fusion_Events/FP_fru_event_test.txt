@@ -1,0 +1,148 @@
+*** Settings ***
+Documentation    Test suite to validate Front Panel related events on OneView and FLM
+...    It covers testing of:
+...      FrontPanelFault
+...      FrontPanelFaultCleared
+...      FrontPanelFruContentFault
+...      FrontPanelFruManufacturedForInvalidFault
+...      FrontPanelFruManufacturedForMismatchFault
+
+...    = GENERIC USAGE =
+...    | pybot | -v ENC_SERIAL_NO:[enclosure serial #] | -v APPLIANCE_IP:<ipv4> | -v CIM_Linux_IP:<ipv4> |-v GIT_REPO_ROOT: | FP_fru_event_test.txt |
+...    = Variables =
+...    | GIT_REPO_ROOT |      Required: Repo root path if NOT defined in environment variable this is mgmtfw root location|
+...    | ENC_SERIAL_NO |      Optional: If omitted, will use the 1st enclosure detected in OV |
+...    | APPLIANCE_IP |       Required: OneView IPv4 address |
+...    | CIM_Linux_IP |       Required:CI Manager ipv4 under test |
+
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Library           RoboGalaxyLibrary
+Library           MgmtFWLibrary
+Library           json
+
+Suite Setup       Configure Events Test Environment
+Suite Teardown    Run Keywords  Logout of EM RIS   AND    Logout of Fusion Via REST
+
+*** Test Case *** 
+TC 01: Verify FrontPanelCommFault and FrontPanelCommFaultCleared Events For FrontPanel
+    [Documentation]    This test will verify FrontPanelCommFault and FrontPanelCommFaultCleared events
+    [Tags]    FP    FLM1.01    Automated
+    Front Panel Is Present And Status Is OK
+    Log    message=Failing the FrontPanel and verify failed status/alert event in diags audit log    console=True
+    ${last_fusion_event_id}=    get last fusion event ID
+    ${FrontPanel_Fault_Status}=    Set EM RIS CANmic Faults    ${FrontPanel_Device}    ${FrontPanel_Bay_No}    true
+    Should Be Equal As Strings    ${FrontPanel_Fault_Status}    <Response [200]>
+    ${status}=    Wait for Device Critical    ${FrontPanel_Device}    ${FrontPanel_Bay_No}
+    Should Be True      ${status}   ${FrontPanel_Device} Critical Status not detected
+    Sleep    5
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Status Change MessageID Event    ${EL_FrontPanel_Critical}    ${FrontPanel_Device}    ${FrontPanel_Bay_No}    250
+    Verify Audit Log Alert Event    ${EL_FrontPanel_Fault}    ${FrontPanel_Device}    ${FrontPanel_Bay_No}    250
+    Verify Fusion Event Sent By EM    ${EL_FrontPanel_Fault}    ${last_fusion_event_id}    ${Enclosure_category}
+    Log    message=Clearing FrontPanel commfault injection and verify ok status/alert event in diags audit log    console=True
+    ${FrontPanel_Fault_Status}=    Set EM RIS CANmic Faults    ${FrontPanel_Device}    ${FrontPanel_Bay_No}    false
+    Should Be Equal As Strings    ${FrontPanel_Fault_Status}    <Response [200]>
+    Wait for Device OK    ${FrontPanel_Device}    ${FrontPanel_Bay_No}
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Status Change MessageID Event    ${EL_FrontPanel_OK}    ${FrontPanel_Device}    ${FrontPanel_Bay_No}    250
+    Verify Audit Log Alert Event    ${EL_FrontPanel_Fault_Cleared}    ${FrontPanel_Device}    ${FrontPanel_Bay_No}    250
+    Verify Fusion Event Sent By EM    ${EL_FrontPanel_Fault_Cleared}    ${last_fusion_event_id}    ${Enclosure_category}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Set EM RIS CANmic Faults    ${FrontPanel_Device}    ${FrontPanel_Bay_No}    false    AND    EM Clear FrontPanel Status    ${FrontPanel_Bay_No}
+
+TC 02: Verify FrontPanelFruContentFault Event For FrontPanel device
+    [Documentation]    This test will verify FrontPanelFruContentFault event in FrontPanel
+    [Tags]    FP    FLM1.01    FRU    Automated    Disabled
+    Front Panel Is Present And Status Is OK
+    Log    message=Injecting FrontPanel fru fault and verify failed status/alert event in diags audit log    console=True
+    ${last_fusion_event_id}=    get last fusion event ID
+    # Flash invalid FRU for FrontPanel    
+    Flash Frontpanel Fru    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\FrontPanel\\fru_content_fault.bin
+    RIS EM Efuse Front Panel    ${FrontPanel_Bay_No}    8
+    ${status}=    Wait for Device Critical    ${FrontPanel_Device}    ${FrontPanel_Bay_No}
+    Should Be True      ${status}   ${FrontPanel_Device} Critical Status not detected
+    ${FrontPanel_Health}=    Get FrontPanel Health    ${FrontPanel_Bay_No}
+    Should Be Equal As Strings    ${FrontPanel_Health}    ${HEALTH_CRITICAL}
+    Sleep    5
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_FrontPanel_Fru_ContentFault}    ${FrontPanel_Device}    ${FrontPanel_Bay_No}    250
+    # Verify Fusion Event including event description and resolution
+    Verify Fusion Event Sent By EM    ${EL_FrontPanel_Fru_ContentFault}    ${last_fusion_event_id}    ${Enclosure_category}
+    # Flash the Good Fru
+    Log To Console    Flash Good Fru for FrontPanel
+    Flash Frontpanel Fru    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\Fru_Files\\${CAT}\\Good_Fru\\FP\\${FrontPanel_Bay_No}\\fru.bin
+    RIS EM Efuse Front Panel    ${FrontPanel_Bay_No}    8
+    Wait for Device OK    ${FrontPanel_Device}    ${FrontPanel_Bay_No}
+    ${FrontPanel_Health}=    Get FrontPanel Health    ${FrontPanel_Bay_No}
+    Should Be Equal As Strings    ${FrontPanel_Health}    ${HEALTH_OK}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Flash Frontpanel Fru    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\Fru_Files\\${CAT}\\Good_Fru\\FP\\${FrontPanel_Bay_No}\\fru.bin    AND    RIS EM Efuse Front Panel    ${FrontPanel_Bay_No}    8
+
+TC 03: Verify FrontPanelFruManufacturedForInvalidFault Event For Front Panel
+    [Documentation]    This test will validate FrontPanelFruManufacturedForInvalidFault For Front Panel
+    [Tags]    FP    FLM1.01    FRU    Automated
+    Front Panel Is Present And Status Is OK
+    Log    message=Injecting FrontPanel fru fault and verify failed status/alert event in diags audit log    console=True
+    ${last_fusion_event_id}=    get last fusion event ID
+    #Flash InCompatible Fru 
+    Flash Frontpanel Fru    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\${fpfru_foo}
+    RIS EM Efuse Front Panel    ${FrontPanel_Bay_No}    8
+    ${status}=    Wait for Device Critical    ${FrontPanel_Device}    ${FrontPanel_Bay_No}
+    Should Be True      ${status}   ${FrontPanel_Device} Critical Status not detected
+    ${FrontPanel_Health}=    Get FrontPanel Health    ${FrontPanel_Bay_No}
+    Should Be Equal As Strings    ${FrontPanel_Health}    ${HEALTH_CRITICAL}
+    ${FrontPanel_Fault_Status}=    Get FrontPanel Fault Status    ${FrontPanel_Bay_No}    FRUManufacturedForInvalid
+    Should Be Equal As Strings    ${FrontPanel_Fault_Status}    ${STATUS_CRITICAL}
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Status Change MessageID Event    ${EL_FrontPanel_Critical}    ${FrontPanel_Device}    ${FrontPanel_Bay_No}    250
+    Verify Audit Log Alert Event    ${EL_FrontPanel_FruInvalid}    ${FrontPanel_Device}    ${FrontPanel_Bay_No}    250
+    # Verify Fusion Event including event description and resolution
+    Verify Fusion Event Sent By EM    ${EL_FrontPanel_FruInvalid}    ${last_fusion_event_id}    ${Enclosure_category}
+    # Flash the Good Fru
+    Log To Console    Flash Good Fru for FrontPanel
+    Flash Frontpanel Fru    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\Fru_Files\\${CAT}\\Good_Fru\\FP\\${FrontPanel_Bay_No}\\fru.bin
+    RIS EM Efuse Front Panel    ${FrontPanel_Bay_No}    8
+    Wait for Device OK    ${FrontPanel_Device}    ${FrontPanel_Bay_No}
+    ${FrontPanel_Health}=    Get FrontPanel Health    ${FrontPanel_Bay_No}
+    Should Be Equal As Strings    ${FrontPanel_Health}    ${HEALTH_OK}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Flash Frontpanel Fru    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\Fru_Files\\${CAT}\\Good_Fru\\FP\\${FrontPanel_Bay_No}\\fru.bin    AND    RIS EM Efuse Front Panel    ${FrontPanel_Bay_No}    8
+
+TC 04: Verify FrontPanelFruManufacturedForMismatchFault Event For FrontPanel
+    [Documentation]    This test will validate FrontPanelFruManufacturedForMismatchFault event for FrontPanel
+    [Tags]    FP    FLM1.01    FRU    Automated
+    Front Panel Is Present And Status Is OK
+    Log    message=Injecting FrontPanel fru fault and verify failed status/alert event in diags audit log    console=True
+    ${last_fusion_event_id}=    get last fusion event ID
+    #Flash InCompatible Fru
+    Flash Frontpanel Fru    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\${Customized_FRU_Path}\\${fpfru_nec}
+    RIS EM Efuse Front Panel    ${FrontPanel_Bay_No}    8
+    ${status}=    Wait for Device Critical    ${FrontPanel_Device}    ${FrontPanel_Bay_No}
+    Should Be True      ${status}   ${FrontPanel_Device} Critical Status not detected
+    ${FrontPanel_Health}=    Get FrontPanel Health    ${FrontPanel_Bay_No}
+    Should Be Equal As Strings    ${FrontPanel_Health}    ${HEALTH_CRITICAL}
+    ${FrontPanel_Fault_Status}=    Get FrontPanel Fault Status    ${FrontPanel_Bay_No}    FRUManufacturedForMismatch
+    Should Be Equal As Strings    ${FrontPanel_Fault_Status}    ${STATUS_CRITICAL}
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Status Change MessageID Event    ${EL_FrontPanel_Critical}    ${FrontPanel_Device}    ${FrontPanel_Bay_No}    250
+    Verify Audit Log Alert Event    ${EL_FrontPanel_FruMismatch}    ${FrontPanel_Device}    ${FrontPanel_Bay_No}    250
+    # Verify Fusion Event including event description and resolution
+    Verify Fusion Event Sent By EM    ${EL_FrontPanel_FruMismatch}    ${last_fusion_event_id}    ${Enclosure_category}
+    # Flash the Good Fru
+    Log To Console    Flash Good Fru for FrontPanel
+    Flash Frontpanel Fru    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\Fru_Files\\${CAT}\\Good_Fru\\FP\\${FrontPanel_Bay_No}\\fru.bin
+    RIS EM Efuse Front Panel    ${FrontPanel_Bay_No}    8
+    Wait for Device OK    ${FrontPanel_Device}    ${FrontPanel_Bay_No}
+    ${FrontPanel_Health}=    Get FrontPanel Health    ${FrontPanel_Bay_No}
+    Should Be Equal As Strings    ${FrontPanel_Health}    ${HEALTH_OK}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Flash Frontpanel Fru    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\Fru_Files\\${CAT}\\Good_Fru\\FP\\${FrontPanel_Bay_No}\\fru.bin    AND    RIS EM Efuse Front Panel    ${FrontPanel_Bay_No}    8

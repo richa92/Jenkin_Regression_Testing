@@ -1,0 +1,113 @@
+*** Settings ***
+Documentation     Fusion CLI Operations     
+...               Directory Group Authentication  - US35013
+...               
+...    = USAGE =
+...    | pybot | -v FUSION_IP:<IP> | cli_authentication.txt |
+...    = Variables =
+...    | FUSION_IP | Fusion IP Address |
+
+Variables           ../resources/variables.py	${ENCLOSURE}
+
+Library             RoboGalaxyLibrary
+Library             FusionLibrary
+Library             String
+Resource            ../resources/fusion_ssh.txt
+Resource            ../resources/fusion_api.txt
+Resource            ../resources/fusion_cli.txt
+Resource            ../resources/defaults.txt
+Suite Setup         Log into Fusion via REST
+Suite Teardown      Logout of Fusion via REST
+Force Tags          CLI  DCS  HW
+
+*** Variables ***
+${TAB}             \u0009
+${BS}              \u0008
+${consoleview}     console-view
+${error}           Authentication failed for user 'sarah'.
+${ADserver}        16.125.77.30
+${LDAPserver}      16.114.221.220       #16.125.67.112
+${Workaround}	   False
+
+*** Test Cases ***
+Make Sure WPST AD and LDAP Directory Servers are reachable
+    Pass Execution If	${Workaround}	     AM87 Workaround
+    ${powerShell}    ${status}=    Run Keyword And Ignore Error    Environment Variable Should Be Set    windir
+    ${countFlag}=    Set Variable If    '${powerShell}'=='PASS'    -n 5    -c 5
+    ${rc} =         Run       ping ${countFlag} ${ADserver}
+    Log     ${rc}
+    Should Not Contain    ${rc}     timed out
+    ${rc} =         Run       ping ${countFlag} ${LDAPserver}
+    Should Not Contain    ${rc}     timed out
+	
+Load Test Data
+    Pass Execution If	${Workaround}	     AM87 Workaround
+    ${file}=		     OperatingSystem.Get File    ../data/Directory_Services.json
+    ${ds_data}=     	     Evaluate     json.loads('''${file}''')    json
+    ${ADdirectory}           Get From Dictionary       ${ds_data}         ADdirectory
+    ${LDAPdirectory}         Get From Dictionary       ${ds_data}         LDAPdirectory
+    ${ADgrouprole}           Get From Dictionary       ${ds_data}         ADgrouprole
+    Set Suite Variable       ${ADdirectory}      ${ADdirectory}
+    Set Suite Variable       ${LDAPdirectory}      ${LDAPdirectory}
+    Set Suite Variable       ${ADgrouprole}       ${ADgrouprole} 
+
+Add AD Servers
+    Pass Execution If	${Workaround}	     AM87 Workaround
+    ${status}=    Fusion API Add Directory     ${ADdirectory}
+    Log Dictionary    ${status}
+    ${status_code}=   Get From Dictionary	${status}	status_code
+    Run Keyword If    "${status_code}"=="400"
+    ...		Pass with Known Error
+    Verify Success of Adding Directory       ${status}
+
+Add LDAP Servers
+    Pass Execution If	${Workaround}	     AM87 Workaround
+    ${Status}=    Fusion API Add Directory     ${LDAPdirectory}
+    Log Dictionary    ${status}
+    Verify Success of Adding Directory       ${status}
+
+Add Role to Group
+    Pass Execution If	${Workaround}	     AM87 Workaround
+    ${Status}=     Fusion API Add Role to Group       ${ADgrouprole}
+    Log      ${status}
+    Check Response    ${Status}
+
+Verify the SSH login with Directory Group 
+    [documentation]     CLI Authentication
+    Pass Execution If	${Workaround}	     AM87 Workaround
+    sleep    10
+    ${cred}            Get from Dictionary     ${ADgrouprole}    credentials
+    ${user}            Get From Dictionary     ${cred}           userName
+    Set Suite Variable     ${user}      ${user}
+    ${passwd}          Get From Dictionary     ${cred}           password
+    Set Suite Variable     ${passwd}     ${passwd}
+    ${g2rpg}           Get from Dictionary     ${ADgrouprole}     group2rolesPerGroup
+    ${domain}          Get from Dictionary     ${g2rpg}          loginDomain
+    Set Suite Variable    ${domain}    ${domain}
+    ${egroup}          Get from Dictionary      ${g2rpg}         egroup
+    Set Suite Variable    ${egroup}        ${egroup}
+    ${Output}=    Login to Fusion Via SSH     ${FUSION_IP}     ${domain}\\${user}     ${passwd}     ${CLI_PROMPT}     10
+    Should Be True     ${Output}        msg=Failed to get CLI prompt
+	
+Verify Directory Group Has no Access After removed
+    Pass Execution If	${Workaround}	     AM87 Workaround
+    ${Status}=      Fusion API Del Role From Group       ${domain}      ${egroup}
+    Check Response    ${Status}
+    ${status}     Run Keyword and Expect Error      ${error}       Login to Fusion Via SSH     ${FUSION_IP}    ${user}     ${passwd}    ${CLI_PROMPT}    10
+
+*** Keywords ***
+Verify Success of Adding Directory
+    [Documentation]  Verify the return status from Adding directory
+    [Arguments]      ${status}
+    ${keys}     Get Dictionary Keys     ${status}
+    ${keys}     Convert To List      ${keys}
+    ${index}    get Index From List     ${keys]     u'nestedErrors'
+    Pass Execution if    ${index}==-1         msg=Directory is added successfully
+    @{errors}     Get From Dictionary     ${status}    nestedErrors
+    :For    ${error}    In    @{errors}
+    \       ${code}     Get From Dictionary    ${error}     errorCode
+    \       Pass Execution If    '${code}'=='AUTHN_LOGINDOMAIN_DUPLICATE_NAME'    msg=Directory is already added
+
+Pass with Known Error
+     Log 	AM87: QXCR1001403311, known defect 	level=WARN
+     Set Suite Variable   ${Workaround}	      True

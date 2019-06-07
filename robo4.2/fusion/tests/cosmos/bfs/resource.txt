@@ -1,0 +1,1229 @@
+*** Settings ***
+Documentation  Common keywords for BFS testing
+Library                         FusionLibrary
+Library                         RoboGalaxyLibrary
+Library                         OperatingSystem
+Library                         BuiltIn
+Library                         Collections
+Library                         XML
+Library                         String
+Library                         json
+Library                         Dialogs
+Library                         SSHLibrary
+Variables                       None.py  # provide from command line
+Resource                        ../../../Resources/api/fusion_api_resource.txt
+
+*** Variables ***
+
+${X-API-VERSION}                1200
+${APPLIANCE_IP}                 10.133.1.15
+${DATA}                         None.py  # provide from command line
+${VERBOSE}                      False
+${VERIFY}                       True
+${dhcp}                         tools\\Get-DHCPAddress.ps1
+${spp1}                         None.iso  # provide from command line
+${hotfix}                       None.rpm  # provide from command line
+@{spp_paths}                    ${spp1}  ${hotfix}
+${spp_path}                     None.iso  # provide from command line
+${username}                     root
+${password}                     Cosmos@123
+${mpio}                         tools\\MPIOClaim.ps1
+${storage_path}                 tools\\StoragePath.ps1
+${nic_team}                     tools\\NicTeam.ps1
+${windows_mac}                  tools\\WindowsMAC.ps1
+${mg}                           tools\\MeatGrinder.ps1
+${win_un}                       Administrator
+${win_pd}                       Cosmos@123
+${timeout}                      15m
+${interval}                     15s
+${fail}                         ${0}
+${failure_count}                ${3}
+${SWITCH}                       tools\\Switch_Failover.py
+${jvm_ip}                       16.84.101.64
+${io_meter_timeout}             1000
+${spp_name}                     Service Pack for ProLiant
+@{baseline_spp_names}           ${spp_name}
+${appliance_username}           root
+${appliance_password}           hpvse1
+${ilotool}                      "c:\\Program Files\\Hewlett Packard Enterprise\\RESTful Interface Tool\\ilorest.exe"
+
+# OV DEPLOYMENT VARIABLES
+${app1Ipv4Addr}         10.120.12.80
+${hostname}             bfs-cosmos.net
+${admin_password}       Cosmos123
+${OVFTOOL}              "C:\\Program Files\\VMware\\VMware OVF Tool\\ovftool.exe"
+${fw_timeout}           190m
+
+*** Keywords ***
+BFS OV Suite Setup
+    [Documentation]    Set Log Level, verify appliance pinging and Login to appliance.
+    [Arguments]     ${credentials}
+    Set Log Level   TRACE
+    Appliance is pingable   ${APPLIANCE_IP}
+    Fusion Api Login Appliance  ${appliance_ip}     ${credentials}
+
+BFS OV Suite Setup And DHCP is Pingable
+    [Documentation]    Set Log Level, verify appliance pinging,verify dhcp pinging and Login to appliance.
+    [Arguments]     ${credentials}  ${dhcpservers}
+    Set Log Level   TRACE
+    Appliance is pingable   ${APPLIANCE_IP}
+    :FOR  ${dhcp}  IN  @{dhcpservers}
+    \  DHCP is pingable  ${dhcp['ip']}
+    Fusion Api Login Appliance  ${appliance_ip}     ${credentials}
+
+DHCP is pingable
+    [Documentation]    Verify DHCP Ping
+    [Arguments]     ${dhcp}
+    ${Output}=    Run    ping -n 4 ${dhcp}
+    Log    ${Output}    console=True
+    Should Contain    ${Output}    TTL=
+    [Return]    ${Output}
+
+BFS OV Suite Teardown
+    [Documentation]    Logout from appliance
+    Fusion Api Logout Appliance
+
+BFS Altair Suite Setup
+    [Documentation]    Set Log Level, verify appliance pinging and Login to Altair appliance.
+    [Arguments]     ${credentials}
+    Set Log Level   TRACE
+    Appliance is pingable   ${altair_ip}
+    Altair_api_login_appliance  ${altair_ip}     ${altair_un}     ${altair_passwd}
+
+BFS Altair Suite Teardown
+    [Documentation]    Logout from Altair appliance
+    altair_api_logout_appliance
+
+Upload SPP to Fusion
+    [Documentation]    Upload SPP build to appliance
+    [Arguments]     ${host}     ${user}     ${password}     ${spppath}
+    ${Output}=   Run and return RC and output    powershell.exe -ExecutionPolicy Unrestricted -file ${spp} ${host} ${user} ${password} ${spppath}
+
+Delete SPP From Fusion
+    [Documentation]    Delete SPP build from appliance
+    [Arguments]     ${host}     ${user}     ${password}     ${spp}
+    ${Output}=   Run and return RC and output    powershell.exe -ExecutionPolicy Unrestricted ${del_spp} ${host} ${user} ${password} ${spp}
+
+Get Server Ethernet Connections IPs from DHCP
+    [Documentation]    Read MAC address from profile data, query to DHCP and return IP
+    [Arguments]     ${profile}
+    ${ip}=  Create List
+    :FOR    ${connection}  IN  @{profile['connectionSettings']['connections']}
+    \   Run Keyword Unless  '${connection['functionType']}' == 'Ethernet'     Continue For Loop
+    \   ${net_name} =    Get From Dictionary     ${connection}  networkUri
+    \   ${uri} =  Common URI lookup by name  ${net_name}
+    \   ${net} =    Fusion Api Get Ethernet Networks    ${uri}
+    \   ${vlan} =    Get From Dictionary     ${net}  vlanId
+    \   ${dhcp_detail} =   Get DHCP Server     ${vlan}
+    \   Run Keyword If  ${dhcp_detail} == []   Continue For Loop
+    \   ${mac} =    Get From Dictionary     ${connection}  mac
+    \   ${IPAddress} =     Get IP From DHCP    ${mac}  ${dhcp_detail[0]}  ${dhcp_detail[1]}
+    \   Append To List  ${ip}   ${IPAddress}
+    [Return]    ${ip}
+
+Ping IPAddress
+    [Documentation]  Ping the IP address given in argument
+    [Arguments]     ${ipv4address}
+    ${RC}   ${output} =  Run and return RC and Output    ping -n 4 ${ipv4address}
+    ${gotTask}     ${response} =  Run Keyword and Ignore Error  Should be equal     ${RC}   ${0}    \n${output}
+    Run keyword if      '${gotTask}'=='FAIL'    Fail        IP Address - ${ipv4address} is unreachable. Output is ${response}
+    ${value1}=  Evaluate    'Request timed out'
+    ${value2}=  Evaluate    'Destination host unreachable'
+    ${failStatus1}     ${response} =  Run Keyword and Ignore Error  Should Contain      ${output}   ${value1}
+    ${failStatus2}     ${response} =  Run Keyword and Ignore Error  Should Contain      ${output}   ${value2}
+    Run Keyword If      '${failStatus1}'=='PASS' or '${failStatus2}'=='PASS'    FAIL    IP Address - ${ipv4address} is unreachable.
+    ...                 ELSE                    Log  IP Address - ${ipv4address} is pingable.  console=True
+    [Return]    True
+
+Get DHCP Server
+    [Documentation]    Retrieve DHCP server on given vlan
+    [Arguments]     ${vlan}
+    ${dhcp_details} =   Create List
+    :FOR    ${dhcpserver}   IN  @{dhcpservers}
+    \   Run Keyword Unless  '${dhcpserver['vlanid']}' == '${vlan}'      Continue For Loop
+    \   ${dhcpserver_ip} =  Get From Dictionary     ${dhcpserver}   ip
+    \   Append To List  ${dhcp_details}     ${dhcpserver_ip}
+    \   ${dhcpserver_scope} =  Get From Dictionary     ${dhcpserver}   scope
+    \   Append To List  ${dhcp_details}     ${dhcpserver_scope}
+    [Return]    ${dhcp_details}
+
+Get IP From DHCP
+    [Documentation]    Call Powershell Utility to retrive IP from DHCP server
+    [Arguments]     ${mac}  ${dhcp_ip}  ${dhcp_scope}
+	${ips}=  Create List
+    ${results} =    lookup_ip_address_from_mac    ${dhcp_ip}    ${mac}
+    :For  ${ip_details}  in  @{results['results']}
+    \    Continue For Loop if  '${ip_details['scope']}' != '${dhcp_scope}'
+    \    ${ip} =    Set Variable    ${ip_details['ip']}
+    \    Append to List   ${ips}  ${ip}
+    ${count} =      Get Length      ${ips}
+    Run Keyword if      ${count} != 0  Return from keyword  ${ips[0]}
+
+Create Backup From OV
+    [Documentation]    Create appliance backup
+    ${resp}=    Fusion Api Create Backup
+    log    Creating Backup.......       console=True
+    Should Be Equal as Strings      '${resp['status_code']}'     '202'     msg=Failed to Backup OneView
+    Wait For Task2  ${resp}      timeout=2000      interval=5
+
+Restore From Backup From OV
+    [Documentation]    Restore appliance backup
+    [Arguments]  ${restore_timeout}=8000    ${restore_interval}=120
+    ${status}=    Set Variable    ${EMPTY}
+    ${Response}=    Fusion Api Get Backup
+    Run keyword unless      ${Response['status_code']}== 200     Fail     "Unable to Get the latest backup"
+    ${restore_body}       Create Dictionary      type=RESTORE
+    ...                      uriOfBackupToRestore=${Response['members'][0]['uri']}
+    Log     ${restore_body}     console=True
+    ${output}=        Fusion Api Restore Backup    ${restore_body}
+    Log      ${output}     console=True
+    Sleep     200sec
+    Run keyword unless     ${output['status_code']}== 202     Fail      "Unable to perform the restore from backup operation"
+    ${restore_resp}=      Fusion API Get Restore Status
+    Log      ${restore_resp}       console=True
+    Run keyword unless    ${restore_resp['status_code']}== 200      Fail      "Unable to get the restore details"
+    :FOR     ${index}     IN RANGE    ${restore_resp['count']}
+    \    Run Keyword If    '${restore_resp['members'][${index}]['backupIdToRestore']}' != '${Response['members'][0]['id']}'     Continue For Loop
+    \    ${restore_id} =    Set Variable    ${restore_resp['members'][${index}]['id']}
+    Wait Until Keyword Succeeds  ${restore_timeout}    ${restore_interval}   Check Restore Status   ${restore_id}
+
+Check Restore Status
+    [Documentation]  Checks the restore status
+    [Arguments]  ${restore_id}
+    ${resp}    Fusion API Get Restore Status    ${restore_id}
+    Run keyword unless      ${resp['status_code']}== 200    Fail    "Unable to get the restore id details"
+	Log    "Restoring is in Progress...Percentage complete ${resp['percentComplete']}"     console=True
+    Run Keyword If      '${resp['status']}' != 'SUCCEEDED'    Fail
+    ...  ELSE  Log  Restore is successful
+
+ESXi Server Should Be Pinging And Volume Should Be Active
+   [Documentation]     Get the OS ip from DHCP server and perform ping test. List and validate fcoe disks.
+   [Arguments]     ${profile}
+
+    ${profilename}=     Get From Dictionary  ${profile[0]}  name
+    ${esxip} =  Create List
+    ${profiles} =       Fusion Api Get Server Profiles  param=?count=10&filter="name matches '%25${profilename}%25'"
+    ${resp} =      Get Server Ethernet Connections IPs from DHCP  @{profiles['members']}
+    ${count} =      Get Length      ${resp}
+    Run Keyword if      ${count} == 0     FAIL    No IP's found in DHCP server
+    :FOR   ${ips}    IN   @{resp}
+    \      ${status}     ${response}=     Run Keyword and Ignore Error      Ping IPAddress    ${ips}
+    \      ${ip}=     Convert To String   ${ips}
+    \      Run Keyword If      '${status}'=='PASS'     Append to list  ${esxip}   ${ip}
+    ${count} =      Get Length      ${esxip}
+    Run Keyword if      ${count} == 0     FAIL    No IP's are pingable
+    Set Global Variable    ${esxip}
+
+    # open ssh connection
+    ${status}   ${resp}=    Run Keyword And Ignore Error    Open Connection    ${esxip[0]}  timeout=300s
+    Run Keyword If  '${status}'=='FAIL'     Fail    Failed to Open SSH Connection for ${esxip[0]}
+
+    ${newstatus}    ${resp}=    Run Keyword And Ignore Error    Login    ${username}    ${password}
+    Run Keyword If  '${newstatus}'=='FAIL'      Fail    Failed to do SSH Login for ${esxip[0]}
+
+    ${result}=  Execute Command      esxcli storage core device list
+
+    # check whether fcoe is listing or not
+    ${resultlist}=     Split String    ${result}    \n
+    log     SSH command output: ${resultlist}     console=true
+    :FOR     ${line}   in    @{resultlist}
+    \    ${fcoe_value}=    Evaluate     'Display Name: 3PARdata Fibre Channel'
+    \    ${iscsi_value}=    Evaluate     'Display Name: LEFTHAND iSCSI Disk'
+    \    ${fcoe_status}     ${taskState} =  Run Keyword and Ignore Error    Should Contain    ${line}    ${fcoe_value}
+    \    ${iscsi_status}     ${taskState} =  Run Keyword and Ignore Error    Should Contain    ${line}    ${iscsi_value}
+    \    Run keyword if   '${fcoe_status}'=='PASS' or '${iscsi_status}'=='PASS'    Exit for loop
+    Run keyword if   '${fcoe_status}'!='PASS' and '${iscsi_status}'!='PASS'   FAIL    Failed to Find fcoe/iscsi Disk
+
+    # check disks are as expected
+    ${fcoediskcountmatches}=    Get Regexp Matches    ${result}    ${fcoe_value}
+    ${iscsidiskcountmatches}=    Get Regexp Matches    ${result}    ${iscsi_value}
+    ${fcoediskcount} =      Get Length      ${fcoediskcountmatches}
+    ${iscsidiskcount} =      Get Length      ${iscsidiskcountmatches}
+    Run Keyword if      ${fcoediskcount} != 0 or ${iscsidiskcount} != 0   Log   found fcoe/iscsi disks  console=yes
+    ...                 ELSE   FAIL   msg= couldn't find fcoe/iscsi disks
+
+    # check active state paths
+    ${activestatus}=    Evaluate     'Status: on'
+    ${degradedstatus}=    Evaluate     'Status: degraded'
+    ${activepath}=   Get Regexp Matches    ${result}     ${activestatus}
+    ${degradedpath}=   Get Regexp Matches    ${result}     ${degradedstatus}
+    ${activecount} =      Get Length      ${activepath}
+    ${degradedcount} =      Get Length      ${degradedpath}
+    Run Keyword if      ${activecount} != 0 or ${degradedcount}!=0     Log   Atleast one link status is active  console=yes
+    ...                 ELSE   FAIL   msg= Status is not active
+
+SLES Server Should Be Pinging And Volume Should Be Active
+   [Documentation]     Get the OS ip from DHCP server and perform ping test. List and validate fcoe disks.
+   [Arguments]     ${profile}
+
+   ${profilename}=     Get From Dictionary  ${profile[0]}  name
+   ${slesip} =  Create List
+   ${profiles} =       Fusion Api Get Server Profiles  param=?count=10&filter="name matches '%25${profilename}%25'"
+   ${resp} =      Get Server Ethernet Connections IPs from DHCP  @{profiles['members']}
+    ${count} =      Get Length      ${resp}
+    Run Keyword if      ${count} == 0     FAIL    No IP's found in DHCP server
+    :FOR   ${ips}    IN   @{resp}
+    \      ${status}     ${response}=     Run Keyword and Ignore Error      Ping IPAddress    ${ips}
+    \      ${ip}=     Convert To String   ${ips}
+    \      Run Keyword If      '${status}'=='PASS'     Append to list  ${slesip}   ${ip}
+    ${count} =      Get Length      ${slesip}
+    Run Keyword if      ${count} == 0     FAIL    No IP's are pingable
+    Set Global Variable    ${slesip}
+
+    # open ssh connection
+    ${status}   ${resp}=    Run Keyword And Ignore Error    Open Connection    ${slesip[0]}  timeout=300s
+    Run Keyword If  '${status}'=='FAIL'     Fail    Failed to Open SSH Connection for ${slesip[0]}
+
+    ${newstatus}    ${resp}=    Run Keyword And Ignore Error    Login    ${username}    ${password}
+    Run Keyword If  '${newstatus}'=='FAIL'      Fail    Failed to do SSH Login for ${slesip[0]}
+
+    ${result}=  Execute Command      multipath -ll
+    log   SSH Command output: ${result}    console=true
+
+    # check active state paths
+    ${activestatus}=    Evaluate     'active ready running'
+    ${degradedstatus}=   Evaluate     'active ready ${SPACE}running'
+    ${degradedpath}=   Get Regexp Matches    ${result}   ${degradedstatus}
+    ${activepath}=   Get Regexp Matches    ${result}     ${activestatus}
+    ${activecount} =      Get Length      ${activepath}
+    ${degradecount} =      Get Length      ${degradedpath}
+    ${totalcount}=  Evaluate  ${activecount}+${degradecount}
+    Run Keyword if      ${totalcount} != 0    Log   activepaths are present  console=yes
+    ...                 ELSE   FAIL   msg= activepaths are not present
+
+RHEL Server Should Be Pinging And Volume Should Be Active
+   [Documentation]     Get the OS ip from DHCP server and perform ping test. List and validate fcoe disks.
+   [Arguments]     ${profile}
+
+    ${profilename}=     Get From Dictionary  ${profile[0]}  name
+    ${rhelip} =  Create List
+    ${profiles} =       Fusion Api Get Server Profiles  param=?count=10&filter="name matches '%25${profilename}%25'"
+    ${resp} =      Get Server Ethernet Connections IPs from DHCP  @{profiles['members']}
+    ${count} =      Get Length      ${resp}
+    Run Keyword if      ${count} == 0     FAIL    No IP's found in DHCP server
+    :FOR   ${ips}    IN   @{resp}
+    \      ${status}     ${response}=     Run Keyword and Ignore Error      Ping IPAddress    ${ips}
+    \      ${ip}=     Convert To String   ${ips}
+    \      Run Keyword If      '${status}'=='PASS'     Append to list  ${rhelip}   ${ip}
+    ${count} =      Get Length      ${rhelip}
+    Run Keyword if      ${count} == 0     FAIL    No IP's are pingable
+    Set Global Variable    ${rhelip}
+
+    # open ssh connection
+    ${status}   ${resp}=    Run Keyword And Ignore Error    Open Connection    ${rhelip[0]}  timeout=300s
+    Run Keyword If  '${status}'=='FAIL'     Fail    Failed to Open SSH Connection for ${rhelip[0]}
+
+    ${newstatus}    ${resp}=    Run Keyword And Ignore Error    Login    ${username}    ${password}
+    Run Keyword If  '${newstatus}'=='FAIL'      Fail    Failed to do SSH Login for ${rhelip[0]}
+
+    ${result}=  Execute Command      multipath -ll
+    log   SSH Command output: ${result}    console=true
+
+    # check active state paths
+    ${activestatus}=    Evaluate     'active ready running'
+    ${degradedstatus}=   Evaluate     'active ready ${SPACE}running'
+    ${degradedpath}=   Get Regexp Matches    ${result}   ${degradedstatus}
+    ${activepath}=   Get Regexp Matches    ${result}     ${activestatus}
+    ${activecount} =      Get Length      ${activepath}
+    ${degradecount} =      Get Length      ${degradedpath}
+    ${totalcount}=  Evaluate  ${activecount}+${degradecount}
+    Run Keyword if      ${totalcount} != 0    Log   activepaths are as expected  console=yes
+    ...                 ELSE   FAIL   msg= activepaths are not present
+
+Install MPIO Feature And Windows Server Should Be Pinging
+    [Documentation]     Install MPIO Feature And Windows Server Should Be Pinging
+    [Arguments]     ${profile}
+
+    ${winip} =  Create List
+    ${profilename}=     Get From Dictionary  ${profile[0]}   name
+    ${profiles} =       Fusion Api Get Server Profiles  param=?count=10&filter="name matches '%25${profilename}%25'"
+    ${resp} =      Get Server Ethernet Connections IPs from DHCP  @{profiles['members']}
+    ${count} =      Get Length      ${resp}
+    Run Keyword if      ${count} == 0     FAIL    No IP's found in DHCP server
+    :FOR   ${ips}    IN   @{resp}
+    \      ${status}     ${response}=     Run Keyword and Ignore Error      Ping IPAddress    ${ips}
+    \      ${ip}=     Convert To String   ${ips}
+    \      Run Keyword If      '${status}'=='PASS'     Append to list  ${winip}   ${ip}
+    ${count} =      Get Length      ${winip}
+    Run Keyword if      ${count} == 0     FAIL    No IP's are pingable
+    Set Global Variable    ${winip}
+
+    Run  powershell Enable-PSRemoting -Force
+    Run  powershell Set-Item wsman:\\localhost\\client\\trustedhosts * -Force
+    Run  powershell Restart-Service WinRM
+
+    ${output}=   Run    powershell.exe -ExecutionPolicy Unrestricted -file ${mpio} ${winip[0]} ${win_un} ${win_pd} True
+    ${storage_path}=    Get Regexp Matches    ${output}    Disk\\d: \\d\\d Paths
+    ${storage_path_state}=    Get Regexp Matches    ${output}    Active
+    ${count_disk} =      Get Length      ${storage_path}
+    Run Keyword if      ${count_disk} != 0     Log  Disks are present
+    ...   ELSE  FAIL   Paths are not as expected
+    ${count_state} =      Get Length      ${storage_path_state}
+    Run Keyword if      ${count_state} != 0     Log  Disks are present
+    ...   ELSE  FAIL   Paths are not as expected
+
+Windows Server Should Be Pinging And Volume Should Be Active
+    [Documentation]     Windows Server Should Be Pinging, FCoE Disk Should Exist and Active
+    [Arguments]     ${profile}
+
+    ${winip} =  Create List
+    ${profilename}=     Get From Dictionary  ${profile[0]}   name
+    ${profiles} =       Fusion Api Get Server Profiles  param=?count=10&filter="name matches '%25${profilename}%25'"
+    ${resp} =      Get Server Ethernet Connections IPs from DHCP  @{profiles['members']}
+    ${count} =      Get Length      ${resp}
+    Run Keyword if      ${count} == 0     FAIL    No IP's found in DHCP server
+    :FOR   ${ips}    IN   @{resp}
+    \      ${status}     ${response}=     Run Keyword and Ignore Error      Ping IPAddress    ${ips}
+    \      ${ip}=     Convert To String   ${ips}
+    \      Run Keyword If      '${status}'=='PASS'     Append to list  ${winip}   ${ip}
+    \      Run Keyword If      '${status}'=='PASS'     Set Test Variable    ${final_ip}   ${ip}
+    ${count} =      Get Length      ${final_ip}
+    Run Keyword if      ${count} == 0     FAIL    No IP's are pingable
+
+    Run  powershell Enable-PSRemoting -Force
+    Run  powershell Set-Item wsman:\\localhost\\client\\trustedhosts * -Force
+    Run  powershell Restart-Service WinRM
+
+    ${output}=   Run    powershell.exe -ExecutionPolicy Unrestricted -file ${storage_path} ${final_ip} ${win_un} ${win_pd}
+    ${storage_path}=    Get Regexp Matches    ${output}    Disk\\d: \\d\\d Paths
+    ${storage_path_state}=    Get Regexp Matches    ${output}    Active
+    ${count_disk} =      Get Length      ${storage_path}
+    Run Keyword if      ${count_disk} != 0     Log  Disks are present
+    ...   ELSE  FAIL   Paths are not as expected
+    ${count_state} =      Get Length      ${storage_path_state}
+    Run Keyword if      ${count_state} != 0     Log  Disks are present
+    ...   ELSE  FAIL   Paths are not as expected
+
+Ping IP Post Restart
+    [Documentation]     Ping IP's Post Restart servers
+    [Arguments]         ${profile}
+    ${iplist} =  Create List
+    ${profilename}=     Get From Dictionary  ${profile[0]}   name
+    ${profiles} =       Fusion Api Get Server Profiles  param=?count=10&filter="name matches '%25${profilename}%25'"
+    ${resp} =      Get Server Ethernet Connections IPs from DHCP   @{profiles['members']}
+    ${count} =      Get Length      ${resp}
+    Run Keyword if      ${count} == 0     FAIL    No IP's found in DHCP server
+    :FOR   ${ips}    IN   @{resp}
+    \      ${status}     ${response}=     Run Keyword and Ignore Error      Ping IPAddress    ${ips}
+    \      ${ip}=     Convert To String   ${ips}
+    \      Run Keyword If      '${status}'=='PASS'     Append to list  ${iplist}   ${ip}
+    ${count} =      Get Length      ${iplist}
+    Run Keyword if      ${count} == 0     Log   Waiting for OS to load and pingable......  console=True
+    Run Keyword if      ${count} == 0     FAIL    No IP's are pingable
+
+Ping IP After IC Actions
+    [Documentation]     Ping IP's Post IC Disable/Enable
+    [Arguments]         ${profile}
+    ${iplist} =  Create List
+    ${profilename}=     Get From Dictionary  ${profile[0]}   name
+    ${profiles} =       Fusion Api Get Server Profiles  param=?count=10&filter="name matches '%25${profilename}%25'"
+    ${resp} =      Get Server Ethernet Connections IPs from DHCP   @{profiles['members']}
+    ${count} =      Get Length      ${resp}
+    Run Keyword if      ${count} == 0     FAIL    No IP's found in DHCP server
+    :FOR   ${ips}    IN   @{resp}
+    \      ${status}     ${response}=     Run Keyword and Ignore Error      Ping IPAddress    ${ips}
+    \      ${ip}=     Convert To String   ${ips}
+    \      Run Keyword If      '${status}'=='PASS'     Append to list  ${iplist}   ${ip}
+    ${count} =      Get Length      ${iplist}
+    Run Keyword if      ${count} == 0     Log   Waiting for IP post IC Action  console=True
+    Run Keyword if      ${count} == 0     FAIL    No IP's are pingable
+
+Power On Server Profile And Wait For POST State
+    [Documentation]    Power On Server Profiles And Wait For Post State
+    [Arguments]    ${profile}   ${wait}= 3m   ${timeout}= 15m    ${interval}= 15s
+    Power on Servers in Profiles   ${profile}
+    Wait for Servers in Profiles to reach POST State  ${profile}  timeout=${timeout}  interval=${interval}
+    Wait Until Keyword Succeeds  ${timeout}    ${interval}   Ping IP Post Restart   ${profile}
+    Log    Wait for OS to load...     console=True
+    Sleep    ${wait}
+
+Edit Server Profile And Power On
+    [Documentation]    Edit server profile, verify expected data and power on
+    [Arguments]        ${profile}    ${expected_serverprofile}   ${timeout}=3000
+
+    Log   ${\n}Powering off the server ${profile[0]['serverHardwareUri']}    console=True
+    Power off Server    ${profile[0]['serverHardwareUri']}
+    :FOR  ${server_profile}   IN    @{profile}
+    \     ${responses}=  Edit Server Profile With Local Storage    ${server_profile}
+    Wait For Task2    ${responses}    timeout=${timeout}    interval=15
+    Verify Resources for List     ${expected_serverprofile}
+    Power On Server Profile And Wait For POST State    ${profile}
+
+Unassign Server Profile
+    [Documentation]    Unassign Server Profile and validate the same
+    [Arguments]      ${profile}    ${expected_serverprofile}
+    Log   ${\n}Powering off the server ${profile[0]['serverHardwareUri']}    console=True
+    Power off Server    ${profile[0]['serverHardwareUri']}
+    :FOR  ${server_profile}   IN    @{profile}
+    \     Pop From Dictionary  ${server_profile}  serverHardwareUri
+    \     ${responses}=  Edit Server Profile With Local Storage    ${server_profile}
+    Wait For Task2    ${responses}    timeout=3000    interval=15
+    Verify Resources for List     ${expected_serverprofile}
+
+Assign Server Profile
+    [Documentation]   Assign server hardware to server profile
+    [Arguments]     ${profile}    ${expected_serverprofile}
+    Edit Server Profile And Power On     ${profile}    ${expected_serverprofile}
+
+Enable NIC Teaming in ESXi
+    [Documentation]    Enable NIC Teaming in ESXi
+    [Arguments]     ${profile}
+    [Timeout]    8min
+    ${profilename}=     Get From Dictionary  ${profile[0]}  name
+    ${esxip} =  Create List
+    ${profiles} =       Fusion Api Get Server Profiles  param=?count=10&filter="name matches '%25${profilename}%25'"
+    ${resp} =      Get Server Ethernet Connections IPs from DHCP  @{profiles['members']}
+    ${count} =      Get Length      ${resp}
+    Run Keyword if      ${count} == 0     FAIL    No IP's found in DHCP server
+    :FOR   ${ips}    IN   @{resp}
+    \      ${status}     ${response}=     Run Keyword and Ignore Error      Ping IPAddress    ${ips}
+    \      ${ip}=     Convert To String   ${ips}
+    \      Run Keyword If      '${status}'=='PASS'     Append to list  ${esxip}   ${ip}
+    ${count} =      Get Length      ${esxip}
+    Run Keyword if      ${count} == 0     FAIL    No IP's are pingable
+    Set Global Variable    ${esxip}
+    ${status}   ${resp}=    Run Keyword And Ignore Error    Open Connection    ${esxip[0]}  timeout=300s
+    Run Keyword If  '${status}'=='FAIL'     Fail    Failed to Open SSH Connection for ${esxip[0]}
+    ${newstatus}    ${resp}=    Run Keyword And Ignore Error    Login    ${username}    ${password}
+    Run Keyword If  '${newstatus}'=='FAIL'      Fail    Failed to do SSH Login for ${esxip[0]}
+    ${result}=  Execute Command      esxcli network nic list
+    ${nic}=    Get Regexp Matches    ${result}    vmnic
+    ${count} =      Get Length      ${nic}
+    Run Keyword if      ${count} == 0  FAIL     No Network disks
+    ${result}=  Execute Command      esxcli network vswitch standard policy failover get -v vSwitch0
+    ${vswitch}=    Get Regexp Matches    ${result}    vmnic
+    ${count} =      Get Length      ${vswitch}
+    Run Keyword if      ${count} == 1     Log  Nic teaming is not done  console=yes
+    ${add}=  Execute Command      esxcli network vswitch standard uplink add -v vSwitch0 -u vmnic1
+    ${result}=  Execute Command      esxcli network vswitch standard policy failover set -v vSwitch0 -a vmnic0,vmnic1
+    Log  ${result}
+
+Create RHEL Nic Bonding
+    [Documentation]   Check networks and configure nic bonding
+    [Arguments]     ${profile}
+    [Timeout]    8min
+    ${profilename}=     Get From Dictionary  ${profile[0]}  name
+    ${rhelip} =  Create List
+    ${profiles} =       Fusion Api Get Server Profiles  param=?count=10&filter="name matches '%25${profilename}%25'"
+    ${resp} =      Get Server Ethernet Connections IPs from DHCP  @{profiles['members']}
+    ${count} =      Get Length      ${resp}
+    Run Keyword if      ${count} == 0     FAIL    No IP's found in DHCP server
+    :FOR   ${ips}    IN   @{resp}
+    \      ${status}     ${response}=     Run Keyword and Ignore Error      Ping IPAddress    ${ips}
+    \      ${ip}=     Convert To String   ${ips}
+    \      Run Keyword If      '${status}'=='PASS'     Append to list  ${rhelip}   ${ip}
+    ${count} =      Get Length      ${rhelip}
+    Run Keyword if      ${count} == 0     FAIL    No IP's are pingable
+
+    ${status}   ${resp}=    Run Keyword And Ignore Error    Open Connection    ${rhelip[0]}
+    Run Keyword If  '${status}'=='FAIL'     Fail    Failed to Open SSH Connection for ${rhelip[0]}
+    ${newstatus}    ${resp}=    Run Keyword And Ignore Error    Login    ${username}    ${password}
+    Run Keyword If  '${newstatus}'=='FAIL'      Fail    Failed to do SSH Login for ${rhelip[0]}
+
+    ${ifconfig}=  Execute Command      ifconfig | grep bond
+    log   SSH Command output: ${ifconfig}    console=true
+    Close Connection
+
+    ${bond}=    Evaluate     'bond'
+    ${bond_match}=   Get Regexp Matches    ${ifconfig}     ${bond}
+    ${bond_count} =      Get Length      ${bond_match}
+    Run Keyword if      ${bond_count} == 0   Configure Nic Bonding in RHEL    ${profile}
+    ...                 ELSE   log   NIC bonding configuration already exists in RHEL OS  console=true
+
+Configure Nic Bonding in RHEL
+   [Documentation]     Configure nic bonding in RHEL. The nic bonding will be configured for network adapter present in the server hardware.
+   [Arguments]   ${profile}
+
+   # get the mac address that has to be bonded
+   ${rhelip} =  Create List
+   ${profilename}=     Get From Dictionary  ${profile[0]}  name
+   ${profiles} =       Fusion Api Get Server Profiles  param=?count=10&filter="name matches '%25${profilename}%25'"
+   ${mac} =      Get Server MAC Address  @{profiles['members']}
+   ${resp} =      Get Server Ethernet Connections IPs from DHCP  @{profiles['members']}
+   ${count} =      Get Length      ${resp}
+   Run Keyword if      ${count} == 0     FAIL    No IP's found in DHCP server
+   :FOR   ${ips}    IN   @{resp}
+   \      ${status}     ${response}=     Run Keyword and Ignore Error      Ping IPAddress    ${ips}
+   \      ${ip}=     Convert To String   ${ips}
+   \      Run Keyword If      '${status}'=='PASS'     Append to list  ${rhelip}   ${ip}
+   ${count} =      Get Length      ${rhelip}
+   Run Keyword if      ${count} == 0     FAIL    No IP's are pingable
+
+   log     configuring NIC Bonding in RHEL    console=True
+   ${status}   ${resp}=    Run Keyword And Ignore Error    Open Connection    ${rhelip[0]}  timeout=300s
+   Run Keyword If  '${status}'=='FAIL'     Fail    Failed to Open SSH Connection for ${rhelip[0]}
+   ${newstatus}    ${resp}=    Run Keyword And Ignore Error    Login    ${username}    ${password}
+   Run Keyword If  '${newstatus}'=='FAIL'      Fail    Failed to do SSH Login for ${rhelip[0]}
+
+   Create File      rhel_nicbonding\\ifcfg-bond0_slave_1     HWADDR=${mac[0]}${\n}TYPE=Ethernet${\n}NAME="bond0 slave 1"${\n}ONBOOT=yes${\n}MASTER=bond0${\n}SLAVE=yes${\n}
+   Create File      rhel_nicbonding\\ifcfg-bond0_slave_2     HWADDR=${mac[1]}${\n}TYPE=Ethernet${\n}NAME="bond0 slave 2"${\n}ONBOOT=yes${\n}MASTER=bond0${\n}SLAVE=yes${\n}
+
+   run   cmd.exe rhel_nicbonding\\dos2unix.exe rhel_nicbonding\\ifcfg-bond0_slave_1
+   run   cmd.exe rhel_nicbonding\\dos2unix.exe rhel_nicbonding\\ifcfg-bond0_slave_2
+
+   ${status}   ${eth0}=    Run Keyword And Ignore Error    SSHLibrary.Put File    rhel_nicbonding\\ifcfg-bond0_slave_1    //etc/sysconfig//network-scripts/    mode=0644
+   Run Keyword If  '${status}'=='FAIL'     Fail    Failed to Transfer ifcfg-bond0_slave_1 file
+
+   ${status}   ${eth1}=    Run Keyword And Ignore Error    SSHLibrary.Put File    rhel_nicbonding\\ifcfg-bond0_slave_2    //etc/sysconfig//network-scripts/    mode=0644
+   Run Keyword If  '${status}'=='FAIL'     Fail    Failed to Transfer ifcfg-bond0_slave_2 file
+
+   ${status}   ${bond0}=    Run Keyword And Ignore Error    SSHLibrary.Put File    rhel_nicbonding\\ifcfg-Bond_connection_1    //etc/sysconfig//network-scripts/    mode=0644
+   Run Keyword If  '${status}'=='FAIL'     Fail    Failed to Transfer ifcfg-Bond_connection_1 file
+
+   Sleep    5s
+   ${rhelnicip} =  Create List
+
+
+   ${resp} =      Get Server Ethernet Connections IPs from DHCP  @{profiles['members']}
+   ${count} =      Get Length      ${resp}
+   Run Keyword if      ${count} == 0     FAIL    No IP's found in DHCP server
+   :FOR   ${ips}    IN   @{resp}
+   \      ${status}     ${response}=     Run Keyword and Ignore Error      Ping IPAddress    ${ips}
+   \      ${ip}=     Convert To String   ${ips}
+   \      Run Keyword If      '${status}'=='PASS'     Append to list  ${rhelnicip}   ${ip}
+   ${count} =      Get Length      ${rhelnicip}
+   Run Keyword if      ${count} == 0     FAIL    No IP's are pingable
+
+   ${status}   ${resp}=    Run Keyword And Ignore Error    Open Connection    ${rhelnicip[0]}  timeout=300s
+   Run Keyword If  '${status}'=='FAIL'     Fail    Failed to Open SSH Connection for ${rhelnicip[0]}
+   ${newstatus}    ${resp}=    Run Keyword And Ignore Error    Login    ${username}    ${password}
+   Run Keyword If  '${newstatus}'=='FAIL'      Fail    Failed to do SSH Login for ${rhelnicip[0]}
+
+   ${restart_network}=     Execute Command      service network restart
+   log   SSH Command output: ${restart_network}    console=true
+   ${ifconfig}=  Execute Command      ifconfig | grep bond
+   log   SSH Command output: ${ifconfig}    console=true
+
+   ${bond}=    Evaluate     'bond'
+   ${bond_match}=   Get Regexp Matches    ${ifconfig}     ${bond}
+   ${bond_count} =      Get Length      ${bond_match}
+   Run Keyword if      ${bond_count} == 1   log    NIC bonding is configured successfully  console=True
+   ...                 ELSE   FAIL   msg= Failed to configure NIC bonding
+
+Get Server MAC Address
+    [Documentation]    Read MAC address from profile data
+    [Arguments]     ${profile}
+    ${macaddr}=  Create List
+    :FOR    ${connection}  IN  @{profile['connectionSettings']['connections']}
+    \   Run Keyword Unless  '${connection['functionType']}' == 'Ethernet'     Continue For Loop
+    \   ${net_name} =    Get From Dictionary     ${connection}  networkUri
+    \   ${uri} =  Common URI lookup by name  ${net_name}
+    \   ${net} =    Fusion Api Get Ethernet Networks    ${uri}
+    \   ${mac} =    Get From Dictionary     ${connection}  mac
+    \   Append To List  ${macaddr}   ${mac}
+    log     ${macaddr}    console=true
+    [Return]    ${macaddr}
+
+Create SLES Nic Bonding
+    [Documentation]   Check networks and configure nic bonding
+    [Arguments]     ${profile}
+    [Timeout]    8min
+    ${profilename}=     Get From Dictionary  ${profile[0]}  name
+    ${slesip} =  Create List
+    ${profiles} =       Fusion Api Get Server Profiles  param=?count=10&filter="name matches '%25${profilename}%25'"
+    ${resp} =      Get Server Ethernet Connections IPs from DHCP  @{profiles['members']}
+    ${count} =      Get Length      ${resp}
+    Run Keyword if      ${count} == 0     FAIL    No IP's found in DHCP server
+    :FOR   ${ips}    IN   @{resp}
+    \      ${status}     ${response}=     Run Keyword and Ignore Error      Ping IPAddress    ${ips}
+    \      ${ip}=     Convert To String   ${ips}
+    \      Run Keyword If      '${status}'=='PASS'     Append to list  ${slesip}   ${ip}
+    ${count} =      Get Length      ${slesip}
+    Run Keyword if      ${count} == 0     FAIL    No IP's are pingable
+    ${status}   ${resp}=    Run Keyword And Ignore Error    Open Connection    ${slesip[0]}  timeout=300s
+    Run Keyword If  '${status}'=='FAIL'     Fail    Failed to Open SSH Connection for ${slesip[0]}
+    ${newstatus}    ${resp}=    Run Keyword And Ignore Error    Login    ${username}    ${password}
+    Run Keyword If  '${newstatus}'=='FAIL'      Fail    Failed to do SSH Login for ${slesip[0]}
+
+    ${ifconfig}=  Execute Command      ifconfig | grep bond
+    ${ipaddress}=  Execute Command      ip address | grep bond
+    log   SSH Command output: ${ifconfig}    console=true
+    log   SSH Command output: ${ipaddress}    console=true
+    Close Connection
+
+    ${bond}=    Evaluate     'bond'
+    ${bond_match}=   Get Regexp Matches    ${ifconfig}     ${bond}
+    ${bond_match_sles15}=   Get Regexp Matches    ${ipaddress}     ${bond}
+    ${bond_count} =      Get Length      ${bond_match}
+    ${bond_count_sles15} =      Get Length      ${bond_match_sles15}
+    Run Keyword if      ${bond_count} == 0 and ${bond_count_sles15} == 0  Configure Nic Bonding in SLES    ${profile}
+    ...                 ELSE   log   NIC bonding configuration already exists in SLES OS  console=true
+
+Configure Nic Bonding in SLES
+   [Documentation]     Configure nic bonding in sles. The nic bonding will be configured for network adapter present in the server hardware.
+   [Arguments]     ${profile}
+
+   ${profilename}=     Get From Dictionary  ${profile[0]}  name
+   ${slesip} =  Create List
+   ${profiles} =       Fusion Api Get Server Profiles  param=?count=10&filter="name matches '%25${profilename}%25'"
+   ${resp} =      Get Server Ethernet Connections IPs from DHCP  @{profiles['members']}
+   ${count} =      Get Length      ${resp}
+   Run Keyword if      ${count} == 0     FAIL    No IP's found in DHCP server
+   :FOR   ${ips}    IN   @{resp}
+    \      ${status}     ${response}=     Run Keyword and Ignore Error      Ping IPAddress    ${ips}
+    \      ${ip}=     Convert To String   ${ips}
+    \      Run Keyword If      '${status}'=='PASS'     Append to list  ${slesip}   ${ip}
+   ${count} =      Get Length      ${slesip}
+   Run Keyword if      ${count} == 0     FAIL    No IP's are pingable
+   log     configuring NIC Bonding in SLES    console=True
+   ${status}   ${resp}=    Run Keyword And Ignore Error    Open Connection    ${slesip[0]}  timeout=300s
+   Run Keyword If  '${status}'=='FAIL'     Fail    Failed to Open SSH Connection for ${slesip[0]}
+   ${newstatus}    ${resp}=    Run Keyword And Ignore Error    Login    ${username}    ${password}
+   Run Keyword If  '${newstatus}'=='FAIL'      Fail    Failed to do SSH Login for ${slesip[0]}
+
+   ${adapter_name}=  Execute Command      cat /etc/sysconfig/network/ifcfg-eth0 | grep NAME
+   log   SSH Command output: ${adapter_name}    console=true
+
+   Create File      sles_nicbonding\\ifcfg-eth0     BOOTPROTO='none'${\n}BROADCAST=''${\n}ETHTOOL_OPTIONS=''${\n}IPADDR=''${\n}MTU=''${\n}${adapter_name}${\n}NETMASK=''${\n}NETWORK=''${\n}REMOTE_IPADDR=''${\n}STARTMODE='hotplug'${\n}USERCONTROL='no'
+   Create File      sles_nicbonding\\ifcfg-eth1     BOOTPROTO='none'${\n}BROADCAST=''${\n}ETHTOOL_OPTIONS=''${\n}IPADDR=''${\n}MTU=''${\n}${adapter_name}${\n}NETMASK=''${\n}NETWORK=''${\n}REMOTE_IPADDR=''${\n}STARTMODE='hotplug'${\n}USERCONTROL='no'
+
+   run   cmd.exe sles_nicbonding\\dos2unix.exe sles_nicbonding\\ifcfg-eth0
+   run   cmd.exe sles_nicbonding\\dos2unix.exe sles_nicbonding\\ifcfg-eth1
+
+   ${status}   ${eth0}=    Run Keyword And Ignore Error    SSHLibrary.Put File    sles_nicbonding\\ifcfg-eth0    //etc/sysconfig//network/    mode=0644
+   Run Keyword If  '${status}'=='FAIL'     Fail    Failed to Transfer ifcfg-eth0 file
+
+   ${status}   ${eth1}=    Run Keyword And Ignore Error    SSHLibrary.Put File    sles_nicbonding\\ifcfg-eth1    //etc/sysconfig//network/    mode=0644
+   Run Keyword If  '${status}'=='FAIL'     Fail    Failed to Transfer ifcfg-eth1 file
+
+   ${status}   ${bond0}=    Run Keyword And Ignore Error    SSHLibrary.Put File    sles_nicbonding\\ifcfg-bond0    //etc/sysconfig//network/    mode=0644
+   Run Keyword If  '${status}'=='FAIL'     Fail    Failed to Transfer ifcfg-bond0 file
+
+   ${restart_network}=     Execute Command      service network restart
+   log   SSH Command output: ${restart_network}    console=true
+   ${ifconfig}=  Execute Command      ifconfig | grep bond
+   ${ipaddress}=  Execute Command      ip address | grep bond
+   log   SSH Command output: ${ifconfig}    console=true
+   log   SSH Command output: ${ipaddress}    console=true
+
+   ${bond}=    Evaluate     'bond'
+   ${bond_match}=   Get Regexp Matches    ${ifconfig}     ${bond}
+   ${bond_match_sles15}=   Get Regexp Matches    ${ipaddress}     ${bond}
+   ${bond_count} =      Get Length      ${bond_match}
+   ${bond_count_sles15} =      Get Length      ${bond_match_sles15}
+   Run Keyword if      ${bond_count} == 1 or ${bond_count_sles15} == 1     log    NIC bonding is configured successfully  console=True
+   ...                 ELSE   FAIL   msg= Failed to configure NIC bonding
+
+Update IC Downlink Port and wait until port reaches desired state
+    [Documentation]     Disable and enable IC Downlink Port
+    [Arguments]  ${interconnects}  ${timeout}= 15m    ${interval}= 15s
+    ${responses}=  Create List
+    :FOR  ${inter}  IN  @{interconnects}
+    \  ${resp}=  Update IC Port Async  ${inter['name']}  ${inter['port']}  ${inter['downlink']}
+    \   Append To List   ${responses}  ${resp}
+    :FOR  ${task}  IN  @{responses}
+    \   Wait For Task2    ${task}    timeout=20m    interval=5
+    :FOR  ${inter}  IN  @{interconnects}
+    \  Verify port state is as expected  ${inter['name']}  ${inter['port']}  ${inter['port_status']}
+
+Update IC Uplink Port and wait until port reaches desired state
+    [Documentation]     Disable and enable IC Uplink Port
+    [Arguments]  ${interconnects}  ${timeout}= 15m    ${interval}= 15s
+    ${responses}=  Create List
+    :FOR  ${inter}  IN  @{interconnects}
+    \  ${resp}=  Update IC Port Async  ${inter['name']}  ${inter['port']}  ${inter['uplink']}
+    \   Append To List   ${responses}  ${resp}
+    :FOR  ${task}  IN  @{responses}
+    \   Wait For Task2    ${task}    timeout=20m    interval=5
+    :FOR  ${inter}  IN  @{interconnects}
+    \  Verify port state is as expected  ${inter['name']}  ${inter['port']}  ${inter['port_status']}
+
+Verify port state is as expected
+    [Documentation]  Wait till port state goes unlinked or linked state
+    [Arguments]     ${name}  ${port_name}  ${status}  ${timeout}= 50m    ${interval}= 15s
+    Wait Until Keyword Succeeds  ${timeout}    ${interval}  IC Port Status Should be Expected  ${name}  ${port_name}  ${status}
+
+IC Port Status Should be Expected
+    [Documentation]  Validation of port status in IC
+    [Arguments]  ${name}  ${port_name}  ${status}
+    ${uri} =     Create IC Port URI   ${name}    ${port_name}
+    ${resp} =    fusion api get resource    uri=${uri}
+    Run Keyword If  '${resp['portStatus']}' != '${status}'  FAIL  msg=Port state is not expected
+    ...  ELSE  Log  Port state is in expected state  console=yes
+
+Enable Windows Nic Team
+    [Documentation]    Powershell Utility to create nic teaming in Windows
+    [Arguments]         ${profile}  ${CreateRemove}    ${TeamName}    ${EthernetInterface}
+    ${profilename}=     Get From Dictionary  ${profile[0]}  name
+    ${win_ip} =  Create List
+    ${dhcpserverip2} =  Create List
+    ${profiles} =       Fusion Api Get Server Profiles  param=?count=10&filter="name matches '%25${profilename}%25'"
+    ${resp} =      Get Server Ethernet Connections IPs from DHCP  @{profiles['members']}
+    ${count} =      Get Length      ${resp}
+    Run Keyword if      ${count} == 0     FAIL    No IP's found in DHCP server
+    :FOR   ${ips}    IN   @{resp}
+    \      ${status}     ${response}=     Run Keyword and Ignore Error      Ping IPAddress    ${ips}
+    \      ${ip}=     Convert To String   ${ips}
+    \      Run Keyword If      '${status}'=='PASS'     Append to list  ${win_ip}   ${ip}
+    \      Run Keyword If      '${status}'!='PASS'     Append to list  ${dhcpserverip2}   ${ip}
+    ${count} =      Get Length      ${win_ip}
+    Run Keyword if      ${count} == 0     FAIL    No IP's are pingable
+    Run Keyword if      ${count} > 1   Append to list  ${dhcpserverip2}  ${win_ip[1]}
+    ${Output}=   Run    powershell.exe -ExecutionPolicy Unrestricted -file ${nic_team} ${win_ip[0]} ${win_un} ${win_pd} ${EthernetInterface} ${TeamName} ${CreateRemove}
+    ${nic}=    Get Regexp Matches    ${Output}    Nic Teaming Successfull
+    ${nic_exist}=    Get Regexp Matches    ${Output}    Nic Teaming Already Exists!!!
+    ${count_nic} =      Get Length      ${nic}
+    ${count_nic_exist} =      Get Length      ${nic_exist}
+    ${totalcount}=  Evaluate  ${count_nic}+${count_nic_exist}
+    Run Keyword if      ${totalcount} == 1     Log  Nic teaming is successfull  console=yes
+    Run Keyword if      ${totalcount} == 0     FAIL  Nic teaming is not successfull
+    ${lacp}=    Get Regexp Matches    ${Output}   Teaming Mode is LACP
+    ${count_teaming_mode_lacp} =      Get Length      ${lacp}
+    Run Keyword if      ${count_teaming_mode_lacp} == 1     Log  Teaming Mode is LACP and VPLAG is configured  console=yes
+
+Check And Configure NIC Teaming In Windows
+    [Documentation]    Check And Configure NIC Teaming In Windows
+    [Arguments]     ${profile}   ${CreateRemove}    ${TeamName}    ${EthernetInterface}
+    [Timeout]    8min
+    ${profilename}=     Get From Dictionary  ${profile[0]}  name
+    ${win_ip} =  Create List
+    ${dhcpserverip2} =  Create List
+    ${profiles} =       Fusion Api Get Server Profiles  param=?count=10&filter="name matches '%25${profilename}%25'"
+    ${resp} =      Get Server Ethernet Connections IPs from DHCP  @{profiles['members']}
+    ${count} =      Get Length      ${resp}
+    Run Keyword if      ${count} == 0     FAIL    No IP's found in DHCP server
+    :FOR   ${ips}    IN   @{resp}
+    \      ${status}     ${response}=     Run Keyword and Ignore Error      Ping IPAddress    ${ips}
+    \      ${ip}=     Convert To String   ${ips}
+    \      Run Keyword If      '${status}'=='PASS'     Append to list  ${win_ip}   ${ip}
+    \      Run Keyword If      '${status}'!='PASS'     Append to list  ${dhcpserverip2}   ${ip}
+    ${count} =      Get Length      ${win_ip}
+    Run Keyword if      ${count} == 0     FAIL    No IP's are pingable
+    Run Keyword if      ${count} > 1   Append to list  ${dhcpserverip2}  ${win_ip[1]}
+    Set Global Variable    ${win_ip[0]}
+    ${Get_Teaming} =    set variable   $Username = '${win_un}'; $Password = '${win_pd}'; $pass = ConvertTo-SecureString -AsPlainText $Password -Force; $Cred = New-Object System.Management.Automation.PSCredential -ArgumentList $Username,$pass ; $session = New-PsSession -ComputerName ${win_ip[0]} -Credential $Cred ; Invoke-Command -Session $session -ScriptBlock {Get-NetLbfoTeam}
+    ${status} =    Run     powershell "${Get_Teaming}"
+    ${nic}=     Get Regexp Matches    ${status}   TeamNics
+    ${count_nic} =     get length     ${nic}
+    Run Keyword if      ${count_nic} == 1     Log  Nic teaming already exists  WARN
+    Run Keyword if      ${count_nic} == 0     Enable Windows Nic Team   ${profile}  ${CreateRemove}   ${TeamName}   ${EthernetInterface}
+
+Get Backup status and wait till completed
+    [Documentation]  Get Backup status and wait till completed
+    ${Response}=    Fusion Api Get Backup
+    Run Keyword If  '${Response['members'][0]['status']}' != 'SUCCEEDED'  FAIL  Backup is still in progress
+    ...  ELSE  Log  Backup is completed  console=yes
+
+Connectivity Validation until appliance restore is completed
+    [Documentation]  Check Appliance is pinging until appliance is in OK state
+    [Arguments]  ${ip}   ${desired_state}=OK
+    ${passed}=  Run Keyword and Return Status   Ping IPAddress  ${ip}
+    Run Keyword if  '${passed}' == 'True'  Log  Ip is pinging
+    ...  ELSE  Set Test Variable  ${fail}  ${fail + 1}
+    ${failure_check}=  Evaluate      ${fail} > ${failure_count}
+    Run keyword if  ${failure_check}    FAIL   Ping failure count is more than ${failure_check}
+    Check Appliance State    ${APPLIANCE_IP}   ${desired_state}
+
+Download Specified SPP to Local Path
+    [Documentation]   Download Given SPP File to Local Path
+    ...     Usage     ${WEB_URL} ${WEB_USERNAME}, ${WEB_PASSWORD} should be passed via command line.
+    ...               Here WEB_URL is absolute path of remote file to be download
+    ...     pybot -v WEB_URL:http://wpstwork4.vse.rdlabs.hpecorp.net/OVST/SPP/DD-TH1/SPP2017100.2017_0908.53.iso -v WEB_USERNAME:wpstuser -v WEB_PASSWORD:hpvse1 02_Add_Base_Resources.robot
+    [Arguments]    ${remote_spp_file}=None   ${WEB_USERNAME}=None    ${WEB_PASSWORD}=None
+    Run Keyword If   '${remote_spp_file}'=='${None}'   Fail   msg="Specify HTTP Url of File in Command line"
+    Httpserver open connection       ${remote_spp_file}     ${WEB_USERNAME}    ${WEB_PASSWORD}
+    Log    WEB_URL:${remote_spp_file}   console=True
+    ${path2}   ${file} =    Split Path    ${remote_spp_file}
+    Create Folder If Not Exists     ${SPP_LOCALPATH}
+    ${localfile} =   Set Variable    ${SPP_LOCALPATH}/${file}
+    Http Directory Download File    ${remote_spp_file}   ${localfile}   ${THREADNUM}
+    Httpserver close Connection
+    Set Suite Variable    ${SPP_LOCAL_FILE}    ${localfile}
+
+Create Folder If Not Exists
+    [Documentation]   Create Folder If Not Exists
+    [Arguments]   ${dirname}
+    ${status}    ${message}    Run Keyword And Ignore Error    OperatingSystem.Directory Should Exist     ${dirname}
+    Run Keyword If    '${status}'=='FAIL'    Create Directory    ${dirname}
+
+EfuseSynergy
+    [Documentation]   Efuse Synergy On|Off
+    ...               Usage  EfuseSynergy  ${efuse_action}=EFuseOn  ${encl_serial}=CN75140CPT  ${interconnect_bay}=6  ${state}=Absent|Configured|Monitored
+    [Arguments]   ${efuse_action}  ${encl_serial}  ${interconnect_bay}  ${state}
+    ${status}   ${resp}=    Run Keyword And Ignore Error    Open Connection    ${APPLIANCE_IP}
+    Run Keyword If  '${status}'=='FAIL'     Fail    Failed to Open SSH Connection for ${APPLIANCE_IP}
+    ${newstatus}    ${resp}=    Run Keyword And Ignore Error    Login    ${appliance_username}   ${appliance_password}
+    Run Keyword If  '${newstatus}'=='FAIL'      Fail    Failed to do SSH Login for ${APPLIANCE_IP}
+    ${link_local_ip}=  Execute Command      /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${encl_serial} -o i
+    ${Auth}=  Execute Command      /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${encl_serial} -o token
+    ${Auth}    Should Match Regexp    ${Auth}    (?i)\\S*
+    Set Suite Variable    ${Auth}   ${Auth}
+    log to console     EM TOKEN: ${Auth}
+    ${Efuse}=  Execute Command      curl -gkx "" -X POST -d '{"Action":"${efuse_action}"}' -isS -H 'x-auth-token:${Auth}' --tlsv1 "https://[${link_local_ip}%bond0]/rest/v1/InterconnectBays/${interconnect_bay}"
+    log   SSH Command output: ${Efuse}    console=true
+    ${ic}=  Get IC URI  ${encl_serial}, interconnect ${interconnect_bay}
+    Wait Until Keyword Succeeds     ${timeout}   ${interval}      IC should reach desired state    ${ic}    ${state}
+    Close Connection
+
+IC should reach desired state
+    [Documentation]  IC should reach desired state
+    [Arguments]  ${uri}  ${state}
+    Set Log Level  TRACE
+    ${resp} =  fusion api get resource  ${uri}
+    Log  \t ${uri}: ${resp['state']}  console=yes
+    Should Match Regexp  ${resp['state']}  ${state}
+    [Return]  ${resp}
+
+Get Target IP from server
+   [Documentation]  Get Target IP from server
+   ...  Provide iometer_machine_profile in data file which has machine details
+   ${target_ip}=  Create List
+   :FOR  ${profile_name}  IN   @{iometer_server_profile['server_details']}
+   \   ${ip}=  Get IP from DHCP For IOmeter  ${profile_name['IOmeter_Target_profile_name']}
+   \   Append to List  ${target_ip}  ${ip}
+   [return]  ${target_ip}
+
+Get IP from DHCP For IOmeter
+    [Documentation]  Get IP from DHCP server
+    [Arguments]  ${profilename}
+    ${final_ip} =  Create List
+    ${profiles} =       Fusion Api Get Server Profiles  param=?count=10&filter="name matches '%25${profilename}%25'"
+    ${resp} =      Get Server Ethernet Connections IPs from DHCP  @{profiles['members']}
+    ${count} =      Get Length      ${resp}
+    Run Keyword if      ${count} == 0     FAIL    No IP's found in DHCP server
+    :FOR   ${ips}    IN   @{resp}
+    \      ${status}     ${response}=     Run Keyword and Ignore Error      Ping IPAddress    ${ips}
+    \      ${ip}=     Convert To String   ${ips}
+    \      Run Keyword If      '${status}'=='PASS'     Append to list  ${final_ip}   ${ip}
+    ${count} =      Get Length      ${final_ip}
+    Run Keyword if      ${count} == 0     FAIL    No IP's are pingable
+    [return]  ${final_ip[0]}
+
+MAC address specified in profile and retrieved from SLES OS should be same
+    [Documentation]     Ethernet MAC Address Verification in OS Level.
+    [Arguments]     ${profile}
+    ${mac_count} =  Create List
+    ${slesip}   ${profiles} =   Get Profile Data and OS IP From Server Profile   ${profile}
+    ${macaddress} =    Open SSH Connection And Get MAC Address From Profile    ${slesip}   ${profiles}   ${profile}
+    :FOR   ${mac}    IN   @{macaddress}
+    \      ${result}=  Execute Command      ip address
+    \      ${mac_lower} =  Convert To Lowercase  ${mac}
+    \      log   ${mac_lower}   console=true
+    \      log   SSH Command output: ${result}    console=true
+    \      Match MAC Address   ${mac_lower}   ${mac_count}   ${result}
+    ${len} =     get length     ${mac_count}
+    Run Keyword if      ${len} != 0     Log   MAC address is matched  console=yes
+    ...                 ELSE   FAIL   msg= MAC address is not matched
+
+MAC address specified in profile and retrieved from RHEL OS should be same
+    [Documentation]     Ethernet MAC Address Verification in OS Level.
+    [Arguments]     ${profile}
+    ${mac_count} =  Create List
+    ${rhelip}    ${profiles} =   Get Profile Data and OS IP From Server Profile   ${profile}
+    ${macaddress} =    Open SSH Connection And Get MAC Address From Profile    ${rhelip}   ${profiles}   ${profile}
+    :FOR   ${mac}    IN   @{macaddress}
+    \      ${mac_lower} =  Convert To Lowercase  ${mac}
+    \      log   ${mac_lower}   console=true
+    \      ${result}=  Execute Command      ifconfig
+    \      ${result_lower}=  Convert To Lowercase  ${result}
+    \      log   SSH Command output: ${result_lower}    console=true
+    \      Match MAC Address    ${mac_lower}   ${mac_count}   ${result_lower}
+    ${len} =     get length     ${mac_count}
+    Run Keyword if      ${len} != 0     Log   MAC address is matched  console=yes
+    ...                 ELSE   FAIL   msg= MAC address is not matched
+
+MAC address specified in profile and retrieved from Windows OS should be same
+    [Documentation]     Ethernet MAC Address Verification in OS Level.
+    [Arguments]     ${profile}
+    ${mac_count} =  Create List
+    ${winip}   ${profiles} =   Get Profile Data and OS IP From Server Profile    ${profile}
+    ${profilename}=     Get From Dictionary  ${profile[0]}  name
+    ${macaddress}=   Get Server MAC Address   @{profiles['members']}
+    Log   MAC address from Profile ${profilename}: ${macaddress}
+    :FOR   ${mac}    IN   @{macaddress}
+    \      ${mac_new} =   Replace String   ${mac}  :   -
+    \      log   ${mac_new}   console=true
+    \      ${result}=   Run    powershell.exe -ExecutionPolicy Unrestricted -file ${windows_mac} ${winip[0]} ${win_un} ${win_pd}
+    \      log   Command output: ${result}    console=true
+    \      Match MAC Address    ${mac_new}   ${mac_count}   ${result}
+    ${len} =     get length     ${mac_count}
+    Run Keyword if      ${len} != 0     Log   MAC address is matched  console=yes
+    ...                 ELSE   FAIL   msg= MAC address is not matched
+
+MAC address specified in profile and retrieved from ESXi OS should be same
+    [Documentation]     Ethernet MAC Address Verification in OS Level.
+    [Arguments]       ${profile}
+    ${mac_count} =  Create List
+    ${esxip}   ${profiles} =   Get Profile Data and OS IP From Server Profile    ${profile}
+    ${macaddress} =    Open SSH Connection And Get MAC Address From Profile    ${esxip}   ${profiles}   ${profile}
+    :FOR   ${mac}    IN   @{macaddress}
+    \      ${mac_lower} =  Convert To Lowercase  ${mac}
+    \      log   ${mac_lower}   console=true
+    \      ${result}=  Execute Command      esxcli network nic list
+    \      log   SSH Command output: ${result}    console=true
+    \      Match MAC Address    ${mac_lower}   ${mac_count}   ${result}
+    ${len} =     get length     ${mac_count}
+    Run Keyword if      ${len} != 0     Log   MAC address is matched  console=yes
+    ...                 ELSE   FAIL   msg= MAC address is not matched
+
+Get Profile Data and OS IP From Server Profile
+    [Documentation]     Get Profile data and OS IP from Server Profile and IP should be pinging
+    [Arguments]       ${profile}
+    ${osip} =  Create List
+    ${profilename} =     Get From Dictionary  ${profile[0]}  name
+    ${profiles} =       Fusion Api Get Server Profiles  param=?count=10&filter="name matches '%25${profilename}%25'"
+    ${resp} =      Get Server Ethernet Connections IPs from DHCP  @{profiles['members']}
+    ${count} =      Get Length      ${resp}
+    Run Keyword if      ${count} == 0     FAIL    No IP's found in DHCP server
+    :FOR   ${ips}    IN   @{resp}
+    \      ${status}     ${response}=     Run Keyword and Ignore Error      Ping IPAddress    ${ips}
+    \      ${ip}=     Convert To String   ${ips}
+    \      Run Keyword If      '${status}'=='PASS'     Append to list  ${osip}   ${ip}
+    ${count} =      Get Length      ${osip}
+    Run Keyword if      ${count} == 0     FAIL    No IP's are pingable
+    Set Global Variable    ${osip}
+    [return]    ${osip}   ${profiles}
+
+Open SSH Connection And Get MAC Address From Profile
+    [Documentation]     Open SSH Connection And Login and Get MAC Address From Profile
+    [Arguments]       ${osip}    ${profiles}   ${profile}
+    ${status}   ${resp} =    Run Keyword And Ignore Error    Open Connection    ${osip[0]}  timeout=300s
+    Run Keyword If  '${status}'=='FAIL'     Fail    Failed to Open SSH Connection for ${osip[0]}
+
+    ${newstatus}    ${resp}=    Run Keyword And Ignore Error    Login    ${username}    ${password}
+    Run Keyword If  '${newstatus}'=='FAIL'      Fail    Failed to do SSH Login for ${osip[0]}
+
+    ${profilename} =     Get From Dictionary  ${profile[0]}  name
+    ${macaddress} =   Get Server MAC Address   @{profiles['members']}
+    Log   MAC address from Profile ${profilename}: ${macaddress}
+    [return]     ${macaddress}
+
+Match MAC Address
+    [Documentation]     Match MAC address and append to a list
+    [Arguments]       ${mac}   ${mac_count}   ${result}
+    ${mac_match}=   Get Regexp Matches    ${result}     ${mac}
+    ${len} =     get length     ${mac_match}
+    Run Keyword if      ${len} != 0   Append To List  ${mac_count}   ${mac_match}
+
+Get IP From Server Profile
+    [Documentation]    Get IP From Server Profile
+    [Arguments]        ${profilename}
+    ${win_ip}=    create list
+    ${profiles} =       Fusion Api Get Server Profiles  param=?count=10&filter="name matches '%25${profilename}%25'"
+    ${resp} =      Get Server Ethernet Connections IPs from DHCP  @{profiles['members']}
+    ${count} =      Get Length      ${resp}
+    Run Keyword if      ${count} == 0     FAIL    No IP's found in DHCP server
+    :FOR   ${ips}    IN   @{resp}
+    \      ${status}     ${response}=     Run Keyword and Ignore Error      Ping IPAddress    ${ips}
+    \      ${ip}=     Convert To String   ${ips}
+    \      Run Keyword If      '${status}'=='PASS'     Append to list  ${win_ip}   ${ip}
+    ${count} =      Get Length      ${win_ip}
+    Run Keyword if      ${count} == 0     FAIL    No IP's are pingable
+    [Return]    ${win_ip[0]}
+
+Enable PSRemoting And Set Trustedhosts
+    [Documentation]    Enable PSRemoting And Set Trustedhosts
+    Run  powershell Enable-PSRemoting -Force
+    Run  powershell Set-Item wsman:\\localhost\\client\\trustedhosts * -Force
+    Run  powershell Restart-Service WinRM
+
+TOR Switch Port Should Be
+     [Documentation]    TOR switch port shutdown/enable using SSH
+     [Arguments]  ${Switch_IP}  ${Switch_Port}  ${Switch_Username}  ${Switch_Password}  ${Port_Name}  ${State}  ${Uplink}  ${interconnect_name}  ${uplink_port_status}
+     ${RC}  ${output} =  Run and return RC and Output  Python ${SWITCH} ${Switch_IP} ${Switch_Port} ${Switch_Username} ${Switch_Password} ${Port_Name} ${State}
+     Run Keyword If  '${RC}' != '0'  FAIL  Not able to perform action on switch
+     Wait Until Keyword Succeeds  10m  15s  Uplink Port Status Should be  ${Uplink}  ${interconnect_name}  ${uplink_port_status}
+
+Uplink Port Status Should be
+    [Documentation]    Uplink ports status should be unlinked or linked
+    [Arguments]  ${Uplink}  ${interconnect_name}  ${uplink_port_status}
+    ${interconnect_uri}=  Get IC URI  ${interconnect_name}
+    ${id}=  Split String  ${interconnect_uri}  /
+    ${interconnect_id}=  Set Variable  ${id[3]}
+    ${resp} =   Fusion Api Get Resource   ${interconnect_uri}/ports/${interconnect_id}:${Uplink}
+    Run Keyword if  '${resp['portStatus']}' != '${uplink_port_status}'  FAIL
+    ...  ELSE  Log  Uplink Port ${Uplink} Status of ${interconnect_name} is as expected  console=yes
+
+Update From Group - verify LE state and LI consistency status
+    [Documentation]        Invoke update from group on LE, verify LE is now consistent, LI remains consistent
+    [Arguments]            ${logical_enclosure}     ${update_logical_enclosure_from_group}      ${li_state_after_update}  ${timeout}=5000
+    ${count} =      Get Length      ${logical_enclosure}
+    ${responses}=  Create List
+    :FOR   ${index}   IN RANGE   0  ${count}
+    \      ${resp}=    get resource    LE:${logical_enclosure[${index}]['name']}
+    \      Run Keyword If    ${resp['status_code']}!=200    FAIL    LE ${logical_enclosure[${index}]['name']} does not exists
+    \      ${response}=  Run Keyword If    ${update_logical_enclosure_from_group[${index}]} is not ${null}  Update Logical Enclosure from Group Async  ${update_logical_enclosure_from_group[${index}]}
+    \      Run Keyword If    ${response} is not ${null}   Append to List  ${responses}  ${response}
+    Wait For Task2  ${responses}  timeout=${timeout}      interval=20
+    :FOR   ${index}   IN RANGE   0  ${count}
+    \  Logical Enclosure State Should Be    ${logical_enclosure[${index}]['name']}    Consistent
+    \  Logical Interconnect Consistency Status Should Be  ${li_state_after_update[${index}]['name']}    CONSISTENT
+
+Network And Memory Stress Using MeatGrinder
+    [Documentation]    Network Connectivity And Memory Stress Using MeatGrinder
+    [Arguments]       ${win_os_servers}
+    : For  ${win}  in  @{win_os_servers}
+    \  ${hostip}=    Get IP From Server Profile   ${win['hostname']}
+    \  ${targetip}=    Get IP From Server Profile   ${win['targetname']}
+    \  ${sharedFolder} =  set variable  ${stress_tool['sharedFolder']}
+    \  ${stress}=  Run    powershell.exe -ExecutionPolicy Unrestricted -file ${mg} ${hostip} ${targetip} ${win_un} ${win_pd} ${sharedFolder}
+
+Get Firmware Bundle Version
+    [Documentation]    Get Firmware Bundle Version
+    ${resp} =    Fusion Api Get Firmware Driver
+    Return From Keyword If  ${resp['count']}==0  Firmware Not Found
+    :FOR    ${fw}    IN    @{resp['members']}
+    \        ${version} =    Get From Dictionary        ${fw}    version
+    [Return]    ${version}
+
+Create SPP Custom Build for C7K
+    [Documentation]  Create SPP Custom Build for C7K
+    [Arguments]  ${spp_name}  ${timeout}=600
+    ${hotfix}=  Create List
+    ${custom_spp_name}=  Create List
+    ${fw_drivers}=  Fusion Api Get Firmware Driver
+    :FOR  ${fw_driver}  IN  @{fw_drivers['members']}
+    \    Run Keyword If  '${fw_driver['bundleType']}' == 'Hotfix'  Append To List  ${hotfix}  ${fw_driver['uri']}
+    \    Run Keyword If  '${fw_driver['bundleType']}' != 'SPP'   Continue For Loop
+    \    ${spp_uri}=  Run Keyword If  '${fw_driver['name']}' == '${spp_name}'  Set Variable  ${fw_driver['uri']}
+    ${body}=  Set To Dictionary  ${custom_spp}  baselineUri  ${spp_uri}  hotfixUris  ${hotfix}
+    ${response}=  Fusion Api Create Firmware Bundle  ${body}
+    Wait For Task2  ${response}      timeout=${timeout}      interval=10
+    ${fw_driver}=  Fusion Api Get Firmware Driver
+    :FOR  ${spp_name}  IN  @{fw_driver['members']}
+    \    Run Keyword If  '${spp_name['name']}' == '${custom_spp['customBaselineName']}'  Append To List  ${custom_spp_name}  ${spp_name['name']}
+    ${count} =      Count Values In List  ${custom_spp_name}  ${custom_spp['customBaselineName']}
+    Run Keyword If  '${count}' == '0'  FAIL  Custom SPP is not created
+
+Poweroff Interconnect Should Be Successful
+    [documentation]    Poweroff Interconnect Should Be Successful
+    [Arguments]      ${OA_HOST}    ${OA_USER}    ${OA_PASS}    ${DEVICE}    ${BAY}  ${Interconnect_Name}   ${match}
+    ${execute_cmd} =  OA CLI POWEROFF   ${OA_HOST}    ${OA_USER}    ${OA_PASS}    ${DEVICE}    ${BAY}
+    ${get_message_match}=   Get Regexp Matches    ${execute_cmd}     ${match}
+    ${match_count} =      Get Length      ${get_message_match}
+    Run Keyword if      ${match_count} == 1    Log  Interconnect ${Interconnect_Name} is powered off  console=yes
+    Run Keyword if      ${match_count} == 0    FAIL   Failed to execute command
+
+Poweron Interconnect Should Be Successful
+    [documentation]    Poweron Interconnect Should Be Successful
+    [Arguments]      ${OA_HOST}    ${OA_USER}    ${OA_PASS}    ${DEVICE}    ${BAY}  ${Interconnect_Name}   ${match}
+    ${execute_cmd} =  OA CLI POWERON   ${OA_HOST}    ${OA_USER}    ${OA_PASS}    ${DEVICE}    ${BAY}
+    ${get_message_match}=   Get Regexp Matches    ${execute_cmd}     ${match}
+    ${match_count} =      Get Length      ${get_message_match}
+    Run Keyword if      ${match_count} == 1    Log  Interconnect ${Interconnect_Name} is powered on  console=yes
+    Run Keyword if      ${match_count} == 0    FAIL   Failed to execute command
+
+# OV DEPLOY FTS KEYWORDS
+Assign Administrator Password
+    [Documentation]    Accept EULA and Assign Administrator Password for FTS
+    [Arguments]     ${password}
+    Wait For Appliance To Become Pingable   ${APPLIANCE_IP}
+    Wait For Appliance To Be Ready          ${APPLIANCE_IP}
+    Log     -Agree to EULA    console=True
+    ${eula}=    Fusion Api Save EULA    ${APPLIANCE_IP}
+    Run Keyword If    ${eula['status_code']}!=200    FAIL   msg=EULA is not saved
+    Log     -Enable service access    console=True
+    ${access}=  Fusion Api Get service access   ${APPLIANCE_IP}
+    Run Keyword If   ${access['_content_consumed']}==True    Log  Service access is True
+    Run Keyword If    ${access['status_code']}==400    FAIL   msg=Service Access is not proper
+    ${creds}    Create Dictionary    newPassword    ${password}
+    ...                              oldPassword    admin
+    ...                              userName       Administrator
+    ${pwd_resp}=   Fusion Api Change Administrator password   host=${APPLIANCE_IP}  body=${creds}
+    Run Keyword If  ${pwd_resp['status_code']}==400  Log   Password is already set  WARN
+    Run Keyword If    ${pwd_resp['status_code']}==200    Log   Password is set
+    ${admin_creds}    Create Dictionary    userName    Administrator    password    ${password}
+    Set Suite Variable      ${admin_credentials}    ${admin_creds}
+    ${response}    ${AUTHTOKEN}    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_creds}
+    Return From Keyword If    ${response['status_code']}!=200    FAIL   msg=Failed to login
+
+Get Appliance Interface Data
+    [Documentation]    Get Appliance Interface settings and type
+    ${resp} =    Fusion Api Get Appliance Interfaces
+    Run Keyword If    ${resp['status_code']}!=200
+    ...    Fatal Error    Unable to fetch Appliance Interfaces Dictionary: ${resp['message']}
+    ${interfacelist}=  Get From dictionary    ${resp}    applianceNetworks
+    ${interface0}=    Get From List    ${interfacelist}    0
+    ${interfacetype}=   Get From dictionary    ${resp}    type
+    [Return]    ${interface0}   ${interfacetype}
+
+Configure Oneview Interface
+    [Documentation]    Configure Appliance Interface settings
+    ${interface}    ${int_type}=   Get Appliance Interface Data
+    Run Keyword If    ${interface}==${None}    FAIL   msg=Unable to fetch Appliance Interfaces Dictionary
+    ${new_interface}=    Create Dictionary  activeNode=1                unconfigure=${FALSE}                 hostname=${hostname}.hp.com
+    ...                           macAddress=${interface['macAddress']}   confOneNode=${True}                  ipv4Type=STATIC
+    ...                           ipv6Type=UNCONFIGURE        overrideIpv4DhcpDnsServers=${FALSE}
+    ...                           aliasDisabled=${False}     device=eth0     app1Ipv4Addr=${app1Ipv4Addr}    ipv4Subnet=${interface['ipv4Subnet']}
+    ...                           ipv4Gateway=${interface['ipv4Gateway']}
+    ${applianceNetworks}=  Create List     ${new_interface}
+    ${appliance_interface}=    Create Dictionary    type=${int_type}
+    ...                                             applianceNetworks=${applianceNetworks}
+    ${resp} =   Fusion Api Configure Appliance Interfaces   ${appliance_interface}
+    Run Keyword If  ${resp['status_code']!=202}   FAIL  msg=Appliance Network interfaces are not correct
+    # if STATIC, get new IP and login. for 2.00, use virtIpv4Addr (Tbird), otherwise use app1Ipv4Addr
+    Run Keyword If  '${app1Ipv4Addr}' is not 'None'                 Set New IP and Login    ${app1Ipv4Addr}
+    ...             ELSE    Log     Either app1Ipv4Addr or virtIpv4Addr must be provided in the 'appliance' variable in your data file     WARN
+
+    Wait For Task   ${resp}     timeout=200s        interval=5s
+    Appliance Network Interface Should Exist    ${appliance_interface}
+
+Edit Server Profile, Wait until firmware state reaches to desired state
+    [Documentation]  Edit Server Profile, Wait until firmware state reaches to desired state
+    ...    This Keyword is when editing to server profile with option 'firmwareInstallType': 'FirmwareAndOSDrivers'
+    ...    Data:
+    ...    ${profile} [{'name': 'esx67u1_LPe1605_fc_run2', 'type': 'ServerProfileV10', 'serverHardwareUri': 'SH:2SN748014Z, bay 8', 'enclosureGroupUri': 'EG:encgrp3', 'description': '', 'affinity': 'Bay',
+    ...                 'connectionSettings': {'connections': [{'id': 1, 'name': '', 'functionType': 'Ethernet', 'portId': 'Flb 1:1-a', 'requestedMbps': '2500', 'mac': '3E:B5:AE:50:00:14', 'macType': 'UserDefined', 'networkUri': 'ETH:eth1', 'boot': {'priority': 'NotBootable'}},
+    ...                                                        {"id": 2, "name": "", "functionType": "FibreChannel", "portId": "Mezz 1:1", 'requestedMbps': 'Auto', 'mac': '3E:B5:AE:50:00:16', 'macType': 'UserDefined', "networkUri": "FC:fc1", "boot": {"priority": "Primary", "bootVolumeSource": "ManagedVolume"}}], },
+    ...                 'serverHardwareTypeUri': 'SHT:BL460c Gen10:Flb1:HP FlexFabric 10Gb 2-port 536FLB Adapter:1:HP LPe1605 16Gb FC HBA for BladeSystem c-Class',
+    ...                 'firmware': {'manageFirmware': True, 'forceInstallFirmware': True, 'firmwareInstallType': 'FirmwareAndOSDrivers', 'firmwareBaselineUri': 'rest/firmware-drivers/SPPGen10Snap4_2018_1211_57'}
+    ...                 "boot": {"order": ["HardDisk", "CD", "USB", "PXE"], "manageBoot": True},
+    ...                 "bootMode":{"manageMode": True, "mode": "BIOS", "pxeBootPolicy": None},
+    ...                 'bios': {'manageBios': False, 'overriddenSettings': []},
+    ...                 'hideUnusedFlexNics': True, 'osDeploymentSettings': None,
+    ...                 'localStorage': {'sasLogicalJBODs': [], 'controllers':[]},
+    ...                                  'sanStorage':{'hostOSType': 'VMware (ESXi)', 'manageSanStorage': True,
+    ...                                                'volumeAttachments': [{'id': 1, 'volumeUri': "SVOL:esx67u1_LPe1605_fc_run2", 'bootVolumePriority': 'Primary', 'lunType': 'Auto',
+    ...                                                'volumeStorageSystemUri': 'SSYS:cosmos3par',
+    ...                                                'storagePaths': [{'isEnabled': True, 'connectionId': 3, 'targetSelector': 'Auto'}, {"isEnabled": True, "connectionId": 4, "targetSelector": "Auto"}]}]}}]
+
+    [Arguments]  ${profile}  ${expected_profile}  ${firmware_timeout}=200m  ${interval}=10m  ${state}=Activated  ${failed_state}=Failed
+    :FOR  ${sp}  IN  @{profile}
+    \  Power off Server    ${sp['serverHardwareUri']}
+    \  ${responses}=  Edit Server Profile With Local Storage    ${sp}
+    \  Wait For Task2    ${responses}    timeout=${timeout}    interval=15
+    \  Power on Server    ${sp['serverHardwareUri']}
+    \  ${firmware_state}=  Wait Until Keyword Succeeds  ${firmware_timeout}  ${interval}  Wait until firmware reaches desired state and return if firmware update failed  ${sp}
+    \  Run Keyword If  '${firmware_state}'=='${failed_state}'  FAIL  msg=Firmware update with OS and drivers is failed
+    \  Run Keyword If  '${firmware_state}'=='${state}'  Log  Firmware update with OS and drivers is successful  console=yes
+    Verify Resources for List     ${expected_profile}
+
+Wait until firmware reaches desired state and return if firmware update failed
+    [Documentation]  Wait until firmware is activated and return if firmware update failed
+    [Arguments]  ${profile}  ${failed_state}=Failed  ${state}=Activated
+    ${firmware_state}=  Get Server Profile Firmware Install State  ${profile}
+    ${failed_match}=    Get Regexp Matches    ${firmware_state}    ${failed_state}
+    ${failed_count} =      Get Length      ${failed_match}
+    Return From Keyword if      ${failed_count} != 0    ${failed_state}
+    Run Keyword If  '${firmware_state}'!='${state}'  FAIL
+    [Return]  ${state}
+
+Check IloRestTool
+    [Documentation]    Check If Ilo Rest Tool installed on automation client
+    ...    If it is not installed ILO connection will fail
+    ${rc}   ${output}=  Run and Return Rc and Output    dir ${ilotool}
+    Run Keyword Unless      '${rc}' == '0'      Fatal Error
+    ...     msg=Could not find ilorest.exe. Is it installed?
+
+Restore System Defaults Settings
+    [Documentation]    Restore System default settings in Gen9/Gen10 server
+    [Arguments]     ${hw_name}    ${ilousername}      ${ilopassword}
+    ${iloip} =  Get Server Hardware iLO IP  ${hw_name}
+    ${hw_type}=     Get Server Generation by Server Name     ${hw_name}
+    ${bios_config}=     set variable if   '${hw_type}'=='Gen10'    Bios.v1_0_0     HpBios.1.2.0
+    ${rc}   ${output} =  Run and return RC and Output   ${ilotool} set RestoreDefaults=yes --selector=${bios_config} --url=${iloip} -u ${ilousername} -p ${ilopassword} --commit
+    Run Keyword if     ${rc}==${0}    Log  System default settings has been selected successfully  console=yes
+    ...  ELSE   FAIL  msg=Restore Defaults Failed : ${output}
+    # Reboot server to effect changes done
+    ${rc1}   ${resp} =  Run and return RC and Output   ${ilotool} reboot --url=${iloip} -u ${ilousername} -p ${ilopassword}
+    Run Keyword if     ${rc1}==${0}    Log  Rebooting the Server it will take few minutes  console=yes
+    ...  ELSE  FAIL  msg=Restart server failed: ${resp}
+
+Get Server Generation by Server Name
+    [Documentation]    Get Server Generation by server name
+    [Arguments]     ${hw_name}
+    ${resp} =     Get Resource  ${hw_name}
+    Return From Keyword If  ${resp['status_code']}!=200
+    ${server_type}=    Set Variable    ${resp["model"]}
+    ${type}=    Split String From Right  ${server_type}
+    [Return]    ${type[-1]}

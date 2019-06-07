@@ -1,0 +1,136 @@
+*** Settings ***
+Library              FusionLibrary
+Library              RoboGalaxyLibrary
+Library              OperatingSystem
+Library              BuiltIn
+Library              copy
+Library              Collections
+Library              String
+Library              json
+Resource             ../../../../Resources/api/fusion_api_resource.txt
+
+*** Variables ***
+${APPLIANCE_IP}             unknown
+
+*** Keywords ***
+########################################### Security Mode check ###########################################
+Security Mode Check: Current Mode Is:
+    [Documentation]    Check if current mode is the target mode
+    ...                 ${target_mode}= LEGACY | FIPS | CNSA
+    [Arguments]  ${target_mode}
+    ${current_mode_response}=    Fusion Api Get Current Security Mode
+    ${modename}=        Get From Dictionary  ${current_mode_response}  modeName
+    ${currentMode}=     Get From Dictionary  ${current_mode_response}  currentMode
+    Should Be Equal As Strings  ${modename}  ${target_mode}
+    Should Be True  ${currentMode}
+    Log To Console  ***Current Mode is:${modename}***
+
+Security Mode Check: Current Mode By Mode List Is:
+    [Documentation]    Check if current mode is the target mode by mode list API
+    ...                 ${target_mode}= LEGACY | FIPS | CNSA
+    [Arguments]  ${target_mode}
+    ${mode_list_response}=    Fusion Api Get Security Modes
+    ${content}=    Set Variable  ${mode_list_response['_content']}
+    ${mode_list}=    Common Utils Conv Json To Dict  ${content}
+    :FOR    ${count}    IN    @{mode_list}
+    \       ${modeName}=        Get From Dictionary  ${count}  modeName
+    \       ${currentMode}=     Get From Dictionary  ${count}  currentMode
+    \       Run Keyword And Return if   '${modeName}'=='${target_mode}'    Should Be True  ${currentMode}
+    Fail  Cannot find the specific memeber in Dictionary
+
+########################################### Security Mode Switch ###########################################
+Wait For Appliance State To Be STARTING
+    [Documentation]  Wait For Appliance State To Be STARTING
+   [Arguments]                      ${timeout}=40 min  ${interval}=30 s
+   Wait Until Keyword Succeeds       ${timeout}  ${interval}       Appliance State Should Be STARTING
+
+Wait For Appliance State To Be OK
+    [Documentation]  Wait For Appliance State To Be OK
+   [Arguments]                      ${timeout}=50 min  ${interval}=60 s
+   Wait Until Keyword Succeeds       ${timeout}  ${interval}       Appliance State Should Be OK
+
+Wait For Appliance State To Be FACTORY_RESET
+    [Documentation]  Wait For Appliance State To Be FACTORY_RESET
+   [Arguments]                      ${timeout}=2 min  ${interval}=2 s
+   Wait Until Keyword Succeeds       ${timeout}  ${interval}       Appliance State Should Be FACTORY_RESET
+
+Appliance State Should Be STARTING
+    [Documentation]  Appliance State Should Be STARTING
+   ${state} =     Fusion Api Get Resource       /controller-state.json
+   Log To Console  -Appliance state: ${state['state']}
+   Should Match Regexp        ${state['state']}  ((?i)STARTING)
+
+Appliance State Should Be OK
+    [Documentation]  Appliance State Should Be OK
+   ${state} =     Fusion Api Get Resource       /controller-state.json
+   Log To Console  -Appliance state: ${state['state']}
+   Should Match Regexp        ${state['state']}  ((?i)OK)
+
+Appliance State Should Be FACTORY_RESET
+    [Documentation]  Appliance State Should Be FACTORY_RESET
+   ${state} =     Fusion Api Get Resource       /controller-state.json
+   Log To Console  -Appliance state: ${state['state']}
+   Should Match Regexp        ${state['state']}  ((?i)FACTORY_RESET)
+
+Switch Security Mode To:
+    [Documentation]    Switch Security Mode To LEGACY/FIPS/CNSA
+    [Arguments]  ${target_mode}
+    ${current_mode_response}=    Fusion Api Get Current Security Mode
+    ${modename}=        Get From Dictionary  ${current_mode_response}  modeName
+    Run Keyword And Return if  '${target_mode}'=='${modename}'    Log To Console  ${\n}******Current Mode Is Already ${modename}, Ignore Mode Switch.******
+    ${target_mode_body}    Create Dictionary  modeName=${target_mode}
+    Log To Console  ${\n}******Switching Mode To: ${target_mode}******
+    ${response}=    Fusion Api Change Security Mode  ${target_mode_body}
+    Wait For Appliance State To Be STARTING
+    Wait For Appliance State To Be OK
+
+Switch Security Mode Without Waiting To:
+    [Documentation]    Switch Security Mode To LEGACY/FIPS/CNSA
+    [Arguments]  ${target_mode}
+    ${current_mode_response}=    Fusion Api Get Current Security Mode
+    ${modename}=        Get From Dictionary  ${current_mode_response}  modeName
+    Run Keyword And Return if  '${target_mode}'=='${modename}'    Log To Console  ${\n}******Current Mode Is Already ${modename}, Ignore Mode Switch.******
+    ${target_mode_body}    Create Dictionary  modeName=${target_mode}
+    Log To Console  ${\n}******Switching Mode To: ${target_mode}******
+    ${response}=    Fusion Api Change Security Mode  ${target_mode_body}
+
+Mode Switch Should Be Failed By Non IA User
+    [Documentation]    Mode Switch Should Be Failed by non IA user
+    ${CNSA_mode}    Create Dictionary  modeName=CNSA
+    ${response}=    Fusion Api Change Security Mode  ${CNSA_mode}
+    ${message}=    Get From Dictionary  ${response}  message
+    Should Be Equal As Strings  ${message}  Authorization error: User not authorized for this operation.
+
+Mode Switch Should Be Failed To Mode:
+    [Documentation]    Mode Switch Should Be Failed due to appliance certificates are not compliant to the target mode
+    [Arguments]  ${modeName}
+    ${mode_body}    Create Dictionary  modeName=${modeName}
+    ${response}=    Fusion Api Change Security Mode  ${mode_body}
+    ${message}=    Get From Dictionary  ${response}  message
+    Should Be Equal As Strings  ${message}  The signature algorithm and key size of the server certificate signed by an external certificate authority is not compatible with the ${modeName} mode.\nSecurity Standards device and/or certificate validation error
+
+########################################### add user and login by added user###########################################
+Add NonIA User
+    [Documentation]   Add NonIA User
+    ${resp} =   Fusion Api Add User     body=${user}
+    Run Keyword If  ${resp['status_code']} !=200    fail    msg=BackupUser creation failed
+    ...         ELSE    Log To Console  \n BackupUser created succesfully !!
+    Wait For Task2  ${resp}
+
+Remove NonIA User
+    [Documentation]   Remove NonIA User
+    ${resp} =    Fusion Api Remove User  uri=/rest/users/BackupUser
+    Run Keyword And Ignore Error    Wait For Task2  ${resp}
+
+Login By NonIA User
+    [Documentation]   Login By NonIA User
+    Fusion Api Login Appliance  ${APPLIANCE_IP}  ${backupuser_credentials}
+
+Login By IA User
+    [Documentation]   Login By IA User
+    Fusion Api Login Appliance  ${APPLIANCE_IP}  ${admin_credentials}
+
+Login By IA User With Headers
+    [Documentation]   Login By IA User
+    ${headers}=    Create Dictionary  X-Api-Version=800  Content-Type=application/json
+    Fusion Api Login Appliance  ${APPLIANCE_IP}  ${admin_credentials}  headers=${headers}

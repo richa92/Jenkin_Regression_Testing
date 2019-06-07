@@ -1,0 +1,807 @@
+*** Settings ***
+Library             RoboGalaxyLibrary
+Library             FusionLibrary
+Library             MgmtFWLibrary
+Library             OperatingSystem
+Library             BuiltIn
+Library             Collections
+Library             SSHLibrary
+Library             String
+
+
+*** Keywords ***
+###################################################################################
+## KEYWORDS SECTION                                                              ##
+###################################################################################
+Setup Events Test Environment
+    [Documentation]    Setup environment sessions for Event testing
+    Login to Fusion via REST
+    Login to Fusion via SSH
+    Login to EM And Create Session
+    
+    # Clean up Fusion Alerts log
+    ${response}=    fusion_api_delete_alert
+
+    # Find Lastest EM and Fusion Event and Alert IDs
+    Run Keyword and Ignore Error    EM Diags Get Audit Log Events
+    Console    Lastest EM Event Found: ${Last_EventID}
+    ${found_latest_alert_id}=    Get Latest Fusion Alert ID
+    Log    ${found_latest_alert_id}
+    Set Suite Variable    ${Last_AlertID}    ${found_latest_alert_id}
+    Console    Lastest Fusion Alert Found: ${Last_AlertID}
+
+Get Latest Fusion Alert ID
+    [Documentation]    Get the LATEST Fusion Alert Event ID to use as a baseline 
+    ${cur_alerts}    Fusion Api Get Alerts    /rest/alerts?sort=created:ascending
+    ${alert_members}    Get From Dictionary    ${cur_alerts}    members
+    ${latest_alert}    Get From List    ${alert_members}    -1
+    ${latest_alert_uri}    Get From Dictionary    ${latest_alert}    uri
+    ${latest_alert_id}     Fetch From Right    ${latest_alert_uri}    /
+    [Return]    ${latest_alert_id}
+
+Check EM Event
+    [Documentation]    Get the latest Fan Fault event from EM 
+    [Arguments]    ${expected_events}   ${event_list}    ${Last_EventID}
+    :FOR    ${event}    IN    @{event_list}
+    \    Log    ${event['MessageID']}
+    \    Remove Values From List    ${expected_events}    ${event['MessageID']}
+    Should Be Empty    ${expected_events}    Event(s) not found: ${expected_events}
+
+Check and Get Fusion Alert Corrective Action
+    [Documentation]    Check and validate the latest Fusion Alerts and get the Corrective Action if FOUND
+    ...                MATCHED Alert Event
+    [Arguments]    ${expected_alert_type_id}    ${alert_list}
+    :FOR    ${alert}    IN    @{alert_list}
+    \    ${found}=    Run Keyword And Return Status    List Should Contain Value    ${expected_alert_type_id}    ${alert['alertTypeID']}
+    \    ${alert_corrective_action}=    Run Keyword If    '${Found}'=='False'    Continue For Loop
+         ...    ELSE    Get From Dictionary    ${alert}    correctiveAction
+    [Return]    ${alert_corrective_action}
+
+EM Diags Get Audit Log Events
+    [Documentation]    Fetch Diag Audit Log Events.
+    ...    (Assumes an SSH connection with curl is currently open)
+    ...    Returns a list of (dictionary) entries and EventID of the latest event encountered.
+    [Arguments]    ${IP}=${EM_IP}    ${Nic}=${FUSION_NIC}
+    ...            ${Origin_Filter}=/rest/v1    ${Starting_EventID}=0
+    Set Suite Variable    ${Last_EventID}    ${Starting_EventID}
+    ${EM_Audit_Events_List}    Create List
+
+    # Get the most recent entries from the audit (RIS events) log.
+    ${Header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    ${Output}    Execute SSH Command
+    ...       curl -ksS --tlsv1 -H ${Header} https://${EM_IP}%${FUSION_NIC}/rest/v1/Diags/AuditLog/50
+
+    # Remove CLI prompt from buffer.  It messes up loads.
+    ${Output}    String.Fetch From Left    ${Output}    [root@
+
+    # Break the output into an (easier to handle) list of lines. One line per event.
+    @{Lines}    Split To Lines    ${Output}
+    : FOR    ${Line}    IN    @{Lines}
+    # Reformat event/line (string) into a json dictionary
+    \    ${Event}    json.loads    ${Line}
+    # Select only the most recent events - skip any before that.
+    \    ${EventID}    Get From Dictionary    ${Event}    EventID
+    # EventID's are of the form n-nnn.  Only compare at the portion after the dash.
+    \    ${tmpEventID}             Fetch From Right    ${EventID}    -
+    \    ${tmpStarting_EventID}    Fetch From Right    ${Starting_EventID}    -
+    \    Run Keyword If    ${${tmpStarting_EventID}}>=${${tmpEventID}}    Continue For Loop
+    # Remember the last EventID encountered
+    \    ${tmpLast_EventID}    Fetch From Right    ${Last_EventID}    -
+    \    Run Keyword If    ${${tmpEventID}}>=${${tmpLast_EventID}}    Set Suite Variable    ${Last_EventID}    ${EventID}
+    # Filter out any unrelated events (e.g., I'm only interested in fan events)
+    # Example: ${Origin_Filter} = '/rest/v1/FanBays/${bayNumber}'
+    \    ${OriginOfCondition}    Get From Dictionary    ${Event}    OriginOfCondition
+    \    ${Found}    Run Keyword And Return Status
+    \    ...    Should Match Regexp    ${OriginOfCondition}    ${Origin_Filter}
+    \    Run Keyword If    '${Found}'=='False'    Continue For Loop
+    # Add event (dictionary) into 'List of EM Audit Events'
+    \    Append to List    ${EM_Audit_Events_list}    ${Event}
+    [Return]    ${EM_Audit_Events_List}    ${Last_EventID}
+
+EM Diags Fault Injection
+    [Documentation]    Inject faults. Where InjectionType is one of: FruFaultInjection,
+    ...    EmSwitchFaultInjection, EmSwitchPortFaultInjection, BladeManagerFaultInjection,
+    ...    CommFaultInjection, FanFaultInjection, PSFaultInjection.
+    ...    usage for FanFaultInjection:
+    ...    URI format: /rest/v1/Diags/FanFaultInjection/<slotID>/<faultType>[/<bool>]
+    ...    Where:
+    ...      slotID    = Valid fan slot number.
+    ...      faultType = [Fan1 | Fan2 | EFuse]
+    ...      bool      = true to inject fault, false to clear fault
+    ...                    NOTE: Boolean is not valid for EFuse faultType.
+    ...    usage for PSFaultInjection:
+    ...    URI format: /rest/v1/Diags/PSFaultInjection/<slotID>/<faultType>/<bool>
+    ...    Where:
+    ...      slotID    = Valid Power Supply slot number.
+    ...      faultType = [PS_OK | AC_OK ]
+    ...      bool      = true to inject fault, false to clear fault
+    [Arguments]    ${InjectionType}    ${slotID}    ${faultType}    ${inject}=''
+    ${Header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    ${Output}    Execute SSH Command
+    ...    curl -ksS --tlsv1 -H ${Header} https://${EM_IP}%${fusion_nic}/rest/v1/Diags/${InjectionType}/${slotID}/${faultType}/${inject}
+    Should Contain    ${Output}    successfully
+    [Return]    ${Output}
+
+Flash Fru For Single Power Supply
+    [Documentation]    This will flash FRU for SINGLE power supply in the enclosure using the provided FRU file path
+    [Arguments]    ${bay number}    ${FRU file}
+    ${fru object}=    Get Powersupply Fru Object    ${bay number}
+    ${result}=    EM API Flash Device Fru    ${fru object}    ${FRU file}
+    Sleep   5
+    [Return]    ${result}
+ 
+ Flash FRU For ALL Existing Power Supply
+    [Documentation]    This will flash FRU to all PS present - Shared
+    [Arguments]    ${path}
+    ${present_ps}=      Get List of Occupied PowerSupply Bays
+    : FOR    ${ps}    IN    @{present_ps}
+    \    Log To Console    Flashing FRU to PS in Bay ${ps}
+    \    ${Status}=    Flash Powersupply Fru    ${ps}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\Fru_Files\\${CAT}\\Good_Fru\\PS\\${ps}\\fru.bin
+    \    Should Be True    ${Status}
+    \    EM Clear PowerSupply Status No Sleep    ${ps}
+
+Get Current Fusion Activity Alerts
+    [Documentation]    Fetch ALL new Fusion Activity Alerts with ID newer than alert ID found in suite setup
+    [Arguments]    ${Starting_AlertID}   ${alert_filter}
+    ${Alert_List}    Create List
+
+    # Get CURRENT AVAILABLE list of "Alerts"
+    ${cur_alert}=    Fusion Api Get Alerts    /rest/alerts?sort=created:ascending
+    ${alert_cnt}=    Get From Dictionary    ${cur_alert}    count
+    Run Keyword if            '${alert_cnt}'=='0'    Console    \nNO ALERT EVENTS FOUND
+    Return From Keyword If    '${alert_cnt}'=='0'    msg=NO ALERT EVENTS FOUND
+    ${alert_members}    Get From Dictionary    ${cur_alert}    members
+
+    # For EACH Alert in CURRENT Alert list. Return ALL alerts in relation to "Alert Filter" 
+    :FOR    ${index}    IN RANGE    0    ${alert_cnt}
+    \    ${single_alert}=    Get From List    ${alert_members}    ${index}
+    # Select only the most recent events - skip any before that
+    \    ${single_alert_uri}=    Get From Dictionary    ${single_alert}    uri
+    \    ${single_alert_id}     Fetch From Right    ${single_alert_uri}    /
+    \    Run Keyword If    ${Starting_AlertID}>=${single_alert_id}    Continue For Loop
+    # Record the NEWER Latest Alert ID than the one found PREVIOUSLY
+    \    Set Suite Variable    ${Last_AlertID}    ${single_alert_id}
+    # Filter out any unrelated alerts
+    \    ${cur_alert_resource_id}=    Get From Dictionary    ${single_alert}    resourceID
+    \    ${found}=    Run Keyword And Return Status    Should Match Regexp    ${cur_alert_resource_id}    ${alert_filter}
+    \    Run Keyword If    '${Found}'=='False'    Continue For Loop
+         ...    ELSE    Append to List    ${alert_list}    ${single_alert}
+    [Return]    ${alert_list}
+
+Get Device Info From Fusion
+    [Documentation]    Get current info for a specific device from fusion side
+    [Arguments]    ${device_type}    ${bay_num}
+    ${response}=    Fusion Api Get Enclosures
+    ${status}=    Get From Dictionary    ${response}    status_code
+    Should be Equal    ${status}    ${200}    msg=Get Enclosures failed ${response}
+    # Make sure we get (more than zero) enclosures listed
+    ${count}=    Get From Dictionary    ${response}    count
+    Run Keyword If    '${count}'=='0'    Fatal Error    msg=No enclosures found
+    # Fetch a pointer to the first enclosure - Member0
+    ${members}=    Get From Dictionary    ${response}    members
+    ${first_mem}=    Get From List    ${members}    0
+    # Extract selected device bay information
+    ${device_list}=    Get From Dictionary    ${first_mem}    ${device_type}
+    ${bay_index}=    Evaluate    ${bay_num}-1
+    ${device_info}    Get From List    ${device_list}    ${bay_index}
+    [Return]    ${device_info}
+
+RIS EM Efuse Off Fan And Wait for Device Critical
+    [Documentation]    Efuse Fan via RIS simulating insertion - Shared
+    ...
+    ...                Example:
+    ...                       |    ${result}=    |    RIS EM Efuse Off Fan    |    <bay number>    |
+    [Arguments]    ${bay number}
+    ${my object}=    Get Model Object For    ${BAY_OBJECT_TYPE}  object name=fan  bay number=${bay number}
+    ${result}=    EM API Do Action    ${my object}    eFuseOff
+    Build RIS Object Model at Root Level
+    Wait for Device Critical    ${Fan_Device}    ${bay number}
+    [Return]    ${result}
+
+Login and Set Last Alert ID
+    [Documentation]    Get Last Alert ID and sets for Suite Usage 
+    Login to Fusion via REST
+    Is EM Ready NO Claim    ${EM_IP}
+    ${found_latest_alert_id}=    Get Latest Fusion Alert ID
+    Log    ${found_latest_alert_id}
+    Set Suite Variable    ${Last_AlertID}    ${found_latest_alert_id}
+    Console    Lastest Fusion Alert Found: ${Last_AlertID}
+    [Return]    ${Last_AlertID}
+    
+Flash FRU Fan
+    [Documentation]    Flash FRU Fan 
+    [Arguments]    ${fru_file}    ${bay_num}
+    ${result}=    Flash Fan Fru    ${bay_num}    ${fru_file}${bay_num}.bin    
+    RIS EM Efuse On Fan    ${bay_num}
+    RIS EM Efuse Off Fan And Wait for Device Critical    ${bay_num}
+    [Return]    ${result}
+
+###################################################################################
+## KEYWORDS to leverage EM DVT Test Framework for Events testing                  #
+###################################################################################
+
+Configure Events Test Environment
+    [Documentation]    Initial Setup configuratin required for EM/Fusion Events testing 
+    Login to Fusion via REST
+    Login to Fusion via SSH
+    ${enc_ser_no_exist}  ${val}=    Run Keyword And Ignore Error    Variable Should Exist    ${ENC_SERIAL_NO}
+    ${enc_ser_no}=    Run Keyword If    '${enc_ser_no_exist}' == 'FAIL'    Get Enclosure Serial Number of First Enclosure
+    ...    ELSE    Set Variable    ${ENC_SERIAL_NO}
+    Logout of Fusion Via SSH
+    Setup EM RIS Session    ${enc_ser_no}
+    Get OV Registry Event Baseline
+    
+Login to EM Via RIS
+    [Documentation]    Login to EM RIS using the floating IP and OV claimed password
+    [Arguments]    ${ip}=${NONE}    ${username}=${NONE}    ${password}=${NONE}
+    ${ip}=    Run Keyword If    '${ip}' == '${NONE}'    Set Variable    ${FLOATING_IP}
+    ...    ELSE    Set Variable    ${ip}
+    ${password}=    Run Keyword If    '${password}' == '${NONE}'    Get Oneview Claim Password
+    ...    ELSE    Set Variable    ${password}
+    ${username}=    Run Keyword If    '${username}' == '${NONE}'    Set Variable    Administrator
+    ...    ELSE    Set Variable    ${username}
+    ${Creds}    Create Dictionary    UserName=${username}    Password=${password}
+    ${response}    ${session_id}=    Login RIS    ${ip}    ${Creds}
+    Return From Keyword If    '${response}' == '<Response [201]>'    ${response}    ${session_id}
+    Fail    msg=Failed to Login to EM with status code ${response}
+
+Setup EM RIS Session
+    [Documentation]    This keyword sets up the EM RIS session and RIS structure to allow usage of existing EM keywords.
+    [Arguments]    ${enc_ser_no}=${NONE}
+    ${FLOATING_IP}=    Get EM Floating IP From OneView    ${enc_ser_no}
+    ${FLOATING IP}=    Run Keyword Unless    '${FLOATING IP}' == '${NONE}'    Catenate    SEPARATOR=    [    ${FLOATING IP}    ]
+    Set Suite Variable    ${FLOATING IP}
+    Create Session    Main    ${FLOATING_IP}
+    ${EFUSION_CLIENT}=    Get Session
+    Set Global Variable    ${EFUSION_CLIENT}
+    ${ov_claim_pwd}=    Get Claim Password From OneView    ${enc_ser_no}
+    Login to EM Via RIS    ip=${FLOATING_IP}    password=${ov_claim_pwd}
+    Build RIS Object Model at Root Level
+
+Get OV Registry Event Baseline
+    [Documentation]  Get the OV registry alert template and use as a baseline to compare alert description and resolution
+    ${reg_ver}=    Get EM Registry Version
+    ${ov_reg_fn}=    Catenate    SEPARATOR=    emRegistry  .  ${reg_ver}  .  json
+    Login to Fusion via SSH
+    SSHLibrary.File Should Exist    /ci/usr/share/registries/messages/en/${ov_reg_fn}
+    SSHLibrary.Get File    /ci/usr/share/registries/messages/en/${ov_reg_fn}
+    Logout of Fusion Via SSH   
+    ${OV_REGISTRY_BASELINE}=    Evaluate    json.load(open("${ov_reg_fn}", "r"))  json
+    Should Not Be Empty    ${OV_REGISTRY_BASELINE}
+    ${baseline_ver}=    Get From Dictionary    ${OV_REGISTRY_BASELINE}    Version
+    Should Be Equal As Strings    ${reg_ver}    ${baseline_ver}
+    ${OV_REGISTRY_BASELINE}=    Get From Dictionary    ${OV_REGISTRY_BASELINE}    Messages
+    Set Suite Variable    ${OV_REGISTRY_BASELINE}
+    OperatingSystem.Remove File    ${ov_reg_fn}
+    OperatingSystem.File Should Not Exist    ${ov_reg_fn}
+
+Get Local OV Registry Event Baseline
+    [Documentation]    Get the local OV registry event baseline file
+    OperatingSystem.File Should Exist    ${GIT_REPO_ROOT}${LocalControlFilePath}
+    ${local_ov_reg_fn} =    OperatingSystem.GetFile    ${GIT_REPO_ROOT}${LocalControlFilePath}
+    ${LOCAL_OV_REGISTRY_BASELINE}=    Evaluate    json.loads(r'''${local_ov_reg_fn}''')  json
+    Should Not Be Empty    ${LOCAL_OV_REGISTRY_BASELINE}
+    ${LOCAL_OV_REGISTRY_BASELINE}=    Get From Dictionary    ${LOCAL_OV_REGISTRY_BASELINE}    Messages
+    [Return]    ${LOCAL_OV_REGISTRY_BASELINE}
+
+Get Claim Password From OneView
+    [Documentation]    This keyword retrieves the Oneview claimed password
+    [Arguments]    ${enc_ser_no}=${NONE}
+    Login to Fusion via SSH
+    ${enc_ser_no}=    Run Keyword If    '${enc_ser_no}' == '${NONE}'    Get Enclosure Serial Number of First Enclosure
+    ...    ELSE    Set Variable    ${enc_ser_no}
+    ${password}=    Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -o p -s ${enc_ser_no}
+    Logout of Fusion Via SSH
+    Should Not Be Empty    ${password}
+    [Return]    ${password}
+
+Get EM Floating IP From OneView
+    [Documentation]    This keyword retrieves the EM floating IP from Oneview
+    [Arguments]    ${enc_ser_no}=${NONE}
+    Login to Fusion via SSH
+    ${enc_ser_no}=    Run Keyword If    '${enc_ser_no}' == '${NONE}'    Get Enclosure Serial Number of First Enclosure
+    ...    ELSE    Set Variable    ${enc_ser_no}
+    ${ip}=    Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -o i -s ${enc_ser_no}
+    Logout of Fusion Via SSH
+    Should Not Be Empty    ${ip}
+    [Return]    ${ip}
+
+Get Enclosure Serial Number of First Enclosure
+    [Documentation]    This keyword retrieves the enclosure serial number of the 1st enclosure listed in OV
+    ${enclosures}=    Execute Command    /ci/bin/tbird/appliance-hal.sh list-enclosures
+    @{enclosure list}=    Split String    ${enclosures}  \n
+    ${enc_ser_no}=    Get From List    ${enclosure list}  0
+    [Return]    ${enc_ser_no}
+
+Get EM Registry Version
+    [Documentation]    Get the version of the EM Registry
+    ${reg}=    EM API Get Registries
+    ${reg_ver}=    Get From Dictionary    ${reg}    Version
+    Should Not Be Empty    ${reg_ver}
+    [Return]    ${reg_ver}
+    
+Get Message Args From Em Event
+    [Documentation]    This keyword retrieves the Message Args from an EM event
+    [Arguments]    ${em_event}
+    ${message_args}=    Set Variable    ${em_event['message']['Events'][0]['MessageArgs']}
+    Should Not Be Empty    ${message_args}
+    [Return]    ${message_args}
+
+Get Resource ID From Em Event
+    [Documentation]    This keyword retrieves the resource ID from an EM event
+    [Arguments]    ${em_event}
+    ${resourceID}=    Set Variable    ${em_event['message']['Events'][0]['OriginOfCondition']}
+    Should Not Be Empty    ${resourceID}
+    [Return]    ${resourceID}
+    
+Validate Interconnect Availability in Fusion
+    [Documentation]
+    ...    Validate the Interconnect info In /rest/enclosures URI
+    [Arguments]    ${bay}
+    : For    ${index}   In Range    1    50
+    \    ${icminfo}=    Get Device Info From Fusion    interconnectBays    ${bay}
+    \    ${interconnectUri}=    Get From Dictionary    ${icminfo}    interconnectUri
+    \    ${status}=    Run Keyword And Return Status    Should Match Regexp    ${interconnectUri}    /rest/interconnects
+    \    Run Keyword If    ${status}    Exit For Loop
+    \    Sleep    10
+    Should be True   ${status} 
+    : For    ${index}   In Range    1    10
+    \    ${icminfo}=    Get Device Info From Fusion    interconnectBays    ${bay}
+    \    ${powerAllocationWatts}=   Get From Dictionary    ${icminfo}     powerAllocationWatts
+    \    ${isnone}=    Run Keyword And Return Status    Should Not Be Equal     ${powerAllocationWatts}     ${None} 
+    \    Run Keyword If    ${isnone}    Exit For Loop
+    \    Sleep    5
+    Should be True   ${isnone}    
+
+###################################################################################
+## KEYWORDS to validate Fusion Events Originating from EM                         #
+###################################################################################
+
+Get Description From Fusion Event
+    [Documentation]    This keyword retrieves the description from the Fusion event
+    [Arguments]    ${fusion_event}
+    ${event_desc}=    Set Variable    ${fusion_event['description']}
+    Should Not Be Empty    ${event_desc}
+    [Return]    ${event_desc}
+    
+Get Resolution From Fusion Event
+    [Documentation]    This keyword retrieves the resolution from the Fusion event
+    [Arguments]    ${fusion_event}
+    ${event_res}=    Set Variable    ${fusion_event['correctiveAction']}
+    [Return]    ${event_res}
+    
+Get Severity From Fusion Event
+    [Documentation]    This keyword retrieves the severity from the Fusion event
+    [Arguments]    ${fusion_event}
+    ${event_severity}=    Set Variable    ${fusion_event['severity']}
+    Should Not Be Empty    ${event_severity}
+    [Return]    ${event_severity}
+    
+Verify Fusion RisTestEvent Sent By EM
+    [Documentation]    This keyword verifies the given event MessageID is logged by Fusion Appliance
+    [Arguments]    ${messageID}    ${last_eventID}=${0}
+    ${em_event}=    get last fusion event
+    Should Not Be Empty    ${em_event}
+    ${variable_value}=    Get Variable Value    ${EM_REGISTRY_VERSION}
+    ${messageID}=    Run Keyword If    '${variable_value}' <> 'None'    Set Variable    ${EM_REGISTRY_VERSION}.${messageID}    ELSE
+    ...    Set Variable    ${messageID}
+    ${event_status}=    is Fusion Event    ${messageID}    ${last_eventID}
+    Should Be True    ${event_status}
+    ${fusion_event}=    Get Last Fusion Event By    ${messageID}    ${last_eventID}
+    Should Not Be Empty    ${fusion_event}
+    ${fusion_event_desc}=    Get Description From Fusion Event    ${fusion_event}
+    ${fusion_event_res}=    Get Resolution From Fusion Event    ${fusion_event}
+    ${ov_reg_desc}  ${ov_reg_res}=    Get Description and Resolution From OV Registry Baseline    ${OV_REGISTRY_BASELINE}    ${messageID}    ${em_event}
+    ${desc_check}  ${desc_value}=    Run Keyword And Ignore Error    Should Be Equal As Strings    ${fusion_event_desc}    ${ov_reg_desc}
+    ${res_check}  ${res_value}=    Run Keyword And Ignore Error    Should Be Equal As Strings    ${fusion_event_res}    ${ov_reg_res}
+    ${status}=    Set Variable If    '${desc_check}' == 'PASS' and '${res_check}' == 'PASS'    True    False
+    ${err_msg}=    Run Keyword If    '${desc_check}' == 'FAIL' and '${res_check}' == 'FAIL'    Catenate    SEPARATOR=,    ${desc_value}    ${res_value}
+    ...    ELSE IF    '${desc_check}' == 'FAIL' and '${res_check}' == 'PASS'    Set Variable    ${desc_value}
+    ...    ELSE IF    '${desc_check}' == 'PASS' and '${res_check}' == 'FAIL'    Set Variable    ${res_value}
+    Should Be True    ${status}    FAIL: ${err_msg}
+    ${dup_event_status}=    is Duplicate Fusion Event    ${messageID}    ${last_eventID}
+    Should Not Be True    ${dup_event_status}
+
+Verify Fusion Event Sent By EM
+    [Documentation]    This keyword verifies the given event MessageID is logged by Fusion Appliance
+    [Arguments]    ${messageID}    ${last_eventID}=${0}    ${alert_resource}=None
+    ${alert_name}=    Set Variable    ${messageID}
+    ${em_event}=    em api get last event by message ID    ${messageID}
+    Should Not Be Empty    ${em_event}
+    ${variable_value}=    Get Variable Value    ${EM_REGISTRY_VERSION}
+    ${messageID}=    Run Keyword If    '${variable_value}' <> 'None'    Set Variable    ${EM_REGISTRY_VERSION}.${messageID}    ELSE
+    ...    Set Variable    ${messageID}
+    :FOR  ${Loop}  IN RANGE   1  25
+    \    ${event_status}=    is Fusion Event    ${messageID}    ${last_eventID}
+    \    Run Keyword If    '${event_status}'=='${True}'    Exit For Loop
+    \    Sleep    30
+    Should Be True    ${event_status}
+    ${fusion_event}=    Get Last Fusion Event By    ${messageID}    ${last_eventID}
+    Should Not Be Empty    ${fusion_event}
+    ${fusion_event_desc}=    Get Description From Fusion Event    ${fusion_event}
+    ${fusion_event_res}=    Get Resolution From Fusion Event    ${fusion_event}
+    ${fusion_event_sev}=    Get Severity From Fusion Event    ${fusion_event}
+    ${event_resource}=    Get From Dictionary    ${fusion_event}    resourceUri
+    ${list_value} =   Split String     ${event_resource}    /
+    ${resource}=    Run Keyword If    '${list_value[2]}' == 'v1'    Set Variable    ${list_value[3]}
+    ...    ELSE    Set Variable    ${list_value[2]}
+    Run Keyword If    '${alert_resource}' != 'None'    Should Be Equal    ${resource}    ${alert_resource}
+    ${ov_reg_desc}  ${ov_reg_res}=    Get Description and Resolution From OV Registry Baseline    ${OV_REGISTRY_BASELINE}    ${messageID}    ${em_event}
+    ${ov_reg_dict}=    Get From Dictionary    ${OV_REGISTRY_BASELINE}    ${alert_name}
+    ${ov_reg_sev}=    Get From Dictionary    ${ov_reg_dict}    Severity
+    ${sev_check}  ${sev_value}=    Run Keyword And Ignore Error    Should Be Equal As Strings    ${fusion_event_sev}    ${ov_reg_sev}
+    ${desc_check}  ${desc_value}=    Run Keyword And Ignore Error    Should Be Equal As Strings    ${fusion_event_desc}    ${ov_reg_desc}
+    ${res_check}  ${res_value}=    Run Keyword And Ignore Error    Should Be Equal As Strings    ${fusion_event_res}    ${ov_reg_res}
+    ${status}=    Set Variable If    '${desc_check}' == 'PASS' and '${res_check}' == 'PASS' and '${sev_check}' == 'PASS'    True    False
+    ${err_msg}=    Run Keyword If    '${desc_check}' == 'FAIL' and '${res_check}' == 'FAIL'    Catenate    SEPARATOR=,    ${desc_value}    ${res_value}
+    ...    ELSE IF    '${desc_check}' == 'FAIL' and '${res_check}' == 'PASS'    Set Variable    ${desc_value}
+    ...    ELSE IF    '${desc_check}' == 'PASS' and '${res_check}' == 'FAIL'    Set Variable    ${res_value}
+    ${sev_err_msg}=    Run Keyword If    '${sev_check}' == 'FAIL'    Set Variable    msg=Severity is not equal in fusion event and OV ${sev_value}
+    Should Be True    ${status}    FAIL: ${err_msg} ${sev_err_msg}
+    ${dup_event_status}=    is Duplicate Fusion Event    ${messageID}    ${last_eventID}
+    Should Not Be True    ${dup_event_status}
+
+Get Duplicate Alerts From Fusion
+    [Documentation]    This keyword gives list of duplicate fusion events logged by Fusion Appliance.
+    [Arguments]    ${messageID}    ${last_eventID}=${0}
+    ${events}=    Get All Fusion Events
+    ${listOfDuplicateAlerts}=    Create List
+    ${variable_value}=    Get Variable Value    ${EM_REGISTRY_VERSION}
+    ${messageID}=    Run Keyword If    '${variable_value}' <> 'None'    Set Variable    hpris.${EM_REGISTRY_VERSION}.${messageID}    ELSE
+    ...    Set Variable    ${messageID}
+    : FOR    ${event}    IN    @{events}
+    \    ${uri}=    Get From Dictionary    ${event}    uri
+    \    ${rest}    ${eventID}=    Split String From Right    ${uri}    /    1
+    \    Run Keyword If    '${event["alertTypeID"]}'=='${messageID}' and ${eventID} > ${last_eventID}
+    \    ...    Append To List    ${listOfDuplicateAlerts}    ${event}
+    [Return]    ${listOfDuplicateAlerts}
+
+Get Resource URI Status From Alerts
+    [Documentation]    This keyword will check if the passed resorce URI category is present in any of the duplicate alerts
+    [Arguments]    ${resourceCategory}    ${duplicateAlerts}
+    : FOR   ${event}    IN    @{duplicateAlerts}
+    \    ${rest}    ${resource}    ${name}=    Split String From Right    ${event['associatedResource']['resourceUri']}    /    2
+    \    ${isTrue} =    Run Keyword And Return Status    Should Be Equal    ${resource}    ${resourceCategory}
+    \    Run Keyword If    ${isTrue}    Exit For Loop
+    [Return]    ${isTrue}
+
+Verify Fusion Event Sent By EM without desc
+    [Documentation]    This keyword verifies the given event MessageID is logged by Fusion Appliance
+    [Arguments]    ${messageID}    ${last_eventID}=${0}
+    ${em_event}=    em api get last event by message ID    ${messageID}
+    Should Not Be Empty    ${em_event}
+    ${variable_value}=    Get Variable Value    ${EM_REGISTRY_VERSION}
+    ${messageID}=    Run Keyword If    '${variable_value}' <> 'None'    Set Variable    ${EM_REGISTRY_VERSION}.${messageID}    ELSE
+    ...    Set Variable    ${messageID}
+    :FOR  ${Loop}  IN RANGE   1  25
+    \    ${event_status}=    is Fusion Event    ${messageID}    ${last_eventID}
+    \    Run Keyword If    '${event_status}'=='${True}'    Exit For Loop
+    \    Sleep    30
+    Should Be True    ${event_status}
+    ${fusion_event}=    Get Last Fusion Event By    ${messageID}    ${last_eventID}
+    Should Not Be Empty    ${fusion_event}
+    ${fusion_event_res}=    Get Resolution From Fusion Event    ${fusion_event}
+    ${ov_reg_desc}  ${ov_reg_res}=    Get Description and Resolution From OV Registry Baseline    ${OV_REGISTRY_BASELINE}    ${messageID}    ${em_event}
+    ${res_check}  ${res_value}=    Run Keyword And Ignore Error    Should Be Equal As Strings    ${fusion_event_res}    ${ov_reg_res}
+    ${status}=    Set Variable If    '${res_check}' == 'PASS'    True    False
+    ${err_msg}=    Run Keyword If    '${res_check}' == 'FAIL'    Set Variable    ${res_value}
+    Should Be True    ${status}    FAIL: ${err_msg}
+    [Return]    ${fusion_event}
+
+Restore Affected Blade and ICM
+    [Documentation]    This keyword restores the correct mezz fru back to affected blades
+    [Arguments]    ${affected_icm_list}    ${ekey_blade_list}    ${quartz_fru}    ${mezz_fru_filename}
+    : FOR    ${icm_bay}    IN    @{affected_icm_list}
+    \    RIS EM Efuse Off Interconnect    ${icm_bay}
+    : FOR    ${blade_bay}    IN    @{ekey_blade_list}
+    \    FRU_Init_File Cleanup
+    \    Fru_File Cleanup
+    \    Update Fru Utility config_data File    ${FLOATING_IP}    False
+    \    Replace Text in FRU INIT FILE    ${GIT_REPO_ROOT}${FRU_UPDATE_ROOT}${FRU_JSON_Init_Filename}    ${quartz_fru}     ${mezz_fru_filename}
+    \    Replace Text in Mezz Update Config Data File    compaq    ${iLO_Admin_Password}
+    \    Perform Mezz FRU Update on Blade in Bay    ${blade_bay}
+    \    RIS EM Efuse On Blade    ${blade_bay}
+    \    sleep    10
+    \    RIS EM Efuse Off Blade No Sleep    ${blade_bay}
+    \    Sleep    5
+    \    Build RIS Object Model at Root Level
+    \    Wait for Device Ok    ${Blade_Device}    ${blade_bay}
+    
+Get The Mgmt Port In The Network Via RIS
+    [Documentation]    This keyword gets the active management port within the given network - Shared 
+    ...                Example: 
+    ...                       |    Get The Mgmt Port In The Network   |    ${floating_ip_dict}
+    [Arguments]    ${floating_ip_dict}    ${pwd}=${NONE}
+    ${EMS}=     Get Dictionary Keys     ${floating_ip_dict}
+    ${active_count}=  Set Variable  0
+    ${active_mgmt_port}=    Set Variable    0
+    ${em_bay_num}=    Set Variable    0
+    : FOR    ${em}   IN    @{EMS}
+    \    Login to EM Via RIS    ip=${em}   password=${pwd}
+    \    ${active_count}=    Convert To Integer    ${active_count}
+    \    Log To Console    Number of active ports are ${active_count}
+    \    ${encl_upper_portstatus}=  Get Switch Port Status  ${MGMT_PORT_UPPER_BAY}  Active  True  True  ${EM_Active_NativeVLANId}  Enabled  OK
+    \    ${encl_lower_portstatus}=  Get Switch Port Status  ${MGMT_PORT_LOWER_BAY}  Active  True  True  ${EM_Active_NativeVLANId}  Enabled  OK 
+    \    ${active_count}=  Run Keyword If  ${encl_upper_portstatus}==True  Evaluate   ${active_count}+1    ELSE    Convert To Integer    ${active_count}
+    \    ${active_count}=  Run Keyword If  ${encl_lower_portstatus}==True  Evaluate   ${active_count}+1    ELSE    Convert To Integer    ${active_count}
+    \    ${switch_port_object}=  Get SwitchPort Object  ${MGMT_PORT_UPPER_BAY}
+    \    ${upper_portmode_first_before}=    Get From Dictionary    ${switch_port_object}    MgmtPortMode
+    \    ${check_upper1}=  Evaluate  '${upper_portmode_first_before}'=='Active'
+    \    ${active_mgmt_port}=  Run Keyword If    ${check_upper1}    Set Variable    ${em}    ELSE    Convert To String    ${active_mgmt_port}
+    \    ${em_bay_num}=  Run Keyword If    ${check_upper1}    Set Variable    1    ELSE    Convert To Integer    ${em_bay_num}
+    \    ${switch_port_object}=  Get SwitchPort Object  ${MGMT_PORT_LOWER_BAY}
+    \    ${lower_portmode_first_before}=    Get From Dictionary    ${switch_port_object}    MgmtPortMode
+    \    ${check_lower1}=  Evaluate  '${lower_portmode_first_before}'=='Active'
+    \    ${active_mgmt_port}=  Run Keyword If    ${check_lower1}    Set Variable    ${em}    ELSE    Convert To String    ${active_mgmt_port} 
+    \    ${em_bay_num}=  Run Keyword If    ${check_lower1}    Set Variable    2    ELSE    Convert To Integer    ${em_bay_num}
+    \    Log To Console    For Floating IP Dictionary loop
+    \    Log To Console    EM_IP active mgmt port ${active_mgmt_port}
+    Run Keyword If  ${active_count} <> 1    Fail   Mgmt is Active for 2 or more EMs or is not active at all!!
+    [Return]    ${active_mgmt_port}    ${em_bay_num}
+
+Get All The Floating IPs In The Network Loop via RIS
+    [Documentation]    This keyword gets all the floating ip's within a network loop - Shared
+    ...
+    ...                Example:
+    ...                       |    Get All The Floating IPs In The Network Loop   |    ${first_floating_ip}
+    [Arguments]    ${first_floating_ip}
+    ${active_ip_temp}=    Get Diags Active EM IPv6 LL Address
+    ${active_ip}=  Catenate    SEPARATOR=  [${active_ip_temp}] 
+    ${standby status}   ${standby_ip_temp}=    Run Keyword And Ignore Error    Get Diags Standby EM IPv6 LL Address
+    ${standby_ip}=  Run Keyword If    '${standby status}' == 'PASS'    Catenate    SEPARATOR=  [${standby_ip_temp}]
+    ${first_floating_ip}=  Catenate    SEPARATOR=    [${first_floating_ip}] 
+    ${first_floating_ip}=    Convert To Lowercase    ${first_floating_ip}     
+    ${floating_ip_dict}=    Create dictionary     ${first_floating_ip}    0    
+    Set Test Variable    ${floating_ip_dict}	
+    Set Test Variable    ${em_ip}    ${first_floating_ip}
+    Set Test Variable    ${previous_em_ip}    ${first_floating_ip}
+    ${dict_counter}=    Set Variable    0
+    ${flag}=    Set Variable    1 
+    ${em_bay}=  Set Variable    1   
+    Log To Console    First EM IP ${em_ip}
+    Log To Console    First active EM IP ${active_ip}
+    Run Keyword If    '${standby status}' == 'PASS'    Log To Console    First standby EM IP ${standby_ip}
+    ${active_bay}=    Get Active EM Bay Number
+    : FOR    ${counter}   IN RANGE    100  
+    \    ${enc_info}=    Get Enclosure Manager Object    ${em_bay}
+    \    ${external_neighbor}=    Get From Dictionary    ${enc_info}    Oem.Hp.LinkedNeighbors.External.IpAddress
+    \    ${active_bay}=    Get From Dictionary    ${enc_info}    Oem.Hp.LinkedNeighbors.External.BayNumber
+    \    Exit For Loop If    "${active_bay}"=="None"   
+    \    ${external_neighbor_temp}=   Replace String    ${external_neighbor}       0000:0000:0000:     : 
+    \    ${external_neighbor_temp}=   Replace String    ${external_neighbor_temp}      :0  :
+    \    ${external_neighbor_temp}=   Replace String    ${external_neighbor_temp}      :0  :     
+    \    ${external_neighbor_ip}=     Catenate    SEPARATOR=  [${external_neighbor_temp}]          
+    \    Set Suite Variable    ${em_ip}    ${external_neighbor_ip}
+    \    ${dict_counter}=    Evaluate    ${dict_counter}+1
+    \    Exit For Loop If    '${em_ip}'=='${first_floating_ip}'
+    \    Set To Dictionary    ${floating_ip_dict}     ${em_ip}    ${dict_counter}
+    \    ${em_bay}=    Set Variable If    '${active_bay}'=='1'   2    1
+    \    ${em_bay}=    Convert To Integer    ${em_bay}
+    \    ${status}=    Run Keyword And Return Status    Logout RIS
+    \    Should Be Equal As Strings    ${status}    True	    
+    \    Create Session    Enclosure    ${em_ip}
+    \    Switch Enclosure via RIS    Enclosure 
+    \    ${active_ip_temp}=    Get Diags Active EM IPv6 LL Address
+    \    ${active_ip}=  Catenate    SEPARATOR=  [${active_ip_temp}]
+    \    ${standby status}   ${standby_ip_temp}=    Run Keyword And Ignore Error    Get Diags Standby EM IPv6 LL Address
+    \    ${standby_ip}=  Run Keyword If    '${standby status}' == 'PASS'    Catenate    SEPARATOR=  [${standby_ip_temp}]
+    \    Log To Console     Neighbor EM IP ${em_ip}
+    \    Log To Console     Neighbor active EM IP ${active_ip}
+    \    Run Keyword If    '${standby status}' == 'PASS'    Log To Console    First standby EM IP ${standby_ip}
+    [Return]    ${floating_ip_dict}
+
+Switch Enclosure via RIS
+    [Arguments]    ${index_or_alias}
+    [Documentation]    Switches the session to another enclosure - Shared
+    ...
+    ...    Example:
+    ...    | ${old index}= | Switch Enclosure | <session index_or_alias> |
+    ${old index}=    Switch Session    ${index_or_alias}
+    ${EFUSION_CLIENT}=    Get Session
+    Set Global Variable    ${EFUSION_CLIENT}
+    ${EM_IP}=    Get Session Info
+    Login to EM via RIS    ${EM_IP}
+    Build RIS Object Model at Root Level
+    [Return]    ${old_index}
+    
+Validate alertID in fusion events
+    [Arguments]    ${last_eventID}    ${alertID}
+    [Documentation]    Keyword Validate If The Given AlertID Is Present In Fusion Events
+    ${FusionEvents}=   Get All Fusion Events
+    ${length}=    Get Length    ${FusionEvents}
+    :FOR    ${x}    IN RANGE   0    ${length}
+        \    ${id}=    Get From Dictionary    ${FusionEvents[${x}]}    uri
+        \    ${id}=    Fetch From Right    ${id}    /alerts/
+        \    ${res}=    Run Keyword If    ${id}>${last_eventID}    Get From Dictionary    ${FusionEvents[${x}]}    alertTypeID
+        \    ${status}    ${msg}=    Run Keyword And Ignore Error    Should Be Equal    ${res}    ${alertID}
+        \    Exit For Loop If    '${status}'=='PASS'
+    [Return]    ${status}
+    
+Validate Health Status
+    [Arguments]    ${hardware_details}    ${status}    ${state}=None
+    [Documentation]    Keyword to get health status and state from a detailed dictionary passed
+    ${counts}=    Get From Dictionary    ${hardware_details}    count
+    :FOR    ${count}    IN RANGE    0    ${counts}
+    \    ${member}=    Get From Dictionary    ${hardware_details}    members
+    \    ${member1}=    Get From List    ${member}    ${count}
+    \    ${status1}=    Get From Dictionary    ${member1}    status
+    \    Should Be Equal    "${status1}"    "${status}"
+    \    ${state1}=    Get From Dictionary    ${member1}    state
+    \    Run Keyword If    '${state}'!='None'    Should Be Equal    ${state1}    ${state}
+###################################################################################
+## KEYWORDS to Restore Good FRU for devices#
+###################################################################################
+
+Restore Good FLM FRU Duplex mode
+    [Documentation]    This keyword flashes good FRU to both the FLMs in the enclosure
+    Login to EM Via RIS
+    ${active_bay}=    Get Diags EmClusterStatus Active Node
+    ${standby_em_bay}=    Get Diags EmClusterStatus Standby Node
+    Log To Console    Flash Good Fru to bay ${standby_em_bay}
+    Flash Enclosure Manager Fru    ${standby_em_bay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\Fru_Files\\${CAT}\\Good_Fru\\EM\\${standby_em_bay}\\fru.bin
+    Log To Console    Flash Good Fru to bay ${active_bay}
+    Flash Enclosure Manager Fru    ${active_bay}    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\Fru_Files\\${CAT}\\Good_Fru\\EM\\${active_bay}\\fru.bin
+    RIS EM Reboot    ${active_bay}
+    Log To Console    Sleeping 5 minutes
+    Sleep    600
+    Login to EM Via RIS
+
+Reboot FLM after the suite
+    [Documentation]    This keyword reboots the FLMs in the enclosure
+    Login to EM Via RIS
+    ${active_bay}=    Get Diags EmClusterStatus Active Node
+    Log To Console    Rebooting the FLMs
+    RIS EM Reboot    ${active_bay}
+    Log To Console    Sleeping 5 minutes
+    Sleep    600
+    Login to EM Via RIS
+
+Restore Good Midplane FRU
+    [Documentation]    This keyword flashs good Midplane FRU
+    Login to EM via RIS
+    ${active_bay}=    Get Diags EmClusterStatus Active Node
+    Flash Midplane Fru    ${GIT_REPO_ROOT}${TESTDATA_ROOT}\\Fru_Files\\${CAT}\\Good_Fru\\MIDPLANE\\${Midplane_Bay_No}\\fru.bin
+    RIS EM Reboot    ${active_bay}
+    Sleep    600
+    Login to EM via RIS
+
+Inject InterconnectManagerICMReadyFault Event
+    [Documentation]    InterconnectManagerICMReadyFault event detection when infoBlock 31 is populating
+    ...
+    ...    Example:
+    ...           | InterconnectManagerICMReadyFault Event Detection When Block 31 Is Populating | ${icm_list} | ${blade_bay} | ${block_num} |
+    [Arguments]    ${icm_list}    ${blade_bay}    ${block_num}
+    : FOR    ${icm_bay}    IN    @{icm_list}
+    \    EM API Get Diags    ResetEnclosureUptime
+    \    RIS EM Efuse Interconnect    ${icm_bay}    8
+    \    Sleep    ${EM_EFUSE_Duration}
+    \    Wait Until ICM Ready Check Passes    ${blade_bay}
+    \    Sleep    10
+    \    Set Diags Enable ICM Ready Flag     ${icm_bay}
+    \    ${ready_flag_status_info_block}=     Is Interconnect Ready Flag Enabled     ${icm_bay}
+    \    Should Be Equal    ${ready_flag_status_info_block}    True
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${icm_fault_status}=    Set EM RIS Faults   ICMFaultInjection    ${icm_bay}    Ready    ${block_num}    false
+    \    Should Be Equal As Strings    ${icm_fault_status}    <Response [200]>
+    \    Sleep    900
+    \    ${res}=    Get BladeICMReadyStatus     ${blade_bay}
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_ICM_Manager_ICMReadyFault}    ${ICM_Device}    ${icm_bay}    900
+    \    Verify Fusion Event Sent By EM    ${EL_ICM_Manager_ICMReadyFault}    ${last_fusion_event_id}
+    \    Validate Interconnect Fault Status  ${icm_bay}  ManagementProcessorICMReadyFault  ${HEALTH_WARNING}
+
+Clear InterconnectManagerICMReadyFaultCleared Event
+    [Documentation]    InterconnectManagerICMReadyFaultCleared event detection when infoBlock 31 populates
+    ...
+    ...    Example:
+    ...           | InterconnectManagerICMReadyFaultCleared Event Detection When Block 31 Populates | ${icm_list} | ${block_num} |
+    [Arguments]    ${icm_list}    ${block_num}
+    : FOR    ${icm_bay}    IN    @{icm_list}
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${icm_fault_status}=    Set EM RIS Faults   ICMFaultInjection    ${icm_bay}    Ready    ${block_num}    true
+    \    Should Be Equal As Strings    ${icm_fault_status}    <Response [200]>
+    \    Sleep    900
+    \    ${ready_flag_status_info_block}=     Is Interconnect Ready Flag Enabled     ${icm_bay}
+    \    Should Be Equal    ${ready_flag_status_info_block}    True
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_ICM_Manager_ICMReadyFaultCleared}    ${ICM_Device}    ${icm_bay}    900
+    \    Verify Fusion Event Sent By EM    ${EL_ICM_Manager_ICMReadyFaultCleared}    ${last_fusion_event_id}
+    \    Wait for Device OK    ${ICM_Device}    ${icm_bay}
+    \    Validate Interconnect Fault Status  ${icm_bay}  ManagementProcessorICMReadyFault  ${HEALTH_OK}
+
+Injecting Un-terminated Fault To FLM For Specific Device
+    [Arguments]   ${device_type}   ${bay_no}   ${observation}   ${report}   ${fault}   ${num_em}='2'
+    [Documentation]    This keyword is used to inject the unterminated fault
+    ...
+    ...    Example:
+    ...    Injecting Un-terminated Fault To FLM For Specific Device   |  ${device_type}  |  ${bay_no}  |  ${observation}  |  ${report}  |  ${fault}
+    ${Expect_Observ} =   Run Keyword If   '${observation}' == 'A'   Set Variable   RX_A(Mocked)
+    ...    ELSE   Set Variable   RX_B(Mocked)
+    ${Expect_Report} =   Run Keyword If   '${report}' == 'A'   Set Variable   RX_A(Mocked)
+    ...    ELSE   Set Variable   RX_B(Mocked)
+
+    #Remember observe and report value before fake values
+    ${orig_observ}   ${orig_report} =   Get Device CanRedMon_JSON   ${device_type}   ${bay_no}
+
+    #start fake value on device
+    ${response} =   Run Keyword If   ${num_em} == '2'   Set Diags CanRedFake Value    ${device_type}    ${observation}    ${report}   ${fault}   ${bay_no}
+    ...    ELSE   Set Diags CanRedFake Single EM    ${device_type}    ${observation}    ${report}   ${bay_no}
+    ${result}=    Get Diags CanRedMon
+    Log    ${result}    level=INFO
+    ${device_observe}   ${device_report} =   Get Device CanRedMon_JSON   ${device_type}   ${bay_no}
+    Should Be Equal   ${Expect_Observ}   ${device_observe}
+    Should Be Equal   ${Expect_Report}   ${device_report}
+    Sleep    180
+    #clear fault
+    ${clear_fault}=   Catenate   SEPARATOR=   ${fault}   Cleared
+    ${response} =   Run Keyword If   ${num_em} == '2'   Set Diags CanRedFake Value   ${device_type}    NORMAL    NORMAL    ${fault}   ${bay_no}
+    ...    ELSE   Set Diags CanRedFake Single EM    ${device_type}    NORMAL    NORMAL   ${bay_no}
+    ${device_observe}   ${device_report} =   Get Device CanRedMon_JSON   ${device_type}   ${bay_no}
+    Should Be Equal   ${orig_observ}   ${device_observe}
+    Should Be Equal   ${orig_report}   ${device_report}
+
+Set Diags CanRedFake Value
+    [Arguments]   ${device_type}=ALL   ${observation}=${None}   ${report}=${None}   ${fault}=${None}   ${bay_no}=${None}
+    [Documentation]    This keyword perform based on the option provided in the argument - Shared
+    ...
+    ...    Example:
+    ...    ${response} = | Set Diags CanRedFake Value  |  ${device_type}  |  ${bay_no}  |  ${observation}  |  ${report}
+    ${active_em_ip} =   Get Diags Active EM IPv6 LL Address
+    ${standby_em_ip} =   Get Diags Standby EM IPv6 LL Address
+    ${active_em_response}   ${status} =   Run Keyword If   ${bay_no} != ${None}   EM API Get Diags Status   CanRedFake/${device_type}/${bay_no}/${observation}/${report}   [${active_em_ip}]
+    ${active_em_response}   ${status} =   Run Keyword If   "${device_type}" == "ALL"   EM API Get Diags Status   CanRedFake/ALL/${observation}/${report}   [${active_em_ip}]
+    Logout of EM RIS
+    Login to EM Via RIS    [${standby_em_ip}]
+    ${standby_em_response}   ${status} =   Run Keyword If   ${bay_no} != ${None}   EM API Get Diags Status   CanRedFake/${device_type}/${bay_no}/${observation}/${report}   [${standby_em_ip}]
+    ${standby_em_response}   ${status} =   Run Keyword If   "${device_type}" == "ALL"   EM API Get Diags Status   CanRedFake/ALL/${observation}/${report}   [${standby_em_ip}]
+    Logout of EM RIS
+    Login to EM Via RIS
+    [Return]   ${active_em_response}   ${standby_em_response}
+    
+InterconnectManagerICMReadyFault Detection When The Block 31 Is Populating
+    [Documentation]    InterconnectManagerICMReadyFault event detection when infoBlock 31 is populating - Shared
+    ...        copied from InterconnectManagerICMReadyFault Detection When Block 31 Is Populating
+    ...    Example:
+    ...           | InterconnectManagerICMReadyFault Detection When Block 31 Is Populating | ${icm_list} | ${blade_bay} | ${block_num} |
+    [Arguments]    ${icm_list}    ${blade_bay}    ${block_num}
+    : FOR    ${icm_bay}    IN    @{icm_list}
+    \    EM API Get Diags    ResetEnclosureUptime
+    \    RIS EM Efuse Interconnect    ${icm_bay}    8
+    \    Sleep    ${EM_EFUSE_Duration}
+    \    Wait Until ICM Ready Check Passes    ${blade_bay}
+    \    Sleep    10
+    \    Set Diags Enable ICM Ready Flag     ${icm_bay}
+    \    ${ready_flag_status_info_block}=     Is Interconnect Ready Flag Enabled     ${icm_bay}
+    \    Should Be Equal    ${ready_flag_status_info_block}    True
+    \    ${icm_fault_status}=    Set EM RIS Faults   ICMFaultInjection    ${icm_bay}    Ready    ${block_num}    false
+    \    Should Be Equal As Strings    ${icm_fault_status}    <Response [200]>
+    \    Sleep    10
+    \    ${res}=    Get BladeICMReadyStatus     ${blade_bay}
+    \    RIS EM Efuse Interconnect    ${icm_bay}    8
+    \    Sleep    ${EM_EFUSE_Duration}
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_ICM_Manager_ICMReadyFault}    ${ICM_Device}    ${icm_bay}    1200
+    \    Verify Fusion Event Sent By EM    ${EL_ICM_Manager_ICMReadyFault}    ${last_fusion_event_id}    
+    \    Validate Interconnect Fault Status  ${icm_bay}  ManagementProcessorICMReadyFault  ${HEALTH_WARNING}
+
+InterconnectManagerICMReadyFaultCleared Detection When The Block 31 Populates
+    [Documentation]    InterconnectManagerICMReadyFaultCleared event detection when infoBlock 31 populates - Shared
+    ...    copied from InterconnectManagerICMReadyFaultCleared Detection When Block 31 Populates
+    ...    Example:
+    ...           | InterconnectManagerICMReadyFaultCleared Detection When Block 31 Populates | ${icm_list} | ${block_num} |
+    [Arguments]    ${icm_list}    ${block_num}
+    : FOR    ${icm_bay}    IN    @{icm_list}
+    \    ${icm_fault_status}=    Set EM RIS Faults   ICMFaultInjection    ${icm_bay}    Ready    ${block_num}    true
+    \    Should Be Equal As Strings    ${icm_fault_status}    <Response [200]>
+    \    ${ready_flag_status_info_block}=     Is Interconnect Ready Flag Enabled     ${icm_bay}
+    \    Should Be Equal    ${ready_flag_status_info_block}    True
+    \    Sleep    300
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_ICM_Manager_ICMReadyFaultCleared}    ${ICM_Device}    ${icm_bay}    900
+    \    Verify Fusion Event Sent By EM    ${EL_ICM_Manager_ICMReadyFaultCleared}    ${last_fusion_event_id}
+    \    Wait for Device OK    ${ICM_Device}    ${icm_bay}
+    \    Validate Interconnect Fault Status  ${icm_bay}  ManagementProcessorICMReadyFault  ${HEALTH_OK}  

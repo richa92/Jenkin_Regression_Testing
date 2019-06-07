@@ -1,0 +1,344 @@
+*** Settings ***
+Documentation    em_health.txt - Enclosure EM Health test - With DEBUG enabled
+...    = USAGE =
+...    | pybot | -v ENCLOSURE:dcs |-v FUSION_IP:<IP> | EM_health.txt |
+...    = Variables =
+...    | ENCLOSURE | Required; Enclosure to use |
+...    | FUSION_IP | Required when enclosure is DCS; IP address of the FusionVM to use |
+
+Library           json
+Library           robot.api.logger
+Variables         ../resources/variables.py    ${ENCLOSURE}
+Resource          ../resources/defaults.txt
+Resource          ../resources/fusion_api.txt
+Resource          ../resources/em_api.txt
+Resource          ../resources/fusion_ssh.txt
+Resource          ../resources/enclosure_info.txt
+Force Tags        HW
+Suite Setup       Suite Setup
+Suite Teardown    Suite Teardown
+
+*** Variables ***
+${EFuse_Sleep}            5 minutes
+@{Failover_RIS_Events}    emRegistry.1.0.EmOk
+...                       emRegistry.1.0.EmInserted
+...                       emRegistry.1.0.EmLinkedNeighborsUpdated
+# ...                       emRegistry.1.0.EmClusterResourceFault
+# ...                       emRegistry.1.0.EmClusterResourceCleared
+# ...                       emRegistry.1.0.EmCritical
+# @{Failover_Alerts}        hpris.emRegistry.1.0.EmFruContentFault
+# ...                       hpris.emRegistry.1.0.EmClusterResourceCleared
+# ...                       hpris.emRegistry.1.0.EmClusterResourceFault
+
+*** Test Case ***
+Failover Standby EM and verify events
+    [Tags]    Failover    Standby EM
+    Perform ForceFailover on Standby EM
+
+    # Create New session on new active EM
+    Login to EM
+
+    Validate RIS events         ${StandbyEMBay}    ${Failover_RIS_Events}
+    Validate no Activity Alerts are received
+
+    # TODO: Add in health verification for EMs.
+    Validate EM ${StandbyEMBay} role is Active in OneView
+    Validate EM ${ActiveEMBay} role is Standby in OneView
+
+    Validate EM ${StandbyEMBay} role is Active in EM RIS
+
+    Update EM Roles
+
+Failover Active EM and verify events
+    [Tags]    Failover    Active EM
+    Perform ForceFailover on Active EM
+
+    Login to EM
+
+    Validate RIS events         ${ActiveEMBay}    ${Failover_RIS_Events}
+    # Validate Activity Alerts    ${ActiveEMBay}    ${Failover_Alerts}
+    Validate no Activity Alerts are received
+
+    Validate EM ${StandbyEMBay} role is Active in OneView
+    Validate EM ${ActiveEMBay} role is Standby in OneView
+
+    Validate EM ${StandbyEMBay} role is Active in EM RIS
+
+    Update EM Roles
+
+Reset Active EM and verify events
+    [Tags]    Reset    Active EM
+    Perform Reset on Active EM
+
+    Login to EM
+
+    Validate RIS events         ${ActiveEMBay}    ${Failover_RIS_Events}
+    # Validate Activity Alerts    ${ActiveEMBay}    ${Failover_Alerts}
+    Validate no Activity Alerts are received
+
+    Validate EM ${StandbyEMBay} role is Active in OneView
+    Validate EM ${ActiveEMBay} role is Standby in OneView
+
+    Validate EM ${StandbyEMBay} role is Active in EM RIS
+
+    Update EM Roles
+
+EFuseReset Standby Em and verify events
+    [Tags]    EFuseReset    Standby EM
+    Perform EFuseReset on Standby EM
+    Validate no RIS events are received
+    Validate no Activity Alerts are received
+
+    Validate EM ${StandbyEMBay} role is Standby in OneView
+    Validate EM ${ActiveEMBay} role is Active in OneView
+
+    Validate EM ${ActiveEMBay} role is Active in EM RIS
+
+*** Keywords ***
+Perform ${ACTION} on ${ROLE} EM
+    Perform EM Action    ${ACTION}    ${${ROLE}EMBay}    EnclosureManager
+    Console    \nSleeping for ${Efuse_Sleep}.
+    Sleep    ${EFuse_Sleep}
+
+Validate RIS events
+    [Arguments]    ${Bay}    ${Expected Events}
+    # Using 'ForceFailover' as a identifier of EnclosureManager/* events.
+    ${Event_List}    ${Last_EventID}=    EM Diags Get Audit Log Events
+    ...    Starting_EventID=${Last_EventID}    Event_Filter=/ForceFailover
+    EM Diags Print Audit Log Summary    ${Event_List}
+    Console    \nLast event found: ${Last_EventId}
+
+    :FOR    ${Event}    IN    @{Event_List}
+    \    Log    ${Event['MessageID']}
+    \    Remove Values From List    ${Expected_Events}    ${Event['MessageID']}
+    Run Keyword And Continue On Failure
+    ...    Should Be Empty    ${Expected_Events}
+
+Validate Activity Alerts
+    [Arguments]    ${Bay}    ${Expected_Alerts}
+    ${Alert_list}    ${Last_AlertID}    Fusion Api Get Activity Alerts
+    ...    Starting_AlertID=${${Last_AlertId}}    Resource_Filter=.*EnclosureManager\/${Bay}.*
+
+    :FOR    ${Alert}    IN    @{Alert_List}
+    \    Remove Values From List    ${Expected_Alerts}    ${Alert['alertTypeID']}
+    Run Keyword And Continue On Failure
+    ...    Should Be Empty    ${Expected_Alerts}    Event(s) not found: ${Expected_Alerts}
+
+Validate EM ${BAY} role is ${ROLE} in OneView
+    ${DeviceInfo}    Fusion Api Get Device    BayNumber=${Bay}
+    # Verify specfied EM role is now Active/Standby
+    Run Keyword And Continue On Failure
+    ...    Should Be Equal    ${DeviceInfo['role']}    ${ROLE}    msg=Enclosure Manager ${Bay} is not reporting '${ROLE}' role in OneView.
+
+Validate EM ${BAY} role is Active in EM RIS
+    ${ActiveEMResource}=    Get Active EM Resource
+    ${CurrentActiveEMBay}=    Fetch From Right    ${ActiveEMResource}    /
+    Should Be Equal    ${CurrentActiveEMBay}    ${Bay}     msg=Enclosure Manager ${Bay} is not current Active EM in EM-RIS.
+
+Validate no RIS events are received
+    ${Event_List}    ${Last_EventID}=    EM Diags Get Audit Log Events
+    ...    Starting_EventID=${Last_EventID}    Event_Filter=/ForceFailover
+    EM Diags Print Audit Log Summary    ${Event_List}
+    Run Keyword And Continue On Failure
+    ...    Should Be Empty    ${Event_List}
+
+Validate no Activity Alerts are received
+    Run Keyword And Continue On Failure
+    ...    Run Keyword And Expect Error   No Activity Events Found
+    ...    Fusion Api Get Activity Alerts    Starting_AlertID=${${Last_AlertId}}    Resource_Filter=.*EnclosureManager\/.*
+
+Suite Setup
+    Login to Fusion via REST
+    Login to Fusion via SSH
+
+    # Get EM Session ID
+    Login to EM
+
+    # Verify 2EM precondition
+    ${available EMs}=    Get Present Enclosure managerBays List
+    ${EM count}=    Get Length    ${available EMs}
+    Should Be Equal as Strings    ${EM count}    2    msg=2EMs are required for this test script.
+
+    # Set Active and Standby EMs
+    Update EM Roles
+
+    # Find Last Audit Event IDs
+    Run Keyword and Ignore Error    EM Diags Get Audit Log Events
+    # Set Suite Variable    ${Last_EventID}     4-137    ### Debug Code
+    Console    Last EM Event found: ${Last_EventID}
+    # Run Keyword and Ignore Error    Fusion Api Get Activity Alerts
+    Set Suite Variable    ${Last_AlertID}     1      ### Debug Code
+    Console    Last Alert found: ${Last_AlertID}
+
+Suite Teardown
+    Logout of Fusion via REST
+    Logout of Fusion via SSH
+
+###############################################################################
+
+Perform EM Action
+    [Documentation]    Perform an efuse action on a EM bay. Action = EFuseOff | EFuseOn
+    [Arguments]    ${Action}    ${BayNumber}    ${Resource}=EnclosureManager
+    # ${Header}    Set Variable    "X-Auth-Token":"${EMSessionID}"
+    ${Data}      Set Variable    {"Action":"${Action}"}
+    ${Output}    Execute SSH Command
+    ...    curl -ikX POST -H ${Auth_Header} --data-ascii '${data}' https://${EM_IP}%${fusion_nic}/rest/v1/${Resource}/${BayNumber}
+    Should Contain    ${Output}    { "Action": "${Action}" }
+    ...    msg=${Action} action failed \n${Output}
+
+###############################################################################
+
+EM Diags Get Audit Log Events
+    [Documentation]    Fetch Diag Audit Log Events.
+    ...    (Assumes an SSH connection with curl is currently open)
+    ...    Returns a list of (dictionary) entries and EventID of the latest event encountered.
+    [Arguments]    ${IP}=${EM_IP}    ${Nic}=${FUSION_NIC}
+    ...            ${Origin_Filter}=/rest/v1    ${Starting_EventID}=0-0
+    ...            ${Event_Filter}=${EMPTY}
+    Set Suite Variable    ${Last_EventID}    ${Starting_EventID}
+    ${EM_Audit_Events_List}    Create List
+
+    # Get the most recent entries from the audit (RIS events) log.
+    ${Output}    Execute SSH Command
+    ...       curl -ksS -H ${Auth_Header} https://${EM_IP}%${FUSION_NIC}/rest/v1/Diags/AuditLog/50${Event_Filter}
+    # Remove CLI prompt from buffer.  It messes up loads.
+    ${Output}    String.Fetch From Left    ${Output}    [root@
+
+    # Break the output into an (easier to handle) list of lines. One line per event.
+    @{Lines}    Split To Lines    ${Output}
+    : FOR    ${Line}    IN    @{Lines}
+    \    # Reformat event/line (string) into a json dictionary
+    \    ${Event}    json.loads    ${Line}
+
+    \    # Select only the most recent events - skip any before that.
+    \    ${EventID}    Get From Dictionary    ${Event}    EventID
+    \    # Log To Console    Considering Event ${EventID}
+    \    # EventID's are of the form n-nnn.  Only compare at the portion after the dash.
+    \    ${tmpEventMajorID}        Fetch From Left    ${EventID}    -
+    \    ${tmpEventID}             Fetch From Right    ${EventID}    -
+    \    ${tmpStarting_EventMajorID}    Fetch From Left    ${Starting_EventID}    -
+    \    ${tmpStarting_EventID}    Fetch From Right    ${Starting_EventID}    -
+    \    Run Keyword If    ${100000 * ${tmpStarting_EventMajorID} + ${tmpStarting_EventID}} >= ${100000 * ${tmpEventMajorID} + ${tmpEventID}}    Continue For Loop
+
+    \    # Remember the last EventID encountered
+    \    ${tmpLast_EventMajorID}    Fetch From Left    ${Last_EventID}    -
+    \    ${tmpLast_EventID}    Fetch From Right    ${Last_EventID}    -
+    \    Run Keyword If    ${100000 * ${tmpEventMajorID} + ${tmpEventID}} >= ${100000 * ${tmpLast_EventMajorID} + ${tmpLast_EventID}}
+    \    ...    Set Suite Variable    ${Last_EventID}    ${EventID}
+
+    \    # Filter out any unrelated events (e.g., I'm only interested in EM events)
+    \    # Example: ${Origin_Filter} = '/rest/v1/EMBays/${bayNumber}'
+    \    ${OriginOfCondition}    Get From Dictionary    ${Event}    OriginOfCondition
+    \    ${Found}    Run Keyword And Return Status
+    \    ...    Should Match Regexp    ${OriginOfCondition}    ${Origin_Filter}
+    \    Run Keyword If    '${Found}'=='False'    Continue For Loop
+
+    \    # Add event (dictionary) into 'List of EM Audit Events'
+    \    Append to List    ${EM_Audit_Events_list}    ${Event}
+    [Return]    ${EM_Audit_Events_List}    ${Last_EventID}
+
+EM Diags Print Audit Log Summary
+    [Documentation]    Print (on console) a brief summary of events in list.
+    [Arguments]    ${EM_Audit_Events_List}
+    Console    \nEM Audit Log
+    : FOR    ${Event}    IN        @{EM_Audit_Events_List}
+    \    ${EventID}      Get From Dictionary    ${Event}    EventID
+    \    ${Origin}       Get From Dictionary    ${Event}    OriginOfCondition
+    \    ${EventType}    Get From Dictionary    ${Event}    EventType
+    \    ${MessageID}    Get From Dictionary    ${Event}    MessageID
+    \    Console    ${EventID}\t${MessageID}\t${EventType}\t${Origin}
+
+Fusion Api Get Activity Alerts
+    [Documentation]    Fetch recent Fusion Activity Alerts
+    ...    (Assumes a Fusion REST Api connection is open and logged in).
+    ...    Returns a list of Alerts.
+    [Arguments]    ${Starting_AlertID}=1    ${Resource_Filter}=.*
+    ${Alert_List}    Create List
+
+
+    # Get the entire list of Alerts
+    log    Getting Fusion Alerts    console=True
+    ${Response}    Fusion Api Get Alerts    /rest/alerts?sort=created:descending
+
+    ${Count}    Get From Dictionary    ${Response}    count
+    Run Keyword if            '${Count}'=='0'    Console    \nNo alert events found
+    Return From Keyword If    '${Count}'=='0'    msg=No alert events found
+
+    ${Members}    Get From Dictionary    ${Response}    members
+    :FOR    ${Index}    IN RANGE    0    ${Count}
+    \    ${Alert}    Get From List    ${Members}    ${Index}
+    \    ${uri}    Get From Dictionary    ${Alert}    uri
+    \    ${id}     Fetch From Right    ${uri}    /
+
+    \    # Special case - We just want to find the last/highest Activity ID
+    \    Run Keyword If    ${Starting_AlertID}==1
+    \    ...    Set Suite Variable     ${Last_AlertID}    ${id}
+    \    Continue For Loop If    ${Starting_AlertID}==1    #${Alert_List}    ${id}
+
+    \    # Select only the most recent events - skip any after that
+    \    Continue For Loop If    ${Starting_AlertID}>=${id}    #${Alert_List}      ${Last_AlertID}
+
+    \    # Remember the last Alert ID encountered
+    \    Run Keyword If    ${id}>${Last_AlertID}
+    \    ...    Set Suite Variable    ${Last_AlertID}    ${id}
+
+    \    # Filter out any unrelated alerts
+    \    ${resourceID}    Get From Dictionary    ${Alert}    resourceID
+    \    ${Found}    Run Keyword And Return Status
+    \    ...    Should Match Regexp    ${resourceID}    ${Resource_Filter}
+    \    Run Keyword If    '${Found}'=='False'    Continue For Loop
+
+    \    # Include this alert into the 'List of Activity Events'
+    \    Append to List    ${Alert_List}    ${Alert}
+
+    Run Keyword And Continue On Failure
+    ...    Should Not Be Empty    ${Alert_List}    No Activity Events Found
+    [Return]    ${Alert_List}    ${Last_AlertID}
+
+Print Activity Event summary
+    [Arguments]    ${Alert_List}
+    :FOR    ${Alert}    IN    @{Alert_List}
+    \    ${uri}            Get From Dictionary    ${Alert}    uri
+    \    ${alertState}     Get From Dictionary    ${Alert}    alertState
+    \    ${alertTypeID}    Get From Dictionary    ${Alert}    alertTypeID
+    \    ${description}    Get From Dictionary    ${Alert}    description
+    \    Console     \n${uri}\t${alertTypeID}\t${alertState}\t${description}
+
+Fusion Api Get Device
+    [Documentation]    Get a specific device from the enclosure information
+    [Arguments]    ${DeviceType}=managerBays    ${BayNumber}=1
+    ${Response}    Fusion Api Get Enclosures
+    ${Status}      Get From Dictionary    ${Response}    status_code
+    Should be Equal    ${Status}    ${200}    msg=Get Enclosures failed ${Response}
+
+    # Make sure we get (more than zero) enclosures listed
+    ${Count}       Get From Dictionary    ${Response}    count
+    Run Keyword If    '${Count}'=='0'    Fatal Error    msg=No enclosures found
+
+    # Fetch a pointer to the first enclosure - Member0
+    ${Members}     Get From Dictionary    ${Response}    members
+    ${Member0}     Get From List          ${Members}      0
+
+    # Extract selected device bay information
+    ${DeviceBays}        Get From Dictionary    ${Member0}      ${DeviceType}
+    ${BayIndex}     Evaluate    ${BayNumber}-1
+    ${DeviceInfo}    Get From List    ${DeviceBays}    ${BayIndex}
+    [Return]    ${DeviceInfo}
+
+Print Device Info
+    [Arguments]    ${DeviceInfo}
+    # Print a nicely formatted copy on the console
+    ${NicelyFormattedJsonString}    json.dumps    ${DeviceInfo}    indent=${4}    sort_keys=${True}
+    Console    \nDevice Info\n${NicelyFormattedJsonString}
+
+Update EM Roles
+    ${ActiveEMResource}=    Get Active EM Resource
+    ${ActiveEMBay}=    Fetch From Right    ${ActiveEMResource}    /
+    Set Suite Variable    ${ActiveEMBay}
+    ${StandbyEMBay}=    Set Variable If    '${ActiveEMBay}'=='1'    2    1
+    Set Suite Variable    ${StandbyEMBay}
+    Log To Console    EM Bay ${ActiveEmBay} is active.
+
+Login To EM
+    ${EM_IP}    ${EMSessionID}=    EM Api Create Session
+    Set Suite Variable    ${Auth_Header}    "X-Auth-Token":"${EMSessionID}"

@@ -1,0 +1,215 @@
+*** Settings ***
+Documentation	OVST test suite for hellfire
+
+Library			FusionLibrary
+Library			RoboGalaxyLibrary
+Library			MgmtFWLibrary
+Library			OperatingSystem
+Library			BuiltIn
+Library			Collections
+Library			XML
+Library			String
+Library			json
+Library			Process
+
+Library			os_deployment.py
+Library			OVA_deployment.py
+Library			thumbprint.py
+Library			vm_deployment.py
+Library			svmc_deployment.py
+Resource		../../../Resources/api/fusion_api_resource.txt
+Resource		../../../Resources/api/hellfire_api_resource.txt
+Resource		../../../Resources/api/hellfire/sdi_system_profiles.txt
+Variables		data_variables_hellfire_ovst.py
+
+
+*** Test Cases ***
+
+Cleanup OVA
+	RoboGalaxyLibrary.Connect To VI Server		${vc_ip}	${vc_user}	${vc_password}
+	${svmc_exists}=		Run keyword and return status	OVA_deployment.connect_to_host_and_get_vm	${vc_ip}	${vc_user}	${vc_password}		${svmc_name}
+	${svmc_power_status}=	Run keyword if	${svmc_exists}==True	RoboGalaxyLibrary.is_vm_powered_off				${svmc_name}
+	Run keyword if	${svmc_power_status}==False	RoboGalaxyLibrary.power_off_vm		${svmc_name}
+	Run keyword if	${svmc_exists}==True		RoboGalaxyLibrary.destroy_vm	${svmc_name}
+	${ov_exists}=		Run keyword and return status	OVA_deployment.connect_to_host_and_get_vm	${vc_ip}	${vc_user}	${vc_password}		${Appliance_Name}	
+	${power_status}=	Run keyword if	${ov_exists}==True	RoboGalaxyLibrary.is_vm_powered_off				${Appliance_Name}
+	Run keyword if	${power_status}==False	RoboGalaxyLibrary.power_off_vm		${Appliance_Name}
+	Run keyword if	${ov_exists}==True		RoboGalaxyLibrary.destroy_vm	${Appliance_Name}
+	Disconnect From VI Server
+
+Deploy OVA
+	svmc_deployment.deploy_svmc	${svmc_name}	${vc_ip}	${vc_user}	${vc_password}	${vc_port}	${datacenter_svmc}	${datastore_svmc}	${cluster_svmc}	${svmc_net_details}	${svmcloc}	${svmc_root_user}	${svmc_root_pw}
+	OVA_deployment.ov_deploy_process	${Appliance_Name}	${OV_ovaloc}	${OV_ovf_network}	${OV_network}	${ov_waitforip}		${ov_net_details}		${debug_log}
+	RoboGalaxyLibrary.Connect To VI Server		${vc_ip}	${vc_user}	${vc_password}
+	${Appliance_IP}=	RoboGalaxyLibrary.get_vm_ipv4_addresses		${Appliance_Name}
+	Fusion Api Save Eula	${Appliance_IP[0]}
+	Fusion Api Set Service Access	${Appliance_IP[0]}	${service_access}
+	${req} = 		Create Dictionary		newPassword=${app_password}
+	...										oldPassword=${app_init_password}
+	...										userName=${app_username}
+	Fusion Api Change Administrator Password	host=${Appliance_IP[0]}	body=${req}
+	Fusion Api Login Appliance 		${Appliance_IP[0]}		${admin_credentials}
+	${Response}    Fusion Api Get Appliance Interfaces
+    Run Keyword If    ${Response['status_code']}!=200
+    ...    Fatal Error    Unable to fetch Appliance Interfaces Dictionary: ${Response['message']}
+    Remove From Dictionary    ${Response}    status_code
+    Remove From Dictionary    ${Response}    headers
+    ${applianceNetworksList}    Get From Dictionary    ${Response}    applianceNetworks
+    ${applianceNetworks0}    Get From List    ${applianceNetworksList}    0
+    Set To Dictionary    ${applianceNetworks0}    app1Ipv4Addr    ${new_appliance_ip}
+    Set To Dictionary    ${applianceNetworks0}    ipv4Gateway		${gateway_ip}
+    Run keyword and Ignore Error	Fusion Api Configure Appliance Interfaces    ${Response}
+	Sleep	3 minutes    
+		
+Get IP
+	RoboGalaxyLibrary.Connect To VI Server		${vc_ip}	${vc_user}	${vc_password}
+	${Appliance_IP}=	RoboGalaxyLibrary.get_vm_ipv4_addresses		${Appliance_Name}
+	Log to Console	${Appliance_IP[0]}
+	Run keyword if	'${Appliance_IP[0]}'=='NULL' or '${Appliance_IP[0]}'=='None'		FAIL		Failed to get Oneview Appliance IP		
+	${Appliance_IP}		Set variable	${Appliance_IP[0]}
+	Set Global Variable      ${Appliance_IP}	
+
+Add Users
+	Fusion Api Login Appliance 		${Appliance_IP}		${admin_credentials}
+	Add Users from variable		${users}
+	Fusion Api Logout Appliance
+	
+Add Ethernet Networks
+	Fusion Api Login Appliance 		${Appliance_IP}		${admin_credentials}
+	Add Ethernet Networks from variable		${ethernet_networks}
+    Fusion Api Logout Appliance
+    
+Add Network Sets
+	Fusion Api Login Appliance 		${Appliance_IP}		${admin_credentials} 
+	Add Network Sets from variable		${network_sets}
+	Fusion Api Logout Appliance
+
+Add DL's
+	Fusion Api Login Appliance 		${Appliance_IP}		${admin_credentials}
+    Add Server Hardware Async		${server_hardwares}
+    Sleep	2 minutes
+	Fusion Api Logout Appliance
+
+Add Server Profile Templates
+	Fusion Api Login Appliance 		${Appliance_IP}		${admin_credentials}
+	Add Non Existing Server Profile Templates		${server_profile_templates}
+    Fusion Api Logout Appliance
+  
+Register IP pools subnet
+	Fusion Api Login Appliance 		${Appliance_IP}		${admin_credentials}
+	Create ID Pools IPV4 Subnet			${ipv4_subnet}
+	Fusion Api Logout Appliance
+    
+Register IP pools ranges
+	Fusion Api Login Appliance 		${Appliance_IP}		${admin_credentials}
+	Create ID Pools IPV4 Ranges		${ipv4_ranges}
+	Fusion Api Logout Appliance
+
+Associate subnet
+	Fusion Api Login Appliance 		${Appliance_IP}		${admin_credentials}
+	:FOR	${sub_assc}	in	@{subnet_association} 
+	\	Edit network		${sub_assc}
+	Fusion Api Logout Appliance
+	
+Create Hypervisor Manager
+	${response}		${session_id}=			Fusion Api Login Appliance		${Appliance_IP} 		${admin_credentials}
+	${validate}=	Convert to boolean   True
+	${resp}=	Add Hypervisor Manager		${hypervisor_managers}		${validate}		
+	Log to console		${resp}
+	Fusion Api Logout Appliance
+
+Create cluster profile
+	${response}		${session_id}=			Fusion Api Login Appliance		${Appliance_IP}			${admin_credentials}
+	:FOR	${ilo_ip}	in		@{ilo_ips}
+	\	${s_name}=	Get Server Hardware Name from ILO IP	${ilo_ip['ilo_ip']}
+	\	Power off Server	${s_name}
+	${validate}=	Convert to boolean   True 
+	${resp}=	Add Cluster Profile		${cluster_profile}		${validate}
+	Run keyword if	${resp[0]['status']}==False			FAIL
+	Run keyword if	${resp[0]['task_status']}==False	FAIL		
+	Log to console	${resp}
+	Fusion Api Logout Appliance
+
+Deploy OS on Host
+	os_deployment.deploy
+	Sleep	20 minutes
+	
+Add host to cluster
+	RoboGalaxyLibrary.Connect To VI Server		${vc_ip}	${vc_user}	${vc_password}
+	:FOR	${host_name}	in		@{Hosts}
+	\	${thumbprint}=        thumbprint.Main	${vc_ip}	${cluster_path}	${vc_user}	${vc_password}	${host_name['host_name']}	${host_name['host_user_name']}	${host_name['host_password']}		
+	\	Log to Console	${thumbprint}
+	\	${response}=	RoboGalaxyLibrary.Add Host To Cluster	${host_name['host_name']}	${cluster_name}	${host_name['host_user_name']}	${host_name['host_password']}	${thumbprint}
+	\	Log to Console	${response}
+	Sleep	15 minutes
+
+Add SDiRM
+	Fusion Api Login Appliance 		${Appliance_IP}		${admin_credentials}
+	${status}		${resp}=	Create Sdi System Profiles		${sdi_system_profiles_ilo}
+	Log to console		${resp}
+	Run keyword if	${status}==False			FAIL
+	Run keyword if	'${resp['taskState']}'!='Completed'			FAIL
+	Fusion Api Logout Appliance
+
+Create storage volumes
+	Fusion Api Login Appliance 		${Appliance_IP}		${admin_credentials}
+	:FOR	${volume}	in	@{storage_volumes}
+	\	${response}=		storage_volume.Add Storage Volume	${volume}
+	\	Wait for task2		${response}	
+	Fusion Api Logout Appliance
+
+Update Hypervisor Cluster Profile to Add Volumes
+	Fusion Api Login Appliance 		${Appliance_IP}		${admin_credentials}
+	Sleep	1 minutes
+	${valid}		Set Variable	True
+	${resp}=	Update Cluster Profile		${cluster_update_add_volumes}		${valid}
+	Run keyword if	${resp[0]['status']}==False			FAIL
+	Run keyword if	${resp[0]['task_status']}==False	FAIL
+	Sleep	5 minutes
+	Fusion Api Logout Appliance
+
+Update Hypervisor Cluster Profile to delete Volumes
+	Fusion Api Login Appliance 		${Appliance_IP}		${admin_credentials}
+	Sleep	5 minutes
+	${valid}		Set Variable	True
+	${resp}=	Update Cluster Profile		${cluster_update_delete_volumes}		${valid}
+	Sleep	2 minutes
+	Run keyword if	${resp[0]['status']}==False			FAIL
+	Run keyword if	${resp[0]['task_status']}==False	FAIL
+	Fusion Api Logout Appliance
+	
+Delete Storage Volumes
+	Fusion Api Login Appliance 		${Appliance_IP}		${admin_credentials}
+	${resplist_vol}=	Remove Storage Volumes Async	${storage_volumes}		${param}
+	wait for task2  ${resplist_vol}  timeout=500  interval=10
+	Fusion Api Logout Appliance
+
+#Delete SDiRM
+#	Fusion Api Login Appliance 		${Appliance_IP}		${admin_credentials}
+#	${status}	${response}=		Delete Sdi System Profiles		${sdi_system_profiles_ilo[0]['Name']}
+#	Log to console		Status:${status}
+#	Log to console		Response:${response}
+#	Run keyword if		${status}==False	FAIL
+#	Run keyword if		'${response['taskState']}'!='Completed'			FAIL	
+#	Fusion Api Logout Appliance
+#
+#Delete Cluster Profile
+#	Fusion Api Login Appliance 		${Appliance_IP}		${admin_credentials}
+#	Sleep	4 minutes
+#	${resp}=	Delete cluster profile		${cluster_profile[0]['name']}
+#	Run keyword if	${resp[0]['status']}==False			FAIL
+#	Run keyword if	${resp[0]['task_status']}==False	FAIL
+#	Fusion Api Logout Appliance
+#
+#Teardown setup
+#	Fusion Api Login Appliance 		${Appliance_IP}		${admin_credentials}
+#	Remove All Server Profile Templates
+#	Power off ALL servers
+#	Remove All DL Server Hardware Async
+#	Remove ALL Network Sets
+#	Fusion Api Logout Appliance
+
+Collect support dump of Oneview
+	Fusion Api Login Appliance 		${Appliance_IP}		${admin_credentials}
+	Create Support Dump And Downloads Batch On Verify	${support_dump_users}	True
+	Fusion Api Logout Appliance

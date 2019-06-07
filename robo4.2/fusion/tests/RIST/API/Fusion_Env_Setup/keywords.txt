@@ -1,0 +1,502 @@
+*** Settings ***
+Library              FusionLibrary
+Library              RoboGalaxyLibrary
+Library              OperatingSystem
+Library              BuiltIn
+Library              Collections
+Library              robot.api.logger
+Library           	 SSHLibrary
+Library           	 String
+Resource             ../../../../Resources/api/fusion_api_resource.txt
+Resource             ../global_variables.robot
+Variables 		     ./data_variables.py
+
+
+*** Keywords ***
+Setup Env For C7000
+    [Documentation]         Add/Create all necessary resources like Licenses/Users/Networks/Network sets/LIGs/EGs
+    ...                     that will be used by feature tests or regression tests
+    [Arguments]	            ${Ring}
+    ...                     ${FTS}=false
+    ...                     ${Add_Enclosure}=false
+    ...                     ${Add_Storage}=false
+    ...                     ${Team_Name}=SHQA
+    ...                     ${Add_User}=true
+	Set Log Level	TRACE
+	${settings} =           Set Variable                        ${C7000EnvSetup.${Team_Name}}
+
+    ${APPLIANCE_IP}=        Get Variable Value                  ${APPLIANCE_IP}                 ${None}
+
+    # ========= Do FTS if explicitly claimed =========
+	Run Keyword If          '${FTS}'=='true'
+	...                     Log    [First Time Setup]    console=true
+    Run Keyword If          '${FTS}'=='true'
+    ...                     First Time Setup
+    ...                     password=${settings.Common.admin_credentials['password']}
+    Run Keyword If          '${FTS}'=='false'
+    ...                     Console                             Skipped FTS since variable 'FTS' is '${FTS}'
+
+    # ========= Login to OneView to get the API client with the auth/token =========
+	Fusion Api Login Appliance 		                            ${APPLIANCE_IP}		            ${settings.Common.admin_credentials}
+    # ${RC}=                  Fusion Api Get Appliance Interfaces
+    # Console                 ${RC}
+
+    # ========= Add licenses =========
+	${licenses} =	        Get Variable Value	                ${settings.Common.licenses}
+	Run Keyword If	        ${licenses} is not ${null}		    Add Licenses from variable		${licenses}
+
+    # ========= Add users =========
+    ${users}=               Set Suite Variable	                ${null}
+    Run Keyword If          '${Add_User}' == 'true'
+	...                     Set Suite Variable    ${users}      ${settings.Common.users}
+	Run Keyword If	        ${users} is not ${null}             Add Users from variable		    ${users}
+
+    # ========= Set a mark indicating if this Env Setup is for DCS =========
+    Set Suite Variable      ${DCS}                              false
+    ${result}  ${ret_val}=  Run Keyword And Ignore Error
+    ...                     Should Contain
+    ...                     ${Ring}
+    ...                     DCS
+    Run Keyword If          '${result}'=='PASS'
+    ...                     Set Suite Variable
+    ...                     ${DCS}
+    ...                     true
+
+    # ========= Add SAN Managers (all defined types like HPE/Cisco/BNA) =========
+    ${SANManager_Data1}=    Get Variable Value                  ${settings.Common.SAN_Managers}
+    ${SANManager_Data}=     Deepcopy    ${SANManager_Data1}
+    Run Keyword If          '${DCS}'=='true'
+    ...                     Set Suite Variable
+    ...                     ${SANManager_Data}
+    ...                     ${settings.Common.SAN_Managers_DCS}
+    Run Keyword If          ${SANManager_Data} is not ${null}
+    ...                     Add San Managers Async
+    ...                     ${SANManager_Data}
+    #   ======= Make sure the VSANs are all discovered before using them to create networks
+    Sleep                   60s
+
+    # ========= Create Ethernet networks =========
+	${ethernet_networks} =	Get Variable Value                  ${settings.Common.ethernet_networks}
+	Run Keyword If	        ${ethernet_networks} is not ${null}
+	...                     Add Ethernet Networks from variable
+	...                     ${ethernet_networks}
+
+    # ========= Create FC networks =========
+	${fc_networks} =	    Get Variable Value	                ${settings.Common.fc_networks}
+	Run Keyword If          '${DCS}'=='true'
+	...                     Set Suite Variable
+	...                     ${fc_networks}
+	...                     ${settings.Common.fc_networks_DCS}
+	Run Keyword If	        ${fc_networks} is not ${null}
+	...                     Run Keyword And Ignore Error
+	...                     Add FC Networks from variable
+	...                     ${fc_networks}
+
+    # ========= Create FCoE networks =========
+	${fcoe_networks} =	    Get Variable Value	                ${settings.Common.fcoe_networks}
+	Run Keyword If          '${DCS}'=='true'
+	...                     Set Suite Variable
+	...                     ${fcoe_networks}
+	...                     ${settings.Common.fcoe_networks_DCS}
+	Run Keyword If	        ${fcoe_networks} is not ${null}
+	...                     Add FCoE Networks from variable
+	...                     ${fcoe_networks}
+
+    # ========= Create network sets =========
+	${network_sets} =        Get Variable Value	                ${settings.Common.network_sets}
+	Run Keyword If	        ${network_sets} is not ${null}
+	...                     Run Keyword And Ignore Error
+	...                     Add Network Sets from variable		${network_sets}
+
+    # ========= Create logical interconnect groups =========
+	${ligs} =	            Get Variable Value	                ${settings.${Ring}.LIG}
+	Run Keyword If	        ${ligs} is not ${null}
+	...                     Run Keyword And Ignore Error
+	...                     Run Keyword for List
+	...                     ${ligs}
+	...                     Add LIG from variable
+
+    # ========= Create enclosure groups =========
+	${enc_groups} =	        Get Variable Value	                ${settings.${Ring}.EG}
+	Run Keyword If	        ${enc_groups} is not ${null}
+	...                     Run Keyword And Ignore Error
+	...                     Run Keyword for List
+	...                     ${enc_groups}
+	...                     Add Enclosure Group from variable
+
+    # ========= Add enclosures =========
+    ${Encs} =	            Set Suite Variable	                ${null}
+    Run Keyword If         '${Add_Enclosure}'=='true'
+    ...                     Set Suite Variable
+    ...                     ${Encs}
+    ...                     ${settings.${Ring}.Encs}
+	Run Keyword If	        ${Encs} is not ${null}
+	...                     Run Keyword And Ignore Error
+	...                     Add Enclosures from variable      ${Encs}
+
+    # ========= Add storage systems (step 1 - connect) =========
+    ${ss} =                 Set Suite Variable                 ${null}
+    Run Keyword If          '${Add_Storage}'=='true'
+    ...                     Set Suite Variable
+    ...                     ${ss}
+    ...                     ${settings.${Ring}.StorageSystems_Put}
+	Run Keyword If	        ${ss} is not ${null}
+	...                     Run Keyword And Ignore Error
+    ...                     Add Storage Systems Async    ${ss}
+
+    # ========= Add storage systems (step 2 - edit) =========
+	${ss_put} =	            Set Suite Variable	                ${null}
+    Run Keyword If          '${Add_Storage}'=='true'
+    ...                     Set Suite Variable
+    ...                     ${ss_put}
+    ...                     ${settings.${Ring}.StorageSystems_Put}
+	Run Keyword If	        ${ss_put} is not ${null}
+	...                     Run Keyword And Ignore Error
+	...                     Edit Storage Systems Async          ${ss_put}
+
+    # ========= Managed storage pools (step 3 - edit) =========
+	${sp_put} =	            Set Suite Variable	                ${null}
+    Run Keyword If          '${Add_Storage}'=='true'
+    ...                     Set Suite Variable
+    ...                     ${sp_put}
+    ...                     ${settings.${Ring}.StoragePools}
+	Run Keyword If	        ${sp_put} is not ${null}
+	...                     Run Keyword And Ignore Error
+	...                     Edit Storage Pools Async            ${sp_put}
+
+    # ========= Create volume templates =========
+	${vts} =	            Set Suite Variable	                ${null}
+    Run Keyword If          '${Add_Storage}'=='true'
+    ...                     Set Suite Variable
+    ...                     ${vts}
+    ...                     ${settings.${Ring}.VolumeTemplates}
+	Run Keyword If	        ${vts} is not ${null}
+	...                     Run Keyword And Ignore Error
+	...                     Add Storage Volume Templates Async  ${vts}
+
+    # ========= Create volumes =========
+	${vols} =	            Set Suite Variable	                ${null}
+    Run Keyword If          '${Add_Storage}'=='true'
+    ...                     Set Suite Variable
+    ...                     ${vols}
+    ...                     ${settings.${Ring}.Volumes}
+	Run Keyword If	        ${vols} is not ${null}
+	...                     Run Keyword And Ignore Error
+	...                     Add Storage Volumes Async           ${vols}
+
+
+Setup Env For TBird
+    [Documentation]         Add/Create all necessary resources like Licenses/Users/Networks/Network sets/LIGs/EGs
+    ...                     that will be used by feature tests or regression tests
+    [Arguments]	            ${Ring}
+    ...                     ${Add_LE}=false
+    ...                     ${Add_Storage}=false
+    ...                     ${Team_Name}=SHQA
+    ...                     ${Add_Existing_Storage}=false
+    ...                     ${Add_User}=true
+	Set Log Level	        TRACE
+	${settings} =           Set Variable                        ${TBirdEnvSetup.${Team_Name}}
+
+	${licenses} =	        Get Variable Value	                ${settings.Common.licenses}
+	Run Keyword If	        ${licenses} is not ${null}
+	...                     Run Keyword And Ignore Error
+	...                     Add Licenses from variable		${licenses}
+#	Delete All Fusion License
+
+    ${users}=               Set Suite Variable	                ${null}
+    Run Keyword If          '${Add_User}' == 'true'
+	...                     Set Suite Variable    ${users}      ${settings.Common.users}
+	Run Keyword If	        ${users} is not ${null}
+	...                     Run Keyword And Ignore Error
+	...                     Add Users from variable		    ${users}
+
+    ${SANManager_Data}=     Get Variable Value                  ${settings.Common.SAN_Managers}
+    Run Keyword If          ${SANManager_Data} is not ${null}
+    ...                     Add San Managers Async
+    ...                     ${SANManager_Data}
+
+	${ethernet_networks} =	Get Variable Value                  ${settings.Common.ethernet_networks}
+	Run Keyword If	        ${ethernet_networks} is not ${null}
+	...                     Run Keyword And Ignore Error
+	...                     Add Ethernet Networks from variable  ${ethernet_networks}
+
+	${fc_networks} =	    Get Variable Value	                ${settings.Common.fc_networks}
+	Run Keyword If	        ${fc_networks} is not ${null}
+	...                     Run Keyword And Ignore Error
+	...                     Add FC Networks from variable       ${fc_networks}
+
+	${fcoe_networks} =	    Get Variable Value	                ${settings.Common.fcoe_networks}
+	Run Keyword If	        ${fcoe_networks} is not ${null}
+	...                     Run Keyword And Ignore Error
+	...                     Add FCoE Networks from variable     ${fcoe_networks}
+
+	${network_sets} =        Get Variable Value	                ${settings.Common.network_sets}
+	Run Keyword If	        ${network_sets} is not ${null}
+	...                     Run Keyword And Ignore Error
+	...                     Add Network Sets from variable		${network_sets}
+
+	${ligs} =	            Get Variable Value	                ${settings.${Ring}.LIG}
+	Run Keyword If	        ${ligs} is not ${null}
+	...                     Run Keyword And Ignore Error
+	...                     Run Keyword for List                ${ligs}
+	...                     Add LIG from variable
+
+	${sas_ligs} =	        Get Variable Value	                ${settings.${Ring}.SAS_LIG}
+	Run Keyword If	        ${sas_ligs} is not ${null}
+	...                     Run Keyword And Ignore Error
+	...                     Run Keyword for List                ${sas_ligs}
+	...                     Add SAS LIG
+
+	${carbon_ligs} =	    Get Variable Value	                ${settings.${Ring}.CARBONS_LIG}
+	Run Keyword If	        ${carbon_ligs} is not ${null}
+	...                     Run Keyword And Ignore Error
+	...                     Run Keyword for List                ${carbon_ligs}
+	...                     Add LIG from variable
+
+	${enc_groups} =	        Get Variable Value	                ${settings.${Ring}.EG}
+	Run Keyword If	        ${enc_groups} is not ${null}
+	...                     Run Keyword And Ignore Error
+	...                     Run Keyword for List                ${enc_groups}
+	...                     Add Enclosure Group from variable
+
+    ${logical_enc} =	    Set Suite Variable	                ${null}
+    Run Keyword If         '${Add_LE}'=='true'
+    ...                     Set Suite Variable
+    ...                     ${logical_enc}
+    ...                     ${settings.${Ring}.LE}
+	Run Keyword If	        ${logical_enc} is not ${null}
+	...                     Run Keyword And Ignore Error
+	...                     Add Logical Enclosure from variable
+	...                     ${logical_enc}
+
+    # ========= Add storage systems (step 1 - connect) =========
+    ${ss} =                 Set Suite Variable                 ${null}
+    Run Keyword If          '${Add_Storage}'=='true'
+    ...                     Set Suite Variable
+    ...                     ${ss}
+    ...                     ${settings.${Ring}.StorageSystems_Put}
+	Run Keyword If	        ${ss} is not ${null}
+	...                     Run Keyword And Ignore Error
+	...                     Add Storage Systems Async    ${ss}
+#	Pass Execution          +++++++++++++++++ =============
+
+    # ========= Add storage systems (step 2 - edit) =========
+	${ss_put} =	            Set Suite Variable	                ${null}
+    Run Keyword If          '${Add_Storage}'=='true'
+    ...                     Set Suite Variable
+    ...                     ${ss_put}
+    ...                     ${settings.${Ring}.StorageSystems_Put}
+	Run Keyword If	        ${ss_put} is not ${null}
+	...                     Run Keyword And Ignore Error
+	...                     Edit Storage Systems Async          ${ss_put}
+
+    # ========= Managed storage pools (step 3 - edit) =========
+	${sp_put} =	            Set Suite Variable	                ${null}
+    Run Keyword If          '${Add_Storage}'=='true'
+    ...                     Set Suite Variable
+    ...                     ${sp_put}
+    ...                     ${settings.${Ring}.StoragePools}
+	Run Keyword If	        ${sp_put} is not ${null}
+	...                     Run Keyword And Ignore Error
+	...                     Edit Storage Pools Async            ${sp_put}
+
+	${vts} =	            Get Variable Value	                ${settings.${Ring}.VolumeTemplates}
+	Run Keyword If	        '${Add_Storage}'=='true' and ${vts} is not ${null}
+	...                     Run Keyword And Ignore Error
+	...                     Add Storage Volume Templates Async  ${vts}
+
+	${vols} =               Get Variable Value	                ${settings.${Ring}.Volumes}
+	Run Keyword If	        '${Add_Storage}'=='true' and ${vols} is not ${null}
+	...                     Run Keyword And Ignore Error
+	...                     Add Storage Volumes Async           ${vols}
+
+	${vols} =               Get Variable Value	                ${settings.${Ring}.Existing_Volumes}
+	Run Keyword If	        '${Add_Existing_Storage}'=='true' and ${vols} is not ${null}
+	...                     Run Keyword And Ignore Error
+	...                     Add Existing Storage Volumes From Storage Systems       ${vols}
+
+Translate Pass Status
+    [Documentation]     Translate pass status
+    [Arguments]         ${Pass_Build}
+    Run Keyword If      '${Pass_Build}'=='true'     Set Suite Variable      ${Non_Passed}   False
+    Run Keyword If      '${Pass_Build}'=='false'    Set Suite Variable      ${Non_Passed}   True
+
+Generate Unique Identifier
+    [Documentation]         Generate unique identifier
+    [Arguments]             ${identifier}
+    ${random number}=       Generate Random String      4                       0123456789
+    ${identifier_length}=   Get Length                  ${identifier}
+    Run Keyword If          ${identifier_length}==0     Return From Keyword     ${random number}
+    ...                     ELSE                        Return From Keyword     ${identifier}-${random number}
+
+Deploy C7000 Appliance
+    [Documentation]  Deploy c7000 appliance
+    [Arguments]     ${Appliance_Deployment}=${C7000EnvSetup.${Team_Name}.Common.Appliance_Deployment}
+    ...             ${Fusion_Version}=${Fusion_Version}
+    ...             ${OVA_Type}=${OVA_Type}
+    ...             ${Build_Number_Filter}=${Build_Number_Filter}
+    ${settings}=            Set Variable                ${C7000EnvSetup.${Team_Name}}
+    ${Fusion_Version}=      Get Variable Value          ${Fusion_Version}           NONE
+    Run Keyword If          '${Fusion_Version}'=='NONE'
+    ...                     Set Suite Variable
+    ...                     ${Fusion_Version}
+    ...                     ${settings.Common.Appliance_Deployment['Fusion_Version']}
+
+    ${OVA_Type}=            Get Variable Value          ${OVA_Type}                 NONE
+    Run Keyword If          '${OVA_Type}'=='NONE'
+    ...                     Set Suite Variable
+    ...                     ${OVA_Type}
+    ...                     ${settings.Common.Appliance_Deployment['OVA_Type']}
+
+    ${Pass_Build}=          Get Variable Value           ${Pass_Build}          NONE
+    Run Keyword If          '${Pass_Build}'=='NONE'
+    ...                     Set Suite Variable
+    ...                     ${Pass_Build}
+    ...                     ${settings.Common.Appliance_Deployment['Pass_Build']}
+
+    ${Build_Number_Filter}=
+    ...                     Get Variable Value           ${Build_Number_Filter}          NONE
+    Run Keyword If          '${Build_Number_Filter}'=='NONE'
+    ...                     Set Suite Variable
+    ...                     ${Build_Number_Filter}
+    ...                     ${settings.Common.Appliance_Deployment['Build_Number_Filter']}
+
+    ${FTS}=                 Get Variable Value           ${FTS}                 NONE
+    Run Keyword If          '${FTS}'=='NONE'
+    ...                     Set Suite Variable
+    ...                     ${FTS}
+    ...                     ${settings.Common.Appliance_Deployment['FTS']}
+
+    ${Schematic}=            Get Variable Value      ${Schematic}               NONE
+    Run Keyword If          '${Schematic}'=='NONE'
+    ...                     Set Suite Variable
+    ...                     ${Schematic}
+    ...                     ${settings.Common.Appliance_Deployment['Schematic']}
+
+    Set Suite Variable      ${SSH_Username}         ${settings.Common.Appliance_Deployment['SSH_Username']}
+    Set Suite Variable      ${SSH_Password}         ${settings.Common.Appliance_Deployment['SSH_Password']}
+    Set Suite Variable      ${Fusion_Depot}         ${settings.Common.Appliance_Deployment['Fusion_Depot']}
+    Set Suite Variable      ${Image_Name}           ${settings.Common.Appliance_Deployment['Image_Name']}
+    Set Suite Variable      ${Image_Ext}            ova
+    Set Suite Variable      ${OVFtool}              ${settings.Common.Appliance_Deployment['OVFtool']}
+    Set Suite Variable      ${DATASTORE}            ${settings.Common.Appliance_Deployment['DATASTORE']}
+    Set Suite Variable      ${SITELAN_NETWORK}      ${settings.Common.Appliance_Deployment['SITELAN_NETWORK']}
+    Set Suite Variable      ${VM_FOLDER}            ${settings.Common.Appliance_Deployment['VM_FOLDER']}
+    Set Suite Variable      ${Target_Locator}       ${settings.Common.Appliance_Deployment['Target_Locator']}
+    Set Suite Variable      ${vSphere_IP}           ${settings.Common.Appliance_Deployment['vCenter']['server']}
+    Set Suite Variable      ${vSphere_Username}     ${settings.Common.Appliance_Deployment['vCenter']['user']}
+    Set Suite Variable      ${vSphere_Password}     ${settings.Common.Appliance_Deployment['vCenter']['password']}
+    Set Suite Variable      ${VMName_Prefix}        ${settings.Common.Appliance_Deployment['VMName_Prefix']}
+
+    Translate Pass Status   ${Pass_Build}
+
+    ${Image_Name}=      Run Keyword If          '${Image_Name}'=='NONE'
+    ...                 Get LatestBuild Name    ${Fusion_Depot}     ''      ${Image_Ext}
+    ...                 HPE?OneView.*${Build_Number_Filter}.*.%s$
+    ...                 ELSE
+    ...                 Set Variable            ${Image_Name}
+
+    Console                 \n[Image Name] = "${Image_Name}"
+    Set Suite Variable      ${Deploy_URL}                   ${Fusion_Depot}${Image_Name}
+    Console                 \nDeploying from: ${Deploy_URL}
+    Log                     ${Deploy_URL}
+    ${name}=                Get substring                   ${Image_Name}                   0   -4
+    Set Suite variable      ${Fusion_Name}                  ${settings.Common.Appliance_Deployment['VMName_Prefix']}-${name}
+    Console                 \nThe Appliance name is: ${Fusion_Name}
+# Check OVFtool
+    ${RC}                   ${Output}=                      Run and Return Rc and Output    dir ${OVFtool}
+    Run Keyword Unless      '${RC}' == '0'                  Fatal Error
+    ...                     msg=Could not find ovftool.exe. Is it installed? (See \\\\eml.usa.hp.com\\emgmt\\Tools\\WMARE)
+
+# Deploy Fusion Appliance
+    Console                 \nDeploying VM: ${Fusion_Name}
+    ${Command}=             Catenate                    ${OVFtool}
+    ...                     --skipManifestCheck
+    ...                     --noSSLVerify
+    ...                     --acceptAllEulas
+    ...                     --machineOutput
+    ...                     --powerOn
+    ...                     --ipProtocol=IPv4
+    ...                     --powerOffTarget
+    ...                     --overwrite
+    ...                     --name="${Fusion_Name}"
+    ...                     --datastore="${DATASTORE}"
+    ...                     --network="${SITELAN_NETWORK}"
+    ...                     --diskMode=thin
+    ...                     --vmFolder="${VM_FOLDER}"
+    ...                     ${Deploy_URL}
+    ...                     ${Target_Locator}
+    Log                     ${Command}
+    ${RC}                   ${Output}=                  Run and Return Rc and Output    ${Command}
+    Run Keyword Unless      '${RC}' == '0'              Fatal Error                     msg=Could not deploy new VM ${Output}
+
+    Connect To VI Server        ${vSphere_IP}           ${vSphere_Username}     ${vSphere_Password}
+    Wait Until Keyword Succeeds                         10 min                  60 sec                  Get VM IPv4 Addresses
+    ...                         ${Fusion_Name}
+    Sleep                       60
+    @{IPs}=                     Get VM IPv4 Addresses   ${Fusion_Name}
+    ${IP}=                      Get From List           ${IPs}                  0
+    Set Suite Variable          ${Fusion_IP}            ${IP}
+    Set Suite Variable          ${Fusion_URL}           https://${Fusion_IP}
+    Set Environment Variable    FUSION_URL              ${Fusion_URL}
+    Set Environment Variable    FUSION_IP               ${Fusion_IP}
+    Console                     \nYour FusionVM URL is: ${Fusion_URL}
+
+	Run Keyword If              "${OVA_Type}"=="DCS"
+	...                         Run Keyword If
+	...                         "${Schematic}"!="NONE"
+	...                         Run Keyword If
+	...                         "${Schematic}"!="demo"
+	...                         Set Appliance Schematic     ${Schematic}    ${Fusion_IP}
+
+    [Return]                    ${Fusion_IP}
+
+
+Set Appliance Schematic
+    [Documentation]     Set appliance schematic
+    [Arguments]         ${Schematic}    ${Fusion_IP}
+    Open Connection         ${Fusion_IP}
+    Login                   root                hpvse1
+
+    Wait Until Keyword Succeeds     5 min   5 sec   Check DCS status is Running
+
+    ${RC}=                  Execute Command     dcs status
+    Console                 \n${RC}
+    Should Match Regexp     ${RC}               ^.*DCS.is.Running.*
+
+    ${matched_strings}=     Get Regexp Matches  ${RC}           .*Schematic.used\:.*/dcs/schematic/${Schematic}.*$
+    Console                 matched string list for "${Schematic}" is: "${matched_strings}"
+    Run Keyword If          "${matched_strings}"=="[]"
+    ...                     Console
+    ...                     Current DCS Schematic is not "${Schematic}", will change it
+    Run Keyword If          "${matched_strings}"!="[]"
+    ...                     Console
+    ...                     Current DCS Schematic is already "${Schematic}" as expected, nothing to change
+    Return From Keyword If  "${matched_strings}"!="[]"
+
+    Should Match Regexp     ${RC}               .*Schematic.used\:.*/dcs/schematic/.*$
+    ${RC}=                  Execute Command     dcs stop
+    Console                 \n${RC}
+    Should Match Regexp     ${RC}               .*DCS.is.Stopped.*
+
+    Wait Until Keyword Succeeds     5 min   5 sec   Check Expected DCS Schematic is Running    ${Schematic}
+
+    ${RC}=                  Execute Command     dcs status
+    Console                 \n${RC}
+    Should Match Regexp     ${RC}               ^.*DCS.is.Running.*
+    Should Match Regexp     ${RC}               .*Schematic.used:.*/dcs/schematic/${Schematic}.*$
+
+    Close Connection
+
+Check Expected DCS Schematic is Running
+    [Documentation]    Check expected dcs schematic is running
+    [Arguments]             ${Schematic}
+    ${RC}=                  Execute Command     dcs start /dcs/schematic/${Schematic} cold
+    Console                 \n${RC}
+    Should Match Regexp     ${RC}               .*DCS.daemon.is.already.running.*
+
+Check DCS status is Running
+    [Documentation]    check dcs status is running
+    ${RC}=                  Execute Command     dcs status
+    Console                 \n${RC}
+    Should Match Regexp     ${RC}               ^.*DCS.is.Running.*

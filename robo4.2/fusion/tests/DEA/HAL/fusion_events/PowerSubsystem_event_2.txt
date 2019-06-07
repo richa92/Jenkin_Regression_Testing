@@ -1,0 +1,116 @@
+*** Settings ***
+Documentation    Test suite to validate Power Subsytem related events on OneView and FLM
+...               It covers testing of:
+...               PowerSubsystemAllocationCollectionChanged
+...               PowewrSusbsystemAllocationDeleted
+...               PowewrSusbsystemAllocationDPatched
+...               PowewrSusbsystemAllocationPosted
+...    = GENERIC USAGE =
+...    | pybot | -v ENC_SERIAL_NO:[enclosure serial #] | -v APPLIANCE_IP:<ipv4> | -v CIM_Linux_IP:<ipv4> |-v GIT_REPO_ROOT: | PowerSubsystem_event.txt |
+...    = Variables =
+...    | GIT_REPO_ROOT |      Required: Repo root path if NOT defined in environment variable this is mgmtfw root location|
+...    | ENC_SERIAL_NO |      Optional: If omitted, will use the 1st enclosure detected in OV |
+...    | APPLIANCE_IP |       Required: OneView IPv4 address |
+...    | CIM_Linux_IP |       Required:CI Manager ipv4 under test |
+
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Library           RoboGalaxyLibrary
+Library           MgmtFWLibrary
+Library           json
+Suite Setup       Configure Events Test Environment
+Suite Teardown    Run Keywords  Logout of EM RIS   AND    Logout of Fusion Via REST
+
+
+*** Test Case ***
+TC 01: PowerAllocation Events Verification
+    [Documentation]    This test will validate the PowerAllocation events
+    [Tags]    PowerSubsystem    Alert    Events    FLM2.00     OV3.10    OVD5234  #Resource updated event and hence not valid test
+    ${last_fusion_event_id}=    get last fusion event ID
+    ${power_infrastructure_watts}=    Get Power Infrastructure Watts
+    ${low_pwr_limit_val}=    Evaluate    ${power_infrastructure_watts} + 300
+    ${pwr_limits}=    Set Variable    ${Power_Input_Watts}
+    ${pwr_limit_increased_val}=    Convert To Integer    ${pwr_limits}
+    ${present_list}=    Get List of Occupied iLO Blade Bays
+    Should Not Be Empty    ${present_list}    msg=No iLO Blades present in the enclosure
+    ${set_enc_power_limit}=    Set Input Power Limit Watts    ${low_pwr_limit_val}
+    Should Be Equal As Integers    ${set_enc_power_limit}    200
+    ${pwr_limit}=    Get Input Power Limit Watts
+    Should Be Equal    ${pwr_limit}    ${low_pwr_limit_val}    msg=Failed to set enclosure power limit value
+    Set And Verify Input Power Limit State Is On
+    : FOR    ${blade_bay}    IN    @{present_list}
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${efuse_status_code}=    RIS EM Efuse Blade    ${blade_bay}    ${EM_EFUSE_Duration}
+    \    Should Be Equal As Integers    ${efuse_status_code}    ${EM_Accept_Request}
+    \    Sleep    8
+    \   ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \   Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \   Verify Audit Log Resource Updated Event      PowerAllocations    ${EL_Power_Subsystem_Power_Allocation_Collection_Changed}    1    450
+    \   Verify Fusion Event Sent By EM    ${EL_Power_Subsystem_Power_Allocation_Collection_Changed}    ${last_fusion_event_id}
+    \   Verify Audit Log Resource Updated Event      PowerAllocations    ${EL_Power_Subsystem_Power_Allocation_Deleted}    1    450  
+    \   Verify Fusion Event Sent By EM    ${EL_Power_Subsystem_Power_Allocation_Deleted}    ${last_fusion_event_id}
+    \   ${Account_status}=    Create an Account on iLO    ${blade_bay}    ${iLO_Username}    ${iLO_Password}    ${iLO_Login_Name}
+    \   ${ilo_ip}=    Get iLO IPv6 LL Address from EM RIS    ${blade_bay}
+    \   ${status}=    Login to iLO    ${ilo_ip}    ${iLO_Username}    ${iLO_Password}
+    \   ${Power_State}=    Get iLO Blade Power Status
+    \   Should Be Equal As Strings    ${Power_State}    Off
+    ${set_enc_power_limit_mod}=    Set Input Power Limit Watts    ${pwr_limit_increased_val}
+    Should Be Equal As Integers    ${set_enc_power_limit_mod}    200
+    ${pwr_limit_updated}=    Get Input Power Limit Watts
+    Sleep    180
+    Should Be Equal    ${pwr_limit_updated}    ${pwr_limit_increased_val}    msg=Failed to set/modify enclosure power limit value
+    : FOR    ${blade_bay}    IN    @{present_list}
+    \   ${efuse_status_code}=    RIS EM Efuse Blade    ${blade_bay}    ${EM_EFUSE_Duration}
+    \   ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \   Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \   Should Be Equal As Integers    ${efuse_status_code}    ${EM_Accept_Request}
+    \   Verify Audit Log Resource Updated Event       PowerAllocations    ${EL_Power_Subsystem_Power_Allocation_Posted}    1    450
+    \   Verify Fusion Event Sent By EM    ${EL_Power_Subsystem_Power_Allocation_Posted}    ${last_fusion_event_id}
+    \   Sleep    8
+    Sleep    180
+    : FOR    ${blade_bay}    IN    @{present_list}
+    \    Is PowerAllocation Resource Available For Ilo Based Blade    ${blade_bay}
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Resource Updated Event    PowerAllocations    ${EL_Power_Subsystem_Power_Allocation_Patched}    1    450
+    \    Verify Fusion Event Sent By EM    ${EL_Power_Subsystem_Power_Allocation_Patched}      ${last_fusion_event_id}
+    \    ${ilo_ip}=    Get iLO IPv6 LL Address from EM RIS    ${blade_bay}
+    \    ${status}=    Login to iLO    ${ilo_ip}    ${iLO_Username}    ${iLO_Password}
+    \    ${Power_State}=    Get iLO Blade Power Status
+    \    Should Be Equal As Strings    ${Power_State}    On
+    \    ${status}=    iLO RIS Del User    ${iLO_Login_Name}
+    \    Logout of iLO
+   [Teardown]    Run Keyword If Test Failed     Set And Verify Input Power Limit State Is Off
+
+TC 02: Verify Events For PowerSubsystemOverLimit And PowerSubsystemOverLimitCleared
+    [Documentation]    This test will validate the events for PowerSubsystemOverLimit And PowerSubsystemOverLimitCleared
+    [Tags]    PowerSubsystem    Alert    Events    FLM2.00    OV3.10    Automated
+    ${last_fusion_event_id}=    get last fusion event ID
+    ${pwrAllocatedWatts}=    Get PowerAllocatedWatts
+    ${pwr_limit_less_than_alloc_watts}=    Evaluate    ${pwrAllocatedWatts} - 200
+    Set And Verify Input Power Limit State Is On
+    ${set_enc_power_limit_less_than_alloc_watts}=    Set Input Power Limit Watts    ${pwr_limit_less_than_alloc_watts}
+    Should Be Equal As Integers    ${set_enc_power_limit_less_than_alloc_watts}    200
+    ${input_pwr_limit}=    Get Input Power Limit Watts
+    Should Be Equal    ${input_pwr_limit}    ${pwr_limit_less_than_alloc_watts}
+    ${encl_status}=    Get Enclosure Health
+    Should Be Equal    ${encl_status}    ${HEALTH_WARNING}
+    ${pwr_efficiency}=    Get Power Efficiency Percentage
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_Power_Subsystem_Overlimit}    PowerMetrics    None    250
+    Verify Fusion Event Sent By EM    ${EL_Power_Subsystem_Overlimit}    ${last_fusion_event_id}
+    ${pwr_limit_greater_than_alloc_watts}=    Evaluate    100 * ${pwrAllocatedWatts} / ${pwr_efficiency} + 10
+    ${set_enc_power_limit_greater_than_alloc_watts}=    Set Input Power Limit Watts    ${pwr_limit_greater_than_alloc_watts}
+    Should Be Equal As Integers    ${set_enc_power_limit_greater_than_alloc_watts}    200
+    ${output_pwr_limit}=    Get Output Power Limit Watts
+    Should Be True    ${output_pwr_limit} >= ${pwrAllocatedWatts}
+    Wait for Enclosure Health OK
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_Power_Subsystem_Overlimit_Cleared}    PowerMetrics    None    250
+    Verify Fusion Event Sent By EM    ${EL_Power_Subsystem_Overlimit_Cleared}    ${last_fusion_event_id}
+    Set Input Power Limit Off
+    [Teardown]    Run Keyword If Test Failed    Set Input Power Limit Off

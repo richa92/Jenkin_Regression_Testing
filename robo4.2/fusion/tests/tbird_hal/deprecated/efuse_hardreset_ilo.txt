@@ -1,0 +1,84 @@
+*** Settings ***
+Documentation     Efuse Hard Reset Blade iLO
+...    = USAGE =
+...    | pybot | -v ENCLOSURE:dcs          | FUSION_IP:my_fusion_ip | efuse_hardreset_ilo.txt |
+...    | pybot | -v ENCLOSURE:dcs          | efuse_hardreset_ilo.txt |
+...    = Variables =
+...    | ENCLOSURE | Optional. Dictionary key from variables.py representing the desired enclosure.  Default value is dcs. |
+...    | FUSION_IP | Required if ENCLOSURE is dcs.
+...    Pre-requisite:  iLO time setting is assumed to match current time.
+...    		       Blade iLO connect info in variables.py.
+...    User Story: US35834    Author: David Gray
+
+# AM-DVT US35834
+# David Gray
+# 2014, December
+
+Library           RoboGalaxyLibrary   	 	     	 	   # DVTs Robot Framework extensions
+Library           FusionLibrary                        	      	   # DVTs Robot Framework extensions
+Variables         ${CURDIR}/../resources/variables.py    ${ENCLOSURE}    # Variables file
+Resource          ${CURDIR}/../resources/defaults.txt	 	   # AM-DVT default variables
+Resource          ${CURDIR}/../resources/ilo_cli.txt               # AM-DVT Fusion API extensions
+Resource          ${CURDIR}/../resources/fusion_api.txt            # AM-DVT Fusion API extensions
+Resource          ${CURDIR}/../resources/hal_webapp.txt            # AM-DVT HAL Webapp extensions
+Resource          ${CURDIR}/../resources/system_info.txt           # AM-DVT fusion API extensions
+Force Tags        HW
+
+*** Variables ***
+
+${unfilled}   12
+
+*** Testcases ***
+
+Efuse HardReset Blade Bays
+    ${bayurl}=	Set Variable If		${DCS}==True		/rest/v1/chassis/1/BladeBays    /rest/v1/BladeBays
+    ${filled}  	${unfilled}=		Find Filled Bays	${bayurl}
+    ${bayno}=   	Select Random ELement From List    		${filled}
+    ${bay}=		Convert to String     ${bayno}
+    ${bayinfo}=	   	Get From Dictionary     ${BLADE DATA}           ${bay}
+    ${ip}= 	 Get From Dictionary	${bayinfo}	BLADE_ILO_IP4
+    ${user}=  	 Get From Dictionary	${bayinfo}	BLADE_ILO_USER
+    ${pw}= 	 Get From Dictionary	${bayinfo}	BLADE_ILO_PW
+
+    # Verify iLO is up
+    iLO Connect	 ${ip}		${user}		${pw}
+    iLO Get Uid Status
+
+    ${curtime}=	     Evaluate	time.time()	time
+    HAL Action  BladeManagerHardReset	${bayno}
+    Log 	Wait for Reset
+    Sleep	2
+
+    # Verify iLO is down
+    Run Keyword and Expect Error	*    iLO Get Uid Status
+    Log	 	 Wait for iLO to Reset	console=yes
+    :For   ${t}   in range	1     10
+    \    ${status}=  Run Keyword and Return Status
+    \	 ...	     iLO Get Uid Status
+    \	 Exit for Loop If		"${status}" == "True"
+    \	 Sleep	  10
+    Run Keyword If	  ${t} == 9	Fail	msg=Failed to re-connect with iLO
+    Verify Reset via iLO Log   ${curtime}
+
+Negative: Efuse HardReset EmptyBay
+    ${length}=  	Get Length	${unfilled}
+    ${status}  ${emptyno}   Run Keyword and Ignore Error
+    ...   Select Random Element From List    ${unfilled}
+    Run Keyword If	${length}>0
+    ...   HAL Action  	BladeManagerHardReset		${emptyno}	invalid
+
+Negative: Efuse HardReset Invalid Bay
+    ${invalid}= 	Set Variable			${-1}
+    HAL Action  	BladeManagerHardReset		${invalid}	invalid
+    ${invalid}= 	Set Variable			${99}
+    HAL Action  	BladeManagerHardReset		${invalid}	invalid
+    
+*** Keywords ***
+
+Verify Reset via iLO Log
+       [Arguments]   ${curtime}
+       @{log}=		iLO Get iLO Event log		hard reset
+       ${logtime}=	Get from Dictionary		@{log}[-1]	last_update
+       ${logtime}=	evaluate 			time.mktime(time.strptime("${logtime}","%m/%d/%Y %H:%M"))	time
+       ${delta}=	evaluate			abs(${curtime}-${logtime})
+       Run Keyword If	${delta} > 90			Fail    msg=No reset seen since start of test   

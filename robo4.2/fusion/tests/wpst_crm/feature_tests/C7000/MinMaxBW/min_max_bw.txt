@@ -1,0 +1,157 @@
+*** Settings ***
+Documentation		Feature Test: Min-Max Bandwidth
+...                 Updated test to include all network types: Ethernet, FC and FCoE networks
+...		
+Variables 		    data_variables.py		
+
+Suite Setup   		Run FTS and test-specific setup
+Suite Teardown		Suite Teardown
+
+Resource            ../../../../resource/fusion_api_all_resource_files.txt
+
+Library				Collections
+Library             json
+
+*** Variables ***
+${SSH_PASS}                     hpvse1
+${VM}
+
+*** Test Cases ***
+POSITIVE - Update MAX BW higher than previous requested value
+    [Tags]  1    POSITIVE
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	Fusion Api Login Appliance 		${APPLIANCE_IP}		${admin_credentials}
+	# GET the connectionTemplateUri for the networks, then update them
+	${eth_ct} =     Get connectionTemplateUri    net_101    ethernet
+    ${ct} =         Get Resource by URI     ${eth_ct}
+    Set to Dictionary   ${ct['bandwidth']}    maximumBandwidth    6000
+    ...                                       typicalBandwidth    4000
+    Remove from Dictionary    ${ct}    status_code    headers
+    ${resp} =       Fusion Api Update Connection Template    ${ct}    ${eth_ct}
+
+	${fc_ct} =     Get connectionTemplateUri    SAN-A    fc
+    ${ct} =         Get Resource by URI     ${fc_ct}
+    Set to Dictionary   ${ct['bandwidth']}    maximumBandwidth    6000
+    ...                                       typicalBandwidth    4000
+    Remove from Dictionary    ${ct}    status_code    headers
+    ${resp} =       Fusion Api Update Connection Template    ${ct}    ${fc_ct}
+
+	${fcoe_ct} =     Get connectionTemplateUri    fcoe_1002    fcoe
+    ${ct} =         Get Resource by URI     ${fcoe_ct}
+    Set to Dictionary   ${ct['bandwidth']}    maximumBandwidth    6000
+    ...                                       typicalBandwidth    4000
+    Remove from Dictionary    ${ct}    status_code    headers
+    ${resp} =       Fusion Api Update Connection Template    ${ct}    ${fcoe_ct}
+
+    sleep    3min
+
+    ${profile} =    Fusion Api Get Server Profiles    param=?filter="'name'=='Profile1'"
+    ${conns} =      Get from dictionary     ${profile['members'][0]}    connections
+
+	${valDict} = 	Create Dictionary	requestedMbps=2500
+	...									maximumMbps=6000
+	#${l} = 	Get Length	${conns}
+
+	:FOR	${x}	IN RANGE	0	3
+	\       Validate Response Regex    ${conns[${x}]}    ${valDict}
+
+POSITIVE - Update MAX BW lower than previous requested value
+    [Tags]  2    POSITIVE
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	Fusion Api Login Appliance 		${APPLIANCE_IP}		${admin_credentials}
+	# GET the connectionTemplateUri for the networks, then update them
+	${eth_ct} =     Get connectionTemplateUri    net_101    ethernet
+    ${ct} =         Get Resource by URI     ${eth_ct}
+    Set to Dictionary   ${ct['bandwidth']}    maximumBandwidth    2000
+    ...                                       typicalBandwidth    2000
+    Remove from Dictionary    ${ct}    status_code    headers
+    ${resp} =       Fusion Api Update Connection Template    ${ct}    ${eth_ct}
+
+	${fc_ct} =     Get connectionTemplateUri    SAN-A    fc
+    ${ct} =         Get Resource by URI     ${fc_ct}
+    Set to Dictionary   ${ct['bandwidth']}    maximumBandwidth    2000
+    ...                                       typicalBandwidth    2000
+    Remove from Dictionary    ${ct}    status_code    headers
+    ${resp} =       Fusion Api Update Connection Template    ${ct}    ${fc_ct}
+
+	${fcoe_ct} =     Get connectionTemplateUri    fcoe_1002    fcoe
+    ${ct} =         Get Resource by URI     ${fcoe_ct}
+    Set to Dictionary   ${ct['bandwidth']}    maximumBandwidth    2000
+    ...                                       typicalBandwidth    2000
+    Remove from Dictionary    ${ct}    status_code    headers
+    ${resp} =       Fusion Api Update Connection Template    ${ct}    ${fcoe_ct}
+
+    sleep    3min
+
+    ${profile} =    Fusion Api Get Server Profiles    param=?filter="'name'=='Profile1'"
+    ${conns} =      Get from dictionary     ${profile['members'][0]}    connections
+
+	${valDict} = 	Create Dictionary	requestedMbps=2500
+	...                                 allocatedMbps=2000
+	...									maximumMbps=2000
+	${l} = 	Get Length	${conns}
+	:FOR	${x}	IN RANGE	0	${l}
+	\       Validate Response Regex    ${conns[${x}]}    ${valDict}
+
+NEGATIVE - Attempt to over-subscribe the connections (max is 2gb, ask for 4gb)
+    [Tags]  3    NEGATIVE
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	Fusion Api Login Appliance 		${APPLIANCE_IP}		${admin_credentials}
+    # Get the profile, update the connections, then edit profile
+    ${profile} =    Fusion Api Get Server Profiles    param=?filter="'name'=='Profile1'"
+    ${uri} =        Get from dictionary     ${profile['members'][0]}    uri
+    ${conns} =      Get from dictionary     ${profile['members'][0]}    connections
+	${l} = 	Get Length	${conns}
+	:FOR	${x}	IN RANGE	0	${l}
+	\       Set to dictionary          ${conns[${x}]}    requestedMbps    4000
+
+	Set to dictionary    ${profile['members'][0]}    connections    ${conns}
+
+    ${resp} =    Fusion Api Edit Server Profile    body=${profile['members'][0]}    uri=${uri}
+    ${task} =   Wait For Task   ${resp}
+    # validate top level dict
+    ${valDict} = 	Create Dictionary	taskState=Error
+	...                                 taskStatus=Unable to edit server profile: Profile1.
+	Validate Response 	${task}	${valDict}
+    # validate taskErrors[0] dict
+    ${valDict} = 	Create Dictionary	errorCode=BW_NETWORKMAXBW_OVERFLOW_ERROR
+	...                                 message=Requested bandwidth (4 Gb/s) exceeds the maximum bandwidth (2 Gb/s) configured on the network for connection 1.
+	Validate Response 	${task['taskErrors'][0]}	${valDict}
+    should match regexp    ${task['taskErrors'][0]['recommendedActions'][0]}    Reduce the requested bandwidth for connection 1 so that it does not exceed the maximum bandwidth available for network .* of 2 Gb/s.
+
+*** Keywords ***
+FTS
+	Set Log Level	DEBUG
+    Get VM IP   ${VM}
+	First Time Setup					password=hpvse123
+
+Test Specific Setup
+	Set Log Level	TRACE
+	${TEST_NAME} =      Set Variable    TEST-SPECIFIC SETUP
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	Log to console and logfile	[TEST-SPECIFIC SETUP]
+	Fusion Api Login Appliance 		${APPLIANCE_IP}		${admin_credentials}
+	${users} =	Get Variable Value	${users}
+	Run Keyword If	${users} is not ${null}    Add Users from variable				${users}
+	${ethernet_networks} =	Get Variable Value    ${ethernet_networks}
+	Run Keyword If	${ethernet_networks} is not ${null}    Add Ethernet Networks from variable	${ethernet_networks}
+	${fc_networks} =	Get Variable Value	${fc_networks}
+	Run Keyword If	${fc_networks} is not ${null}    Add FC Networks from variable		${fc_networks}
+	${fcoe_networks} =	Get Variable Value	${fcoe_networks}
+	Run Keyword If	${fcoe_networks} is not ${null}    Add FCoE Networks from variable		${fcoe_networks}
+	${ligs} =	Get Variable Value	${ligs}
+	Run Keyword If	${ligs} is not ${null}	Run Keyword for List	${ligs}    Add LIG from variable
+	${enc_groups} =	Get Variable Value	${enc_groups}
+	Run Keyword If	${enc_groups} is not ${null}	Run Keyword for List	${enc_groups}	Add Enclosure Group from variable
+	${licenses} =	Get Variable Value	${licenses}
+	Run Keyword If	${licenses} is not ${null}		Add Licenses from variable		${licenses}
+	${encs} =	Get Variable Value	${encs}
+	Run Keyword If	${encs} is not ${null}					Add Enclosures from variable	${encs}
+	Power Off All Servers
+	${server_profiles} =	Get Variable Value	${server_profiles}
+	Run Keyword If	${server_profiles} is not ${null}		Add Server Profiles from variable	${server_profiles}
+
+Run FTS and test-specific setup
+	Set Log Level	TRACE
+    FTS
+    Test Specific Setup

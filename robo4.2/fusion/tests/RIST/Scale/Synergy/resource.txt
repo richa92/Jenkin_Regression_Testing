@@ -1,0 +1,195 @@
+*** Settings ***
+Documentation        Configures an appliance with resources found in supplied data file. Pass in specific tags with pybot -i <tag(s)> to limit processing
+Library                         FusionLibrary
+Library                         RoboGalaxyLibrary
+Library                         OperatingSystem
+Library                         BuiltIn
+Library                         Collections
+Library                         XML
+Library                         String
+Library                         json
+Library                         SSHLibrary
+Library                         FtpLibrary
+
+Resource                        ../../../../Resources/api/fusion_api_resource.txt
+
+Variables                       MiniRig.py
+*** Variables ***
+#${X-API-VERSION}                500
+${APPLIANCE_IP}                 10.0.16.100
+${VERIFY}                       ${TRUE}
+${spp}                          C:\\RoboGalaxy\\fusion\\tests\\RIST\\Scale\\Add-Spp.ps1
+${FUSION_SSH_USERNAME}          root
+${FUSION_SSH_PASSWORD}          hpvse1
+${XML_SOURCE_PATH}              /ci/data/sarm/config/rshpe.xml
+${XML_TARGET_PATH}              /ci/data/sarm/config/tmp.xml
+${XML_URL}                      http://${APPLIANCE_IP}:8444/RsdcMock/
+${REBOOT_TIME}                  60
+${REMOTE_SUPPORT_TIMEOUT}       300
+*** Keywords ***
+Scale Suite Setup
+    [Arguments]     ${credentials}
+    Set Log Level   TRACE
+    Appliance is pingable   ${APPLIANCE_IP}
+    Fusion Api Login Appliance  ${appliance_ip}     ${credentials}
+
+Scale Suite Teardown
+    Fusion Api Logout Appliance
+
+Verify Scale Resources
+    [Documentation]  Verify Resource
+    ...              **kwargs are used to add key value pair to the expected DTO
+    ...              Example:
+    ...                Verify Resource  ${expected_dto}
+    ...                Verify Resource  ${expected_dto}  Status=OK
+    ...              Data Required:
+    ...                Expected Resource DTO
+    [Arguments]  ${expected_dto}  &{kwargs}
+
+    ${validate_status} =    Create List
+    : FOR   ${expected}     IN      @{expected_dto}
+    \   ${status}  ${name} =  Run Keyword and Ignore Error  Get From Dictionary  ${expected}  name
+    \   Return from keyword if    '${status}'=='FAIL'    ${expected} doesn't contain the key $name
+    \   ${status}  ${type} =  Run Keyword and Ignore Error  Get From Dictionary  ${expected}  type
+    \   Return from keyword if    '${status}'=='FAIL'    ${expected} doesn't contain the key $type
+    \   Log to console and logfile  ${\n}Verifying ${type} ${name}
+    #\   ${new_expected_dto} =  Add Key Value to DTO  ${expected}  &{kwargs}
+    \   ${dto} =  Get Resource  ${type}:${name}
+    \   log to console  the dto is ${dto}
+    \   Run Keyword If  '${dto['status']}'=='OK'    Log to console and logfile  Verify ${type} ${name} succeeded
+    \   Run Keyword If  '${dto['status']}'=='OK'    Continue For Loop
+    \   Run Keyword If  '${dto['status']}'=='Critical'    Log     Verify Resource Failed for ${type} ${name}   WARN
+    \   Run Keyword If  '${dto['status']}'=='Critical'    Append to List  ${validate_status}  Critical
+    \   Run Keyword If  '${dto['status']}'=='Warning'    Log     Verify Resource Failed for ${type} ${name}   WARN
+    \   Run Keyword If  '${dto['status']}'=='Warning'    Append to List  ${validate_status}  Warning
+    ${len} =    Get Length  ${validate_status}
+    Run Keyword Unless  '${len}'=='0'    Fail    msg=Resource Verification Failed
+
+Upload SPP to Fusion
+    [Arguments]     ${host}     ${user}     ${password}     ${spppath}
+    ${Output}=   Run and return RC and output    powershell.exe -ExecutionPolicy Unrestricted -file ${spp} ${host} ${user} ${password} ${spppath}
+
+Delete SPP From Fusion
+    [Arguments]     ${host}     ${user}     ${password}     ${spp}
+    ${Output}=   Run and return RC and output    powershell.exe -ExecutionPolicy Unrestricted ${del_spp} ${host} ${user} ${password} ${spp}
+
+Verify All Logical Interconnects
+    [Documentation]     To check if all Logical Interconnects are CONSISTENT and OK in Status
+    ${li} =  Fusion API Get LI
+    ${l} =  Get Length  ${li['members']}
+    ${status} =   Create List
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   Run Keyword If  '${li['members'][${x}]['status']}'!='OK' or '${li['members'][${x}]['consistencyStatus']}'!='CONSISTENT'  Run Keyword    Log   Verify Logical Interconnect ${li['members'][${x}]['name']} Failed     WARN
+    \   Run Keyword If  '${li['members'][${x}]['status']}'=='Critical'  Append to List    ${status}     Critical
+    ${sas_li} =     Fusion Api Get SAS LI
+    ${l} =  Get Length  ${sas_li['members']}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   Run Keyword If  '${sas_li['members'][${x}]['status']}'!='OK' or '${sas_li['members'][${x}]['consistencyStatus']}'!='CONSISTENT'  Log   Verify Logical Interconnect ${sas_li['members'][${x}]['name']} Failed     WARN
+    \   Run Keyword If  '${sas_li['members'][${x}]['status']}'=='Critical'  Append to List    ${status}     Critical
+    ${len} =   Get Length  ${status}
+    Run Keyword Unless  '${len}'=='0'   Fail     msg=One or more Logical Interconnects are in Critical Status
+
+Verify Managed Server Hardware
+    [Documentation]     To verify all server hardware is managed
+    ${resp} =   Fusion Api Get Server Hardware
+    ${l} =  Get Length  ${resp['members']}
+    ${status} =   Create List
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   Run Keyword If  '${resp['members'][${x}]['status']}'!='OK'  Run Keyword    Log   Verify Server Hardware ${resp['members'][${x}]['name']} Failed     WARN
+    \   Run Keyword If  '${resp['members'][${x}]['status']}'=='Critical'  Append to List    ${status}     Critical
+    \   Run Keyword If  '${resp['members'][${x}]['state']}'!='NoProfileApplied'  Log   Server Hardware ${resp['members'][${x}]['name']} is not Managed     WARN
+    ${len} =   Get Length  ${status}
+    Run Keyword Unless  '${len}'=='0'   Fail     msg=One or more Server Hardware are in Critical Status
+
+Verify Monitored Server Hardware
+    [Documentation]     To verify all server hardware is monitored
+    ${resp} =   Fusion Api Get Server Hardware
+    ${l} =  Get Length  ${resp['members']}
+    ${status} =   Create List
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   Run Keyword If  '${resp['members'][${x}]['status']}'!='OK'  Run Keyword    Log   Verify Server Hardware ${resp['members'][${x}]['name']} Failed     WARN
+    \   Run Keyword If  '${resp['members'][${x}]['status']}'=='Critical'  Append to List    ${status}     Critical
+    \   Run Keyword If  '${resp['members'][${x}]['state']}'!='Monitored'  Log   Server Hardware ${resp['members'][${x}]['name']} is not Monitored     WARN
+    ${len} =   Get Length  ${status}
+    Run Keyword Unless  '${len}'=='0'   Fail     msg=One or more Server Hardware are in Critical Status
+
+Verify All Interconnects
+    [Documentation]     To check if all Interconnects are in Good Status
+    ${resp} =   Fusion Api Get Interconnect
+    ${l} =  Get Length  ${resp['members']}
+    ${status} =   Create List
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   Run Keyword If  '${resp['members'][${x}]['status']}'!='OK'  Run Keyword    Log   Verify Logical Interconnect ${resp['members'][${x}]['name']} Failed     WARN
+    \   Run Keyword If  '${resp['members'][${x}]['status']}'=='Critical'  Append to List    ${status}     Critical
+    ${resp_sas} =     Fusion Api Get SAS Interconnects
+    ${l} =  Get Length  ${resp_sas['members']}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   Run Keyword If  '${resp_sas['members'][${x}]['status']}'!='OK'  Log   Verify Logical Interconnect ${resp_sas['members'][${x}]['name']} Failed     WARN
+    \   Run Keyword If  '${resp_sas['members'][${x}]['status']}'=='Critical'  Append to List    ${status}     Critical
+    ${len} =   Get Length  ${status}
+    Run Keyword Unless  '${len}'=='0'   Fail     msg=One or more Interconnects are in Critical Status
+
+Update XML Node
+    [Documentation]     Edit file /ci/data/sarm/config/rshpe.xml
+    ...                 Modify the xml node <entry key="HpAdapter.Address.EndPoint">
+    ...                 http://IP_Address:8444/RsdcMock/</entry>
+    ...                 to reference your appliance IP address
+    [Arguments]    ${ip}=${APPLIANCE_IP}  ${ssh_user}=${FUSION_SSH_USERNAME}
+    ...            ${ssh_password}=${FUSION_SSH_PASSWORD}
+    ...  ${source}=${XML_SOURCE_PATH}  ${dest}=${XML_TARGET_PATH}
+    ...  ${url}=${XML_URL}
+    ${cmd}=  Set Variable
+    ...  's#<entry key="HpAdapter.Address.EndPoint">.*#<entry key="HpAdapter.Address.EndPoint">${url}</entry>#'
+    Login to Fusion via SSH    ${ip}    ${ssh_user}    ${ssh_password}
+    resource.Execute SSH Command  sed ${cmd} ${source} > ${dest}
+    resource.Execute SSH Command  yes | cp -f ${dest} ${source}
+    ${output}=     resource.Execute SSH Command    grep ${url} ${source}
+    Should Contain    ${output}    ${url}
+
+Execute PSQL Command On Appliance
+    [Documentation]     Execute the PSQL on appliance and reference
+    ...    appliance IP address in the SQL statement.
+    ...    psql -U postgres fusiondb
+    ...    UPDATE sarm.sttngs SET valu = 'http://IP_Address:8444/RsdcMock/'
+    ...    WHERE ky_nm = 'HpAdapter.Address.EndPoint';
+    [Arguments]    ${ip}=${APPLIANCE_IP}  ${ssh_user}=${FUSION_SSH_USERNAME}
+    ...            ${ssh_password}=${FUSION_SSH_PASSWORD}
+    ...  ${url}=${XML_URL}
+    Login to Fusion via SSH    ${ip}    ${ssh_user}    ${ssh_password}
+    resource.Execute SSH Command    psql -U postgres fusiondb  fusiondb=#
+    ${output}=     resource.Execute SSH Command
+    ...  UPDATE sarm.sttngs SET valu = ${url} WHERE ky_nm = 'HpAdapter.Address.EndPoint';  fusiondb=#
+    Should Contain    ${output}    UPDATE 1
+
+Restart The Appliance
+    [Documentation]     Reboot Appliance
+    [Arguments]    ${ip}=${APPLIANCE_IP}  ${ssh_user}=${FUSION_SSH_USERNAME}
+    ...            ${ssh_password}=${FUSION_SSH_PASSWORD}
+    Login to Fusion via SSH    ${ip}    ${ssh_user}    ${ssh_password}
+    ${output}=     resource.Execute SSH Command    reboot    #
+    Should Contain    ${output}    The system is going down for reboot NOW!
+    Sleep    ${REBOOT_TIME}    reason=Waiting for OV after reboot.
+    Wait For Appliance To Be Ready
+
+Initiate Remote Support Registration
+    [Documentation]     Initiate remote support registration
+    [Arguments]    ${FUSION_IP}=${APPLIANCE_IP}  ${cred}=${ADMIN_CREDENTIALS}
+    ...            ${rem_supp_edit}=${REMOTESUPPORT_EDIT}
+    ...            ${time_out}=${REMOTE_SUPPORT_TIMEOUT}
+    Set Log Level    Trace
+
+    ${response}    ${sessionid}    Fusion Api Login Appliance  ${FUSION_IP}  ${cred}
+    Run Keyword If    ${response['status_code']}==200    Log    Successful login    console=True
+    ${response}=    Fusion Api Edit Remote Support    ${rem_supp_edit}
+    Log    ${response}
+    Run Keyword If  ${response['status_code']}==200  Log  Successful Enable Remote Support  console=True
+    ...    ELSE IF  ${response['status_code']}==202  Wait For Task  ${response}  ${time_out}
+    ...    ELSE     Fail  msg=Failed to Enable Remote Support
+
+Execute SSH Command
+    [Documentation]     Executes given command on the Fusion SSH shell
+    ...                 Example:\n| Execute CLI Command | show enclosure list |
+    [Arguments]         ${Command}      ${PROMPT}=${FUSION PROMPT}
+    SSHLibrary.Write    ${Command}
+    ${Output}=          Read until      ${PROMPT}
+    [Return]            ${Output}

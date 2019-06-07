@@ -1,0 +1,312 @@
+*** Settings ***
+Documentation       This module for FC FCoE Feature testing in Potash
+Resource           ../../../Resources/api/fusion_api_resource.txt
+Resource           InternalKeywords.txt
+Library            RoboGalaxyLibrary
+Library            FusionLibrary
+
+Library             BuiltIn
+Library             Collections
+Library             XML
+Library             String
+Library             Dialogs
+#Library             InternalFunctions
+
+*** Variables ***
+
+*** keywords ***
+
+
+#############################################################
+#  Profile creation keywords
+##############################################################
+
+Add Server Profiles from variable
+                [Documentation]             Adds Server Profiles to an appliance from a variable which contains a list of dicts with the entire payload
+                [Arguments]                      ${profiles}   ${timeout}=15m    ${interval}=10s   ${endstate}=((?i)Warning|Completed|Error)   ${param}=?force=ignoreServerHealth
+                Log   Adding SERVER PROFILES   console=True
+                :FOR      ${profile}             IN           @{profiles}
+                \   ${profile} =    Copy Dictionary     ${profile}
+        \       ${space} =   Check For Whitespace From String   ${profile['name']}
+        \       Run Keyword If   ${space} is ${True}   Fail   msg=Profile name contains whitespace. This is not allowed in CI-FIT naming convention.
+                \              ${shuri} =             Get from Dictionary        ${profile}             serverHardwareUri
+                \              ${uri} =     MAT_PreRequisite.Get Server Hardware URI                             ${shuri}
+                \              Set to Dictionary               ${profile}             serverHardwareUri         ${uri}
+                \              ${eg} =    Get from Dictionary    ${profile}    enclosureGroupUri
+                \              @{words} =        Split String           ${eg}     :
+                \              ${type} =             Get From List     ${words}              0
+                \              ${eg} =    Get From List     ${words}              1
+                \              ${uri} =    Get Enclosure Group URI             ${eg}
+                \              Set to Dictionary               ${profile}             enclosureGroupUri         ${uri}
+                \              ${enc} =               Get from Dictionary        ${profile}             enclosureUri
+                \              @{words} =        Split String           ${enc}   :
+                \              ${type} =             Get From List     ${words}              0
+                \              ${enc} =               Get From List     ${words}              1
+                \              ${uri} =    Get Enclosure URI           ${enc}
+                \              Set to Dictionary               ${profile}             enclosureUri      ${uri}
+                \              ${profile} =         Update connections in profile    ${profile}
+                \              ${resp} =              Fusion Api Create Server Profile                                body=${profile}   param=${param}
+                \              ${task} =    MAT_PreRequisite.Wait For Task     ${resp}                 timeout=${timeout}                       interval=${interval}
+                \   ${task_state} =            Get From dictionary        ${task}     taskState
+                \   Should Match Regexp               ${task_state}     ${endstate}
+
+Check For Whitespace From String
+    [Documentation]   Check for whitespace from string. Returns true if whitespace exists else return false.
+    [Arguments]    ${string}
+    @{stringList} =    Split String    ${string}
+    ${l} =    Get Length    ${stringList}
+    ${result} =    Run Keyword If    ${l} > 1    Set Variable    ${True}
+    ...                   ELSE    Set Variable   ${False}
+    [Return]    ${result}
+
+Get Server Hardware URI
+    [Documentation]    Get ALL Appliance Server Hardware URI
+    [Arguments]                  ${enc_server}
+    ${resp} =          Fusion Api Get Server Hardware
+                ${shlist} =            Get From Dictionary       ${resp}    members
+                :FOR      ${sh}      IN           @{shlist}
+                \              ${name} =           Get From Dictionary       ${sh}      name
+                \              Run Keyword If    '${name}' != '${enc_server}'        Continue For Loop
+                \              ${uri} =    Get From dictionary        ${sh}      uri
+                [Return]               ${uri}
+
+Update connections in profile
+   [Documentation]   updates the Server Profile connections from the request body.  There are two DTO versions:
+   ...    'connections' and 'connectionSettings'{}
+   [Arguments]    ${profile}
+   ${keys} =           get dictionary keys   ${profile}
+   ${c} =              Get Match Count       ${keys}    connectionSettings
+   ${connections} =    Run keyword if   ${c} == 1    get from dictionary    ${profile['connectionSettings']}   connections
+   ...   ELSE          get from dictionary    ${profile}   connections
+   ${connections} =    MAT_PreRequisite.Lookup Connection Uris    ${connections}
+   Run keyword if    ${c} == 1   Set to Dictionary   ${profile['connectionSettings']}    connections    ${connections}
+   ...   ELSE                    Set to Dictionary   ${profile}    connections    ${connections}
+   [Return]    ${profile}
+
+Wait For Task
+    [Documentation]    Waits for a task to reach an end-state
+    [Arguments]    ${resp}    ${timeout}=60s    ${interval}=2s    ${taskType}=Default   ${status_code}=${202}
+    Log to console    \n
+    ${valDict} =    Create Dictionary    status_code=${status_code}
+    MAT_PreRequisite.Validate Response    ${resp}    ${valDict}
+    ${task} =    Run Keyword If    '${taskType}' == 'Default'   Wait Until Keyword Succeeds    ${timeout}    ${interval}    MAT_PreRequisite.Task Reached Endstate    ${resp}
+    ...    ELSE IF    '${taskType}' == 'Restore'   Wait Until Keyword Succeeds    ${timeout}    ${interval}   Restore MAT_PreRequisite.Task Reached Endstate    ${resp}
+    ...    ELSE    Fail    msg=The taskType specified is invalid. Please use 'Default' or 'Restore'...
+    [Return]    ${task}
+
+Task Reached Endstate
+    [Documentation]    Waits for a task to reach an end-state
+    [Arguments]    ${resp}
+    Set Log Level    TRACE
+    #Should Contain           ${resp} uri
+    ${location} =    Get Variable Value    ${resp['headers']['location']}
+    ${task_uri} =    Run Keyword If    '${location}' is 'None'    Get From Dictionary    ${resp}    uri
+    ...     ELSE    Get Variable Value    ${location}
+    Should Not Be Empty    ${task_uri}    msg=No task uri could be retreived from response
+     # Hack for backup task uri that contains https://IP in error
+    ${task_uri} =    Remove String    ${task_uri}    https://    ${APPLIANCE_IP}
+    ${task} =    Fusion Api Get Task    uri=${task_uri}
+    ${task_state} =    Get From Dictionary    ${task}    taskState
+    ${task_category} =    Get From Dictionary    ${task}       category
+    ${task_name} =    Get From Dictionary    ${task}    name
+    ${resource} =    Get From Dictionary    ${task['associatedResource']}    resourceName
+    ${resource_uri} =    Get From Dictionary    ${task['associatedResource']}    resourceUri
+    Log to console and logfile    \t Task: [${task_category}:${task_name}] is: ${task_state} for resource: ${resource} ${resource_uri}
+    Should Match Regexp    ${task_state}    ((?i)Warning|Unknown|Terminated|Killed|Error|Completed)
+    ${failedsubtasks} =    Run Keyword If     '${task_state}' != 'Completed'    fusion api get task    param=?filter="parentTaskUri='${task_uri}'"&filter="taskState ne 'Completed'"
+    [Return]    ${task}
+
+Lookup connection uris
+    [Documentation] Processes a list of connections, getting the uris for networks
+    [Arguments]     ${connections}
+    ${conns} =  Create List
+    :FOR    ${connection}   IN  @{connections}
+    \   ${connection} =     Copy dictionary     ${connection}
+    \   ${functionType} =   Get from Dictionary ${connection}   functionType
+    \   ${net} =            Get From Dictionary ${connection}   networkUri
+    \   @{words} =  Split String    ${net}  :
+    \   ${type} =   Get From List   ${words}    0
+    \   ${net} =    Get From List   ${words}    1
+    \   ${net} =    Create List ${net}
+    \   ${uri} =    Run Keyword If  '${type}' == 'FC'       MAT_PreRequisite.Get FC URIs            ${net}
+    \   ...         ELSE IF         '${type}' == 'ETH'      MAT_PreRequisite.Get Ethernet URIs  ${net}
+    \   ...         ELSE IF         '${type}' == 'NS'       MAT_PreRequisite.Get Network Set URIs   ${net}
+    \   ...         ELSE IF         '${type}' == 'FCOE'     MAT_PreRequisite.Get FCoE URIs  ${net}
+    \   ${uri} =    Get From List   ${uri}  0
+    \   Set to Dictionary   ${connection}   networkUri  ${uri}
+    \   append to list  ${conns}    ${connection}
+    [Return]    ${conns}
+
+Get FC URIs
+    [Documentation]    Get FC network URIs for the named FC network list
+                [Arguments]                      ${netlist}
+                ${urilist} =            Create List
+                :FOR      ${net}   IN           @{netlist}
+                \   ${val} =     Get substring  ${net}  1   5
+                \              Run Keyword If                                   '${val}' == 'rest'               Append To List  ${urilist}               ${net}
+                \   Continue For Loop If    '${val}' == 'rest'
+                \              ${resp} =              Fusion Api Get FC Networks                       param=?filter="'name'=='${net}'"
+                \   Continue For Loop If    ${resp['members']} == []
+                \              ${uri} =    Get From Dictionary                       ${resp['members'][0]}   uri
+                \              Append To List  ${urilist}               ${uri}
+                [Return]               ${urilist}
+
+Get Ethernet URIs
+    [Documentation]    Get Ethernet network URIs for the named ethernet network list
+                [Arguments]                      ${netlist}
+                ${urilist} =            Create List
+                :FOR      ${net}   IN           @{netlist}
+                \   ${val} =     Get substring  ${net}  1   5
+                \              Run Keyword If                                   '${val}' == 'rest'               Append To List  ${urilist}               ${net}
+                \   Continue For Loop If    '${val}' == 'rest'
+                \              ${resp} =              Fusion Api Get Ethernet Networks                          param=?filter="'name'=='${net}'"
+                \   Continue For Loop If    ${resp['members']} == []
+                \              ${uri} =    Get From Dictionary                       ${resp['members'][0]}   uri
+                \              Append To List  ${urilist}               ${uri}
+                [Return]               ${urilist}
+
+Get Network Set URIs
+    [Documentation]    Get Network Set URIs for the named network set list
+                [Arguments]                      ${netlist}
+                ${urilist} =            Create List
+                :FOR      ${net}   IN           @{netlist}
+                \              ${resp} =              Fusion Api Get Network Set                        param=?filter="'name'=='${net}'"
+                \   Continue For Loop If    ${resp['members']} == []
+                \              ${uri} =    Get From Dictionary                       ${resp['members'][0]}   uri
+                \              Append To List  ${urilist}               ${uri}
+                [Return]               ${urilist}
+
+Get FCoE URIs
+    [Documentation]    Get FCoE network URIs for the named FCoE network list
+                [Arguments]                      ${netlist}
+                ${urilist} =            Create List
+                :FOR      ${net}   IN           @{netlist}
+                \   ${val} =     Get substring  ${net}  1   5
+                \              Run Keyword If                                   '${val}' == 'rest'               Append To List  ${urilist}               ${net}
+                \   Continue For Loop If    '${val}' == 'rest'
+                \              ${resp} =              Fusion Api Get Fcoe Networks                   param=?filter="'name'=='${net}'"
+                \   Continue For Loop If    ${resp['members']} == []
+                \              ${uri} =    Get From Dictionary                       ${resp['members'][0]}   uri
+                \              Append To List  ${urilist}               ${uri}
+                [Return]               ${urilist}
+
+
+Validate Response
+    [Documentation]         Validates data in a response body against expected values
+    ...   Example:
+    ...   ${rc} =                        Convert to Integer          400
+                ...   ${valDict} =    Create Dictionary             status_code=${rc}
+                ...                                                                                                                                                            errorCode=CRM_DUPLICATE_NETWORK_NAME
+                ...   Validate Response   ${respDict}          ${valDict}
+                [Arguments]    ${resp}   ${validation}
+                Set Log Level      TRACE
+                ${response} =    Copy Dictionary    ${resp}
+                @{vkeys} =         Get Dictionary Keys        ${validation}
+                ${rkeys} =            Get Dictionary Keys        ${response}
+                @{keys} =           MAT_PreRequisite.Remove all the keys in response that are not in validation            ${vkeys}               ${rkeys}
+                :FOR      ${x}        IN           @{keys}
+                \              Remove From Dictionary              ${response}       ${x}
+                Dictionaries Should Be Equal       ${validation}       ${response}       msg=Response does not match validation dictionary            values=True
+
+Remove all the keys in response that are not in validation
+                [Arguments]      ${vkeys}               ${rkeys}
+                :FOR      ${x}        IN           @{vkeys}
+                \              Remove Values From List             ${rkeys}               ${x}
+                [Return]               ${rkeys}
+
+Power OFF server
+    [Arguments]     ${server}
+    [Documentation] Querys the appliance for a server by name and then Powers it off
+    Log to console and logfile      Powering off ${server}
+    ${body} =   Create Dictionary   powerState=Off
+    ...                             powerControl=PressAndHold
+    ${servers} =    Fusion Api Get Server Hardware
+    :FOR    ${s}    IN  @{servers['members']}
+    \       Continue For Loop If      '${s['name']}' != '${server}'
+    \       ${resp} =   Fusion Api Edit Server Hardware Power State     body=${body}    uri=${s['uri']}
+    \       ${task} =   MAT_PreRequisite.Wait For Task  ${resp}     240s    10s
+
+Power ON Server
+    [Documentation]    Querys the appliance for a server by name and then Powers it on
+    [Arguments]     ${server}
+    Log to console and logfile      Powering on ${server}
+    ${body} =     Create Dictionary    powerState=On
+    ...                powerControl=MomentaryPress
+    ${servers} =     Fusion Api Get Server Hardware
+    :FOR    ${s}    IN    @{servers['members']}
+    \    Continue For Loop If    '${s['name']}' != '${server}'
+    \    ${resp} =    Fusion Api Edit Server Hardware Power State    body=${body}    uri=${s['uri']}
+    \    ${task} =    MAT_PreRequisite.Wait For Task    ${resp}    240s    10s
+
+
+
+Build LIG body
+    [Documentation]  Build LIG body
+    [Arguments]     ${xlig}
+    ${xlig} =   Copy Dictionary     ${xlig}
+    ${uplinkSets} =     Copy List   ${xlig['uplinkSets']}
+    ${l} =  Get Length  ${uplinkSets}
+
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${networkType} =    Get From Dictionary     ${uplinkSets[${x}]}     networkType
+    \   ${networks} =       Get From Dictionary     ${uplinkSets[${x}]}     networkUris
+    \   Run Keyword If  '${networkType}' == 'Ethernet'      Continue For Loop
+    \   ${networkUris} =    MAT_PreRequisite.Get FC Uris     ${networks}
+    \   Set to dictionary   ${uplinkSets[${x}]}     networkUris     ${networkUris}
+
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${networkType} =    Get From Dictionary     ${uplinkSets[${x}]}     networkType
+    \   ${networks} =       Get From Dictionary     ${uplinkSets[${x}]}     networkUris
+    \   Run Keyword If  '${networkType}' == 'FibreChannel'  Continue For Loop
+    \   ${networkUris} =    MAT_PreRequisite.Get FCoE Uris   ${networks}
+    \   ${ethernetUris} =   MAT_PreRequisite.Get Ethernet URIs   ${networks}
+    \   ${networkUris} =    combine lists   ${networkUris}  ${ethernetUris}
+    \   Set to dictionary   ${uplinkSets[${x}]}     networkUris     ${networkUris}
+
+    ${name} =                       Get Variable Value  ${xlig['name']}
+    ${enclosureIndexes} =           Get Variable Value  ${xlig['enclosureIndexes']}
+    ${enclosureType} =              Get Variable Value  ${xlig['enclosureType']}
+    ${ethernetSettings} =           Get Variable Value  ${xlig['ethernetSettings']}
+    ${fcoeSettings} =               Get Variable Value  ${xlig['fcoeSettings']}
+    ${interconnectBaySet} =         Get Variable Value  ${xlig['interconnectBaySet']}
+    ${interconnectMapTemplate} =    Get Variable Value  ${xlig['interconnectMapTemplate']}
+    ${redundancyType} =             Get Variable Value  ${xlig['redundancyType']}
+    ${stackingMode} =               Get Variable Value  ${xlig['stackingMode']}
+    ${telemetryConfiguration} =     Get Variable Value  ${xlig['telemetryConfiguration']}
+    ${snmpConfiguration} =          Get Variable Value  ${xlig['snmpConfiguration']}
+    ${enclosureIndexes} =           Get Variable Value  ${xlig['enclosureIndexes']}
+    ${internalNetworkUris} =        Get Variable Value  ${xlig['internalNetworkUris']}
+
+    ${internalNetworkUris} =     Run Keyword If   ${internalNetworkUris} is not ${null}    MAT_PreRequisite.Get Ethernet Uris    ${internalNetworkUris}
+
+    ${body} =   Fusion Api Create LIG Payload   name=${name}
+    ...                                         enclosureIndexes=${enclosureIndexes}
+    ...                                         enclosureType=${enclosureType}
+    ...                                         ethernetSettings=${ethernetSettings}
+    ...                                         fcoeSettings=${fcoeSettings}
+    ...                                         interconnectBaySet=${interconnectBaySet}
+    ...                                         interconnectMapTemplate=${interconnectMapTemplate}
+    ...                                         internalNetworkUris=${internalNetworkUris}
+    ...                                         redundancyType=${redundancyType}
+    ...                                         stackingMode=${stackingMode}
+    ...                                         telemetryConfiguration=${telemetryConfiguration}
+    ...                                         snmpConfiguration=${snmpConfiguration}
+    ...                                         uplinkSets=${uplinkSets}
+
+    [Return]    ${body}
+
+############################################################################
+# Creating LIG - With combination of networks with specified uplink ports
+############################################################################
+LIG creation
+    [Documentation]    Creation of LIG
+    [Arguments]         ${lig_test}
+    Set Suite Variable      ${TRUE}                 True
+    ${resp} =    MAT_PreRequisite.Build LIG body    ${lig_test}
+    Log to Console    ${resp}
+    ${resp1} =    fusion_api_create_lig    ${resp}
+    Log to Console    ${resp1}
+    Run keyword unless   ${resp1['status_code']}== 202    Fail    ${resp1['message']}
+    Sleep    60s
+    #${task} =   Wait For Task   ${resp1}    60s
+    Log to console and logfile    LIG created successfully ${resp1['stateReason']}

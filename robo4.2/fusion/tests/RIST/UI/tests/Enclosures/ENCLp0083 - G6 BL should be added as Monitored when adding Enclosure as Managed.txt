@@ -1,0 +1,75 @@
+*** Settings ***
+Documentation   ENCLp0083 - G6 BL should be added as Monitored when adding Enclosure as Managed
+Library         robot.api.logger
+Resource        ../resource.txt
+Test Setup      Get Firmware Version and Update Firmware for BL Server if Necessary
+Test Teardown   Remove Managed Enclosure
+Suite Setup      Load Multi Test Data and Open Browser
+Suite Teardown	  Pause And Close Browser For Suite
+
+*** Variables ***
+${ilo_firmware_version}     None
+${ilo_version}          None
+${user}         Administrator
+${firmware_version}     2.27
+${target_ilo_firmware_version}  None
+${enclosure_obj}    None
+${data_search_node}     ENCLp0083
+${add_as}           Managed
+
+*** Test Cases ***
+As an Administrator I want to verify G6 BL should be added as Monitored when adding Enclosure as Managed
+    ${data}=    Get Data By Xpath   //${data_search_node}/enclosure[@addas='${add_as}']
+    set suite variable      ${enclosure_obj}       ${data}
+    Fusion UI Login To Appliance    ${user}
+    Add Enclosure As Managed
+    Power Off Server Hardware
+    Validate Server Hardware iLo Firmware Meet Target Version
+
+*** Keyword ***
+Add Enclosure As Managed
+    ${status}=  Fusion UI add enclosure     @{enclosure_obj.enclosure}
+    should be true      ${status}       msg=Failed add enclosure as Monitored
+
+Power Off Server Hardware
+    ${data1}=   Get Data By Xpath   //${data_search_node}/enclosure[@addas='${add_as}']
+    ${data2}=   Get Data By Xpath   //${data_search_node}/enclosure[@addas='${add_as}']//bay[@FwVersion='${firmware_version}']
+    Fusion Srm Oa Api User Login    ${data1.enclosure[0].oa1hostname}   ${data1.enclosure[0].oa1username}       ${data1.enclosure[0].oa1password}
+    :FOR    ${bay}  IN  @{data2.bay}
+    \   ${bay_number}=  Replace String Using Regexp     ${bay.name}       (.+?)(\\d+)$        \\2
+    \   Fusion Srm OA Api Power Off Blade       ${bay_number}
+    SLEEP       20
+
+Validate Server Hardware iLo Firmware Meet Target Version
+    ${data}=    Get Data By Xpath   //${data_search_node}/enclosure[@addas='${add_as}']//bay[@FwVersion='${firmware_version}']
+    ${status}=  Fusion UI Validate Server Hardware Meet Minimum iLo Firmware Version    @{data.bay}
+    should be true      ${status}       msg=Function "Fusion UI validate server hardware page hardware" return False
+
+Get Firmware Version and Update Firmware for BL Server if Necessary
+    ${data}=    Get Data By Xpath   //${data_search_node}/enclosure[@addas='${add_as}']//bay[@FwVersion='${firmware_version}']
+    Console         ${data.bay[0].iloIP} ${data.bay[0].iloUserName} ${data.bay[0].iloPassword}
+    ilo connect     ${data.bay[0].iloIP}    ${data.bay[0].iloUserName}   ${data.bay[0].iloPassword}
+    ${firmware_infos}=     ilo get fw version
+    set suite variable    ${ilo_firmware_version}  ${firmware_infos['firmware_version']}
+    set suite variable    ${ilo_version}  ${firmware_infos['management_processor']}
+    Should Be Equal As Strings      ${ilo_version.lower()}      ilo2        msg=IlO version is not as expected
+    convert to number   ${ilo_firmware_version}
+    set suite variable    ${target_ilo_firmware_version}    ${firmware_version}
+    convert to number   ${target_ilo_firmware_version}
+    Console     ${ilo_firmware_version}
+    Console     ${target_ilo_firmware_version}
+    run keyword if  ${ilo_firmware_version} != ${target_ilo_firmware_version}     Upgrade Firmware for BL Server
+
+Upgrade Firmware for BL Server
+    Console     update firmware
+    ${data}=    Get Data By Xpath   //${data_search_node}/enclosure[@addas='${add_as}']//bay[@FwVersion='${firmware_version}']
+    ilo connect     ${data.bay[0].iloIP}    ${data.bay[0].iloUserName}   ${data.bay[0].iloPassword}
+    Console     ${data.bay[0].iloIP}${data.bay[0].iloUserName}${data.bay[0].iloPassword}
+    Console         ${data.bay[0].FwBundleUrl}
+    ${status}=      ilo update firmware     ${data.bay[0].FwBundleUrl}
+    Should Be True      ${status}       msg=ilo update firmware return False
+    Sleep           120
+
+Remove Managed Enclosure
+    ${status}=                      Fusion UI Remove Enclosure      @{enclosure_obj.enclosure}
+    Should Be True                  ${status}                   msg=Failed to remove monitored enclosure

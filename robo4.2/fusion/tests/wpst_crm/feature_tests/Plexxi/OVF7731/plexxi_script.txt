@@ -1,0 +1,387 @@
+*** Settings ***
+Documentation       Plexxi
+Library             RoboGalaxyLibrary
+Library             FusionLibrary
+Library             SSHLibrary
+Variables           data_variables.py
+Resource            ../../../../../Resources/api/fusion_api_resource.txt
+Resource			../../TBIRD/FVT/Resources/fvt_resource.txt
+Library				../../TBIRD/FVT/fvt_api.py
+Suite Setup			Login User
+
+***Variables***
+${minVlan}	400
+${maxVlan}	450
+${rns_start} 	430
+
+*** Keywords ***
+Login User
+    [Documentation]     Login Administrator To OneView
+    Set Log Level    Trace
+    Fusion Api Login Appliance    ${appliance_ip}    ${admin_credentials}
+    Plexxi Api Login   ${plexxi_connect_host}   ${plexxi_credentials['userName']}   ${plexxi_credentials['password']}
+	[Return]
+
+Wait For Task To Complete 
+    [Documentation]    ait For Task To Complete
+	[Arguments]	${task}	${timeout}=10m	${interval}=1s
+	Should Be Equal As Integers	${task['status_code']}	202
+	${task} =	Wait For Task	${task}	${timeout}	${interval}
+	Should Match Regexp	${task['taskState']}	Completed|Warning
+	[Return]	${task}
+
+Create Bulk Ethernet Networks
+	[Documentation]	Create All Networks To Be used
+	Set To Dictionary	${networks}	vlanIdRange	${minVlan}-${maxVlan}
+	${task} =	Fusion Api Create Ethernet Bulk Networks	${networks}
+	${task} =	Wait For Task To Complete	${task}	120m	5s
+	[Return]
+
+Create Networks List
+	[Documentation]	Create A Networks List
+	[Arguments]	${start}
+	${netlist} =	Create List
+	:FOR	${i}	IN RANGE	0	5
+	\	Append To List	${netlist}	net_${start}
+	\	${start} =	Evaluate	${start} + 1
+	[Return]	${netlist}
+	
+Create Network Sets
+	[Documentation]	Create Regular Network Sets
+	${ns_dto} =	Create Dictionary	type=network-setV5
+	...								networkSetType=Regular
+	:FOR	${i}	IN RANGE	1	5
+	\	Set To Dictionary	${ns_dto}	name	RNS_${i}
+	\	${list} =	Create Networks List	${rns_start}	
+	\	Set To Dictionary	${ns_dto}	networkUris	${list}
+	\	Create Network Set	${ns_dto}	timeout=5m	interval=1s
+	\	${resp} =	Fvt Api Get Network Set By Name	RNS_${i}
+	\	Should Be Equal As Strings	${resp['name']}	RNS_${i}
+	\	${rns_start} =	Evaluate	${rns_start} + 5
+	[Return]
+
+Clean Up Resources
+	[Documentation]   Clean Up All Resources Created	
+	${resp} =	Fusion Api Get Server Profiles
+	:For	${sp}	IN	@{resp['members']}
+	\	${task} =	Fusion Api Delete Server Profile	uri=${sp['uri']}	param=?force=true
+	\	${task} =	Wait For Task To Complete	${task}
+	\	${resp} =	Fvt Api Get Server Profile By Name	${sp['name']}
+	\	Run keyword if	$resp != None	Fail	"Profile ${sp['name']} did not get deleted"	
+	${resp} =	Fusion Api Get Server Profile Templates
+	:For	${spt}	IN	@{resp['members']}
+	\	${task} =	Fusion Api Delete Server Profile Template	uri=${spt['uri']}
+	\	${task} =	Wait For Task To Complete	${task}
+	\	${resp} =	Fvt Api Get Server Profile Template By Name	${spt['name']}
+	\	Run keyword if	$resp != None	Fail	"Profile template ${spt['name']} did not get deleted"	
+	[Return]
+	
+Get Switch Port
+	[Documentation]   Get port information of a switch
+    [Arguments]    ${sw_name}	${port_label}
+	${ports} =	Plexxi Api Get Ports
+	:For	${port}	IN	@{ports['result']}
+	\	Return From Keyword If	'${port['switch_name']}' == '${sw_name}' and '${port['port_label']}' == '${port_label}'	${port}
+	[Return]	None
+	
+Patch Fabric Switch Port
+	[Documentation]   Patch Fabric Switch Port
+    [Arguments]    ${uuid}	${action}
+	${uuid_list} =	Create List	${uuid}
+	${patch_list} =	Create List	${action}
+	${dict} =	Create Dictionary	uuids=${uuid_list}	patch=${patch_list}
+	${body} =	Create List	${dict}	
+	${resp} =	Plexxi Api Patch Ports	body=${body}
+	Should Be Equal As Integers	${resp['status_code']}	200
+	[Return]
+	
+Patch Fabric In OneView
+	[Documentation]   Perform action on fabric in OneView
+    [Arguments]    ${uri}	${body}	${timeout}=1m	${interval}=1s
+	${task}=    Fusion Api Patch fabric	uri=${uri}	body=${body}
+	Should Be Equal As Integers	${task['status_code']}	202
+    ${task} =	Wait For Task To Complete    ${task}	${timeout}	${interval}
+	:For	${i}	IN RANGE	0	300
+	\	${fabric}=   Fusion Api Get Fabric	uri=${uri}	
+	\	Return From Keyword If	'${fabric['state']}' == 'Configured'
+	\	Sleep	1s
+	Fail	\Fabric not in Configured state, state = ${fabric['state']}
+	[Return]
+	
+Get Vlan Group UUID
+	[Documentation]   Get Vlan Group UUID
+    [Arguments]    ${vg_name}
+	${vlan_groups} =	Plexxi Api Get Vlan Groups
+	:For	${vg}	IN	@{vlan_groups['result']}
+	\	Return From Keyword If	'${vg['name']}' == '${vg_name}'	${vg}
+	[Return]	None
+	
+Verify Consistency Report
+	[Documentation]   Verify Consistency Report
+    [Arguments]    ${fabric_uri}	${state}	${resource}	${type}	${label}
+	${report}=	Fvt Api Get Fabric Consistency    uri=${fabric_uri}
+	Should Be Equal As Strings	${report['status']}	${state}
+	Should Be Equal As Strings	${report['result'][0]['name']}	${resource}
+	Should Be Equal As Strings	${report['result'][0]['changes'][0]['name']}	${type}
+	Should Be Equal As Strings	${report['result'][0]['changes'][0]['modified'][0]['name']}	${label}
+	[Return]
+	
+Change OV Integration State
+	[Documentation]   Enable or disable the OV integration in CFM
+    [Arguments]    ${mode}
+	${mode} =	Convert To Boolean	${mode}
+	Set To Dictionary	${oneview_config}	enabled	${mode}
+	${resp} =	plexxi api update oneview configuration	uuid=${ov_uuid}	body=${oneview_config}
+	Should Be Equal As Integers	${resp['status_code']}	200
+	[Return]
+	
+Claim Fabric In OneView
+	[Documentation]   Claim fabric in OneView
+    [Arguments]    ${uri}	${timeout}=5m	${interval}=1s
+	${dict} =	Create Dictionary	op=replace	path=/state	value=Adding
+	${body} =	Create List	${dict}
+	Patch Fabric In OneView	${uri}	${body}	${timeout}	${interval}
+	[Return]
+	
+Reapply Config On Fabric In OneView
+	[Documentation]   Reapply Config On Fabric In OneView
+    [Arguments]    ${uri}	${timeout}=1m	${interval}=1s
+	${dict} =	Create Dictionary	op=replace	path=/state	value=ConfigPending
+	${body} =	Create List	${dict}
+	Patch Fabric In OneView	${uri}	${body}	${timeout}	${interval}
+	[Return]
+	
+Refresh On Fabric In OneView
+	[Documentation]   Refresh On Fabric In OneView
+    [Arguments]    ${uri}	${timeout}=1m	${interval}=1s
+	${dict} =	Create Dictionary	op=replace	path=/refreshState	value=RefreshPending
+	${body} =	Create List	${dict}
+	Patch Fabric In OneView	${uri}	${body}	${timeout}	${interval}
+	[Return]
+	
+Enable Fabric Switch Port
+	[Documentation]   Enable Fabric Switch Port
+    [Arguments]    ${uuid}
+	${dict} =	Create Dictionary	op=replace	path=/admin_state	value=enabled
+	Patch Fabric Switch Port	${uuid}	${dict}
+	[Return]
+	
+Disable Fabric Switch Port
+	[Documentation]   Enable Fabric Switch Port
+    [Arguments]    ${uuid}
+	${dict} =	Create Dictionary	op=replace	path=/admin_state	value=disabled
+	Patch Fabric Switch Port	${uuid}	${dict}
+	[Return]	
+	
+Change Fabric Switch Port Speed
+	[Documentation]   Change Fabric Switch Port Speed
+    [Arguments]    ${uuid}	${speed}
+	${speed} =	Convert To Integer	${speed}
+	${dict} =	Create Dictionary	op=replace	path=/speed/current	value=${speed}
+	Patch Fabric Switch Port	${uuid}	${dict}
+	[Return]
+	
+Set Fabric Switch Port Native Vlan ID
+	[Documentation]   Set Fabric Switch Port Native Vlan
+    [Arguments]    ${uuid}	${native_vlan}
+	${dict} =	Create Dictionary	op=replace	path=/native_vlan	value=${native_vlan}
+	Patch Fabric Switch Port	${uuid}	${dict}
+	[Return]
+	
+***Test cases****
+Create Networks And Network Sets
+    [Documentation]    \n Create Networks And Network Sets
+	#Pass Execution	\n Skip Create Networks And Network Sets
+	Create Bulk Ethernet Networks
+ 	Create Network Sets
+	Pass Execution	\n Finished Create Networks And Network Sets
+
+Integrate OneView To Plexxi Connect 
+    [Documentation]    \n Integrate OneView To Plexxi Connect
+	#Pass Execution	\n Skip Integrate OneView To Plexxi Connect
+	${resp} =   Plexxi Api Add OneView Configuration   ${oneview_config}    
+	Should Be Equal As Integers	${resp['status_code']}	200
+	Set Suite Variable	${ov_uuid}	${resp['result']}	
+    Sleep    3min
+    ${fabric}=    Fvt Api Get Fabric By Name    ${Fabric_name}
+    Should Be Equal As Strings     ${fabric['state']}	Unmanaged
+	Set Suite Variable	${fabric_uri}	${fabric['uri']}
+	Pass Execution	\n Finished Integrate OneView To Plexxi Connect
+
+Claim The Fabric In OneView
+    [Documentation]  \n Claim The Fabric In OneView  
+	#Pass Execution	\n Skip Claim the fabric In OneView
+    ${fabric}=   Fvt Api Get Fabric By Name    ${Fabric_name}
+	Claim Fabric In OneView	${fabric['uri']}	timeout=1m
+	Sleep	3m
+ 	:For	${sw}	IN	@{plexxi_switches}
+	\	${switch} =	Fvt Api Get Switch By Name	${sw['name']}
+	\	Should Be Equal As Strings	${switch['state']}	Configured
+	Pass Execution	\n Finished Claim the fabric In OneView
+	
+Set OneView And Fabric Uris
+    [Documentation]    \n Integrate OneView To Plexxi Connect
+	#Pass Execution	\n Skip Integrate OneView To Plexxi Connect
+	${oneviews} =	Plexxi Api Get OneView Configuration
+	:For	${ov}	IN	@{oneviews['result']}
+	\	Continue For Loop If	'${ov['host']}' != '${oneview_config['host']}'
+	\	Set Suite Variable	${ov_uuid}	${ov['uuid']}	
+    ${fabric}=    Fvt Api Get Fabric By Name    ${Fabric_name}
+	Set Suite Variable	${fabric_uri}	${fabric['uri']}
+	Pass Execution	\n Finished Integrate OneView To Plexxi Connect
+
+Add DL Servers To Oneview 
+    [Documentation]    \n Add DL Servers To Oneview
+	#Pass Execution	\n Skip Add DL Servers To Oneview
+	:For	${server}	IN	@{DL_Servers}
+    \	Set To Dictionary    ${DL_Body}    hostname	${server['IP']}
+    \	${task}    Fusion Api Add Server Hardware    ${DL_Body}
+	\   ${task} =	Wait For Task To Complete	${task}    5m    1s
+	\	${resp} =	Fvt Api Get Server Hardware By Name	${server['name']}
+	\	Should Not Be Equal As Strings	${resp}	None
+	Pass Execution	\n Finished Add DL Servers To Oneview
+
+Create Logical Switch Group
+    [Documentation]    \n Create Logical Switch Group '${plexxi_lsg['name']}'
+	#Pass Execution	\n Skip Create Logical Switch
+	${swmap} = 	Get From Dictionary	   ${plexxi_lsg['switchMapTemplate']}    switchMapEntryTemplates
+    :FOR    ${sw}   IN  @{swmap}
+    \	${swuri} =   Get From Dictionary   ${sw}   permittedSwitchTypeUri
+ 	\	${resp} =   Fvt Api Get Switch Type By Name	${swuri}
+    \	Set to dictionary   ${sw}  permittedSwitchTypeUri   ${resp['uri']}
+	${task} =	Fusion Api Create LSG  	${plexxi_lsg}
+	${task} =	Wait For Task To Complete	${task}
+	${resp} =    Fvt Api Get Logical Switch Group By Name      ${plexxi_lsg['name']}
+	Should Not Be Equal As Strings	${resp}	None
+	Pass Execution	\n Finished Create Logical Switch
+
+Create Logical Switches
+    [Documentation]    \n Create Logical Switches
+	#Pass Execution	\n Skip Create Logical Switches
+    ${lsg} =	Fvt Api Get Logical Switch Group By Name   ${plexxi_lsg['name']}
+    :FOR    ${ls}   IN	@{logical_switches}
+	\	Set to dictionary   ${ls}	type	logical-switchV5 
+	\	Set to dictionary   ${ls}	managementLevel	BASIC_MANAGED 
+    \	Set to dictionary   ${ls}	logicalSwitchGroupUri	${lsg['uri']}
+	\	${swUris} =	Fvt Api Get Switch Uris	${ls['switchUris']}
+    \	Set to dictionary	${ls}	switchUris	${swUris}
+	\	${body} =	Create Dictionary	logicalSwitch=${ls}
+	\	${task} =	Fusion Api Create LS	${body}
+	\	${task} =	Wait For Task To Complete	${task}    5m   2s
+	\	${resp} =	Fvt Api Get Logical Switch By Name	${ls['name']}
+	\	Should Not Be Equal As Strings	${resp}	None
+	Pass Execution	\n Finished Create Logical Switch
+
+Create Server Profile 
+    [Documentation]    \n Add Server Profile
+	#Pass Execution	\n Skip Add Server Profile
+	${profile} =	FVT Copy Dictionary	${Profile}	
+	FVT Add Server Profile	${profile}	timeout=20m	interval=1s  
+	${resp} =	Fvt Api Get Server Profile By Name	${profile['name']}
+	Should Not Be Equal As Strings	${resp}	None
+	Pass Execution	\n Finished Add Server Profile
+
+Change Fabric Switch Port State
+    [Documentation]   \n Change Fabric Switch Port State
+	#Pass Execution	\n Skip Change Fabric Switch Port State
+	Change OV integration State	False
+	${port} =	Get Switch Port	${plexxi_switches[0]['name']}	3
+	Disable Fabric Switch Port	${port['uuid']}
+	Refresh On Fabric In OneView	uri=${fabric_uri}	timeout=1m   
+	Verify Consistency Report	${fabric_uri}	Inconsistent	${plexxi_switches[0]['name']}	ports	3
+	${resp} =	Fvt Api Get Server Profile By Name	${Profile['name']}
+	Run Keyword If	'${resp['status']}' != 'Critical'	Profile is not in CRITICAL status, status = ${resp['status']}
+	Change OV integration State	True	
+	Enable Fabric Switch Port	${port['uuid']}
+	Sleep	3m
+	${report}=	Fvt Api Get Fabric Consistency    uri=${fabric_uri}
+	Should Be Equal As Strings	${report['status']}	Consistent
+	${resp} =	Fvt Api Get Server Profile By Name	${Profile['name']}
+	Run Keyword If	'${resp['status']}' != 'OK'	Fail	Profile is not in OK status, status = ${resp['status']}
+	Pass Execution	\n Finished Change Fabric Switch Port State
+	
+Change Fabric Switch Port Native Vlan ID
+    [Documentation]   \n Change Fabric Switch Port Native Vlan ID
+	#Pass Execution	\n Skip Change Fabric Switch Port Native Vlan ID
+	${port} =	Get Switch Port	${plexxi_switches[0]['name']}	3
+	Change OV integration State	False
+	Set Fabric Switch Port Native Vlan ID	${port['uuid']}	435
+	Refresh On Fabric In OneView	uri=${fabric_uri}	timeout=2m   
+	Verify Consistency Report	${fabric_uri}	Inconsistent	${plexxi_switches[0]['name']}	ports	3
+	Change OV integration State	True
+	Sleep	1m
+	${report}=	Fvt Api Get Fabric Consistency    uri=${fabric_uri}
+	Should Be Equal As Strings	${report['status']}	Consistent	
+	Pass Execution	\n Finished Change Fabric Switch Port Native Vlan ID
+	
+Change Fabric Switch Port Vlan Group
+    [Documentation]   \n Change Fabric Switch Port Vlan Group
+	#Pass Execution	\n Skip Change Fabric Switch Port Vlan Group
+	Change OV integration State	False
+	${vg} =	Get Vlan Group UUID	RNS_1
+	${vlan} =	Evaluate	${rns_start} + 100
+	${vlan} =	Convert To String	${vlan}
+	${new_vlans} =	Replace String	${vg['vlans']}	${rns_start}	${vlan}
+	${body} =	Create Dictionary	description=""	name=${vg['name']}	vlans=${new_vlans}
+	Plexxi Api Update Vlan Group	uuid=${vg['uuid']}	body=${body}
+	Refresh On Fabric In OneView	uri=${fabric_uri}	timeout=2m   
+	Verify Consistency Report	${fabric_uri}	Inconsistent	${Fabric_name}	network-sets	RNS_1
+	Change OV integration State	True
+	Sleep	1m
+	${report}=	Fvt Api Get Fabric Consistency    uri=${fabric_uri}
+	Should Be Equal As Strings	${report['status']}	Consistent
+	Pass Execution	\n Finished Change Fabric Switch Port Vlan Group
+
+Change Fabric Switch Port To A Different Speed
+    [Documentation]   \n Change Fabric Switch Port To A Different Speed
+	#Pass Execution	\n Skip Change Fabric Switch Port To A Different Speed
+	Change OV integration State	False
+	${port} =	Get Switch Port	${plexxi_switches[0]['name']}	3
+	Change Fabric Switch Port Speed	${port['uuid']}	10000
+	Refresh On Fabric In OneView	uri=${fabric_uri}	timeout=2m   
+	Verify Consistency Report	${fabric_uri}	Inconsistent	${plexxi_switches[0]['name']}	ports	3
+	Change OV integration State	True
+	Sleep	1m
+	${report}=	Fvt Api Get Fabric Consistency    uri=${fabric_uri}
+	Should Be Equal As Strings	${report['status']}	Inconsistent
+	Reapply Config On Fabric In OneView	uri=${fabric_uri}	timeout=5m 
+	Pass Execution	\n Finished Change Fabric Switch Port To A Different Speed
+		
+Delete Profiles
+	#Pass Execution	\n Skip Delete Profiles and Profile Template
+	Clean Up Resources
+	Pass Execution	\n Finished Delete Profiles and Profile Template
+	
+Remove Logical Switch And Logical Switch Group
+    [Documentation]   \n Remove Logical Switch And Logical Switch Group
+	#Pass Execution	\n Skip Remove Plexxi Connect From OneView
+	:For	${ls}	IN	@{logical_switches}
+	\	${lsw} =	Fvt Api Get Logical Switch By Name	${ls['name']}
+	\	${task} =	Fusion Api Delete LS	uri=${lsw['uri']}
+	\	${task} =	Wait For Task To Complete	${task}
+	\	${ls} =    Fvt Api Get Logical Switch By Name      ${ls['name']}
+	\	Run Keyword If	$ls != None	Fail	Cannot delete logical switch ${ls['name']}
+	${task} =	Fusion Api Delete LSG	name=${plexxi_lsg['name']}
+	${task} =	Wait For Task To Complete	${task}
+	${lsg} =    Fvt Api Get Logical Switch Group By Name      ${plexxi_lsg['name']}
+	Run Keyword If	$lsg != None	Fail	"Cannot delete logical switch group ${plexxi_lsg['name']}"
+	Pass Execution	\n Finished Remove Logical Switch And Logical Switch Group
+	
+Remove OneView From Plexxi Connect
+    [Documentation]   \n Remove OneView from Plexxi Connect
+	#Pass Execution	\n Skip Remove OneView From Plexxi Connect
+    Plexxi Api Login   ${plexxi_connect_host}   ${plexxi_credentials['userName']}   ${plexxi_credentials['password']}
+	${resp}=   Plexxi Api Get OneView Configuration
+    :FOR   ${ov}   IN   @{resp['result']}
+    \   Run Keyword If   '${ov['host']}' == '${appliance_ip}'   Plexxi Api Delete OneView Configuration   ${ov['uuid']}
+	Pass Execution	\n Finished Remove OneView From Plexxi Connect
+
+Remove Plexxi Connect From OneView	
+    [Documentation]   \n Remove Plexxi Connect From OneView
+	#Pass Execution	\n Skip Remove Plexxi Connect From OneView
+	${task} =	Fusion Api Delete Fabric	name=${Fabric_name}
+	${task} =	Wait For Task To Complete	${task}
+	${fabric} =    Fvt Api Get Fabric By Name      ${Fabric_name}
+	Run Keyword If	$fabric != None	Fail	"Cannot delete fabric ${Fabric_name}"
+	Pass Execution	\n Finished Remove Plexxi Connect From OneView
+	

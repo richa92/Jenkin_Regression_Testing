@@ -1,0 +1,105 @@
+*** Settings ***
+Documentation    Test suite to validate Enclosure Health Status (OK,Warning) when FLMs are removed and re-inserted into the enclosure or are reset
+
+...    = GENERIC USAGE =
+...    | pybot | -v ENC_SERIAL_NO:[enclosure serial #] | -v APPLIANCE_IP:<ipv4> |-v GIT_REPO_ROOT: | EM_FLM_HealthStatus.txt |
+...    = Variables =
+...    | GIT_REPO_ROOT | Required: Repo root path if NOT defined in environment variable this is mgmtfw root location
+...    | ENC_SERIAL_NO | Optional: If omitted, will use the 1st enclosure detected in OV
+...    | APPLIANCE_IP | Required: OneView IPv4 address
+
+Library            RoboGalaxyLibrary
+Library            MgmtFWLibrary
+Library            FusionLibrary
+Library            Collections
+Library            Selenium2Library
+
+Variables          ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables          ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/data_variables.py
+Variables          ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource           ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource           ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Resource          ${GIT_REPO_ROOT}/fusion/Resources/api/servers/enclosure.txt
+
+Suite Setup       Run Keywords    Login to Fusion via REST    AND    Login to Fusion via SSH    AND    Setup EM RIS Session
+Suite Teardown    Run Keyword    Logout of Fusion Via REST
+
+*** Test Cases ***
+
+TC01:: EM Health Status: Validate The Enclosure Health Warning Status When A Standby FLM Is Removed And Re-inserted Into An Enclosure
+    [Documentation]    This test verifies if an enclosure goes to Warning state when a standby flm is removed
+    ...    and returns to OK state when re-inserted back to enclosure
+    [Tags]    PE    API    Automated    FLM    EM
+    #Check If Standby FLM exists and get the Standby FLM bay
+    ${FLM count}=    Get Existing EM Presence Count
+    Should Be Equal as Strings    ${FLM count}    2    msg= Standby FLM is required for this test script
+    ${standby_flm_bay}=    Get FLM Active Or StandBy Bay    Standby
+    #Retrieve the Enclosure health status before efuse-on
+    ${resp_before_efuseon}=    Fusion Api Get Enclosures
+    ${health_before_efuseon}=    Get From Dictionary    ${resp_before_efuseon['members'][0]}    status
+    Should Be Equal    ${health_before_efuseon}    OK
+    #Efuse-On the standby FLM and wait for the FLM absence state
+    Efuse Standby FLM    EFuseOn    ${standby_flm_bay}
+    Wait For Device Present Or Absent Status    ${FLMDevice_EM}    ${standby_flm_bay}    Absent
+    #Retrieve the Enclosure health status after efuse-on
+    ${resp_after_efuseon}=    Fusion Api Get Enclosures
+    ${health_after_efuseon}=    Get From Dictionary    ${resp_after_efuseon['members'][0]}    status
+    Should Be Equal    ${health_after_efuseon}    Warning
+    #Efuse Off the standby FLM and wait for the FLM to return to OK status
+    Efuse Standby FLM     EFuseOff    ${standby_flm_bay}
+    Wait For Device Status    ${FLMDevice_EM}    ${standby_flm_bay}    OK
+    #Check the Enclosure health status after efuse-off
+    ${resp_after_efuseoff}=    Fusion Api Get Enclosures
+    ${health_after_efuseoff}=    Get From Dictionary    ${resp_after_efuseoff['members'][0]}    status
+    Should Be Equal    ${health_after_efuseoff}    OK
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Efuse Standby FLM     EFuseOff    ${standby_flm_bay}    AND    Wait For Device Status    ${FLMDevice_EM}    ${standby_flm_bay}    OK
+
+TC02:: EM Health Status: Validate The Enclosure Health OK Status When The Active FLM Is Reset
+    [Documentation]    This test verifies if an enclosure remains in OK state when we reset the active flm
+    [Tags]    PE    API    Automated1     FLM    EM
+    #Check If Standby FLM exists
+    ${FLM count}=    Get Existing EM Presence Count
+    Should Be Equal as Strings    ${FLM count}    2    msg= Standby FLM is required for this test script
+    #Login to Fusion via SSH
+    #Get the active and standby FLM bay number
+    ${active_flm_bay}=    Get FLM Active Or StandBy Bay    Active
+    ${standby_flm_bay}=    Get FLM Active Or StandBy Bay    Standby
+    #Retrieve the Enclosure health status before active flm reset
+    ${resp_before_reset}=    Fusion Api Get Enclosures
+    ${health_before_reset}=    Get From Dictionary    ${resp_before_reset['members'][0]}    status
+    Should Be Equal    ${health_before_reset}    OK
+    #Reset the active FLM and check the Enclosure health status
+    Reset FLM    ${Enclosures}    ${active_flm_bay}
+    ${resp_after_reset}=    Fusion Api Get Enclosures
+    ${health_after_reset}=    Get From Dictionary    ${resp_after_reset['members'][0]}    status
+    Should Be Equal    ${health_after_reset}    OK
+    #Wait for standby FLM to take over as active and check the Enclosure health status
+    Wait For FLM Failover    ${active_flm_bay}    Active
+    ${resp_after_failover}=    Fusion Api Get Enclosures
+    ${health_after_failover}=    Get From Dictionary    ${resp_after_failover['members'][0]}    status
+    Should Be Equal    ${health_after_failover}    OK
+    ${active_health}=    Get Fusion Device Health Status    ${FLMDevice_EM}    ${active_flm_bay}
+    ${standby_health}=    Get Fusion Device Health Status    ${FLMDevice_EM}    ${standby_flm_bay}
+    Should Be Equal     ${active_health}    OK
+    Should Be Equal     ${standby_health}    OK
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Wait For Device Status    ${FLMDevice_EM}    ${active_flm_bay}    OK    AND    Wait For Device Status    ${FLMDevice_EM}    ${standby_flm_bay}    OK
+
+TC03:: EM Health Status: Validate The Enclosure Health OK Status When The Standby FLM Is Reset
+    [Documentation]    This test verifies if an enclosure remains in OK state when we reset the standby flm
+    [Tags]    PE    API    Automated1    FLM    EM
+    #Check If Standby FLM exists and get the Standby FLM bay
+    ${FLM count}=    Get Existing EM Presence Count
+    Should Be Equal as Strings    ${FLM count}    2    msg= Standby FLM is required for this test script
+    ${standby_flm_bay}=    Get FLM Active Or StandBy Bay    Standby
+    #Retrieve the Enclosure health status before standby flm reset
+    ${resp_before_reset}=    Fusion Api Get Enclosures
+    ${health_before_reset}=    Get From Dictionary    ${resp_before_reset['members'][0]}    status
+    Should Be Equal    ${health_before_reset}    OK
+    #Reset the standby FLM
+    Reset FLM    ${Enclosures}    ${standby_flm_bay}
+    Wait For Device Status    ${FLMDevice_EM}    ${standby_flm_bay}    OK
+    #Retrieve the Enclosure health status after standby flm reset
+    ${resp_after_reset}=    Fusion Api Get Enclosures
+    ${health_after_reset}=    Get From Dictionary    ${resp_after_reset['members'][0]}    status
+    Should Be Equal    ${health_after_reset}    OK
+    [Teardown]    Run Keyword If Test Failed    Run Keyword    Wait For Device Status    ${FLMDevice_EM}    ${standby_flm_bay}    OK

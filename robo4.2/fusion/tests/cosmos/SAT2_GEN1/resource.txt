@@ -1,0 +1,1123 @@
+*** Settings ***
+Library                         FusionLibrary
+Library                         RoboGalaxyLibrary
+Library                         OperatingSystem
+Library                         BuiltIn
+Library                         Collections
+Library                         XML
+Library                         String
+Library                         json
+Library                         Dialogs
+Library                         DateTime
+Library                         SSHLibrary
+Library                         SAT2_TB_data_variable.py
+
+Resource                        ../../../Resources/api/fusion_api_resource.txt
+Variables                       SAT2_TB_data_variable.py
+
+*** Variables ***
+${X-API-VERSION}                1200
+${APPLIANCE_IP}                 10.167.1.15
+${one}                          1
+${two}                          2
+${three}                        3
+${DATA}                         SAT2_TB_data_variable.py
+${VERBOSE}                      False
+${VERIFY}                       True
+${REMOTE_SUPPORT_TIMEOUT}       300
+${dhcp}                         psscripts\\Get-DHCPAddress.ps1
+${mpio}                         psscripts\\MPIOClaim.ps1
+${storage_path}                 psscripts\\StoragePath.ps1
+${nic_team}                     psscripts\\NicTeam.ps1
+${win_un}                       Administrator
+${win_pd}                       Cosmos123
+${timeout}                      15m
+${interval}                     15s
+${appliance_username}           root
+${appliance_password}           hpvse1
+${username}                     root
+${password}                     Cosmos@123
+${LE_SD}                        False
+${OV_SD}                        False
+
+# Download SPP Variables
+${WEB_USERNAME}                 None    # YOU_MUST_SPECIFY_ON_COMMAND_LINE_IF_WEB_URL_REQUIRES_AUTHENTICATION
+${WEB_PASSWORD}                 None    # YOU_MUST_SPECIFY_ON_COMMAND_LINE_IF_WEB_URL_REQUIRES_AUTHENTICATION
+${SPP_LOCALPATH}                F:\\spp
+${WEB_URL}                      http://ci-artifacts02.vse.rdlabs.hpecorp.net/Fusion/rel/4.20/UpdateBin/ue-fullupdate/HPEOneView-fullupdate-4.20.00-0356614.bin    # YOU_MUST_SPECIFY_ON_COMMAND_LINE
+${THREADNUM}                    4
+${SPP_LOCAL_FILE}               None
+${WEB_URL_SPP}                  http://10.120.12.69/firmware/SPP2017101.2017_1027.10.iso    # YOU_MUST_SPECIFY_ON_COMMAND_LINE
+${WEB_USERNAME_SPP}             None    # YOU_MUST_SPECIFY_ON_COMMAND_LINE_IF_WEB_URL_REQUIRES_AUTHENTICATION
+${WEB_PASSWORD_SPP}             None    # YOU_MUST_SPECIFY_ON_COMMAND_LINE_IF_WEB_URL_REQUIRES_AUTHENTICATION
+${Fusion_Name_Final}            3.0_Prabhu_VM_Disk_Expansion
+
+${hdd_size}                     280
+
+${server_profile_timeout}       6000
+${server_profile_interval}      5
+
+*** Keywords ***
+Regression Test Setup
+    [Arguments]     ${credentials}
+    [Documentation]     Suite Setup to ping appliance and Login to OV
+    Set Log Level   TRACE
+    Appliance is pingable   ${APPLIANCE_IP}
+    log   logging in with ${credentials['userName']} user  console=True
+    ${resp}=    Fusion Api Login Appliance  ${appliance_ip}     ${credentials}
+    ${response}=  Convert to List  ${resp}
+    Run Keyword If   ${response[0]['status_code']} is not 200   FAIL   Failed to login
+
+Regression Test Teardown
+    [Documentation]     Suite Teardown to Logout from OV
+    Fusion Api Logout Appliance
+
+Upload SPP to Fusion
+    [Arguments]     ${host}     ${user}     ${password}     ${spppath}
+    [Documentation]     Upload SPP to OneView
+    ${Output}=   Run and return RC and output    powershell.exe -ExecutionPolicy Unrestricted -file ${spp} ${host} ${user} ${password} ${spppath}
+
+Initiate Remote Support Registration
+    [Documentation]     Initiate remote support registration
+    [Arguments]    ${FUSION_IP}=${APPLIANCE_IP}  ${cred}=${ADMIN_CREDENTIALS}
+    ...            ${rem_supp_edit}=${REMOTESUPPORT_EDIT}
+    ...            ${time_out}=${REMOTE_SUPPORT_TIMEOUT}
+    Set Log Level    Trace
+
+    ${response}    ${sessionid}    Fusion Api Login Appliance  ${FUSION_IP}  ${cred}
+    Run Keyword If    ${response['status_code']}==200    Log    Successful login    console=True
+    ${response}=    Fusion Api Edit Remote Support    ${rem_supp_edit}
+    Log    ${response}
+    Run Keyword If  ${response['status_code']}==200  Log  Successful Enable Remote Support  console=True
+    ...    ELSE IF  ${response['status_code']}==202  Wait For Task2  ${response}  ${time_out}
+    ...    ELSE     Fail  msg=Failed to Enable Remote Support
+
+Verify Regression Resources
+    [Documentation]  Verify Resource
+    ...              **kwargs are used to add key value pair to the expected DTO
+    ...              Example:
+    ...                Verify Resource  ${expected_dto}
+    ...                Verify Resource  ${expected_dto}  Status=OK
+    ...              Data Required:
+    ...                Expected Resource DTO
+    [Arguments]  ${expected_dto}  &{kwargs}
+
+    ${validate_status} =    Create List
+    : FOR   ${expected}     IN      @{expected_dto}
+    \   ${status}  ${name} =  Run Keyword and Ignore Error  Get From Dictionary  ${expected}  name
+    \   Return from keyword if    '${status}'=='FAIL'    ${expected} doesn't contain the key $name
+    \   ${status}  ${type} =  Run Keyword and Ignore Error  Get From Dictionary  ${expected}  type
+    \   Return from keyword if    '${status}'=='FAIL'    ${expected} doesn't contain the key $type
+    \   Log   ${\n}Verifying ${type} ${name}    console=True
+    #\   ${new_expected_dto} =  Add Key Value to DTO  ${expected}  &{kwargs}
+    \   ${dto} =  Get Resource  ${type}:${name}
+    \   log to console  the dto is ${dto}
+    \   Run Keyword If  '${dto['status']}'=='OK'    Log   Verify ${type} ${name} succeeded  console=True
+    \   Run Keyword If  '${dto['status']}'=='OK'    Continue For Loop
+    \   Run Keyword If  '${dto['status']}'=='Critical'    Log     Verify Resource Failed for ${type} ${name}   WARN
+    \   Run Keyword If  '${dto['status']}'=='Critical'    Append to List  ${validate_status}  Critical
+    \   Run Keyword If  '${dto['status']}'=='Warning'    Log     Verify Resource Failed for ${type} ${name}   WARN
+    \   Run Keyword If  '${dto['status']}'=='Warning'    Append to List  ${validate_status}  Warning
+    ${len} =    Get Length  ${validate_status}
+    Run Keyword Unless  '${len}'=='0'    Fail    msg=Resource Verification Failed
+
+Verify C7000 Logical Enclosure
+    [Documentation]  Verify Resource
+    ...              **kwargs are used to add key value pair to the expected DTO
+    ...              Example:
+    ...                Verify Resource  ${expected_dto}
+    ...                Verify Resource  ${expected_dto}  Status=OK
+    ...              Data Required:
+    ...                Expected Resource DTO
+    [Arguments]  ${expected_dto}  &{kwargs}
+    ${status}  ${name} =  Run Keyword and Ignore Error  Get From Dictionary  ${expected_dto}  name
+    Return from keyword if    '${status}'=='FAIL'    ${expected_dto} doesn't contain the key $name
+    ${status}  ${type} =  Run Keyword and Ignore Error  Get From Dictionary  ${expected_dto}  type
+    Return from keyword if    '${status}'=='FAIL'    ${expected_dto} doesn't contain the key $type
+    Log  ${\n}Verifying ${type} ${name}    console=True
+    ${new_expected_dto} =  Add Key Value to DTO  ${expected_dto}  &{kwargs}
+    ${dto} =  Get Resource  ${type}:${name}
+    log  the dto is ${dto}
+    log   the expected is ${expected_dto}    console=True
+    ${validate_status} =  Fusion api validate response follow  ${new_expected_dto}  ${dto}  wordy=${False}
+    Return From Keyword    ${validate_status}
+
+Validate Firmware Installed
+    [Arguments]    ${serverHarwares}  ${firmwareBaseline}
+    [Documentation]    Check if firmware updated
+    Log   Check if firmware update    console=True
+    ${firmwareID} =    Get Firmware Bundle UUID By Version    ${firmwareBaseline}
+    :FOR    ${hardware}    IN    @{serverHarwares}
+    \    ${hardware_name} =   Get from Dictionary    ${hardware}    name
+    \    Log   Validating ${hardware_name}    console=True
+    \    ${firmwareComponents} =    Get Server Hardware Firmware Compliance    ${hardware_name}    ${firmwareID}
+    \    Log   Validating ${firmwareComponents}    console=True
+    \    Run Keyword And Continue On Failure    Validate Firmware Components    ${firmwareComponents['componentMappingList']}
+    \    Log   Firmware update success!    console=True
+
+Validate Firmware Components
+    [Arguments]    ${firmwareComponents}
+    [Documentation]    Check if component firmware update required
+    :FOR    ${component}    IN    @{firmwareComponents}
+    \    ${required} =   Get from Dictionary    ${component}    componentFirmwareUpdateRequired
+    \    ${componentName} =   Get from Dictionary    ${component}    componentName
+    \    ${installedVersion} =   Get from Dictionary    ${component}    installedVersion
+    \    ${baselineVersion} =   Get from Dictionary    ${component}    baselineVersion
+    \    Should Not Be True    ${required}    Component ${componentName} verify failed! Installed: ${installedVersion}. Baseline: ${baselineVersion}.
+
+LE BigBang Firmware Update
+    [Arguments]        ${expected_logical_enclosure}    ${spp_version}    ${timeout}=300min
+    [Documentation]     Retrieve LE name and initiate BigBang Firmware update
+    ...                 selceted force option as True, and SharedInfrastructureAndProfiles
+    ...                 And verify the firmware version of server hardware after update
+    :FOR    ${expected_dto}  IN  @{expected_logical_enclosure}
+    \   ${le_name} =    Get from Dictionary     ${expected_dto}  name
+    \   Update Logical Enclosure Firmware  ${le_name}  ${spp_version}  ${True}  SharedInfrastructureAndServerProfiles  timeout=${timeout}
+    \   ${verify_le} =   Verify C7000 Logical Enclosure    ${expected_dto}
+    \   Run Keyword If  '${verify_le}'!='True'  Run Keyword And Continue On Failure    Fail   Verify Logical Enclosure Failed for ${le_name}
+    \   ${server_hardwares} =   Fusion Api Get Server Hardware     param=?filter="'name' sregex '${le_name}'"
+    \   ${server_hardwares} =   Get from Dictionary     ${server_hardwares}    members
+    \   Validate Firmware Installed    ${server_hardwares}  ${spp_version}
+
+Verify Bulk Ethernet Networks
+    [Documentation]  Verify Bulk Ethernet Networks
+    ...              Example:
+    ...                Verify Bulk Regression Resources  ${expected_dto}  ${prefix_name}
+    ...              Data Required:
+    ...                Expected Resource DTO
+    [Arguments]  ${expected_dto}  ${prefix_name}
+
+    @{resources} =   Create List
+    ${all_resources} =   Fusion Api Get Ethernet Networks   param=?filter="'name' sregex '^${prefix_name}'"
+    ${result} =   Fusion Api Validate Response Follow  ${expected_dto}  ${all_resources}
+    Run Keyword If  '${result}'=='False'  Fail  msg=Bulk Ethernet networks verifcation failed.
+
+All Active Directory Group Users Should Be Able To Login
+    [Documentation]   All Active Directory Group Users Should Be Able To Login
+    [Arguments]     ${ad_users}
+    ${user_details}     Create Dictionary
+    :FOR  ${ad}   IN   @{ad_users}
+    \    ${get_user}     Get From Dictionary   ${ad}   userName
+    \    ${get_password}    Get From Dictionary   ${ad}    password
+    \    ${get_logindomain}    Get From Dictionary   ${ad}    loginDomain
+    \    Sleep   3s
+    \    ${set_userdetails}    Set To Dictionary    ${user_details}    userName=${get_user}   password=${get_password}   authLoginDomain=${get_logindomain}   loginMsgAck=true
+    \    Log    Logging with ${get_user} user   console=true
+    \    ${resp}=   Fusion Api Login Appliance  ${appliance_ip}     ${user_details}
+    \    ${response}=  Convert to List  ${resp}
+    \    Run Keyword If   ${response[0]['status_code']} is not 200    Run Keyword And Continue On Failure   FAIL   Failed to login with user ${get_user}
+
+Get Server Ethernet Connections IPs from DHCP
+    [Documentation]    Read MAC address from profile data, query to DHCP and return IP
+    [Arguments]     ${profile}
+    ${ip}=  Create List
+    :FOR    ${connection}  IN  @{profile['connectionSettings']['connections']}
+    \   Run Keyword Unless  '${connection['functionType']}' == 'Ethernet'     Continue For Loop
+    \   ${net_name} =    Get From Dictionary     ${connection}  networkUri
+    \   ${net_resp}=  Get Resource     ${net_name}
+    \   ${category}=    Get From Dictionary    ${net_resp}    category
+    \   Run Keyword if  '${category}' == 'FibreChannel'     Continue For Loop
+    \   ${uri} =  Common URI lookup by name  ${net_name}
+    \   ${net} =    Fusion Api Get Ethernet Networks    ${uri}
+    \   ${native_net_uri} =    Evaluate    ${net}.get('nativeNetworkUri')
+    \   ${native_net}=  Run Keyword if  '${native_net_uri}' != 'None'   Get Resource   ${native_net_uri}
+         ...     ELSE    Fusion Api Get Ethernet Networks  ${uri}
+    \   ${vlan}      Evaluate   ${native_net}.get('vlanId')
+    \   Run Keyword if   ${vlan} is ${None}    Continue For Loop
+    \   ${vlan} =    Get From Dictionary     ${native_net}  vlanId
+    \   ${dhcp_detail} =   Get DHCP Server     ${vlan}
+    \   Run Keyword If  ${dhcp_detail} == []   Continue For Loop
+    \   ${mac} =    Get From Dictionary     ${connection}  mac
+    \   ${IPAddress} =     Get IP From DHCP    ${mac}  ${dhcp_detail[0]}  ${dhcp_detail[1]}   ${dhcp_detail[2]}    ${dhcp_detail[3]}
+    \   Append To List  ${ip}   ${IPAddress}
+    [Return]    ${ip}
+
+Get DHCP Server
+    [Documentation]    Retrieve DHCP server on given vlan
+    [Arguments]     ${vlan}
+    ${dhcp_details} =   Create List
+    :FOR    ${dhcpserver}   IN  @{dhcpservers}
+    \   Run Keyword Unless  '${dhcpserver['vlanid']}' == '${vlan}'      Continue For Loop
+    \   ${dhcpserver_ip} =  Get From Dictionary     ${dhcpserver}   ip
+    \   Append To List  ${dhcp_details}     ${dhcpserver_ip}
+    \   ${dhcpserver_scope} =  Get From Dictionary     ${dhcpserver}   scope
+    \   Append To List  ${dhcp_details}     ${dhcpserver_scope}
+    \   ${dhcpserver_user} =  Get From Dictionary     ${dhcpserver}   username
+    \   Append To List  ${dhcp_details}     ${dhcpserver_user}
+    \   ${dhcpserver_password} =  Get From Dictionary     ${dhcpserver}   password
+    \   Append To List  ${dhcp_details}     ${dhcpserver_password}
+    [Return]    ${dhcp_details}
+
+Get IP From DHCP
+    [Documentation]    Call Powershell Utility to retrive IP from DHCP server
+    [Arguments]     ${mac}  ${dhcp_ip}  ${dhcp_scope}   ${dhcp_user}    ${dhcp_password}
+    ${Output}=   Run    powershell.exe -ExecutionPolicy Unrestricted -file ${dhcp} ${mac} ${dhcp_ip} ${dhcp_user} ${dhcp_password} ${dhcp_scope}
+    [Return]    ${Output}
+
+Ping IPAddress
+    [Documentation]  Ping the IP address given in argument
+    [Arguments]     ${ipv4address}
+    ${RC}   ${output} =  Run and return RC and Output    ping -n 4 ${ipv4address}
+    ${gotTask}     ${response} =  Run Keyword and Ignore Error  Should be equal     ${RC}   ${0}    \n${output}
+    Run keyword if      '${gotTask}'=='FAIL'    Fail        IP Address - ${ipv4address} is unreachable. Output is ${response}
+    ${value1}=  Evaluate    'Request timed out'
+    ${value2}=  Evaluate    'Destination host unreachable'
+    ${failStatus1}     ${response} =  Run Keyword and Ignore Error  Should Contain      ${output}   ${value1}
+    ${failStatus2}     ${response} =  Run Keyword and Ignore Error  Should Contain      ${output}   ${value2}
+    Run Keyword If      '${failStatus1}'=='PASS' or '${failStatus2}'=='PASS'    FAIL    IP Address - ${ipv4address} is unreachable.
+    ...                 ELSE                    Log  IP Address - ${ipv4address} is pingable.  console=True
+    [Return]    True
+
+Install MPIO Feature And Windows Server Should Be Pinging
+    [Documentation]     Install MPIO Feature And Windows Server Should Be Pinging
+    [Arguments]     ${profile}
+    ${resp} =      Get IP From Server Profile   ${profile}
+    Enable PSRemaoting And Set Trustedhosts
+    ${output}=   Run    powershell.exe -ExecutionPolicy Unrestricted -file ${mpio} ${resp[0]} ${win_un} ${win_pd}
+    log    Powershell command output: ${output}     console=True
+
+Windows Server Should Be Pinging And Volume Should Be Active
+    [Documentation]     Windows Server Should Be Pinging, FC Disk Should Exist and Active
+    [Arguments]     ${profile}   ${expectedPath}= 4
+    ${resp} =      Get IP From Server Profile   ${profile}
+    Enable PSRemaoting And Set Trustedhosts
+    ${output}=   Run    powershell.exe -ExecutionPolicy Unrestricted -file ${storage_path} ${resp[0]} ${win_un} ${win_pd} ${expectedPath}
+    log    Powershell command output: ${output}     console=True
+    ${paths}=    Get Regexp Matches    ${Output}    Contains ${expectedPath} Paths
+    ${count_paths} =      Get Length      ${paths}
+    Run Keyword if      ${count_paths} == 0     FAIL  Expected active paths are not as same paths specified
+
+Check And Configure NIC Teaming In Windows
+    [Documentation]    Check And Configure NIC Teaming In Windows
+    [Arguments]     ${profile}   ${CreateRemove}    ${TeamName}    ${EthernetInterface}
+    ${resp} =      Get IP From Server Profile   ${profile}
+    Enable PSRemaoting And Set Trustedhosts
+    ${Get_Teaming} =    set variable   $Username = '${win_un}'; $Password = '${win_pd}'; $pass = ConvertTo-SecureString -AsPlainText $Password -Force; $Cred = New-Object System.Management.Automation.PSCredential -ArgumentList $Username,$pass ; $session = New-PsSession -ComputerName ${resp[0]} -Credential $Cred ; Invoke-Command -Session $session -ScriptBlock {Get-NetLbfoTeam}
+    ${status} =    Run     powershell "${Get_Teaming}"
+    ${nic}=     Get Regexp Matches    ${status}   TeamNics
+    ${count_nic} =     get length     ${nic}
+    Run Keyword if      ${count_nic} == 1     Log  Nic teaming already exists  WARN
+    Run Keyword if      ${count_nic} == 0     Enable Windows Nic Team   ${profile}  ${CreateRemove}   ${TeamName}   ${EthernetInterface}
+
+Enable Windows Nic Team
+    [Documentation]    Powershell Utility to create nic teaming in Windows
+    [Arguments]         ${profile}  ${CreateRemove}    ${TeamName}    ${EthernetInterface}
+    ${resp} =      Get IP From Server Profile   ${profile}
+    ${Output}=   Run    powershell.exe -ExecutionPolicy Unrestricted -file ${nic_team} ${resp[0]} ${resp[1]} ${win_un} ${win_pd} ${EthernetInterface} ${TeamName} ${CreateRemove}
+    log   ${output}
+    ${nic}=    Get Regexp Matches    ${Output}    Nic Teaming Successfull
+    ${count_nic} =      Get Length      ${nic}
+    Run Keyword if      ${count_nic} == 0     FAIL  Nic teaming is not successfull
+
+Get IP From Server Profile
+    [Documentation]    Get IP From Server Profile
+    [Arguments]        ${profile}
+    ${win_ip}=    create list
+    ${profilename}=     Get From Dictionary  ${profile}   name
+    ${profiles} =       Fusion Api Get Server Profiles  param=?count=10&filter="name matches '%25${profilename}%25'"
+    ${resp} =      Get Server Ethernet Connections IPs from DHCP  @{profiles['members']}
+    ${count} =      Get Length      ${resp}
+    Run Keyword if      ${count} == 0     FAIL    No IP's found in DHCP server
+    :FOR   ${ips}    IN   @{resp}
+    \      ${status}     ${response}=     Run Keyword and Ignore Error      Ping IPAddress    ${ips}
+    \      ${ip}=     Convert To String   ${ips}
+    \      Run Keyword If      '${status}'=='PASS'     Append to list  ${win_ip}   ${ip}
+    ${count} =      Get Length      ${win_ip}
+    Run Keyword if      ${count} == 0     FAIL    No IP's are pingable
+    [Return]    ${win_ip}
+
+Enable PSRemaoting And Set Trustedhosts
+    [Documentation]    Enable PSRemaoting And Set Trustedhosts
+    Run  powershell Enable-PSRemoting -Force
+    Run  powershell Set-Item wsman:\\localhost\\client\\trustedhosts * -Force
+    Run  powershell Restart-Service WinRM
+
+Power On Server Profile And Wait For POST State
+    [Documentation]    Power On Server Profiles And Wait For Post State
+    [Arguments]    ${profiles}   ${wait}= 3m   ${timeout}= 15m    ${interval}= 15s
+    Power on Servers in Profiles   ${profiles}
+    Wait for Servers in Profiles to reach POST State  ${profiles}  timeout=${timeout}  interval=${interval}
+    : For  ${profile}  IN  @{profiles}
+    \    Wait Until Keyword Succeeds  ${timeout}    ${interval}   Get IP From Server Profile   ${profile}
+    Log    Wait for OS to load and start services...     console=True
+    Sleep    ${wait}
+
+Wait for Interconnect to go Critical or Ok
+    [Documentation]  Wait till interconnect state goes Critical or Ok
+    [Arguments]     ${name}  ${status}  ${timeout}= 10m    ${interval}= 5s
+    Wait Until Keyword Succeeds  ${timeout}    ${interval}  IC Status Should be Expected   ${name}  ${status}
+
+IC Status Should be Expected
+    [Documentation]   Validation of interconnect status
+    [Arguments]     ${name}  ${status}
+    ${resp} =  Fusion Api Get Interconnect  param=?filter="'name' = '${name}'"
+    Run Keyword If  '${resp['members'][0]['status']}' != '${status}'  FAIL  msg=Interconnect state is not expected state
+    ...  ELSE  Log  Interconnect state is in expected state   console=yes
+
+Simulate a failure in the IC Uplink ports
+    [Documentation]     Disable and enable IC Uplink Port
+    [Arguments]  ${interconnects}  ${timeout}= 15m    ${interval}= 15s
+    :FOR  ${inter}  IN  @{interconnects}
+    \  Update IC Port  ${inter['name']}  ${inter['port']}  ${inter['uplink']}
+    \  Wait for port to go unlinked or linked  ${inter['name']}  ${inter['port']}  ${inter['port_status']}
+
+Wait for port to go unlinked or linked
+    [Documentation]  Wait till port state goes unlinked or linked state
+    [Arguments]     ${name}  ${port_name}  ${status}  ${timeout}= 1m    ${interval}= 5s
+    Wait Until Keyword Succeeds  ${timeout}    ${interval}  IC Port Status Should be Expected  ${name}  ${port_name}  ${status}
+
+IC Port Status Should be Expected
+    [Documentation]  Validation of port status in IC
+    [Arguments]  ${name}  ${port_name}  ${status}
+    ${uri} =     Create IC Port URI   ${name}    ${port_name}
+    ${resp} =    fusion api get resource    uri=${uri}
+    Run Keyword If  '${resp['portStatus']}' != '${status}'  FAIL  msg=Port state is not expected
+    ...  ELSE  Log  Port state is in expected state   console=yes
+
+Create Backup From OV
+    [Documentation]    Create appliance backup
+    ${resp}=    Fusion Api Create Backup
+    log    Creating Backup.......       console=True
+    Should Be Equal as Strings      '${resp['status_code']}'     '202'    msg=Failed to Backup OneView
+    Wait For Task2  ${resp}      timeout=2000      interval=5
+
+All Server Power State Should Be
+    [Documentation]  Verifies Power State of All Server Hardware
+    [Arguments]  ${power_state}
+    ${servers} =     Fusion Api Get Server Hardware
+    ${resp_list} =       Create List
+    :FOR    ${server}    IN    @{servers['members']}
+    \    Run Keyword If     '${server['powerState']}'!='${power_state}'   Append To List    ${resp_list}    ${server['name']}
+    ${count} =   Get Length    ${resp_list}
+    Run Keyword If    '${count}'!='0'    Fail    msg=Servers ${resp_list} are not in powered ${power_state} state.
+
+Verify Network Sets
+    [Documentation]    Verify Network Sets
+    [Arguments]       ${expected_network_sets}
+    :FOR    ${netSet}  IN  @{expected_network_sets}
+    #       -Grab the correct network set from the expected network set list that was passed in
+    \       ${expItem} =  Fusion Api Get Dict From List  ${expected_network_sets}  name  ${netSet['name']}
+    #       -If the network isn't in the list to validate, skip it
+    \       CONTINUE FOR LOOP IF  ${expItem}=={}
+    #       -Get the network resource and do the comparison
+    \       ${actItem} =  Get Resource    NS:${netSet['name']}
+    \       ${result} =  fusion api validate response follow   ${expItem}  ${actItem}  #wordy=${TRUE}
+    \       Run keyword and continue on failure  should be equal  ${result}  ${TRUE}
+
+Verify FCoE Networks
+    [Documentation]    Verify FCoE Networks
+    [Arguments]        ${expected_networks}
+    : FOR    ${net}  IN  @{expected_networks}
+    #       -Grab the correct network from the expected network listed that was passed in
+    \       ${expItem} =  Fusion Api Get Dict From List  ${expected_networks}  name  ${net['name']}
+    #       -If the network isn't in the list to validate, skip it
+    \       CONTINUE FOR LOOP IF  ${expItem}=={}
+    #       -Get the network resource and do the comparison
+    \       ${actItem} =  Get Resource    FCOE:${net['name']}
+    \       ${result} =  fusion api validate response follow   ${expItem}  ${actItem}  wordy=${TRUE}
+    \       Run keyword and continue on failure  should be equal  ${result}  ${TRUE}
+    \       Log  ${result}
+
+Generate Bulk Expired Sessions
+    [Documentation]    Generate Bulk Expired Sessions
+    [Arguments]        ${credentials}   ${number_of_session}=20
+    Set Log Level   TRACE
+    ${sessions}=     Create List
+    :FOR    ${index}    IN RANGE    0   ${number_of_session}
+    \   ${response}     ${session}=    Fusion Api Login Appliance  ${appliance_ip}     ${credentials}
+    \   Run Keyword If   ${response['status_code']} is 200   Append To List    ${sessions}   ${session}
+    \   ${headers} =    Run Keyword If   ${response['status_code']} is 200    Add to headers  Auth=${session}
+    \   Run Keyword If   ${response['status_code']} is 200   Fusion Api Logout Appliance      headers=${headers}
+    \   ...              ELSE    Run keyword and continue on failure    FAIL    Failed to login
+    [Return]    ${sessions}
+
+Sessions Should Not Be Found
+    [Documentation]    Sessions Should Not Be Found
+    [Arguments]        ${sessions}
+    : FOR   ${session}  IN  @{sessions}
+    \   ${response} =   Fusion Api Get Session Info     param=/idle-timeout    sessionID=${session}
+    \   Should Be Equal     '${response['status_code']}'  '404'     Expired session should be invalid.
+
+Appliance Upgrade Status Should Be Successful
+    [Documentation]     Gets the status of Upgrade process should be success.
+    ${resp}=       Fusion Api Get Appliance Firmware Upgrade Status
+    Run Keyword If  ${resp['status_code']}==503  Log  Task is in progress  console=True
+    Run Keyword If  ${resp['status_code']}==503 or ${resp['status_code']}!=200  Fail
+    ${success_state} =   Run Keyword If  ${resp['status_code']}==200  Get From Dictionary  ${resp}  success
+    Run Keyword If  ${resp['status_code']}==200  Should be Equal  ${success_state}   ${true}  msg=Upgrade Failed  values=False
+
+Generate Certificate Chain Payload
+    [Documentation]    Gnerate certificate payload
+    [Arguments]    ${host}    ${payload}    ${root_crt}    ${aliasname}=${None}
+    ${cert} =    Fusion Api Get Remote Certificate     ${host}
+    ${body} =    Copy Dictionary    ${payload}
+    Set To Dictionary    ${body['certificateDetails'][0]}   base64Data    ${root_crt}
+    Run Keyword If  '${aliasname}' != '${None}'   set to dictionary    ${body['certificateDetails'][0]}  aliasName   ${aliasname}
+    set to dictionary    ${body['certificateDetails'][1]}   base64Data    ${cert['certificateDetails'][0]['base64Data']}
+    [Return]    ${body}
+
+Generate Certificate Payload
+    [Documentation]   Generate Certificate Payload
+    [Arguments]       ${host}  ${payload}  ${aliasname}=${None}
+    ${cert} =    Fusion Api Get Remote Certificate     ${host}
+    ${body} =    Copy Dictionary    ${payload}
+    Set To Dictionary    ${body['certificateDetails'][0]}    base64Data    ${cert['certificateDetails'][0]['base64Data']}
+    Run Keyword If  '${aliasname}' != '${None}'   set to dictionary    ${body['certificateDetails'][0]}  aliasName   ${aliasname}
+    [Return]    ${body}
+
+Add Hosts To Cluster
+    [Documentation]     Add hosts to cluster
+    [Arguments]    ${esxi_os_servers}   ${vi_server_details}
+    @{ips}=    create list
+    :FOR  ${esxi_server}  IN   @{esxi_os_servers}
+    \  ${resp} =      Run keyword and continue on failure   Get IP From Server Profile   ${esxi_server}
+    \  append to list   ${ips}    ${resp[0]}
+    :FOR  ${ip}  IN  @{ips}
+    \  connect_to_vi_server  ${vi_server_details['vcenter']}    ${vi_server_details['username']}    ${vi_server_details['password']}
+    \  vi_server_should_be_connected
+    \  ${hosts}     get_hosts_in_cluster   ${vi_server_details['cluster']}
+    \  ${status}  ${host}     Run Keyword And Ignore Error   List Should Contain Value    ${hosts}  ${ip}
+    \  Run keyword if  '${status}' == 'PASS'   log   Host ${ip} exists in cluster   WARN
+    \  Run keyword if  '${status}' == 'PASS'   Remove Values From List   ${ips}  ${ip}
+    \  Continue For Loop If    '${status}' == 'FAIL'
+    :FOR  ${ip}   IN   @{ips}
+    \  ${add_hosts} =  add_host_to_cluster   ${ip}  ${vi_server_details['cluster']}    ${vi_server_details['hostun']}   ${vi_server_details['hostpwd']}  ${NONE}
+    \  Run Keyword Unless    '${add_hosts}' == 'success'   Fail   Failed to add ${ip} to ${vi_server_details['cluster']}
+
+Enter Maintenance Mode For Hosts
+    [Documentation]     Enter or Exit Maintaince Mode For Hosts
+    [Arguments]    ${esxi_os_servers}
+     @{ips}=    create list
+     :FOR  ${esxi_server}  IN   @{esxi_os_servers}
+     \   ${resp} =      Get IP From Server Profile   ${esxi_server}
+     \   ${status}   ${resp}=    Run Keyword And Ignore Error    Open Connection    ${resp[0]}  timeout=300s
+     \   Run Keyword If  '${status}'=='FAIL'     Fail    Failed to Open SSH Connection for ${resp[0]}
+     \   ${newstatus}    ${resp}=    Run Keyword And Ignore Error    Login    ${vi_server_details['hostun']}    ${vi_server_details['hostpwd']}
+     \   Run Keyword If  '${newstatus}'=='FAIL'      Fail    Failed to do SSH Login for ${resp[0]}
+     \   ${result}=  Execute Command     esxcli system maintenanceMode set --enable true
+     \   log   SSH Command output: ${result}    console=True
+     \   Sleep   30s
+
+Exit Maintenance Mode For Hosts
+    [Documentation]     Enter or Exit Maintaince Mode For Hosts
+    [Arguments]    ${esxi_os_servers}
+     @{ips}=    create list
+     :FOR  ${esxi_server}  IN   @{esxi_os_servers}
+     \   ${resp} =      Get IP From Server Profile   ${esxi_server}
+     \   ${status}   ${resp}=    Run Keyword And Ignore Error    Open Connection    ${resp[0]}  timeout=300s
+     \   Run Keyword If  '${status}'=='FAIL'     Fail    Failed to Open SSH Connection for ${resp[0]}
+     \   ${newstatus}    ${resp}=    Run Keyword And Ignore Error    Login    ${vi_server_details['hostun']}    ${vi_server_details['hostpwd']}
+     \   Run Keyword If  '${newstatus}'=='FAIL'      Fail    Failed to do SSH Login for ${resp[0]}
+     \   ${result}=  Execute Command     esxcli system maintenanceMode set --enable false
+     \   log   SSH Command output: ${result}    console=True
+     \   Sleep   30s
+
+Power On The VM
+    [Documentation]   Power On The VM
+    [Arguments]    ${cluster_vm}   ${retry}= 30   ${retry_interval}= 1m
+    power_on_vm    ${cluster_vm['name']}
+
+Windows OS Should Be Pinging
+    [Documentation]   Power On The VM
+    [Arguments]    ${cluster_vm}
+    @{ips}=     Get VM IPv4 Addresses       ${cluster_vm['name']}
+    ${count}=       Get Length      ${ips}
+    Run Keyword If      ${count} == 0    FAIL     msg=No IP address returned from vSphere
+    ${ip}=      Get From List       ${ips}      0
+    Should Match RegExp     ${ip}       [0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}
+    ...     msg=No valid IP address returned from vSphere
+    ${status}     ${response}=     Run Keyword and Ignore Error      Ping IPAddress    ${ip}
+    Run Keyword If      '${status}'!='PASS'    Fail    VM is not pinging ${cluster_vm['name']}
+
+VM Migration
+    [Documentation]     VM migration one host to another
+    [Arguments]         ${vmotion}
+    :FOR  ${var}  IN  @{vmotion}
+    \  connect_to_vi_server  ${var['vcenter']}  ${var['username']}  ${var['password']}
+    \  vi_server_should_be_connected
+    \  ${vmotionStatus} =  migrate_vm_host  ${var['vmname']}  ${var['hostname']}
+    \  Run Keyword If   '${vmotionStatus}' == 'success'        Log           VM is successfully migrated to another host  console=True
+    \  Run Keyword Unless    '${vmotionStatus}' == 'success'             Fail   Failed to migrate VM to another host
+
+LE BigBang Firmware Update before VM Migration
+    [Arguments]        ${expected_logical_enclosure}    ${spp_version}
+    [Documentation]     Retrieve LE name and initiate BigBang Firmware update
+    ...                 selceted force option as True, and SharedInfrastructureAndProfiles
+    :FOR    ${expected_dto}  IN  @{expected_logical_enclosure}
+    \   ${le_name} =    Get from Dictionary     ${expected_dto}  name
+    \   ${response} =  Update Logical Enclosure Firmware before VM Migration  ${le_name}  ${spp_version}  ${True}  SharedInfrastructureAndServerProfiles
+    [Return]  ${response}
+
+Update Logical Enclosure Firmware before VM Migration
+    [documentation]    Updates the firmware on an LE
+    [Arguments]     ${le_name}
+    ...             ${firmwareBaseline}
+    ...             ${forceInstallFirmware}=${True}
+    ...             ${firmwareUpdateOn}=SharedInfrastructureOnly
+    ...             ${logicalInterconnectUpdateMode}=Parallel
+    ...             ${updateFirmwareOnUnmanagedInterconnect}=${False}
+    ...             ${alidateIfLIFirmwareUpdateIsNonDisruptive}=${False}
+    Log  Updating ${firmwareBaseline} firmware for ${le_name}   console=True
+    ${uri} =    Get Logical Enclosure URI    ${le_name}
+    ${LE} =     Fusion Api Get Logical Enclosure    ${uri}
+    ${eTag} =   Get From Dictionary  ${LE}  eTag
+    ${firmwareBaseline} =    Run keyword If    '${firmwareBaseline}' != ''    Get Firmware Bundle By Version  ${firmwareBaseline}
+    ...                      ELSE              Get Variable Value   ${firmwareBaseline}
+    ${firmware_data} =    Create Dictionary    firmwareBaselineUri=${firmwareBaseline}
+    ...                                        forceInstallFirmware=${forceInstallFirmware}
+    ...                                        firmwareUpdateOn=${firmwareUpdateOn}
+    ...                                        logicalInterconnectUpdateMode=${logicalInterconnectUpdateMode}
+    ...                                        updateFirmwareOnUnmanagedInterconnect=${updateFirmwareOnUnmanagedInterconnect}
+    ...                                        validateIfLIFirmwareUpdateIsNonDisruptive=${alidateIfLIFirmwareUpdateIsNonDisruptive}
+    ${body} =   Create Dictionary         op=replace
+    ...                                   path=/firmware
+    ...                                   value=${firmware_data}
+    ${body} =   Create list     ${body}
+    ${response} =   Fusion Api LE Firmware Update   body=${body}    uri=${uri}      etag=${eTag}
+    [Return]    ${response}
+
+Check status of LE Firmware Update
+    [documentation]    Check status firmware on an LE
+    [Arguments]     ${response}
+    ${task} =  Wait For Task2     ${response}     150m    1m    None Expected
+    [Return]    ${task}
+
+Reset Server Hardware Should Be Successful
+    [documentation]    Reset Server Hardware Should Be Successful
+    [Arguments]    ${OA_HOST}    ${OA_USER}    ${OA_PASS}    ${DEVICE}    ${BAY}    ${match}    ${VERBOSE}=True     ${TIMEOUT}=15s
+    :FOR  ${reset}  IN  @{reset_server}
+    \  ${execute_cmd} =   OA CLI RESET  ${reset['host']}  ${reset['user']}  ${reset['password']}  ${reset['device']}  ${reset['bay_number']}
+    \  ${get_message_match}=   Get Regexp Matches    ${execute_cmd}     ${match}
+    \  ${match_count} =      Get Length      ${get_message_match}
+    \  Run Keyword if      ${match_count} == 0    FAIL   Failed to execute command
+
+Poweroff Interconnect Should Be Successful
+    [documentation]    Poweroff Interconnect Should Be Successful
+    [Arguments]      ${OA_HOST}    ${OA_USER}    ${OA_PASS}    ${DEVICE}    ${BAY}   ${match}
+    ${execute_cmd} =  OA CLI POWEROFF   ${OA_HOST}    ${OA_USER}    ${OA_PASS}    ${DEVICE}    ${BAY}
+    ${get_message_match}=   Get Regexp Matches    ${execute_cmd}     ${match}
+    ${match_count} =      Get Length      ${get_message_match}
+    Run Keyword if      ${match_count} == 0    FAIL   Failed to execute command
+
+Poweron Interconnect Should Be Successful
+    [documentation]    Poweron Interconnect Should Be Successful
+    [Arguments]       ${OA_HOST}    ${OA_USER}    ${OA_PASS}    ${DEVICE}    ${BAY}   ${match}
+    ${execute_cmd} =  OA CLI POWERON   ${OA_HOST}    ${OA_USER}    ${OA_PASS}    ${DEVICE}    ${BAY}
+    ${get_message_match}=   Get Regexp Matches    ${execute_cmd}     ${match}
+    ${match_count} =      Get Length      ${get_message_match}
+    Run Keyword if      ${match_count} == 0    FAIL   Failed to execute command
+
+Update Logical Enclosure Firmware - Tbird
+    [documentation]    Updates the firmware on an LE - Tbird
+    [Arguments]     ${le_name}
+    ...             ${firmwareBaseline}
+    ...             ${forceInstallFirmware}=${True}
+    ...             ${firmwareUpdateOn}=SharedInfrastructureOnly
+    ...             ${logicalInterconnectUpdateMode}=Parallel
+    ...             ${updateFirmwareOnUnmanagedInterconnect}=${False}
+    ...             ${alidateIfLIFirmwareUpdateIsNonDisruptive}=${False}
+    ...             ${le_timeout}=200m
+    Log  Updating ${firmwareBaseline} firmware for ${le_name}   console=True
+    ${uri} =    Get Logical Enclosure URI    ${le_name}
+    ${LE} =     Fusion Api Get Logical Enclosure    ${uri}
+    ${eTag} =   Get From Dictionary  ${LE}  eTag
+    ${firmwareBaseline} =    Run keyword If    '${firmwareBaseline}' != ''    Get Firmware Bundle By Version  ${firmwareBaseline}
+    ...                      ELSE              Get Variable Value   ${firmwareBaseline}
+    ${firmware_data} =    Create Dictionary    firmwareBaselineUri=${firmwareBaseline}
+    ...                                        forceInstallFirmware=${forceInstallFirmware}
+    ...                                        firmwareUpdateOn=${firmwareUpdateOn}
+    ...                                        logicalInterconnectUpdateMode=${logicalInterconnectUpdateMode}
+    ...                                        updateFirmwareOnUnmanagedInterconnect=${updateFirmwareOnUnmanagedInterconnect}
+    ...                                        validateIfLIFirmwareUpdateIsNonDisruptive=${alidateIfLIFirmwareUpdateIsNonDisruptive}
+    ${body} =   Create Dictionary         op=replace
+    ...                                   path=/firmware
+    ...                                   value=${firmware_data}
+    ${body} =   Create list     ${body}
+    ${resp} =   Fusion Api LE Firmware Update   body=${body}    uri=${uri}      etag=${eTag}
+    ${task} =  Wait For Task     ${resp}     ${le_timeout}
+    ${taskState} =    Get From Dictionary        ${task}     taskState
+    Log   Update task state: ${taskState}   console=True
+    Should Match    ${taskState}    Completed
+    [Return]    ${task}
+
+LE BigBang Firmware Update - Tbird
+    [Arguments]        ${expected_logical_enclosure}    ${spp_version}
+    [Documentation]     Retrieve LE name and initiate BigBang Firmware update
+    ...                 selceted force option as True, and SharedInfrastructureAndProfiles
+    ...                 And verify the firmware version of server hardware after update
+    :FOR    ${expected_dto}  IN  @{expected_logical_enclosure}
+    \   ${le_name} =    Get from Dictionary     ${expected_dto}  name
+    \   Update Logical Enclosure Firmware - Tbird  ${le_name}  ${spp_version}  ${True}  SharedInfrastructureAndServerProfiles
+    \   ${server_hardwares} =   Fusion Api Get Server Hardware
+    \   ${server_hardwares} =   Get from Dictionary     ${server_hardwares}    members
+    \   Validate Firmware Installed    ${server_hardwares}  ${spp_version}
+
+Set server name and verify in Oneview
+    [Documentation]  Verifies the server name matches as expected and sets the server name
+    ...    and verifies in OneView server hardware page with expected server name
+    ...    Usage: Set server name and verify in OV  ${server_hardware}  ${set_server_name}  ${pre_set_expected_match}  ${post_set_expected_match}
+    ...    ${server_hardware}: Server Hardware Name
+    ...    ${set_server_name}: Sets Server Name in ilo through ssh as desired
+    ...    ${pre_set_expected_match}: Before setting the server name in ilo through ssh expected name to be present
+    ...    ${post_set_expected_match}: After setting the server name in ilo through ssh expected name to be present
+    [Arguments]  ${server_hardware}  ${set_server_name}  ${pre_set_expected_match}  ${post_set_expected_match}  ${timeout}=2m  ${interval}=5s
+    ${result}=  Execute Command      show oemHPE_server_name
+    ${match}=    Get Regexp Matches    ${result}    ${pre_set_expected_match}
+    ${diskcount} =      Get Length      ${match}
+    Run Keyword If  ${diskcount} == 0  FAIL  Hostname is not as expected
+    ${set_name}=  Execute Command      set oemHPE_server_name=${set_server_name}
+    ${show_name}=  Execute Command      show oemHPE_server_name
+    ${match}=    Get Regexp Matches    ${show_name}    ${post_set_expected_match}
+    ${diskcount} =      Get Length      ${match}
+    Run Keyword If  ${diskcount} == 0  FAIL  Hostname is not as expected
+    Wait Until Keyword Succeeds  ${timeout}    ${interval}  Server name should be as expected  ${server_hardware}  ${post_set_expected_match}
+
+Server name should be as expected
+    [Arguments]  ${server_hardware}  ${server_name_expected}
+    [Documentation]  Verify the Server name should be as expected
+    ${resp} =   Get Resource    SH:${server_hardware}
+    ${server_name} =  Set Variable  ${resp['serverName']}
+    Run Keyword If  '${server_name}' != '${server_name_expected}'  FAIL
+    ...  ELSE  Log  Server Name is as expected  console=yes
+
+Efuse Synergy Device
+    [Documentation]   Efuse Device  On|Off|reset
+    ...               Usage  Efuse Synergy Device  ${efuse_action}=EFuseOn  ${encl_serial}=CN75140CPT  ${device_type}=Blade/Interconnect   ${device_bay}=6  ${state}=Absent|Configured|Monitored
+    [Arguments]   ${efuse_action}  ${encl_serial}   ${device_bay}   ${bay_number}
+    ${status}   ${resp}=    Run Keyword And Ignore Error    Open Connection    ${APPLIANCE_IP}
+    Run Keyword If  '${status}'=='FAIL'     Fail    Failed to Open SSH Connection for ${APPLIANCE_IP}
+    ${newstatus}    ${resp}=    Run Keyword And Ignore Error    Login    ${appliance_username}   ${appliance_password}
+    Run Keyword If  '${newstatus}'=='FAIL'      Fail    Failed to do SSH Login for ${APPLIANCE_IP}
+    ${link_local_ip}=  Execute Command      /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${encl_serial} -o i
+    ${Auth}=  Execute Command      /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${encl_serial} -o token
+    ${Auth}    Should Match Regexp    ${Auth}    (?i)\\S*
+    log to console     EM TOKEN: ${Auth}
+    ${output}=  Execute Command      curl -gkx "" -X POST -d '{"Action":"${efuse_action}"}' -isS -H 'x-auth-token:${Auth}' --tlsv1 "https://[${link_local_ip}%bond0]/rest/v1/${device_bay}/${bay_number}"
+    log   SSH Command output: ${Output}    console=true
+    Close Connection
+    [Return]    ${output}
+
+IC should reach desired state
+    [Documentation]  IC should reach desired state
+    [Arguments]  ${uri}  ${state}
+    Set Log Level  TRACE
+    ${resp} =  fusion api get resource  ${uri}
+    Log  \t ${uri}: ${resp['state']}  console=yes
+    Should Match Regexp  ${resp['state']}  ${state}
+    [Return]  ${resp}
+
+RHEL Server Should Be Pinging And Volume Should Be Active
+    [Documentation]     Get the OS ip from DHCP server and perform ping test. List and validate fcoe disks.
+    [Arguments]     ${profile}   ${activepaths}= 4
+    ${profilename}=     Get From Dictionary  ${profile[0]}  name
+    ${rhelip} =  Create List
+    ${profiles} =       Fusion Api Get Server Profiles  param=?count=10&filter="name matches '%25${profilename}%25'"
+    ${resp} =      Get Server Ethernet Connections IPs from DHCP  @{profiles['members']}
+    ${count} =      Get Length      ${resp}
+    Run Keyword if      ${count} == 0     FAIL    No IP's found in DHCP server
+    :FOR   ${ips}    IN   @{resp}
+    \      ${status}     ${response}=     Run Keyword and Ignore Error      Ping IPAddress    ${ips}
+    \      ${ip}=     Convert To String   ${ips}
+    \      Run Keyword If      '${status}'=='PASS'     Append to list  ${rhelip}   ${ip}
+    ${count} =      Get Length      ${rhelip}
+    Run Keyword if      ${count} == 0     FAIL    No IP's are pingable
+    Set Global Variable    ${rhelip}
+    # open ssh connection
+    ${status}   ${resp}=    Run Keyword And Ignore Error    Open Connection    ${rhelip[0]}  timeout=300s
+    Run Keyword If  '${status}'=='FAIL'     Fail    Failed to Open SSH Connection for ${rhelip[0]}
+    ${newstatus}    ${resp}=    Run Keyword And Ignore Error    Login    ${username}    ${password}
+    Run Keyword If  '${newstatus}'=='FAIL'      Fail    Failed to do SSH Login for ${rhelip[0]}
+    ${result}=  Execute Command      multipath -ll
+    log   SSH Command output: ${result}    console=true
+    # check active state paths
+    ${activestatus}=    Evaluate     'active ready running'
+    ${degradedstatus}=   Evaluate     'active ready ${SPACE}running'
+    ${degradedpath}=   Get Regexp Matches    ${result}   ${degradedstatus}
+    ${activepath}=   Get Regexp Matches    ${result}     ${activestatus}
+    ${activecount} =      Get Length      ${activepath}
+    ${degradecount} =      Get Length      ${degradedpath}
+    ${totalcount}=  Evaluate  ${activecount}+${degradecount}
+    Run Keyword if      ${totalcount} == ${activepaths}    Log   activepaths ${activepaths} are as expected  console=yes
+    ...                 ELSE   FAIL   msg= activepaths ${activepaths} are not as expected
+
+Active And StandBy EMs Should Be Upgraded To
+    [Documentation]   Active And StandBy EMs Should Be
+    [Arguments]   ${expected_ov_build_version}
+    ${resp}    fusion_api_get_ha_nodes
+    ${ha_nodes}     set variable   ${resp['members']}
+    ${role_list}   create list
+    :For  ${validate}   IN   @{ha_nodes}
+    \    ${get_name}     Get From Dictionary  ${validate}  name
+    \    ${get_role}     Get From Dictionary   ${validate}   role
+    \    append to list  ${role_list}   ${get_role}
+    \    ${get_oneview_version}   Get From Dictionary   ${validate}  version
+    \    ${get_oneview_build_version}   String.Get Regexp Matches   ${get_oneview_version}  (-.\\d+)
+    \    ${version_match}=    Get Regexp Matches    ${get_oneview_build_version[0]}    ${expected_ov_build_version}
+    \    ${version_match} =      Get Length      ${version_match}
+    \    Run Keyword if      ${version_match} == 0     FAIL  Expected Oneview Version ${expected_ov_build_version} but ${get_name} is still in ${get_oneview_version}
+    ${get_role_length_list}    Get Length   ${role_list}
+    Run Keyword If  ${get_role_length_list} == 1  FAIL   One of EM is not up....
+
+Verify Availability of Sas Interconnect URI
+    [Documentation]  Trying to Get URI of SAS Interconnect, if device available count will increase to '1'
+    ...              else count will be Zero '0'. With respect to count value checking the availability of ICM Natasha
+    ...              and logs are displaying on console returning count value.
+    ...              Example:
+    ...                Verify Availability of Sas Interconnect URI ${name}
+    ...              Data Required:
+    ...                Expected data 'name'(Enclosure Serial Number and Interconnect Bay Number)
+    [Arguments]  ${name}
+    ${resp} =  Fusion Api Get Sas Interconnects  param=?filter="'name' = '${name}'"
+    ${count} =  Get From Dictionary  ${resp}  count
+    Run Keyword If  $count!=0   Log   SAS Interconnect  ${name} is Available  console=true
+    Run Keyword If  $count==0   Log   Failed to Get SAS Interconnect URI found no match for name ${name}  console=true
+    [Return]  ${count}
+
+Verify Availability of Server Hardware URI
+    [Documentation]  Get the URI of Server Hardware, if available count will increment to '1'
+    ...              else count will be Zero '0'. This helps to determine the presence/availability
+    ...              of the given server Hardware
+    [Arguments]  ${enc_server}
+    ${resp} =  Fusion Api Get Server Hardware    param=?filter="'name'=='${enc_server}'"
+    ${count} =  Get From Dictionary  ${resp}  count
+    Run Keyword If  $count!=0   Log   Server Hardware  ${enc_server} is Available  console=true
+    Run Keyword If  $count==0   Log   Failed to Get Server Hardware URI found no match for name ${enc_server}  console=true
+    [Return]  ${count}
+
+CIM Failover
+    [Documentation]   Get the roles, perform failover and verify that role changed.
+    [Arguments]   ${wait_task_timeout}=60m   ${wait_task_interval}=2s   ${cycle_sleep}=60m
+    ${preFailoverRoles} =   Get HA Nodes
+    Set To Dictionary   ${preFailoverRoles['Active']}   role=Standby
+    Log   \nActivating standby CIM...   console=${True}
+    Log   Current active: ${preFailoverRoles['Active']['name']}   console=${True}
+    Log   Current standby: ${preFailoverRoles['Standby']['name']}   console=${True}
+    ${resp} =   Fusion Api Edit HA Nodes   ${preFailoverRoles['Active']}   ${preFailoverRoles['Active']['uri']}
+    Wait For Task   ${resp}   timeout=${wait_task_timeout}   interval=${wait_task_interval}
+    Sleep And Log Reason To Console   ${cycle_sleep}   reason=Sleeping ${cycle_sleep} after CIM failover.
+    Log   Standby CIM activation complete.\n   console=${True}
+    ${postFailoverRoles} =   Get HA Nodes
+    CIM Role Should Have Changed   ${preFailoverRoles}   ${postFailoverRoles}
+
+Get HA Nodes
+    [Documentation]   Build roles dictionary for ease-of-access.
+    Log   Getting HA Nodes and building dictionary off it...   console=True
+    ${resp} =   Fusion Api Get HA Nodes   /rest/appliance/ha-nodes
+    ${roles} =   Create Dictionary
+    :FOR   ${c}   IN   @{resp['members']}
+    \   Set To Dictionary   ${roles}   ${c['role']}=${c}
+    [Return]   ${roles}
+
+CIM Role Should Have Changed
+    [Documentation]   Verify that role changed and fail if not.
+    [Arguments]   ${pre}   ${post}
+    Log   Verifying that CIM role has changed, state is OK, status is OK and uri is correct...   console=${True}
+    Log   Previous active: ${pre['Active']['name']}   console=${True}
+    Log   Current active: ${post['Active']['name']}   console=${True}
+    Log   Active State: ${post['Standby']['state']}   console=${True}
+    Log   Active Status: ${post['Standby']['status']}   console=${True}
+    Should Be Equal As Strings   ${pre['Active']['name']}   ${post['Standby']['name']}   msg=The expected new active CIM should now be ${pre['Standby']['name']}.
+    Should Be Equal As Strings   ${pre['Active']['state']}   ${post['Standby']['state']}   msg=The expected state should be ${pre['Standby']['state']}.
+    Should Be Equal As Strings   ${pre['Active']['status']}   ${post['Standby']['status']}   msg=The expected status should be ${pre['Standby']['status']}.
+    Should Be Equal As Strings   ${pre['Active']['uri']}   ${post['Standby']['uri']}   msg=The expected uri should be ${pre['Standby']['uri']}.
+    Log   CIM role change was successful.   console=${True}
+
+Sleep And Log Reason To Console
+    [Documentation]   Sleep for a given time and log reason to both console and logfile. Sleep has a reason option but it won't log to console (only in logfile) so we are wrapping them here.
+    [Arguments]   ${sleep}   ${reason}=${null}
+    ${dateTime} =   Get Current Date
+    Log   \n[${dateTime}] ${reason}   console=True
+    Sleep   ${sleep}   reason=${reason}
+
+Downloading Support Dump With Test Name
+    [Documentation]    Downloads a created support dump from one view appliance.
+    [Arguments]      ${dump_uri}  ${suite_name}    ${VERIFY}=${FALSE}   ${STATUS_CODE}=200
+    ${sdname} =    Fetch From Right        ${dump_uri}      /
+    ${respdownload} =     Fusion Api Download Support Dump    ${dump_uri}    ../${suite_name}_${sdname}
+    Run keyword if    '${VERIFY}'=='True'     Should Be Equal    '${respdownload['status_code']}'   '${STATUS_CODE}'    msg=Verification of status_code in downloading support dumps has FAILED    values=False
+
+Get Support Dump
+    [Documentation]     Get Support Dump for OneView Appliance
+    [Arguments]     ${support_dump}  ${suite_name}
+    Return From Keyword If   '${OV_SD.lower()}'=='false'    Skipped to take LE and OV SD (\${OV_SD}=${OV_SD})
+    ${dumpUri}=  Create Support Dump Batch  ${support_dump}  ${VERIFY}=True
+    Run Keyword If    '${dumpUri}' == '${null}'    FAIL    Failed to create support dump
+    Downloading Support Dump With Test Name  ${dumpUri}  ${suite_name}  ${VERIFY}=True
+
+Create And Download Logical Enclosure Support Dump With Test Name
+      [Documentation]    Creates and then downloads an LE support dump with test name
+      [Arguments]      ${lesd_body_list}  ${suite_name}   ${VERIFY}=${FALSE}   ${STATUS_CODE}=202
+      ${le_name}    Create Dictionary
+      :FOR    ${eachSD}  IN  @{lesd_body_list}
+      \    ${le_uri}=       Get Logical Enclosure URI     ${eachSD['name']}
+      \    ${id}=         Fetch From Right        ${le_uri}      /
+      \    Set To Dictionary   ${le_name}  name   ${eachSD['name']}
+      \    Pop from dictionary    ${eachSD}    name
+      \    ${resp} =     Fusion Api Get Logical Enclosure Support Dump    body=${eachSD}      id=${id}
+      \    Run keyword if    '${VERIFY}'=='True'     Should Be Equal    '${resp['status_code']}'   '${STATUS_CODE}'    msg=Failed to initiate Create Logical Enclosure Support Dump.    values=False
+      \    Log     \n-Waiting for dump creation task to complete    console=True
+      \    Wait For Task2    ${resp}    timeout=5000    interval=20
+      \    ${location} =  Get From Dictionary    ${resp['headers']}    location
+      \    ${task} =    Fusion Api Get Task    uri=${location}
+      \    Log     \n-Support dump created successfully   console=True
+      \    ${supportDumpUri}=          Get From Dictionary     ${task['associatedResource']}   resourceUri
+      \    ${sdname}=         Fetch From Right        ${supportDumpUri}      /
+      \    ${respdownload} =     Fusion Api Download Support Dump    ${supportDumpUri}    ../${suite_name}_${sdname}
+      \    Set To Dictionary   ${eachSD}  name   ${le_name['name']}
+      \    Run keyword if    '${VERIFY}'=='True'     Should Be Equal    '${respdownload['status_code']}'   '200'    msg=Verification of status_code in downloading support dumps has FAILED
+
+Get LE Support Dump
+    [Documentation]        Create and Download LE Support Dump
+    [Arguments]     ${le_support_dump}  ${suite_name}
+    Return From Keyword If   '${LE_SD.lower()}'=='false'    Skipped to take LE and OV SD (\${LE_SD}=${LE_SD})
+    Create And Download Logical Enclosure Support Dump With Test Name  ${le_support_dump}  ${suite_name}  ${VERIFY}
+
+Get Uplink Sets
+    [Documentation]     Get Uplink Sets
+    ...                 Return the uplink sets names in list
+    ${us_data}    create list
+    ${us_names}   create list
+    ${resp}     Fusion Api Get Uplink Set
+    :FOR   ${eth_sets}   IN   @{resp['members']}
+    \      ${get_name}=  Get From Dictionary    ${eth_sets}   name
+    \      ${get_fc}=     Get From Dictionary   ${eth_sets}   fcMode
+    \      ${get_fcoe}=   Get From Dictionary   ${eth_sets}   fcoeNetworkUris
+    \      ${get_fcoe_lenght}=    Get Length   ${get_fcoe}
+    \      ${get_ethernetnetworktype}=   Get From Dictionary   ${eth_sets}    ethernetNetworkType
+    \      ${get_nwtype} =   Get From Dictionary    ${eth_sets}   networkType
+    \      Run keyword if   '${get_nwtype}' != 'FibreChannel' and '${get_ethernetnetworktype}' == 'Tagged'   append to list   ${us_data}   ${eth_sets}
+    ${get_us_names_count}=   Get length  ${us_data}
+    Run keyword if  ${get_us_names_count} == 0    FAIL   Couldn't find any uplink sets
+    :FOR   ${names}  IN  @{us_data}
+    \      ${get_name}   Get From Dictionary    ${names}   name
+    \      append to list   ${us_names}  ${get_name}
+    ${us_names}=    Remove Duplicates     ${us_names}
+    [Return]   ${us_names}
+
+Get Data From Uplink Sets And Validate At Oneview
+    [Documentation]   Get Data From Uplink Sets And Validate At Oneview
+    [Arguments]   ${uplinkSetNames}   ${uplinkSetAttrs}
+    ${selectUS} =   Create Dictionary
+    :FOR   ${us_name}   IN   @{uplinkSetNames}
+    \   ${resp} =   Fusion Api Get Uplink Set   param=?filter="name='${us_name}'"
+    \   ${lagAttr} =   Get Port Config Info   ${resp['members'][0]['portConfigInfos']}   ${uplinkSetAttrs}
+    \   Set To Dictionary   ${selectUS}   port_details=${lagAttr}
+    \   Fetch Port Information And Validate At Oneview  ${selectUS}
+
+Fetch Port Information And Validate At Oneview
+    [Documentation]   Fetch Port Information And Validate At Oneview
+    [Arguments]        ${uplink_set_data}
+    # create list to store interfaces and port speed
+    ${interfaces}=  create list
+    ${speed}=   create list
+
+    # Fetch the port information
+    :FOR   ${us_port}   IN   @{uplink_set_data['port_details']}
+    \    ${port_status}=   Get From Dictionary   ${us_port}    portStatus
+    \    Should Be Equal As Strings    ${port_status}   Linked
+    \    Log  ${us_port['interconnectName']} Port Status of ${us_port['portName']} is Linked  console=yes
+    \    ${port_status_health}=   Get From Dictionary   ${us_port}  portHealthStatus
+    \    Should Be Equal As Strings    ${port_status_health}    Normal
+    \    Log  ${us_port['interconnectName']} Port State Health of ${us_port['portName']} is Normal  console=yes
+    \    ${remote_portid}   Get From Dictionary   ${us_port['neighbor']}  remotePortId
+    \    append to list  ${interfaces}  ${remote_portid}
+    \    Log  ${us_port['interconnectName']} Interface of ${us_port['portName']} is ${us_port['neighbor']['remotePortId']}  console=yes
+    \    ${operation_speed}   Get From Dictionary   ${us_port}   operationalSpeed
+    \    Log  ${us_port['interconnectName']} Operational of ${us_port['portName']} is ${us_port['operationalSpeed']}  console=yes
+    \    append to list  ${speed}  ${operation_speed}
+
+Get Port Config Info
+    [Documentation]   Get portUri attributes of the portConfigInfos
+    [Arguments]   ${portConfigInfos}   ${attrList}
+    ${lagAttr} =   Create List
+    :FOR   ${portInfo}   IN   @{portConfigInfos}
+    \   ${resp} =   Fusion Api Get Resource   ${portInfo['portUri']}
+    \   ${attr} =   Get Attributes Data From Response Body   ${resp}   ${attrList}
+    \   Append To List   ${lagAttr}   ${attr}
+    [Return]   ${lagAttr}
+
+Get Attributes Data From Response Body
+    [Documentation]   Get attributes from response body member
+    ...               Returns dictionary of attributes.
+    [Arguments]   ${respMember}   ${attrList}
+    ${attr} =   Create Dictionary
+    :FOR   ${attlst}   IN   @{attrList}
+    \   Set To Dictionary   ${attr}   ${attlst}=${respMember['${attlst}']}
+    [Return]   ${attr}
+
+Get FC Uplink Sets
+    [Documentation]     Get FC Uplink Sets
+    ...                 Return the FC uplink sets names in list
+    ${us_data}    create list
+    ${us_names}   create list
+    ${resp}     Fusion Api Get Uplink Set
+    :FOR   ${eth_sets}   IN   @{resp['members']}
+    \      ${get_nwtype}   Get From Dictionary    ${eth_sets}   networkType
+    \      Run keyword if   '${get_nwtype}' == 'FibreChannel'   Append To List   ${us_data}   ${eth_sets}
+    ${get_us_names_count}   Get length  ${us_data}
+    Run keyword if  ${get_us_names_count} == 0    FAIL   Couldn't find any uplink sets
+
+    :FOR   ${names}  IN  @{us_data}
+    \      ${get_name}=   Get From Dictionary    ${names}   name
+    \      Append To List   ${us_names}  ${get_name}
+    ${us_names}=    Remove Duplicates     ${us_names}
+    [Return]   ${us_names}
+
+Upload Firmware
+    [Documentation]    Upload firmware bundle (SPP) to an appliance from a local file patch
+    [Arguments]     ${filepaths}   ${VERIFY}=${FALSE}  ${STATUS_CODE}=202   ${MSG}=FWBASELINE_ALREADY_EXISTS
+    ${resplist} =     Create List
+    :FOR    ${filepath}   IN    @{filepaths}
+    \   ${updatedname} =    Get From Dictionary        ${filepath}    updatedname
+    \   ${local_path} =    Get From Dictionary        ${filepath}    local_path
+    \   ${resp} =     Fusion Api Get Firmware Driver  param=/${updatedname}
+    \   ${_}   ${file} =    Split Path    ${local_path}
+    \   Run Keyword If    ${resp['status_code']}==200
+    \       ...     Log   Firmware ${updatedname} exists
+    \       ...     WARN
+    \   continue for loop if   ${resp['status_code']}==200
+    \   Log    Uploading Firmware Bundle:${updatedname}   console=True
+    \   ${resp} =  Fusion Api Upload Firmware Bundle   ${local_path}
+    \   ${error_msg}=   Run Keyword If   "${resp['status_code']}" == "400"   Get From Dictionary    ${resp}    errorCode
+    \   Log    ${error_msg}    console=True
+    \   continue for loop if   '${error_msg}' == '${MSG}'
+    \   should be equal as integers  ${resp['status_code']}  ${STATUS_CODE}
+    \   append to list        ${resplist}    ${resp}
+    Run Keyword If   ${resp['status_code']}!=200   Wait For Task2  ${resplist}  600
+    Return From Keyword If  ${VERIFY}==${FALSE}
+    Log    Verify Firmware Version Installed    console=True
+    ${getresp}=    Fusion Api Get Firmware Driver    param=?filter="name='${file}'"
+    Run Keyword If   ${getresp['count']} == 0   Fail    msg=\n No Firmware bundle found!!.Please upload the correct firmware bundle
+    :FOR    ${fw}    IN    @{getresp['members']}
+    \        ${version} =    Get From Dictionary        ${fw}    version
+    \        ${uri} =    Get From Dictionary        ${fw}    uri
+    \        Log  Firmware version:${version}    console=True
+
+LE BigBang Firmware Update For Synergy
+    [Arguments]        ${le}    ${spp_version}  ${forceinstallfirmware}  ${FirmwareUpdateOn}  ${LogicalInterconnectUpdateMode}
+    ...     ${updateFirmwareOnUnmanagedInterconnect}=${False}   ${validateIfLIFirmwareUpdateIsNonDisruptive}=${False}
+    [Documentation]     Initiate BigBang Firmware update on FLM, ICM, Server Hardware
+    Update Logical Enclosure Firmware Async  ${le}  ${spp_version}  ${forceinstallfirmware}  ${FirmwareUpdateOn}    ${LogicalInterconnectUpdateMode}    ${updateFirmwareOnUnmanagedInterconnect}    ${validateIfLIFirmwareUpdateIsNonDisruptive}
+    Return From Keyword If  '${FirmwareUpdateOn}' == 'EnclosureOnly'
+    ${server_hardwares} =   Fusion Api Get Server Hardware
+    ${server_hardwares} =   Get from Dictionary     ${server_hardwares}    members
+    Validate Firmware Installed    ${server_hardwares}  ${spp_version}
+
+#######################################
+# Storage 3PAR Keywords
+#######################################
+Storage3par Vlun Should Exists
+    [Documentation]   Check if Storage3par Vlun Exists
+    [Arguments]    ${vlun}
+    Run Keyword and Expect Error   *   Storage3par Vlun Should Exist   ${vlun['hostname']}   ${vlun['volumeName']}   ${vlun['lun']}
+
+Cleanup All Vluns
+    [Documentation]   Cleanup all vlun data
+    [Arguments]   ${volume_names}
+    ${vluns}=   Storage3par Get Vluns
+    :FOR    ${vlun}   IN  @{vluns}
+    \     ${status}=    Get Status of Volume found in dictionary    ${vlun['volumeName']}   ${volume_names}
+    \     Run Keyword If    '${status}'=='True'   Remove Vlun    ${vlun}
+    \     Run Keyword If    '${status}'=='True'   Storage3par Vlun Should Exists   ${vlun}
+
+Get Status of Volume found in dictionary
+   [Documentation]   List of Volume Dict Contain Value
+   [Arguments]   ${volume}   ${cleanup_volumes}
+   :FOR    ${vol}  IN  @{cleanup_volumes}
+   \    ${status}=   Run Keyword And Return Status    Dictionary Should Contain Value    ${vol}     ${volume}
+   \    Return from keyword if  '${status}' == 'True'    ${status}
+
+Remove Vlun
+     [Documentation]   Remove vlun
+     [Arguments]   ${vlun}
+     ${status}   ${portdict}=   Run Keyword and Ignore Error  Get From Dictionary   ${vlun}    portPos
+     ${data}=     Run keyword if    '${status}'=='PASS'   Storage3par Delete Vlun   ${vlun['volumeName']}   ${vlun['lun']}   ${vlun['hostname']}   ${portdict}
+                  ...   ELSE      Storage3par Delete Vlun   ${vlun['volumeName']}   ${vlun['lun']}   ${vlun['hostname']}
+
+FLM should reach desired state
+    [Documentation]  FLM should reach desired state
+    [Arguments]  ${uri}  ${flm_bay}  ${state}
+    Set Log Level  TRACE
+    ${resp} =  fusion api get resource  ${uri}
+    ${manager_bays}=    Get From Dictionary    ${resp}    managerBays
+    ${baynumber}=    Get From Dictionary    ${manager_bays[0]}    bayNumber
+    ${current_flm_state}=    Run Keyword If    '${baynumber}' == ${flm_bay}    Get From Dictionary    ${manager_bays[0]}    devicePresence
+    ...    ELSE    Get From Dictionary    ${manager_bays[1]}    devicePresence
+    Should Match Regexp  ${current_flm_state}  ${state}
+
+ESXi Server Should Be Pinging And Volume Should Be Active
+   [Documentation]     Get the OS ip from DHCP server and perform ping test. List and validate fc disks.
+   [Arguments]     ${profile}
+
+    ${profilename}=     Get From Dictionary  ${profile}  name
+    ${esxip} =  Create List
+    ${profiles} =       Fusion Api Get Server Profiles  param=?count=10&filter="name matches '%25${profilename}%25'"
+   ${resp} =      Get Server Ethernet Connections IPs from DHCP  @{profiles['members']}
+    ${count} =      Get Length      ${resp}
+    Run Keyword if      ${count} == 0     FAIL    No IP's found in DHCP server
+    :FOR   ${ips}    IN   @{resp}
+    \      ${status}     ${response}=     Run Keyword and Ignore Error      Ping IPAddress    ${ips}
+    \      ${ip}=     Convert To String   ${ips}
+    \      Run Keyword If      '${status}'=='PASS'     Append to list  ${esxip}   ${ip}
+    ${count} =      Get Length      ${esxip}
+    Run Keyword if      ${count} == 0     FAIL    No IP's are pingable
+    Set Global Variable    ${esxip}
+
+    # open ssh connection
+    ${status}   ${resp}=    Run Keyword And Ignore Error    Open Connection    ${esxip[0]}  timeout=300s
+    Run Keyword If  '${status}'=='FAIL'     Fail    Failed to Open SSH Connection for ${esxip[0]}
+
+    ${newstatus}    ${resp}=    Run Keyword And Ignore Error    Login    ${username}    ${password}
+    Run Keyword If  '${newstatus}'=='FAIL'      Fail    Failed to do SSH Login for ${esxip[0]}
+
+    ${result}=  Execute Command      esxcli storage core device list
+
+    # check whether fc is listing or not
+    ${resultlist}=     Split String    ${result}    \n
+    log     SSH command output: ${resultlist}     console=true
+    :FOR     ${line}   in    @{resultlist}
+    \    ${value}=    Evaluate     'Display Name: 3PARdata Fibre Channel'
+    \    ${status}     ${taskState} =  Run Keyword and Ignore Error    Should Contain    ${line}    ${value}
+    \    Run keyword if   '${status}'=='PASS'     Exit for loop
+    Run keyword if   '${status}'!='PASS'    FAIL    Failed to Find fc Disk
+
+    # check disks are as expected
+    ${diskcountmatches}=    Get Regexp Matches    ${result}    ${value}
+    ${diskcount} =      Get Length      ${diskcountmatches}
+    Run Keyword if      ${diskcount} != 0    Log   found ${diskcount} fc disks  console=yes
+    ...                 ELSE   FAIL   msg= couldn't find ${diskcount} disks
+
+    # check active state paths
+    ${activestatus}=    Evaluate     'Status: on'
+    ${degradedstatus}=    Evaluate     'Status: degraded'
+    ${activepath}=   Get Regexp Matches    ${result}     ${activestatus}
+    ${degradedpath}=   Get Regexp Matches    ${result}     ${degradedstatus}
+    ${activecount} =      Get Length      ${activepath}
+    ${degradedcount} =      Get Length      ${degradedpath}
+    Run Keyword if      ${activecount} != 0 or ${degradedcount}!=0     Log   Atleast one link status is active  console=yes
+    ...                 ELSE   FAIL   msg= Status is not active
+
+Existing Network Set Should Be Updated With Networks
+    [Documentation]  Checks if a given ethernet network is part of a network set
+    [Arguments]    ${network}   ${verify}
+    Log    \nVerifying if Network Set is updated    console=True
+    ${ns_name}=    Create List
+    ${nws} =    Create List
+    :FOR    ${nw}    IN    @{network}
+    \    ${uri} =  Get Ethernet URI  ${nw}
+    \    ${status}  ${ns_name} =   Check Network Set Containing A Given Network Exists  ${uri}
+    \    Run Keyword If    '${status}'=='${verify}'   Append To List  ${nws}  ${nw}
+    log    ${nws}   console=True
+    ${count} =      Get Length      ${nws}
+    [Return]   ${count}
+
+Firmware Bundle should not exist
+    [Documentation]    Get Firmware Bundle By Version
+    [Arguments]        ${firmware_version}
+    Log   Verifying if Firmware Bundle still exists in appliance    console=True
+    ${resp} =     Fusion Api Get Firmware Driver
+    Return From Keyword If  ${resp['count']}==0  Firmware Not Found
+    :FOR    ${fw}    IN    @{resp['members']}
+    \    ${version} =    Get From Dictionary        ${fw}    version
+    \    Run Keyword If  '${version}' == '${firmware_version}'  FAIL  Firmware Bundle ${fw['name']} still exists
+         ...  ELSE   Log  Firmware bundle ${fw['name']} does not exist  console='True'

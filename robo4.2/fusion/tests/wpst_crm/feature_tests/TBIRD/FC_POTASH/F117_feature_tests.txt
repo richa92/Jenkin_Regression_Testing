@@ -1,0 +1,1091 @@
+*** Settings ***
+Documentation    FC DirectAttach on Potash User Story
+...
+...              - LE - 2 frame, HA, IBS3, CL20 or CL10
+...
+...              - 1 Enet uplinkset on Aside: IC3:Q2:1 (4x8Gb FC/4x10Gb Enet Universal) or Q6 (integration rig)
+...              - 1 DA uplinksets on Aside
+...                   - US-DA1: DA1. 2 uplinks, IC3:Q4:3, Q4:4 (4x8Gb FC/4x10Gb Enet, Universal)
+...              - 1 DA uplinkset on Bside
+...                   - US-DA3: DA3, 2 uplinkport, IC6:Q4:3, Q4:4 (4x8Gb FC/4x10Gb Enet, Universal)
+...
+...              - IC3:Q4:3 and IC3:Q4:4 are connected to 3par-A partner ports
+...              - IC6:Q4:3 and IC6:Q4:4 are connected to 3par-B partner ports
+...
+...              - 4 servers: 1 Enet Connection, 2 FC DA connections (DA1 and DA3 connections)
+...                   - enc1, server1:  Linux,    DA1 and DA3 connections
+...                   - enc1, server4:  Windows,  DA1 and DA3 connections
+...                   - enc2, server1:  Linux,  DA1 and DA3 connections
+...                   - enc2, server4:  Windows,    DA1 and DA3 connections
+...
+...              - Minimum 2 servers going through each uplinkset locally or through Chloride port for storage access
+...
+...              - Test with Happy path, disable/enable uplinks/downlinks, uplink speed change
+...              - Power off/on potashes (Aside and Bside)
+...              - Remove/insert potashes (Aside and Bside)
+...
+...              - Server storage path verification are through server downlink connectionMap of IC nameServers
+...
+
+#Variables        ./data_common.py
+#Variables        ./data_ha.py
+
+Resource         ../../../../resource/fusion_api_all_resource_files.txt
+Resource         ../FVT/fvt-keywords.txt
+Resource         ../FVT/Resources/fvt_resource.txt
+Resource         ./F117_keywords.txt
+
+Library          FusionLibrary
+Library          ../FVT/fvt_api.py
+
+# Setup for each test case
+Test Setup       Common Test Setup
+Test Teardown    Common Test Teardown
+
+*** Variables ***
+${LE_URI}    None
+${POTASH3_URI}    None
+${POTASH6_URI}    None
+
+*** Test Cases ***
+OVF243 Set up Login User
+    [Documentation]    Set up Login User
+    [Tags]  Login    setup
+
+    PASS EXECUTION    Login in test setup, no longer need this
+
+    Set Log Level    TRACE
+    Fusion Api Login Appliance    ${appliance_ip}    ${data_common.admin_credentials}
+
+    # get the OV version
+    ${resp} =    Fusion Api Get Appliance Version
+    Set Suite Metadata     OneView Version      ${resp['softwareVersion']}    top=True
+
+OVF243 Set up Create Ethernet Networks
+    [Documentation]    Set up Create Ethernet Networks
+    [Tags]  Enet     setup
+    Create Ethernet Networks    ${data_common.ethernet_networks}
+
+OVF243 Set up Create FabricAttach and DirectAttach Networks
+    [Documentation]    Set up Create FabricAttach and DirectAttach Networks
+    [Tags]  FC    setup
+    Create FC Networks    ${data_common.fc_networks}
+
+OVF243 Negative LIG FC DA Uplinkset
+    [Tags]  LigUSNegative
+    [Documentation]    The following are tested: limitations for FC DA uplinkset defined on LIG
+    ...                CRM_INVALID_UPLINK_SET_PORT
+    ...                    case - IRF split port
+    ...                    case - IRF unsplit port
+    ...                CRM_LOGICAL_UPLINK_TEMPLATE_FIBRE_CHANNEL_PORTS_DO_NOT_ALL_BELONG_TO_SAME_SWITCH
+    ...                CRM_LOGICAL_UPLINK_CAN_ONLY_CONTAIN_MAX_ONE_FC_NETWORK
+    ...   Note: for unsplit, errorCode changed from CRM_INVALID_UPLINK_SET_PORT_FC
+    ...         to CRM_FC_LOGICAL_UPLINK_TEMPLATE_HAS_UNUSABLE_PORT
+    ...         and status changed from 202 to 400
+    ...                CRM_FC_LOGICAL_UPLINK_TEMPLATE_HAS_UNUSABLE_PORT
+    ...                    case - Q1 to Q6 Unsplit port not allowed
+
+    PASS EXECUTION IF    '${REDUNDANCY}' == 'AB'    Skip Negative Test If Redundancy is A plus B
+
+    Log to console and logfile    ${\n}FC DA uplinkset on LIG negative test
+    :FOR    ${ligtest}    IN    @{err_ligs}
+    \    ${task} =    Add LIG from variable    ${ligtest['ligBody']}    120s    5s
+    \    Verify ErrorCode in taskError  ${task['taskErrors']}    ${ligtest['errorCode']}
+
+
+    # Note that Unsplit port errorCode changed and return status 400
+    ${body} =    Build LIG body    ${err_lig_400['ligBody']}
+    ${resp} =    Fusion Api Create LIG    ${body}
+    Should Be Equal As Integers    ${resp['status_code']}    ${400}
+    Should Be Equal As Strings    ${resp['errorCode']}    ${err_lig_400['errorCode']}
+
+
+OVF243 Set up Create Logical Interconnect Groups
+    [Documentation]    Set up Create Logical Interconnect Groups
+    [Tags]  Lig    setup
+
+    # Create the LIGs based on data file definition
+    :FOR    ${lig}    IN    @{ligs}
+    \    ${task} =    Add LIG from variable    ${lig}    3min    10s
+    \    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+OVF243 Set up Create Enclosure Group
+    [Documentation]    Set up Create Enclosure Group
+    [Tags]  EG     setup
+    ${resp} =    Add Enclosure Group from variable    ${enc_group['${EG}']}
+    ${resp}    Fvt Api Get Enclosure Group By Name    ${EG}
+    Should Be Equal As Strings    ${resp['status']}    OK
+    Should Be Equal As Strings    ${resp['name']}    ${EG}
+
+OVF243 Create Logical Enclosure and Verify LI LE and uplinks status and speed
+    [Documentation]   Create 2 FRAME ME HA IBS3 LE with DA Uplinksets defined on each side
+    [Tags]  LE    setup
+
+    Run Keyword and Ignore Error    Write To ciDebug Log
+    Add Logical Enclosure from variable    ${les['${LE}']}
+
+    Log to Console     ${\n}Wait for all uplinks to reach final status
+    Sleep    ${data_common.UPLINK_STATUS_WAIT}
+
+    Log to Console     ${\n}Verify LE and LI status OK and Consistent
+    ${resp} =    Fvt Api Get Logical Enclosure By Name    ${LE}
+    Run Keyword If    ${resp} != None    Set Suite Variable    ${LE_URI}    ${resp['uri']}
+    Should Be Equal As Strings    ${resp['name']}    ${LE}
+    Should Be Equal As Strings    ${resp['status']}    OK
+    Should Be Equal As Strings    ${resp['state']}    Consistent
+
+    :FOR    ${li}    IN    @{LIs}
+    \    ${resp} =    Fvt Api Get Logical Interconnect By Name    ${li}
+    \    Should Be Equal As Strings    ${resp['consistencyStatus']}    CONSISTENT
+    \    Should Be Equal As Strings    ${resp['status']}    OK
+
+    Log to Console     ${\n}Verify All uplinksets status OK
+    :FOR    ${us}    IN    @{ASIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[0]}    ${us}    OK
+    :FOR    ${us}    IN    @{BSIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[1]}    ${us}    OK
+
+    # Get the Potash information: name, uri,
+    Log to Console     ${\n}Verify Both Potashes in Configured state
+    ${resp} =    Fvt Api Get Interconnect By Name    ${POTASH3}
+    Run Keyword If    ${resp} != None    Set Suite Variable    ${POTASH3_URI}    ${resp['uri']}
+    Should Be Equal As Strings    ${resp['state']}    Configured
+
+    ${resp} =    Fvt Api Get Interconnect By Name    ${POTASH6}
+    Run Keyword If    ${resp} != None    Set Suite Variable    ${POTASH6_URI}    ${resp['uri']}
+    Should Be Equal As Strings    ${resp['state']}    Configured
+
+    Log to Console     ${\n}Verify Aside and Bside DA Uplinks portStatus and operationalSpeed
+    :FOR    ${uplink}    IN    @{IC3_DA_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${uplink}    status=OK    portStatus=Linked    opSpeed=${data_common.OPSPEED8}
+
+    :FOR    ${uplink}    IN    @{IC6_DA_UPLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${uplink}    status=OK    portStatus=Linked    opSpeed=${data_common.OPSPEED8}
+
+    Log to Console     ${\n}Verify Aside and Bside FA Uplinks portStatus and operationalSpeed
+    :FOR    ${uplink}    IN    @{IC3_FA_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${uplink}    status=OK    portStatus=Linked    opSpeed=${data_common.OPSPEED8}
+    :FOR    ${uplink}    IN    @{IC6_FA_UPLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${uplink}    status=OK    portStatus=Linked    opSpeed=${data_common.OPSPEED8}
+
+
+OVF243 Verify all DA uplinkports connected 3par portWWN
+    [Documentation]    Verify all DA uplinkports connected 3par portWWN
+    [Tags]   IC    setup    DAUplinks
+
+    Log to Console     ${\n}Verify DA uplinkports connected 3par portWWN
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+
+    Verify Happy Uplinks DA ports
+
+
+OVF243 LI DA Uplinksets Negative Tests
+    [Tags]  LiUSNegative
+    [Documentation]    The following are tested: limitations for FC DA uplinkset on LI
+    ...                CRM_PORT_CONFIG_INFO_LOCATION_IS_NOT_FC_UPLINK_CAPABLE
+    ...                    case - Q1 to Q6 Unsplit port not allowed
+    ...                    case - IRF split port
+    ...                    case - IRF unsplit port
+    ...                CRM_PORTS_IN_DIFFERENT_SWITCH
+    ...                CRM_LOGICAL_UPLINK_CAN_ONLY_CONTAIN_MAX_ONE_FC_NETWORK
+    ...                CRM_PORT_ALREADY_ASSIGNED
+    ...                CRM_PORT_NUMBER_UNKNOWN_FORMAT
+    ...                    case - Invalid port
+
+    PASS EXECUTION IF    '${REDUNDANCY}' == 'AB'    Skip Negative Test If Redundancy is A plus B
+
+    ${resp} =    Fvt Api Get Logical Interconnect By Name    ${LIs[0]}
+    ${li_uri} =    Get From Dictionary    ${resp}    uri
+
+    :FOR    ${li_us}    IN    @{err_li_us_list}
+    \    ${us} =     Copy Dictionary    ${li_us['usBody']}
+    \    ${body} =    Build US body    ${us}    ${li_uri}
+    \    ${resp} =    Fusion Api Create Uplink Set    body=${body}
+    \    Should Be Equal As Integers    ${resp['status_code']}    ${400}
+    \    Should Be Equal As Strings    ${resp['errorCode']}    ${li_us['errorCode']}
+
+OVF243 Create 4 Server Profiles Each With 2 DirectAttach Connections, Verify Profile status
+    [Documentation]    Create 4 Server Profiles Each With 2 DirectAttach Connections, Verify Profile status
+    [Tags]  SP    Happy
+
+    #Pass Execution    Skip create 4 server profiles
+    Power off all servers
+    Add Server Profiles from variable    ${server_profiles}    10m   20s
+
+    # Verify Server Profile status is OK
+    Verify Server Profiles Status    ${server_profile_names}    OK
+
+OVF243 Power On Servers, Verify Servers Connections through Connection Map from Interconnect nameServers
+    [Documentation]    Power On Servers, Verify Servers Connections through Connection Map from Interconnect nameServers
+    [Tags]  ServerEnd2End    Happy
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+    # power on servers
+    Run Keyword for List    ${servers}    Power on Server
+    Log to Console    ${\n}Waiting ${data_common.SERVER_BOOT_WAIT} minutes for servers to boot and come up
+    Sleep    ${data_common.SERVER_BOOT_WAIT}
+
+    #Verify Servers DA connections on both Aside and Bside through connection map
+    Verify Happy Servers DA Connections
+
+
+OVF243 Change DA uplink speed Case 1, Update LI uplinkset uplink speed from Auto to 4Gb, Verifications
+    [Documentation]    Change DA uplink speed Case 1, Update LI uplinkset uplink speed from Auto to 4Gb, Verifications
+    [Tags]  UplinkSpeedChange1    speedChange
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+
+    Log to Console    ${\n}Edit LI uplinkset US-DA1 uplinks from Auto to 4Gb
+    ${resp} =    Fvt Api Get Logical Interconnect By Name    ${LIs[0]}
+    ${li_uri} =    Get From Dictionary    ${resp}    uri
+
+    ${us} =    Copy Dictionary    ${li_uplinksets['US_DA1_4Gb']}
+    ${body} =    Build US body    ${us}    ${li_uri}
+    ${us_resp} =    fvt-keywords.Get Uplink Set By Name    ${LIs[0]}    ${li_uplinksets['US_DA1_4Gb']['name']}
+    ${us_uri} =    Get From Dictionary    ${us_resp}    uri
+
+    ${resp} =    Fusion Api Edit Uplink Set    body=${body}    uri=${us_uri}
+    ${task} =    Wait For Task    ${resp}    5min    15s
+    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+    Log to Console    ${\n}Wait ${data_common.UPLINK_SPEED_WAIT} for speed change reflected in OV
+    Sleep    ${data_common.UPLINK_SPEED_WAIT}
+
+    Log to Console     ${\n}Verify uplink portStatus and updated operational speed
+    :FOR    ${uplink}    IN    @{US_DA1_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${uplink}    status=OK    portStatus=Linked    opSpeed=${data_common.OPSPEED4}
+
+    Log to Console     ${\n}Verify Bside uplink speed is not affected
+    :FOR    ${uplink}    IN    @{US_DA3_UPLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${uplink}    status=OK    portStatus=Linked    opSpeed=${data_common.OPSPEED8}
+
+    Log to Console    ${\n}Verify server profiles status going through US_DA1 are not affected
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    OK
+
+    Verify Happy Servers Aside DA Connections
+
+
+OVF243 Change DA uplink speed Case 2, Update LI uplinkset uplink speed from 4Gb to 8Gb, Servers DA connection veriication
+    [Documentation]    Change DA uplink speed Case 2, Update LI uplinkset uplink speed from 4Gb to 8Gb, Servers DA connection veriication
+    [Tags]  UplinkSpeedChange2    speedChange
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+    Log to Console    ${\n}Edit LI uplinkset US-DA1 uplinks from 4Gb to 8Gb
+    ${resp} =    Fvt Api Get Logical Interconnect By Name    ${LIs[0]}
+    ${li_uri} =    Get From Dictionary    ${resp}    uri
+
+    ${us} =    Copy Dictionary    ${li_uplinksets['US_DA1_8Gb']}
+    ${body} =    Build US body    ${us}    ${li_uri}
+    ${us_resp} =    fvt-keywords.Get Uplink Set By Name    ${LIs[0]}    ${li_uplinksets['US_DA1_8Gb']['name']}
+    ${us_uri} =    Get From Dictionary    ${us_resp}    uri
+
+    ${resp} =    Fusion Api Edit Uplink Set    body=${body}    uri=${us_uri}
+    ${task} =    Wait For Task    ${resp}    5min    15s
+    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+    Log to Console    ${\n}Wait ${data_common.UPLINK_SPEED_WAIT} for speed change reflected in OV
+    Sleep    ${data_common.UPLINK_SPEED_WAIT}
+
+    Log to Console     ${\n}Verify updated uplink speed
+    :FOR    ${uplink}    IN    @{US_DA1_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${uplink}    status=OK    portStatus=Linked    opSpeed=${data_common.OPSPEED8}
+
+    Log to Console    ${\n}Verify server profiles status going through US_DA1 are not affected
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    OK
+
+    # Verify servers Aside connections through connection map
+    Verify Happy Servers Aside DA Connections
+
+
+OVF243 Change uplink speed Case 3, LI UFG change uplink speed back to Auto, Servers DA connection veriication
+    [Documentation]    Change uplink speed Case 3, LI UFG change uplink speed back to Auto, Servers DA connection veriication
+    [Tags]  LIUFGSpeedChange    speedChange
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+    Log to Console    ${\n}Perform LI update from group to change uplink speed back to Auto
+    ${resp} =    Fvt Api Get Logical Interconnect By Name    ${LIs[0]}
+    ${li_uri} =    Get From Dictionary    ${resp}    uri
+
+    ${resp} =    Fusion Api Update from group    ${li_uri}
+    Should Be Equal As Integers    ${resp['status_code']}    ${202}
+    #took more than 10 minutes
+    ${task} =    Wait For Task    ${resp}    15m    30s
+    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+    Log to Console    ${\n}Wait ${data_common.UPLINK_SPEED_WAIT} for speed change reflected in OV
+    Sleep    ${data_common.UPLINK_SPEED_WAIT}
+
+    Log to Console    ${\n}Verify all uplink speed are expected
+    :FOR    ${uplink}    IN    @{US_DA1_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${uplink}    status=OK    portStatus=Linked    opSpeed=${data_common.OPSPEED8}
+
+    :FOR    ${uplink}    IN    @{IC6_DA_UPLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${uplink}    status=OK    portStatus=Linked    opSpeed=${data_common.OPSPEED8}
+
+    Log to Console    ${\n}Verify server profiles status going through US_DA1 are not affected
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    OK
+
+    # Verify servers Aside connections through connection map
+    Verify Happy Servers Aside DA Connections
+
+
+OVF243 Disable Uplinks Case 1, Affect Servers Aside Connection, Servers DA connection veriication through map
+    [Tags]  DisableAUplink    DisEnaAUplink
+    [Documentation]    Disable Aside DA uplinkset first uplink of the 2 uplinkports
+    ...                Expect uplinkset to be Warning status, no profile connection error
+    ...                Disable Aside DA uplinkset second uplink of the 2 uplinkports - all are disabled
+    ...                Expect uplinkset to be Critical status, profile connection error, servers lose storage path
+    ...                Servers connection is verified through DA nameServers connection map
+
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+    Log to Console    ${\n}Disable Aside uplinkset first uplink ${US_DA1_UPLINKS[0]}
+    ${disabled_ports} =    Create List    ${US_DA1_UPLINKS[0]}
+
+    Disable Ports    ${POTASH3_URI}    ${disabled_ports}    ${data_common.SUBPORT_STATUS_WAIT}
+
+    Log to Console    ${\n}Verify uplink status, portStatus and disabled
+    :FOR    ${ul}    IN    @{disabled_ports}
+    \    Verify Port    ${POTASH3_URI}    ${ul}    status=Warning    portStatus=Unlinked    enabled=False
+
+    Log to Console    ${\n}Verify affected uplinkset status
+    Verify Uplinkset Status    ${LIs[0]}    US-DA1    Warning
+
+    Log to Console    ${\n}Verify server profiles status going through US-DA1 still OK
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    OK
+
+    # If the affected port trigger 3par failover to its partner port (active), any server with connection to
+    # that active port will result with no loss of path due to failed over connection.
+    # This is the expected behavior for 3Par partner ports, confirmed by developer who also verified
+    # on C7K with the same expected behavior.
+    # US-DA1 2 uplinks are connected to 3par-A partner ports. disable IC4:3, cause 3Par port failover to
+    # its partner port.
+    # For servers with connection through US-DA1 - its connectionMap on IC3 remain the same
+
+    Log to Console    ${\n}Verify servers DA connection on Asdie are not affected due to 3par partner port failover
+    Verify Happy Servers Aside DA Connections
+
+    Log to Console    ${\n}Disable US-DA1 second uplink ${US_DA1_UPLINKS[1]}
+    ${disabled_ports} =    Create List    ${US_DA1_UPLINKS[1]}
+
+    Disable Ports    ${POTASH3_URI}    ${disabled_ports}    ${data_common.SUBPORT_STATUS_WAIT}
+
+    Log to Console    ${\n}Verify uplink status, portStatus and disabled
+    :FOR    ${ul}    IN    @{disabled_ports}
+    \    Verify Port    ${POTASH3_URI}    ${ul}    status=Warning    portStatus=Unlinked    enabled=False
+
+    Log to Console    ${\n}Verify affected uplinkset status
+    Verify Uplinkset Status    ${LIs[0]}    US-DA1    Critical
+
+    Log to Console    ${\n}Verify server profiles status going through US-DA1 become Critical
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    Critical
+
+    Log to Console    ${\n}Verify affected servers Aside connectionMap should be empty
+    ${nameservers_ic3} =    Get IC NameServers    ${POTASH3_URI}
+    Should Not Be Empty    ${nameservers_ic3}
+
+    :FOR    ${ul}    IN    @{US_DA1_UPLINKS}
+    \    Log to Console      ${\n}Verify disabled uplinks ${ul} not in nameServers
+    \    Verify Port Not In nameServers    ${nameservers_ic3}    ${ul}
+
+    Log to Console     ${\n}Verify servers DA connection on Aside, expect no connections
+    # Expect all servers Aside downlink connectionMap is ['']
+    ${expected_conn_map} =    Create List    ${EMPTY}
+    :FOR    ${dl}    IN    @{ASIDE_SERVER_DOWNLINKS}
+    \    Verify Server DA Connection    ${nameservers_ic3}    ${dl}    ${expected_conn_map}
+
+    Log to Console    ${\n}Verify servers DA connection on Bsdie are not affected
+    Verify Happy Servers Bside DA Connections
+
+
+OVF243 Enable back Uplinks Case 1, Aside Connection Restoration, Verify servers connection thru Connection Map
+    [Documentation]    Enable back Uplinks Case 1, Aside Connection Restoration, Verify servers connection thru Connection Map
+    [Tags]  EnableAUplink    DisEnaAUplink
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+    Log to Console    ${\n}Enable back Aside US_DA1 both uplinkports
+
+    Enable Ports     ${POTASH3_URI}    ${US_DA1_UPLINKS}    ${data_common.SUBPORT_STATUS_WAIT}
+    Sleep    10min
+    Log to Console    ${\n}Verify uplink status, portStatus and enabled
+    :FOR    ${ul}    IN    @{US_DA1_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${ul}    status=OK    portStatus=Linked    enabled=True
+
+    Log to Console    ${\n}Verify affected uplinksets back to OK
+    Verify Uplinkset Status    ${LIs[0]}    US-DA1    OK
+    Sleep    2min
+    Log to Console      ${\n}Verify Server Profiles status back to OK
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    OK
+
+    Verify Happy Aside Uplinks DA ports
+
+    #Verify Servers DA connections on both Aside and Bside through connection map
+    Verify Happy Servers DA Connections
+
+
+OVF243 Disable Uplinks Case 2, Affect Server Bside Connection, Verify servers connection thru Connection Map
+    [Documentation]    Disable Uplinks Case 2, Affect Server Bside Connection, Verify servers connection thru Connection Map
+    [Tags]  DisableBUplink    DisEnaBUplink
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+    Disable Ports    ${POTASH6_URI}    ${US_DA3_UPLINKS}    ${data_common.SUBPORT_STATUS_WAIT}
+
+    Log to Console    ${\n}Verify uplink status portStatus and disabled
+    :FOR    ${disabled_port}    IN    @{US_DA3_UPLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${disabled_port}    status=Warning    portStatus=Unlinked    enabled=False
+
+    Log to Console    ${\n}Verify affected uplinkset Critical
+    Verify Uplinkset Status    ${LIs[1]}    US-DA3    Critical
+
+    #Verify all 4 server profiles status become Critical
+    Log to Console      ${\n}Verify Server Profiles status Critical
+    Verify Server Profiles status    ${server_profile_names}    Critical
+
+    ${nameservers_ic6} =    Get IC NameServers    ${POTASH6_URI}
+    Should Not Be Empty    ${nameservers_ic6}
+
+    :FOR    ${disabled_port}    IN    @{US_DA3_UPLINKS}
+    \    Log to Console      ${\n}Verify disabled uplink ${disabled_port} not in nameServers
+    \    Verify Port Not In nameServers    ${nameservers_ic6}    ${disabled_port}
+
+    Log to Console     ${\n}Verify servers DA connection on Bside, expect no connections
+    # Expect all servers Bside downlink connectionMap is ['']
+    ${conn_map} =    Create List    ${EMPTY}
+    :FOR    ${dl}    IN    @{BSIDE_SERVER_DOWNLINKS}
+    \    Verify Server DA Connection    ${nameservers_ic6}    ${dl}    ${conn_map}
+
+    #Verify Servers DA connections on Aside not affected
+    Verify Happy Servers Aside DA Connections
+
+
+OVF243 Enable back Uplinks Case 2, Bside Connection Restoration, Verify servers connection thru Connection Map
+    [Documentation]    Enable back Uplinks Case 2, Bside Connection Restoration, Verify servers connection thru Connection Map
+    [Tags]  EnableBUplink    DisEnaBUplink
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+    Enable Ports     ${POTASH6_URI}    ${US_DA3_UPLINKS}   ${data_common.SUBPORT_STATUS_WAIT}
+    Sleep    10min
+    #Verify uplink status
+    Log to Console      ${\n}Verify uplinkport status, portStatus and enabled
+    :FOR    ${port}    IN    @{US_DA3_UPLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${port}    status=OK    portStatus=Linked    enabled=True
+
+    Log to Console    ${\n}Verify affected uplinkset back to OK
+    Verify Uplinkset Status    ${LIs[1]}    US-DA3    OK
+    Sleep    2min
+    #Verify server profiles status back to OK
+    Log to Console      ${\n}Verify Server Profiles status back to OK
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    OK
+
+    Verify Happy Bside Uplinks DA ports
+
+    Log to Console    ${\n}Verify servers Bside DA connection restored
+    Verify Happy Servers Bside DA Connections
+
+    Verify Happy Servers Aside DA Connections
+
+
+OVF243 Disable Downlinks Case 1, Affect Server Aside Connection, Verify servers connection thru Connection Map
+    [Documentation]    Disable Downlinks Case 1, Affect Server Aside Connection, Verify servers connection thru Connection Map
+    [Tags]  DisableDownlink
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+
+    Log to Console      ${\n}Disable downlink of one of enc1 and enc2 server
+    ${dl_list} =    Create List     ${ENC1_SERVERS[0]['enc1_downlink']}    ${ENC2_SERVERS[1]['enc1_downlink']}
+    Disable Ports    ${POTASH3_URI}    ${dl_list}    ${data_common.SUBPORT_STATUS_WAIT}
+
+    Log to Console    ${\n}Verify downlink status, portStatus and disabled
+    :FOR    ${dl}    IN    @{dl_list}
+    \    Verify Port    ${POTASH3_URI}    ${dl}    status=Critical    portStatus=Unlinked    enabled=False
+
+    #Verify server profiles with the disabled downlink should be Critical
+    @{sp_set1} =    Create List    ${ENC1_SERVERS[0]['sp_name']}    ${ENC2_SERVERS[1]['sp_name']}
+    Log to Console      ${\n}Verify Server Profiles with disabled downlink status Critical
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${sp_set1}    Critical
+
+    Log to Console      ${\n}Verify Server Profiles without disabled downlink status OK
+    @{sp_set2} =    Create List    ${ENC1_SERVERS[1]['sp_name']}    ${ENC2_SERVERS[0]['sp_name']}
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${sp_set2}    OK
+
+    Log to Console      ${\n}Verify disabled downlink should not be in nameServers
+    ${nameservers_ic3} =    Get IC NameServers    ${POTASH3_URI}
+    Should Not Be Empty    ${nameservers_ic3}
+
+    Log to Console      ${\n}Verify servers without disabled downlink connection OK through nameServers
+    :FOR    ${dl}    IN    @{dl_list}
+    \    Verify Port Not In nameServers    ${nameservers_ic3}    ${dl}
+
+    ${ok_servers_aside_downlink} =    Create List     ${ENC1_SERVERS[1]['enc1_downlink']}
+                                      ...             ${ENC2_SERVERS[0]['enc1_downlink']}
+
+    :FOR    ${dl}    IN    @{ok_servers_aside_downlink}
+    \    Verify Server DA Connection    ${nameservers_ic3}    ${dl}    ${ASIDE_HAPPY_CONNECTION_MAP}
+
+    Verify Happy Servers Bside DA Connections
+
+OVF243 Enable Back Downlinks Case 1, Aside Connection Restoration, Verify servers connection thru Connection Map
+    [Documentation]    Enable Back Downlinks Case 1, Aside Connection Restoration, Verify servers connection thru Connection Map
+    [Tags]  EnableDownlink
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+    Log to Console      ${\n}Enable enc1 server4 and enc2 server1 Aside downlink
+    ${dl_list} =    Create List     ${ENC1_SERVERS[0]['enc1_downlink']}    ${ENC2_SERVERS[1]['enc1_downlink']}
+    Enable Ports    ${POTASH3_URI}    ${dl_list}    ${data_common.SUBPORT_STATUS_WAIT}
+    Sleep    10min
+    Log to Console    ${\n}Verify downlink status, portStatus and enabled
+    :FOR    ${dl}    IN    @{dl_list}
+    \    Verify Port    ${POTASH3_URI}    ${dl}    status=OK    portStatus=Linked    enabled=True
+
+    #Verify Servers DA connections on both Aside and Bside through connection map
+    Verify Happy Servers DA Connections
+    Sleep    2min
+    #Verify server profiles status back to OK
+    Log to Console      ${\n}Verify Server Profiles status back to OK
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    OK
+
+
+OVF243 Power Off Aside Potash Affecting Aside connections, Verify servers Bside connection thru Connection Map
+    [Documentation]    Power Off Aside Potash Affecting Aside connections, Verify servers Bside connection thru Connection Map
+    [Tags]  PowerOffAside    PowerAside    Power
+
+    # power off IC3, all servers will lose Aside DA connection
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+
+    Log to Console    ${\n}Power off Aside Potash and wait for Maintenance state
+    Power IC and Wait    ${POTASH3_URI}    Off
+
+    Log to Console    ${\n}Wait for downlink status change before checking profile status
+    sleep    ${data_common.SUBPORT_STATUS_WAIT}
+
+    Log to Console     ${\n}Verify Aside DA Uplinks Unlinked Critical
+    :FOR    ${uplink}    IN    @{IC3_DA_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${uplink}    status=Critical    portStatus=Unlinked
+
+    Log to Console     ${\n}Verify Aside downlinks Unlinked Critical
+    :FOR    ${dl}    IN    @{ASIDE_SERVER_DOWNLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${dl}    status=Critical    portStatus=Unlinked
+
+    Log to Console     ${\n}Verify Bside Interconnect is Configured
+    Verify Interconnect    ${POTASH6}    state=Configured
+
+    Log to Console     ${\n}Verify Bside DA Uplinks portStatus and operationalSpeed not impacted
+    :FOR    ${uplink}    IN    @{IC6_DA_UPLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${uplink}    status=OK    portStatus=Linked
+
+    # In recenet build, profiles, LI and uplinksets are no longer guranteed to be Critical
+    # Engineer - after ICM is maintenance, the SDS is not polle hence port status is not updated
+    # remove verification
+    # Log to Console     ${\n}Verify Aside uplinksets Critical
+    # :FOR    ${us}    IN    @{ASIDE_UPLINK_SETS}
+    # \    Verify Uplinkset Status    ${LIs[0]}    ${us}    Critical
+    # Log to Console      ${\n}Verify Profile status Critical
+    # Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    Critical
+
+    Log to Console     ${\n}Verify Bside uplinksets OK, not impacted
+    :FOR    ${us}    IN    @{BSIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[1]}    ${us}    OK
+
+    Log to Console     ${\n}Ensure Potash6 nameServers should not be empty when power off Potash3
+    ${nameservers_ic6} =    Get IC NameServers    ${POTASH6_URI}
+    Should Not Be Empty    ${nameservers_ic6}
+
+    Log to Console     ${\n}Verify servers DA connection on Bside remain intact
+    Verify Happy Servers Bside DA Connections
+
+
+OVF243 Power On Aside Potash Restoring Aside connections, Verify servers connection thru Connection Map
+    [Documentation]    Power On Aside Potash Restoring Aside connections, Verify servers connection thru Connection Map
+    [Tags]  PowerOnAside    PowerAside    Power
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+
+    Log to Console     ${\n}Power back on Aside Potash and wait for Configured state
+    Power IC and Wait    ${POTASH3_URI}    On
+
+    Log to Console     ${\n}Wait for connection deployment before checking profile status
+    sleep    ${data_common.CONN_DEPLOY_WAIT}
+
+    Log to Console     ${\n}Verify Bside Interconnect remain Configured
+    Verify Interconnect    ${POTASH6}    state=Configured
+
+    Log to Console     ${\n}Verify DA Uplinks status and portStatus
+    :FOR    ${uplink}    IN    @{IC3_DA_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${uplink}    status=OK    portStatus=Linked
+    :FOR    ${uplink}    IN    @{IC6_DA_UPLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${uplink}    status=OK    portStatus=Linked
+
+    Log to Console     ${\n}Verify Aside downlinks back to Linked  OK
+    :FOR    ${dl}    IN    @{ASIDE_SERVER_DOWNLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${dl}    status=OK    portStatus=Linked
+
+    Log to Console     ${\n}Verify All uplinksets OK
+    :FOR    ${us}    IN    @{ASIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[0]}    ${us}    OK
+
+    Log to Console     ${\n}Verify Bside uplinksets OK, not impacted
+    :FOR    ${us}    IN    @{BSIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[1]}    ${us}    OK
+    Sleep    2min
+    Log to Console     ${\n}Verify servers Profile status OK
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    OK
+
+    Verify Happy Uplinks DA ports
+
+    #Verify Servers DA connections on both Aside and Bside through connection map
+    Verify Happy Servers DA Connections
+
+OVF243 Power Off Bside Potash Affecting Bside connections, Verify servers Aside connection thru Connection Map
+    [Documentation]    Power Off Bside Potash Affecting Bside connections, Verify servers Aside connection thru Connection Map
+    [Tags]  PowerOffBside    PowerBside    Power
+
+    # Power off IC6 result in US-DA3 connected 3par-B port to fail over to its partner port which
+    # is connected through US_DA2 uplink (active).
+    # Server4 and server10 will lose Bside path and gain failed over path on Aside
+    # Server1 and server7 does not have connection through US_DA2, so will not have failed over path on
+    # Aside. It will lose Bside path and not gain on Aside. Its path through USA-DA1 is not affected
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+
+    Log to Console    ${\n}Power off Bside Potash and wait for Maintenance state
+    Power IC and Wait    ${POTASH6_URI}    Off
+
+    Log to Console    ${\n}Wait for downlink status change before checking profile status
+    sleep    ${data_common.SUBPORT_STATUS_WAIT}
+
+    Log to Console     ${\n}Verify Bside DA Uplinks Unlinked Critical
+    :FOR    ${uplink}    IN    @{IC6_DA_UPLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${uplink}    status=Critical    portStatus=Unlinked
+
+    Log to Console     ${\n}Verify Bside downlinks Unlinked Critical
+    :FOR    ${dl}    IN    @{BSIDE_SERVER_DOWNLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${dl}    status=Critical    portStatus=Unlinked
+
+    Log to Console     ${\n}Verify Aside Interconnect remains Configured
+    Verify Interconnect    ${POTASH3}    state=Configured
+
+    Log to Console     ${\n}Verify Aside DA Uplinks status and portStatus not impacted
+    :FOR    ${uplink}    IN    @{IC3_DA_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${uplink}    status=OK    portStatus=Linked
+
+    # In recenet build, profiles, LI and uplinksets are no longer guranteed to be Critical
+    # Engineer - after ICM is maintenance, the SDS is not polle hence port status is not updated
+    # remove verification
+    # Log to Console     ${\n}Verify Bside uplinksets Critical
+    # :FOR    ${us}    IN    @{BSIDE_UPLINK_SETS}
+    # \    Verify Uplinkset Status    ${LIs[1]}    ${us}    Critical
+    # Log to Console      ${\n}Verify Profile status Critical
+    # Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    Critical
+
+    Log to Console     ${\n}Verify Aside uplinksets OK, not impacted
+    :FOR    ${us}    IN    @{ASIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[0]}    ${us}    OK
+
+    Log to Console     ${\n}Verify Potash3 nameServers should not be affected when power off Potash6
+    ${nameservers_ic3} =    Get IC NameServers    ${POTASH3_URI}
+    Should Not Be Empty    ${nameservers_ic3}
+
+    Verify Happy Servers Aside DA Connections
+
+
+OVF243 Power On Bside Potash Restoring Bside connections, Verify servers connection thru Connection Map
+    [Documentation]    Power On Bside Potash Restoring Bside connections, Verify servers connection thru Connection Map
+    [Tags]  PowerOnBside    PowerBside    Power
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+    Log to Console     ${\n}Power back on Bside Potash and wait for Configured state
+    Power IC and Wait    ${POTASH6_URI}    On
+
+    Log to Console     ${\n}Wait for connection deployment before checking profile status
+    sleep    ${data_common.CONN_DEPLOY_WAIT}
+
+    Log to Console     ${\n}Verify Aside and Bside DA Uplinks status and portStatus
+    :FOR    ${uplink}    IN    @{IC3_DA_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${uplink}    status=OK    portStatus=Linked
+    :FOR    ${uplink}    IN    @{IC6_DA_UPLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${uplink}    status=OK    portStatus=Linked
+
+    Log to Console     ${\n}Verify Aside Interconnect remains Configured
+    Verify Interconnect    ${POTASH3}    state=Configured
+
+    Log to Console     ${\n}Verify Bside downlinks Linked  OK
+    :FOR    ${dl}    IN    @{BSIDE_SERVER_DOWNLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${dl}    status=OK    portStatus=Linked
+
+    Log to Console     ${\n}Verify All uplinksets OK
+    :FOR    ${us}    IN    @{BSIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[1]}    ${us}    OK
+    :FOR    ${us}    IN    @{ASIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[0]}    ${us}    OK
+
+    Sleep    2min
+    Log to Console     ${\n}Verify servers Profile status back to OK
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    OK
+
+    Verify Happy Uplinks DA ports
+
+    #Verify Servers DA connections on both Aside and Bside through connection map
+    Verify Happy Servers DA Connections
+
+OVF243 Efuse Remove Aside Potash Affecting Aside connections, Verify servers Bside connection thru Connection Map
+    [Documentation]    Efuse Remove Aside Potash Affecting Aside connections, Verify servers Bside connection thru Connection Map
+    [Tags]  RemoveAsidePotash    efuse    efuseA
+
+    # remove IC3, triggered US-DA2 3par port fail over to partner port where US-DA3 is connected.
+    # All servers have connection through that active port. Will have failed over path in Bside
+    # Server1 and 7 has connection through US-DA1 with both uplinks on IC3, will lose Aside connection
+    # So all servers will lose Aside connection, and have 2 connections on bside
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+
+    Log to Console    ${\n}Remove Aside potash and wait for Absent state
+    Efuse IC and Wait    ${POTASH3}    EFuseOn
+
+    Log to Console    ${\n}Wait for HA sync and nameServers info stabilization for Efuse case
+    sleep    ${data_common.CONN_DEPLOY_WAIT}
+    #sleep    ${REMOVE_IC_NS_WAIT}
+
+    Log to Console     ${\n}Verify Bside Interconnect remains Configured
+    Verify Interconnect    ${POTASH6}    state=Configured
+
+    Log to Console     ${\n}Verify DA Bside Uplinks status and portStatus not impacted
+    :FOR    ${uplink}    IN    @{IC6_DA_UPLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${uplink}    status=OK    portStatus=Linked
+
+    Log to Console     ${\n}Verify Aside uplinksets Critical
+    :FOR    ${us}    IN    @{ASIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[0]}    ${us}    Critical
+
+    Log to Console     ${\n}Verify Bside uplinksets OK, not impacted
+    :FOR    ${us}    IN    @{BSIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[1]}    ${us}    OK
+
+    Verify Happy Servers Bside DA Connections
+
+    Log to Console      ${\n}Verify Profile status Critical
+    Verify Server Profiles status    ${server_profile_names}    Critical
+
+
+OVF243 Efuse Insert Aside Potash Restoring Aside connections, Verify servers connection thru Connection Map
+    [Documentation]    Efuse Insert Aside Potash Restoring Aside connections, Verify servers connection thru Connection Map
+    [Tags]  InsertAsidePotash    efuse    efuseA
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+
+    Log to Console    ${\n}Insert back Aside potash and wait for Configured state
+    Efuse IC and Wait    ${POTASH3}    EFuseOff
+
+    Log to Console     ${\n}Wait for connection deployment before checking profile status
+    sleep    ${data_common.CONN_DEPLOY_WAIT}
+
+    Log to Console     ${\n}Verify Bside Interconnect remains Configured
+    Verify Interconnect    ${POTASH6}    state=Configured
+
+    Log to Console     ${\n}Verify both sides DA Uplinks status and portStatus
+    :FOR    ${uplink}    IN    @{IC3_DA_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${uplink}    status=OK    portStatus=Linked
+
+    :FOR    ${uplink}    IN    @{IC6_DA_UPLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${uplink}    status=OK    portStatus=Linked
+
+    Log to Console     ${\n}Verify Aside downlinks Linked OK
+    :FOR    ${dl}    IN    @{ASIDE_SERVER_DOWNLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${dl}    status=OK    portStatus=Linked
+
+    Log to Console     ${\n}Verify All uplinksets OK
+    :FOR    ${us}    IN    @{ASIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[0]}    ${us}    OK
+
+    :FOR    ${us}    IN    @{BSIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[1]}    ${us}    OK
+    Sleep    2min
+    Log to Console     ${\n}Verify Servers Profile status
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    OK
+
+    Verify Happy Uplinks DA ports
+    Verify Happy Servers DA Connections
+
+
+OVF243 Efuse Remove Bside Potash Affecting Bside connections, Verify servers Aside connection thru Connection Map
+    [Documentation]    Efuse Remove Bside Potash Affecting Bside connections, Verify servers Aside connection thru Connection Map
+    [Tags]  RemoveBsidePotash    efuse    efuseB
+
+    # Remove IC6 result in all servers lost Bside DA connections
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+
+    Log to Console    ${\n}Remove Bside potash and wait for Absent state
+    Efuse IC and Wait    ${POTASH6}    EFuseOn
+
+    Log to Console    ${\n}Wait for HA sync and nameServers info stabilization for Efuse case
+    sleep    ${data_common.CONN_DEPLOY_WAIT}
+    #sleep    ${REMOVE_IC_NS_WAIT}
+
+    Log to Console     ${\n}Verify Aside Interconnect remains Configured
+    Verify Interconnect    ${POTASH3}    state=Configured
+
+    Log to Console     ${\n}Verify Aside DA Uplinks status and portStatus not impacted
+    :FOR    ${uplink}    IN    @{IC3_DA_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${uplink}    status=OK    portStatus=Linked
+
+    Log to Console     ${\n}Verify Aside downlinks Linked OK not impacted
+    :FOR    ${dl}    IN    @{ASIDE_SERVER_DOWNLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${dl}    status=OK    portStatus=Linked
+
+    Log to Console     ${\n}Verify Bside uplinksets Critical
+    :FOR    ${us}    IN    @{BSIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[1]}    ${us}    Critical
+
+    Log to Console     ${\n}Verify Aside uplinksets OK, not impacted
+    :FOR    ${us}    IN    @{ASIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[0]}    ${us}    OK
+
+    #Verify server profiles status become Critical
+    Log to Console      ${\n}Verify Profile status Critical
+    Verify Server Profiles status    ${server_profile_names}    Critical
+
+    Verify Happy Servers Aside DA Connections
+
+
+OVF243 Efuse Insert Bside Potash Restoring Bside connections, Verify servers connection thru Connection Map
+    [Documentation]    Efuse Insert Bside Potash Restoring Bside connections, Verify servers connection thru Connection Map
+    [Tags]  InsertBsidePotash    efuse    efuseB
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+
+    Log to Console    ${\n}Insert back Bside potash and wait for Configured state
+    Efuse IC and Wait    ${POTASH6}    EFuseOff
+
+    Log to Console     ${\n}Wait for connection deployment before checking profile status
+    sleep    ${data_common.CONN_DEPLOY_WAIT}
+
+    Log to Console     ${\n}Verify Aside Interconnect remains Configured
+    Verify Interconnect    ${POTASH3}    state=Configured
+
+    Log to Console     ${\n}Verify DA Uplinks portStatus and operationalSpeed
+    :FOR    ${uplink}    IN    @{IC3_DA_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${uplink}    status=OK    portStatus=Linked
+    :FOR    ${uplink}    IN    @{IC6_DA_UPLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${uplink}    status=OK    portStatus=Linked
+
+    Log to Console     ${\n}Verify Bside downlinks Linked OK
+    :FOR    ${dl}    IN    @{BSIDE_SERVER_DOWNLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${dl}    status=OK    portStatus=Linked
+
+    Log to Console     ${\n}Verify All uplinksets OK
+    :FOR    ${us}    IN    @{BSIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[1]}    ${us}    OK
+
+    Log to Console     ${\n}Verify Aside uplinksets OK, not impacted
+    :FOR    ${us}    IN    @{ASIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[0]}    ${us}    OK
+    Sleep    2min
+    Log to Console      ${\n}Verify Profile status OK
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    OK
+
+    Verify Happy Uplinks DA ports
+
+    Verify Happy Servers DA Connections
+
+OVF243 BFS
+    [Documentation]    BFS
+    [Tags]    BFS
+    # for Tag include without going through LE creation that was created already
+
+    PASS EXECUTION IF    '${RACK}' != 'AZ51'    Skip Test If Not AZ51 enclosure since no BFS set up yet
+
+    Setup Suite Variables
+
+    # In some enclosure the servers have dual boot with local OS and BFS, some have separate BFS servers
+    # Delete the server profiles that are tested in above test cases with local OS and to be used for BFS
+    ${sp_names} =    Create List
+    :For    ${sp}    IN     @{bfs_server_profiles}
+    \    Power off Server    ${sp['serverHardwareUri']}
+    \    ${sp_resp} =    Fvt Api Get Server Profile By Name    ${sp['name']}
+    \    Run Keyword if     ${sp_resp} != None    Delete a Profile     ${sp_resp['uri']}
+    \    Append to list    ${sp_names}    ${sp['name']}
+
+    # create server profile with BFS specification
+    # This routine will check task finished with Warning or Completed
+    Add Server Profiles from variable    ${bfs_server_profiles}
+    Verify Server Profiles Status    ${sp_names}    OK
+
+    :For    ${sp}    IN     @{bfs_server_profiles}
+    \    Power on Server    ${sp['serverHardwareUri']}
+
+    Log to Console    ${\n}Waiting ${data_common.BFS_SERVER_BOOT_WAIT} minutes for servers to boot and come up
+    Sleep    ${data_common.BFS_SERVER_BOOT_WAIT}
+
+    # In case BFS server is not up, Esx server may take longer to come up
+    # DF - This IP ping is subject to environment, end of row and TH routing
+    #      comment out and use storage verification
+    # Run Keyword for List    ${BFS_PING_LIST}   Wait For Appliance To Become Pingable
+
+    Verify Happy Servers DA Connections
+
+#OVF243 temp BFS verify
+#   [Tags]    verifyBFS
+#
+#    # ssh Linux BFS server and ping other servers
+#    ${ping_targets} =    Get slice from list   ${BFS_PING_LIST}    1
+#    SSH to host and ping others    ${BFS_PING_LIST[0]}    ${ping_targets}
+#    ...    ${LINUX_BFS_USER}    ${LINUX_BFS_PWD}    ${LINUX_BFS_PROMPT}
+#
+#    # ensure all Linux BFS servers are up and can ping gateway
+#    @{gw_ip} =    Create List    ${GW_IP_A}
+#    :For    ${bfs_server}    IN     @{BFS_ENC1_SERVERS}
+#    \    Run Keyword If    "${bfs_server['os']}" == "Linux"    SSH to host and ping others
+#    \    ...    ${bfs_server['ip']}   ${gw_ip}    ${LINUX_BFS_USER}    ${LINUX_BFS_PWD}    ${LINUX_BFS_PROMPT}
+#
+#    :For    ${bfs_server}    IN     @{BFS_ENC2_SERVERS}
+#    \    Run Keyword If    "${bfs_server['os']}" == "Linux"    SSH to host and ping others
+#    \    ...    ${bfs_server['ip']}   ${gw_ip}    ${LINUX_BFS_USER}    ${LINUX_BFS_PWD}    ${LINUX_BFS_PROMPT}
+
+
+*** Keywords ***
+Login OV
+    [Documentation]    Login to OneView
+    Set Log Level    TRACE
+    Run Keyword and Ignore Error    Write To ciDebug Log
+    Fusion Api Login Appliance    ${appliance_ip}    ${data_common.admin_credentials}
+
+Common Test Setup
+    [Documentation]    Pre-condition keyword run before each test case
+    # Run Keyword and Ignore Error    Write To ciDebug Log
+    Login OV
+
+Common Test Teardown
+    [Documentation]    Post-conditions for ALL test cases
+    # Pass Execution
+    fusion api logout appliance
+
+Verify Happy Servers Aside DA Connections
+    [Documentation]    Verify servers Aside DA connections through nameServers connection map
+
+    Log to Console    ${\n}Verify servers Aside DA connections through connection map
+    ${nameservers_ic3} =    Get IC NameServers    ${POTASH3_URI}
+
+    # There is situation that there are extra staled downlink entries in nameServers, check that
+    ${ns_entries} =     Get Length     ${nameservers_ic3}
+    ${expecte_uplinks} =    Get Length   ${US_DA1_UPLINKS}
+    ${expecte_downlinks} =    Get Length   ${ASIDE_SERVER_DOWNLINKS}
+    ${expected_entries} =    Evaluate    ${expecte_uplinks}+${expecte_downlinks}
+
+    Run Keyword And Continue On Failure    Should Be Equal As Integers    ${ns_entries}    ${expected_entries}
+
+    # In happy path, nameServers should not be Empty
+    # Should Not Be Empty    ${nameservers_ic3}
+
+    :FOR    ${aside_dl}    IN    @{ASIDE_SERVER_DOWNLINKS}
+    \    Verify Server DA Connection    ${nameservers_ic3}    ${aside_dl}    ${ASIDE_HAPPY_CONNECTION_MAP}
+
+
+Verify Happy Servers Bside DA Connections
+    [Documentation]    Verify servers Bside DA connections through nameServers connection map
+
+    Log to Console    ${\n}Verify servers Bside DA connections through connection map
+
+    ${nameservers_ic6} =    Get IC NameServers    ${POTASH6_URI}
+
+    # There is situation that there are extra staled downlink entries in nameServers, check that
+    ${ns_entries} =     Get Length     ${nameservers_ic6}
+    ${expecte_uplinks} =    Get Length   ${US_DA3_UPLINKS}
+    ${expecte_downlinks} =    Get Length   ${BSIDE_SERVER_DOWNLINKS}
+    ${expected_entries} =    Evaluate    ${expecte_uplinks}+${expecte_downlinks}
+
+    Run Keyword And Continue On Failure    Should Be Equal As Integers    ${ns_entries}    ${expected_entries}
+
+    # In happy path, nameServers should not be Empty
+    # Should Not Be Empty    ${nameservers_ic6}
+
+    :FOR    ${bside_dl}    IN    @{BSIDE_SERVER_DOWNLINKS}
+    \    Verify Server DA Connection    ${nameservers_ic6}    ${bside_dl}    ${BSIDE_HAPPY_CONNECTION_MAP}
+
+Verify Happy Servers DA Connections
+    [Documentation]    Verify servers both Aside and Bside DA connections through nameServers connection map
+
+    Log to Console    ${\n}Verify servers both Aside and Bside DA connections through connection map
+
+    Run Keyword And Continue On Failure    Verify Happy Servers Aside DA Connections
+    Run Keyword And Continue On Failure    Verify Happy Servers Bside DA Connections
+
+
+Verify Happy Aside Uplinks DA ports
+    [Documentation]    Verify Aside DA uplinkports connected to 3par port through nameServers
+
+    Log to Console    ${\n}Verify Aside DA uplinkports connected to 3par port
+    ${nameServers} =    Get IC NameServers    ${POTASH3_URI}
+    Should Not Be Empty    ${nameServers}
+
+    :FOR    ${uplink_da}    IN    @{IC3_UPLINKS_DA}
+    \    Verify Uplink DA Port    ${nameServers}    ${uplink_da}
+
+
+Verify Happy Bside Uplinks DA ports
+    [Documentation]    Verify Bside DA uplinkports connected to 3par port through nameServers uplinkport info
+
+    Log to Console    ${\n}Verify Bside DA uplinkports connected to 3par port
+
+    ${nameServers} =    Get IC NameServers    ${POTASH6_URI}
+    Should Not Be Empty    ${nameServers}
+
+    :FOR    ${uplink_da}    IN    @{IC6_UPLINKS_DA}
+    \    Verify Uplink DA Port    ${nameServers}    ${uplink_da}
+
+
+Verify Happy Uplinks DA ports
+    [Documentation]    Verify all DA uplinkports connected to its 3par port through nameServers uplinkport info
+
+    Log to Console    ${\n}Verify all Aside and Bside DA uplinkports connected to 3par port
+
+    Run Keyword And Continue On Failure    Verify Happy Aside Uplinks DA ports
+    Run Keyword And Continue On Failure    Verify Happy Bside Uplinks DA ports
+
+
+Setup Suite Variables
+    [Documentation]    Set the suite variables if not set up, for tagged test cases
+
+    ${resp} =    Run Keyword If    '${POTASH3_URI}' == 'None'     Fvt Api Get Interconnect By Name    ${POTASH3}
+    Run Keyword If    ${resp} != None    Set Suite Variable    ${POTASH3_URI}    ${resp['uri']}
+    ${resp} =    Run Keyword If    '${POTASH6_URI}' == 'None'     Fvt Api Get Interconnect By Name    ${POTASH6}
+    Run Keyword If    ${resp} != None    Set Suite Variable    ${POTASH6_URI}    ${resp['uri']}

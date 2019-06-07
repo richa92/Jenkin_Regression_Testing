@@ -1,0 +1,326 @@
+*** Settings ***
+# Usage: pybot -v APPLIANCE_IP:xx.xxx.xxx.xxx \
+#  [-i <tags> ] feature_test_OVF2163.txt
+Documentation		FCoE Mlag
+Suite Setup   		Run FTS and test-specific setup
+#Suite Teardown		Run test-specific teardown
+Variables           data_variables.py
+Resource            ../../../../resource/fusion_api_all_resource_files.txt
+Resource            ../../../feature_tests/TBIRD/FVT/fvt-keywords.txt
+Library             FusionLibrary
+Library				Collections
+Library             json
+Library             ../../../feature_tests/TBIRD/FVT/fvt_api.py
+*** Variables ***
+${SSH_PASS}                     hpvse1
+
+*** Test Cases ***
+Should be able to Create 256 FCoE Networks (2-256)
+    [Tags]   comware  POSITIVE  FCOE
+    Run Keyword and Ignore Error    Write To ciDebug Log
+    Create Fcoe Range    ${fcoe_ranges['fcoe-range-256']}
+
+Should not be able to Create FCoE Network >256
+    [Tags]   comware  POSITIVE  FCOE_MAX
+    Run Keyword and Ignore Error    Write to ciDebug Log
+
+    ${resp} =  Fusion Api Create Fcoe Network  body=${fcoe_networks['fcoe-258']}
+    ${valDict} =   Create Dictionary  status_code=${400}
+    ...                               errorCode=CRM_MAX_FCOE_NETWORKS_REACHED
+    Validate Response    ${resp}  ${valDict}
+
+Should be able to Create LIG without FCoE Mlag settings
+    [Tags]   comware  create-lig-no-mlag  comware-demo
+    Run Keyword and Ignore Error    Write To ciDebug Log
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+    ${body} =   Build LIG body      ${ligs['${LIG1}']}
+    ${resp} =   Fusion Api Create LIG   ${body}
+    ${task} =   Wait For Task   ${resp}     60s 2s
+
+Should be able to Create an LE/EG using both Comware and Cisco LIGs on an 2 Node ME
+    [Tags]   comware  cc-me-lig  cc-me-lig-1
+    Run Keyword                       Write To ciDebug Log
+    Fusion Api Login Appliance       ${APPLIANCE_IP}    ${admin_credentials}
+    ${body} =  Build LIG body        ${ligs['${BothLIG1}']}
+    ${resp} =  Fusion Api Create LIG   ${body}
+    ${task} =  Wait For Task  ${resp}       60s 5s
+
+    Run Keyword for List    ${enc_groups_me}   Add Enclosure Group from variable
+    Add Logical Enclosure from variable     ${les[1]}
+
+Should be able to Create Comware LIG and EG
+    [Tags]   comware  comware-lig  comware-lig-1
+    Run Keyword                       Write To ciDebug Log
+    Fusion Api Login Appliance       ${APPLIANCE_IP}    ${admin_credentials}
+    ${body} =  Build LIG body        ${ligs['${CLIG1}']}
+
+    ${resp} =  Fusion Api Create LIG   ${body}
+    ${task} =  Wait For Task  ${resp}       60s 5s
+
+    Run Keyword for List    ${enc_groups}   Add Enclosure Group from variable
+
+Should not be able to Create Comware LIG with greater than 32 FCoE Networks
+    [Tags]   comware  comware-lig  comware-lig-33  comware-demo
+    Run Keyword                       Write To ciDebug Log
+    Fusion Api Login Appliance        ${APPLIANCE_IP}    ${admin_credentials}
+    ${body} =  Build LIG body         ${ligs['${CLIG2}']}
+
+    ${resp} =  Fusion Api Create LIG   ${body}
+    ${task} =  Wait for Task  ${resp}      60s 2s
+    ${valDict} =   Create Dictionary  taskState=Error
+    ...                               taskStatus=Too many FCoE networks have been specified for the uplink set.
+    Validate Response    ${task}  ${valDict}
+
+Should be able to Create Comware LIG with 32 FCoE Networks
+    [Tags]   comware  comware-lig  comware-lig-32  comware-demo
+    Run Keyword                       Write To ciDebug Log
+    Fusion Api Login Appliance        ${APPLIANCE_IP}    ${admin_credentials}
+    ${body} =  Build LIG body         ${ligs['${CLIG3}']}
+
+    ${resp} =  Fusion Api Create LIG   ${body}
+    ${task} =  Wait for Task  ${resp}      60s 2s
+    ${valDict} =   Create Dictionary  taskState=Completed
+    Validate Response    ${task}  ${valDict}
+
+Should not be able to Create Comware LIG with more than 16 uplink ports
+    [Tags]   comware  comware-lig  comware-gt-16-ports  comware-demo
+    Run Keyword                      Write to ciDebug Log
+    Fusion Api Login Appliance       ${APPLIANCE_IP}     ${admin_credentials}
+    ${body} =  Build LIG body        ${ligs['${CLIG4}']}
+
+    ${resp} =  Fusion Api Create LIG   ${body}
+    ${valDict} =   Create Dictionary  status_code=${400}
+    ...                               errorCode=CRM_PORTS_EXCEED_MAX_PER_UPLINKSET
+    Validate Response    ${resp}  ${valDict}
+
+Should be able to add an fcoe network to a MLAG US
+    [Tags]   comware  edit-mlag-us  add-fcoenet-mlag-us  modify-mlag-us
+    Fusion Api Login Appliance    ${APPLIANCE_IP}   ${admin_credentials}
+    Run Keyword                      Write to ciDebug Log
+    ${li_uri} =           Get LI URI  ${LE2}-${BothLIG1}
+    ${us} =               Copy Dictionary  ${li_uplink_sets['IBS3-Aside-add-fcoe-2']}
+    ${body} =             Build US body  ${us}  ${li_uri}
+    ${resp} =             Fusion Api Get Uplink Set   param=?filter="'name'=='IBS3-Aside-Q6-40gb'"
+    ${fcoenets} =         Get From Dictionary   ${resp['members'][0]}  fcoeNetworkUris
+    ${start_fcoenets} =   Get Length  ${fcoenets}
+    ${start_fcoenets} =   Evaluate  ${start_fcoenets} + 1
+    ${uri} =              Get From Dictionary   ${resp['members'][0]}  uri
+    ${resp} =             Fusion Api Edit Uplink Set  body=${body}   uri=${uri}
+    ${task} =             Wait for Task  ${resp}       5 min  15s
+    ${valDict} =          Create Dictionary   status_code=${200}
+    ...                                       taskState=Completed
+    Validate Response     ${task}  ${valDict}
+    ${resp} =             Fusion Api Get Uplink Set   param=?filter="'name'=='IBS3-Aside-Q6-40gb'"
+    ${fcoenets} =         Get From Dictionary   ${resp['members'][0]}  fcoeNetworkUris
+    ${end_fcoenets} =     Get Length  ${fcoenets}
+    Should Be Equal As Integers  ${end_fcoenets}  ${start_fcoenets}
+    Log to Console and Logfile     \n Edited uplinkset added fcoe network successfully
+
+Should be able to remove an fcoe network from a MLAG US
+    [Tags]   comware  edit-mlag-us  remove-fcoenet-mlag-us  modify-mlag-us
+    Fusion Api Login Appliance    ${APPLIANCE_IP}   ${admin_credentials}
+    Run Keyword                      Write to ciDebug Log
+    ${li_uri} =           Get LI URI  ${LE2}-${BothLIG1}
+    ${us} =               Copy Dictionary  ${li_uplink_sets['IBS3-Aside-minus-fcoe-2']}
+    ${body} =             Build US body  ${us}   ${li_uri}
+    ${resp} =             Fusion Api Get Uplink Set   param=?filter="'name'=='IBS3-Aside-Q6-40gb'"
+    ${fcoenets} =         Get From Dictionary   ${resp['members'][0]}  fcoeNetworkUris
+    ${start_fcoenets} =   Get Length  ${fcoenets}
+    ${start_fcoenets} =   Evaluate  ${start_fcoenets} - 1
+    ${uri} =              Get From Dictionary   ${resp['members'][0]}  uri
+    ${resp} =             Fusion Api Edit Uplink Set  body=${body}   uri=${uri}
+    ${task} =             Wait for Task  ${resp}       5 min  15s
+    ${valDict} =          Create Dictionary   status_code=${200}
+    ...                                       taskState=Completed
+    Validate Response     ${task}  ${valDict}
+    ${resp} =             Fusion Api Get Uplink Set   param=?filter="'name'=='IBS3-Aside-Q6-40gb'"
+    ${fcoenets} =         Get From Dictionary   ${resp['members'][0]}  fcoeNetworkUris
+    ${end_fcoenets} =     Get Length  ${fcoenets}
+    Should Be Equal As Integers  ${end_fcoenets}  ${start_fcoenets}
+    Log to Console and Logfile     \n Edited uplinkset removed fcoe network successfully
+
+Should be able to add a port to an MLAG US
+    [Tags]   comware  edit-mlag-us  add-port-mlag-us  modify-mlag-us
+    Fusion Api Login Appliance    ${APPLIANCE_IP}   ${admin_credentials}
+    Run Keyword                      Write to ciDebug Log
+    ${li_uri} =           Get LI URI  ${LE2}-${BothLIG1}
+    ${us} =               Copy Dictionary  ${li_uplink_sets['IBS3-Aside-add-port']}
+    ${body} =             Build US body  ${us}   ${li_uri}
+    ${resp} =             Fusion Api Get Uplink Set   param=?filter="'name'=='IBS3-Aside-Q6-40gb'"
+    ${start_ports} =      Get From Dictionary   ${resp['members'][0]}  portConfigInfos
+    ${start_port_num} =   Get Length  ${start_ports}
+    ${start_port_num} =   Evaluate  ${start_port_num} + 2
+    ${uri} =              Get From Dictionary   ${resp['members'][0]}  uri
+    ${resp} =             Fusion Api Edit Uplink Set  body=${body}   uri=${uri}
+    ${task} =             Wait for Task  ${resp}       5 min  15s
+    ${valDict} =          Create Dictionary   status_code=${200}
+    ...                                       taskState=Completed
+    Validate Response     ${task}  ${valDict}
+
+    ${resp} =             Fusion Api Get Uplink Set   param=?filter="'name'=='IBS3-Aside-Q6-40gb'"
+    ${ports} =            Get From Dictionary   ${resp['members'][0]}  portConfigInfos
+    ${end_port_num} =     Get Length  ${ports}
+    Should Be Equal As Integers  ${end_port_num}  ${start_port_num}
+    Log to Console and Logfile     \n Edited uplinkset added port successfully
+
+Should be able to remove a port from an MLAG US
+    [Tags]   comware  edit-mlag-us  remove-port-mlag-us  modify-mlag-us
+    Fusion Api Login Appliance    ${APPLIANCE_IP}   ${admin_credentials}
+    Run Keyword                      Write to ciDebug Log
+    ${li_uri} =           Get LI URI  ${LE2}-${BothLIG1}
+    ${us} =               Copy Dictionary  ${li_uplink_sets['IBS3-Aside-minus-port']}
+    ${body} =             Build US body  ${us}   ${li_uri}
+    ${resp} =             Fusion Api Get Uplink Set   param=?filter="'name'=='IBS3-Aside-Q6-40gb'"
+    ${start_ports} =      Get From Dictionary   ${resp['members'][0]}  portConfigInfos
+    ${start_port_num} =   Get Length  ${start_ports}
+    ${start_port_num} =   Evaluate  ${start_port_num} - 2
+    ${uri} =              Get From Dictionary   ${resp['members'][0]}  uri
+    ${resp} =             Fusion Api Edit Uplink Set  body=${body}   uri=${uri}
+    ${task} =             Wait for Task  ${resp}       5 min  15s
+    ${valDict} =          Create Dictionary   status_code=${200}
+    ...                                       taskState=Completed
+    Validate Response     ${task}  ${valDict}
+    ${resp} =             Fusion Api Get Uplink Set   param=?filter="'name'=='IBS3-Aside-Q6-40gb'"
+    ${ports} =            Get From Dictionary   ${resp['members'][0]}  portConfigInfos
+    ${end_port_num} =     Get Length  ${ports}
+    Should Be Equal As Integers  ${end_port_num}  ${start_port_num}
+    Log to Console and Logfile     \n Edited uplinkset removed port successfully
+
+Should be able to create MLAG US
+    [Tags]   comware    comware-us  create-us-2icm
+    Run Keyword         Write to ciDebug Log
+    ${li_uri} =         Get LI URI  ${LE2}-${BothLIG1}
+    ${us} =             Copy Dictionary  ${li_uplink_sets['us1-2icm']}
+    ${body} =           Build US body  ${us}  ${li_uri}
+    ${resp} =           Fusion Api Create Uplink Set   body=${body}
+    ${task} =           Wait For Task   ${resp}    5 min  5s
+    ${valDict} =        Create Dictionary  status_code=${200}
+    ...                                    taskState=Completed
+    Validate Response   ${task}  ${valDict}
+
+Should be able to delete an MLAG US
+    [Tags]   comware    comware-us  delete-us-2icm
+    Run Keyword         Write to ciDebug Log
+    ${resp} =           Fusion Api Delete Uplink Set  name=us1-2icm
+    ${task} =           Wait For Task   ${resp}    120s  5s
+    ${valDict} =        Create Dictionary  status_code=${200}
+    ...                                    taskState=Completed
+    Validate Response   ${task}  ${valDict}
+
+Should not be able to create MLAG US with only 1 ICM
+    [Tags]   comware    comware-us  create-us-1icm
+    Run Keyword         Write to ciDebug Log
+    ${li_uri} =         Get LI URI  ${LE2}-${BothLIG1}
+    ${us} =             Copy Dictionary  ${li_uplink_sets['us1-1icm']}
+    ${body} =           Build US body  ${us}  ${li_uri}
+    ${resp} =           Fusion Api Create Uplink Set   body=${body}
+    ${valDict} =        Create Dictionary  status_code=${400}
+    ...                                    errorCode=CRM_FCOE_MLAG_NETWORKS_NOT_ASSIGNED_TO_BAY
+    Validate Response   ${resp}  ${valDict}
+
+Should be able to perform an Update From Group on the LI
+    [Tags]   comware    cleanup  cleanup-li  update-from-group
+    Run Keyword         Write to ciDebug Log
+    ${li_uri} =         Get LI URI  ${LE2}-${BothLIG1}
+    ${resp} =           Fusion Api Update From Group   uri=${li_uri}
+    Run Keyword If      ${resp['status_code']} !=202    fail   Update from group
+    ${task} =           Wait For Task   ${resp}     5 min      15 s
+    ${valDict} =        Create Dictionary  status_code=${200}
+    ...                                    taskState=Completed
+    Validate Response   ${task}  ${valDict}
+
+Should be able to create non-MLAG US
+    [Tags]   comware    comware-us  create-us-nomlag
+    Run Keyword         Write to ciDebug Log
+    ${li_uri} =         Get LI URI  ${LE2}-${BothLIG1}
+    ${us} =             Copy Dictionary  ${li_uplink_sets['us3']}
+    ${body} =           Build US body  ${us}  ${li_uri}
+    ${resp} =           Fusion Api Create Uplink Set   body=${body}
+    ${task} =           Wait For Task   ${resp}    5 min  5s
+    ${valDict} =        Create Dictionary  status_code=${200}
+    ...                                    taskState=Completed
+    Validate Response   ${task}  ${valDict}
+
+Should be able to Create Cisco LIG
+    [Tags]   cisco  cisco-lig
+    Run Keyword                       Write To ciDebug Log
+    Fusion Api Login Appliance       ${APPLIANCE_IP}    ${admin_credentials}
+    ${body} =  Build LIG body        ${ligs['${CiscoLIG2}']}
+
+    ${resp} =  Fusion Api Create LIG   ${body}
+    ${task} =  Wait For Task  ${resp}       60s 2s
+
+Should not be able to Create Cisco LIG with greater than 32 FCoE Networks
+    [Tags]   cisco  cisco-lig-33
+    Run Keyword                       Write To ciDebug Log
+    Fusion Api Login Appliance        ${APPLIANCE_IP}    ${admin_credentials}
+    ${body} =  Build LIG body         ${ligs['${CLIG5}']}
+
+    ${resp} =  Fusion Api Create LIG   ${body}
+    ${task} =  Wait for Task  ${resp}      60s 2s
+    ${valDict} =   Create Dictionary  taskState=Error
+    ...                               taskStatus=Too many FCoE networks have been specified for the uplink set.
+    Validate Response    ${task}  ${valDict}
+
+Create Server Profile
+    [Tags]   BFS  comware
+    Run Keyword and Ignore Error       Write to ciDebug Log
+    Fusion Api Login Appliance         ${APPLIANCE_IP}    ${admin_credentials}
+    Add Server Profiles from variable  ${server_profiles}   25m    1m
+    Run Keyword for List               ${servers}  Power on Server
+    Log to console and logfile         Waiting 20 minutes for servers to boot...
+    #sleep  20min
+    #Run Keyword for List              ${PING_LIST_1}    Wait For Appliance to Become Pingable
+    #SSH to host and ping x            ${PING_LIST_1[0]}  ${PING_LIST_1[1]}
+    #SSH to host and ping x            ${PING_LIST_3[0]}  ${PING_LIST_3[1]}
+
+Remove LIGs
+    [Tags]   cleanup  cleanup-ligs
+    [Documentation]  Queries the appliance for all LIGs and then removes them
+    ${ligs} =   Fusion Api Get LIG
+    ${count} =   Convert To String  ${ligs['count']}
+    Run Keyword If  '${count}'=='0'   Log  LIG Doesn't exists   WARNa
+    ${response} =  Create List
+    :FOR  ${lig}  IN  @{ligs['members']}
+    \    Log  ${lig['name']}   console=True
+    \    ${resp} =  Fusion Api Delete LIG  uri=${lig['uri']}
+
+*** Keywords ***
+FTS
+    [Documentation]  First Time Setup
+	Set Log Level	DEBUG
+    Get VM IP
+	First Time Setup					password=hpvse123
+
+Test Specific Teardown
+    [Documentation]  Teardown case
+	Power Off All Servers
+    Remove All Server Profiles
+    Remove ALL Users
+    Remove All Ethernet Networks
+    Remove ALL FCoE Networks
+
+Test Specific Setup
+    [Documentation]  General Setup case
+	Set Log Level	TRACE
+	${TEST_NAME} =      Set Variable    TEST-SPECIFIC SETUP
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	Log to console and logfile	[TEST-SPECIFIC SETUP]
+	Fusion Api Login Appliance 		${APPLIANCE_IP}		${admin_credentials}
+	${users} =	Get Variable Value	${users}
+	Run Keyword If	${users} is not ${null}    Add Users from variable				${users}
+	${ethernet_ranges} =	Get Variable Value    ${ethernet_ranges}
+    Run Keyword If  ${ethernet_ranges} is not ${null}       Run Keyword for List     ${ethernet_ranges}  Create Ethernet Range
+    ${network_sets} =   Get Variable Value  ${network_sets}
+    Run Keyword If  ${network_sets} is not ${null}  Add Network Sets from variable      ${network_sets}
+
+	Power Off All Servers
+
+Run FTS and test-specific setup
+    [Documentation]  Run the FTS case and test specific 
+	Set Log Level	TRACE
+    Test Specific Setup
+
+Run test-specific teardown
+    [Documentation]  Run any specific teardown commands
+    Test Specific Teardown

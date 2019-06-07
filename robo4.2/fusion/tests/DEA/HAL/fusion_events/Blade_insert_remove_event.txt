@@ -1,0 +1,100 @@
+*** Settings ***
+Documentation    Test suite to validate blade related events on OneView and FLM
+...    It covers testing of:
+...        BladeInserted
+...        BladeRemoved 
+...    = GENERIC USAGE =
+...    | pybot | -v ENC_SERIAL_NO:[enclosure serial #] | -v APPLIANCE_IP:<ipv4> | -v CIM_Linux_IP:<ipv4> |-v GIT_REPO_ROOT: | Blade_insert_remove_event.txt |
+...    = Variables =
+...    | GIT_REPO_ROOT |      Required: Repo root path if NOT defined in environment variable this is mgmtfw root location|
+...    | ENC_SERIAL_NO |      Optional: If omitted, will use the 1st enclosure detected in OV |
+...    | APPLIANCE_IP |       Required: OneView IPv4 address |
+...    | CIM_Linux_IP |       Required:CI Manager ipv4 under test |
+
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Library           RoboGalaxyLibrary
+Library           MgmtFWLibrary
+Library           json
+
+Suite Setup       Configure Events Test Environment
+Suite Teardown    Run Keywords  Logout of EM RIS   AND    Logout of Fusion Via REST
+
+*** Test Case ***
+TC 01: Verify Events For Blade Removal And Insertion
+    [Documentation]    This test is to verify Blade events for Blade Inserted & Blade Removed
+    [Tags]    Blade    Alert    Events    FLM1.01     FLM2.00     OV3.10    Automated
+    ${present_blade_list}=    Get List of Occupied Blade Bays
+    Should Not Be Empty    ${present_blade_list}    msg=No Blades present in the enlcosure
+    : FOR    ${blade_bay}    IN    @{present_blade_list}
+    \    Log    message=Removing Blade from bay:${blade_bay} and verify resource removed event in diags audit log    console=True
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    RIS EM Efuse On Blade    ${blade_bay}
+    \    Sleep    5
+    \    #Verifying resource removed event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Resource Removed Event    ${Blade_Device}    ${Blade_Removed_Message_ID}    ${blade_bay}    90
+    \    # Verify Fusion Event including event description and resolution
+    \    Verify Fusion Event Sent By EM    ${Blade_Removed_Message_ID}    ${last_fusion_event_id}
+    \    Log    message=Inserting Blade at bay:${blade_bay} and verify resource added event in diags audit log    console=True
+    \    RIS EM Efuse Off Blade    ${blade_bay}
+    \    #Verifying resource added event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Resource Added Event    ${Blade_Device}    ${Blade_Inserted_Message_ID}    ${blade_bay}    250
+    \    Verify Fusion Event Sent By EM    ${Blade_Inserted_Message_ID}    ${last_fusion_event_id}
+    [Teardown]    Run Keyword If Test Failed    RIS EM Efuse Off Blade    ${blade_bay}
+
+TC 02: Verify BladeInsertFault & BladeInsertFaultCleared
+    [Documentation]    This test will verify BladeInsertFault & BladeInsertFaultCleared events
+    [Tags]    Blade    Alert    Events     FLM2.00    OV3.10    Automated
+    Set Test Variable    ${device}    Blade
+    Set Test Variable    ${device_diag_response}    BLADE
+    ${present_blade_list}=    Get List of Occupied Blade Bays
+    Should Not Be Empty    ${present_blade_list}    msg=No Blades present in the enlcosure
+    : FOR    ${blade_bay}    IN    @{present_blade_list}
+    \    Log To Console    \rRemoving and Inserting the ${device} in bay: ${blade_bay}
+    \    ${result}=    RIS EM Efuse On Blade    ${blade_bay}
+    \    Should be True    ${result}
+    \    ${result}=    RIS EM Efuse Off Blade    ${blade_bay}
+    \    Should be True    ${result}
+    \    Sleep    60
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${result}=    EM API Get Diags    deviceStateTransition/${device}/${blade_bay}/remove
+    \    Should Contain    ${result}    Successfully sent diag state transition event remove for ${device_diag_response} ${blade_bay}
+    \    ${result}=    EM API Get Diags    ShowState/${device}/${blade_bay}
+    \    Should Contain    ${result}    State: SM_STATE_ABSENT
+    \    ${result}=    EM API Get Diags    deviceStateTransition/${device}/${blade_bay}/operational
+    \    Should Contain    ${result}    Successfully sent diag state transition event operational for ${device_diag_response} ${blade_bay}
+    \    ${result}=    EM API Get Diags    ShowState/${device}/${blade_bay}
+    \    Should Contain    ${result}    State: SM_STATE_OPERATIONAL
+    \    ${status}    ${result}=    Wait timeout for Device State    ${device}    ${blade_bay}    SM_STATE_INSERTED_ERR    600
+    \    Should Be True    ${status}    msg=expectedSM_STATE_INSERTED_ERR but got ${result}
+    \    ${result}=    EM API Get Diags    deviceStateTransition/${device}/${blade_bay}/operational
+    \    Should Contain    ${result}    Successfully sent diag state transition event operational for ${device_diag_response} ${blade_bay}
+    \    ${result}=    EM API Get Diags    ShowState/${device}/${blade_bay}
+    \    Should Contain    ${result}    State: SM_STATE_INSERTED_ERR
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_Blade_InsertFault}    ${Blade_Device}    ${blade_bay}    450
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_InsertFault}    ${last_fusion_event_id}
+    \    ${result}=    EM API Get Diags    deviceStateTransition/${device}/${blade_bay}/insert
+    \    Should Contain    ${result}    Successfully sent diag state transition event insert for ${device_diag_response} ${blade_bay}
+    \    Sleep    10
+    \    ${result}=    EM API Get Diags    ShowState/${device}/${blade_bay}
+    \    Should Contain    ${result}    State: SM_STATE_INTEGRATED
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_Blade_InsertFault_Cleared}    ${Blade_Device}    ${blade_bay}    450
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_InsertFault_Cleared}    ${last_fusion_event_id}
+    \    ${result}=    RIS EM Efuse On Blade    ${blade_bay}
+    \    Should be True    ${result}
+    \    ${result}=    RIS EM Efuse Off Blade    ${blade_bay}
+    \    Should be True    ${result}
+    \    Sleep    60
+    [Teardown]    Run Keyword If Test Failed    EM API Get Diags    deviceStateTransition/${device}/${blade_bay}/insert

@@ -1,0 +1,145 @@
+*** Settings ***
+Variables   ./Regression_Data.py
+Resource    ./../../../../Resources/api/fusion_api_resource.txt
+Resource    ../global_variables.robot
+
+*** Keywords ***
+Remove All Hardwares
+    [Documentation]    Remove All Hardwares
+    Run Keyword And Ignore Error    Wait For ALL Enclosures In OK Status
+    Run Keyword And Ignore Error    Wait For ALL Enclosures Complete Refresh
+    Run Keyword And Ignore Error    Remove All Enclosures
+    Run Keyword And Ignore Error    Remove All DL Server Hardware Async     ServerTypes=DL
+
+Verify Firmwares Exist
+    [Arguments]        ${ExpectedFirmware}    ${Existed}=${TRUE}
+    [Documentation]    Verify Firmwares Exist
+    Log    Verifying Firmware Exist is ${Existed}...    console=true
+    ${resp} =     Fusion Api Get Firmware Driver
+    Run Keyword If    ${Existed}==${TRUE}    Should Not Be True    ${resp['count']}==0  Firmware Not Found
+    ${FVersions} =  Create List
+    :FOR    ${firmware}    IN    @{resp['members']}
+    \   Append To List  ${FVersions}    ${firmware['version']}
+    :FOR    ${FirmwareVersion}   IN  @{ExpectedFirmware}
+    \   Run Keyword If    ${Existed}==${TRUE}    Should Contain   ${FVersions}   ${FirmwareVersion}
+    \   ...    ELSE    Should Not Contain   ${FVersions}   ${FirmwareVersion}
+    \   Log    Firmware repo verified: ${FirmwareVersion}    console=true
+
+Verify Firmware Exist
+    [Arguments]        ${ExpectedFirmware}
+    [Documentation]    Verify Firmware Exist
+    ${uri} =    Get Firmware Bundle By Version    ${ExpectedFirmware}
+    Should Not Contain    ${uri}    Not_Found
+    [Return]    ${uri}
+
+Verify Firmware Not Exist
+    [Arguments]        ${ExpectedFirmware}
+    [Documentation]    Verify Firmware Not Exist
+    ${uri} =    Get Firmware Bundle By Version    ${ExpectedFirmware}
+    Should Contain    ${uri}    Not_Found
+
+Verify Firmware Status
+    [Arguments]        ${firmware}    ${status}
+    [Documentation]    Verify Firmware Status
+    ${uri} =    Get Firmware Bundle By Version    ${firmware}
+    ${firmware} =    Get Firmware Bundle   ${uri}
+    Should Be Equal    ${firmware['status']}   ${status}    msg=${firmware['name']} status verify failed
+
+Verify Firmwares Status
+    [Arguments]        ${firmwares}    ${status}
+    [Documentation]    Verify Firmwares Status
+    Log    Verifying Firmare Status...    console=true
+    :FOR   ${fwVersion}   IN  @{firmwares}
+    \   Log    Firmware bundle version is ${fwversion}    console=true
+    \   ${uri} =    Get Firmware Bundle By Version  ${fwVersion}
+    \   ${firmware} =    Get Firmware Bundle   ${uri}
+    \   Should Be Equal    ${firmware['status']}   ${status}    msg=${firmware['name']} status verify failed
+
+Verify Firmwares Location
+    [Arguments]        ${firmwares}    ${Expected}    ${Unexpected}
+    [Documentation]    Verify Firmwares Location
+    Log    Verifying Firmare bundle Location...    console=true
+    :FOR   ${fwVersion}   IN  @{firmwares}
+    \   Log    Firmware bundle version is ${fwversion}    console=true
+    \   ${uri} =    Get Firmware Bundle By Version    ${fwVersion}
+    \   ${firmware} =    Get Firmware Bundle    ${uri}
+    \   ${locations} =     Get From Dictionary    ${firmware}    locations
+    \   ${locationlist} =    Get Dictionary Values    ${locations}
+    \   Should Contain List    ${locationlist}    ${Expected}
+    \   Should Not Contain List    ${locationlist}    ${Unexpected}
+
+Should Contain List
+    [Arguments]        ${actual}    ${expected}
+    [Documentation]    Should Contain List
+    Return From Keyword If    ${expected}==None    None
+    :FOR        ${index}    IN    @{expected}
+    \    Should Contain  ${actual}   ${index}
+
+Should Not Contain List
+    [Arguments]        ${actual}    ${expected}
+    [Documentation]    Should Not Contain List
+    Return From Keyword If    ${expected}==None    None
+    :FOR        ${index}    IN    @{expected}
+    \    Should Not Contain  ${actual}   ${index}
+
+Verify Repo Status OK
+    [Arguments]        ${name}
+    [Documentation]    Verify Repo Status OK
+    ${uri} =   Get Repository URI By Name       ${name}
+    ${repo} =   Fusion Api Get Repository       ${uri}
+    Should Be Equal    ${repo['status']}    OK
+    Should Be Equal    ${repo['state']}    Added
+
+Generate HTTPS Request Payload
+    [Arguments]        ${HOST}    ${payload}
+    [Documentation]    Generate HTTPS Request Payload
+    Log    Add repo cert to appliance    console=True
+    ${cert} =    Fusion Api Get Remote Certificate     ${HOST}
+    ${cert_detail} =    Create Dictionary
+    Set To Dictionary    ${cert_detail}    base64Data    ${cert['certificateDetails'][0]['base64Data']}
+    Set To Dictionary    ${cert_detail}    aliasName    ${aliasName}
+    Set To Dictionary    ${cert_detail}    type    ${cert['certificateDetails'][0]['type']}
+    ${cert_details} =    Create List    ${cert_detail}
+    ${add_cert} =    Create Dictionary    certificateDetails=${cert_details}
+    Set To Dictionary    ${add_cert}    type    ${cert['type']}
+    ${resp} =    Fusion Api Import Server Certificate    ${add_cert}
+    Wait For Task2    ${resp}
+    ${body} =    Copy Dictionary    ${payload}
+    [Return]    ${body}
+
+Clear Test Environtment
+    [Documentation]    Clear Test Environtment
+    Log    Power Off Servers and remove all profiles    console=true
+    Run Keyword And Ignore Error    Wait For ALL Server Profile In Normal State
+    Run Keyword And Ignore Error    Power off ALL servers   PressAndHold
+    Run Keyword And Ignore Error    Wait For ALL Servers Complete Refresh
+    Run Keyword And Ignore Error    Remove All Server Profiles
+
+Update server firmware when create profile
+    [Arguments]    ${payload}    ${isForce}=${False}
+    [Documentation]    Create server profile with firmware baseline
+    Log    Update server firmware when create profile    console=true
+    Clear Test Environtment
+    ${profilelist} =    Generate profile body   ${payload}  ${isForce}
+    ${resps} =   Add Server Profiles from variable   ${profilelist}
+    Wait For Task2   ${resps}    100min    30
+
+Generate profile body
+    [Arguments]    ${profiles}    ${isForce}=${False}
+    [Documentation]    Generate profile body
+    ${profiles_body}=  Deep Copy  ${profiles}
+    ${profilelist} =    Create List
+    :FOR    ${profile}    IN    @{profiles_body}
+    \    ${firmware} =     Get from Dictionary    ${profile}    firmware
+    \    ${firmwareBaseline} =    Get from Dictionary  ${firmware}   firmwareBaselineUri
+    \    ${firmwareURI} =    Get Firmware Bundle By Version  ${firmwareBaseline}
+    \    Set to Dictionary    ${firmware}    firmwareBaselineUri    ${firmwareURI}
+    \    Set to Dictionary    ${firmware}    forceInstallFirmware    ${isForce}
+    \    Set to Dictionary    ${profile}    firmware    ${firmware}
+    \    append to list    ${profilelist}    ${profile}
+    [Return]    ${profilelist}
+
+Remove Repository
+    [Documentation]    Remove Repository
+    ${resp} =   Remove Repository By Name     ${repository_name}
+    ${task} =   Wait For Task2           ${resp}     50    5

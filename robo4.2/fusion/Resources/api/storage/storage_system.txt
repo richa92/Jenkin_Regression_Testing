@@ -1,0 +1,228 @@
+*** Settings ***
+Library                RoboGalaxyLibrary
+Library                FusionLibrary
+Library                OperatingSystem
+Library                BuiltIn
+Library                Collections
+Library                XML
+Library                SSHLibrary
+Library                String
+Library                Dialogs
+Documentation       Perform a GET on a storage system and use the entire storage system object in the request body for PUT.
+...                 For StoreServ, PUT can be used to set the managedDomain and managedPools to finish adding the storage system.
+...                 For StoreVirtual, PUT can be used to assign expected network for its port.
+...                 Data File Example:
+...                 storage_systems = [{'type':'StorageSystemV4', 'name':STORESERV1_NAME, 'family':'StoreServ',
+...                    "hostname":STORESERV1_HOSTNAME,'credentials':{'username':'fusionadm', 'password':'hpvse1'},
+...                    "deviceSpecificAttributes":
+...                        {
+...                            "managedDomain": "wpst16",
+...                            "managedPools": [{"domain":"wpst16","name":"FC_wpst16_r1","deviceType":"FC","freeCapacity":"3595961368576","raidLevel":"RAID1",
+...                                             "totalCapacity":"3692598132736","uuid":"87d08c70-b92e-4a89-a22b-3db5ef9734cf"},]
+...                        },
+...                   }
+...                   {'type':'StorageSystemV4','name': STOREVIRTUAL1_NAME , "family":"StoreVirtual",
+...                     "hostname":"16.71.149.173","credentials":{"username":"admin","password":'admin'},
+...                     "ports":[{
+...                       "name": "192.168.21.71",
+...                       "expectedNetworkUri": "ETH:network-untagged",
+...                        "expectedNetworkName": "network-untagged",
+...                        "mode": "Managed",},],
+...                      },
+...                 ]
+
+*** Keywords ***
+Add Storage System
+    [Documentation]    Add storage system and return the response.
+    [Arguments]        ${storageSystem}
+    ${payload} =  copy dictionary  ${storageSystem['credentials']}
+    set to dictionary  ${payload}  hostname  ${storageSystem['hostname']}
+    set to dictionary  ${payload}  family  ${storageSystem['family']}
+    ${resp} =    Fusion Api Create Storage System     body=${payload}
+    Wait For Task2    ${resp}  timeout=300  interval=10
+    [Return]    ${resp}
+
+Add Storage Systems Async
+    [Documentation]    Add a list of storage systems and return the repsonses.
+    [Arguments]        ${storageSystems}
+    ${toAdd} =  Create List
+    :FOR    ${ss}    IN    @{storageSystems}
+    \    ${status} =  Check Resource Existing  SSYS:${ss['name']}
+    \    Run Keyword If    ${status}=='FAIL'  Append To List   ${toAdd}  ${ss}
+
+    ${resplist} =  Create List
+    :FOR    ${ss}    IN    @{toAdd}
+    \    Log  Adding Storage volume ${ss['name']}    console=True
+    \   ${resp} =  Add Storage System  ${ss}
+    \   Append To List  ${resplist}  ${resp}
+    [Return]    ${resplist}
+
+Connect and Add Storage Systems
+    [Documentation]      Connects a storage system and add it to an appliance from a variable which contains a list of dicts with the entire payload
+    ...             Data file Ex:    storage_system = [ {"type": "StorageSystemV3", "credentials": {"ip_hostname": "16.95.208.61", "username": "cosmos", "password": "Insight7"},
+    ...                                                      "name": "cstv400",
+    ...                                                      "managedDomain": "Automation",
+    ...                                                       "serialNumber": "1414379",
+    ...                                                       "uri":"cstv400",
+    ...                                                       "unmanagedPorts": [],
+    ...                                                       "refreshState": "NotRefreshing",
+    ...                                                       "managedPools": [
+    ...                                                       {"type": "StoragePool", "name": "Auto-R0-CPG"}],
+    ...                                                       "managedPorts": [{"type": "StorageTargetPortV3", "portWwn": "20:14:00:02:AC:00:38:2B", "portName": "0:1:4",
+    ...                                                        "name": "0:1:4", "expectedNetworkUri": "yu", "groupName": "Auto"}]
+    ...                                                      }]
+    [Arguments]     ${storageSystems}   ${notFoundStatusCodeList}=404   ${ss_status_code}=202
+    ${toAdd} =  Create List
+    :FOR    ${ss}   IN  @{storageSystems}
+    \       Log  Adding Storage System -${ss['name']}   console=True
+    \       ${resp} =       Get Resource  SSYS:${ss['name']}
+    \       ${statusCode}=  Convert To String  ${resp['status_code']}
+    \       ${status}=      Run Keyword And Return Status   List Should Contain Value  ${notFoundStatusCodeList}  ${statusCode}
+    \       Run Keyword If    ${status}==False     Log   Storage System ${ss['name']} Already Exists     WARN
+    \       Run Keyword If    ${status}==True   Append To List   ${toAdd}  ${ss}
+    ${count} =  Get Length  ${toAdd}
+    Return From Keyword If  '${count}'=='0'
+    ${responses} =  Create List
+    :FOR    ${ss}   IN      @{toAdd}
+    \   ${response} =  Add Storage System  ${ss}
+    \   Run Keyword If  ${response['status_code']}!=${ss_status_code}    Run Keyword And Continue On Failure     FAIL     Adding Storage System ${ss['name']} failed
+    \   Continue For Loop If    ${response['status_code']}!=${ss_status_code}
+    \   Append to List  ${responses}    ${response}
+    Wait For Task2  ${responses}
+    ${edit_response}=  Edit Storage Systems Async  ${toAdd}
+    [return]    ${edit_response}
+
+Edit Storage System
+    [Documentation]    Edit the storage system and return the response.
+    [Arguments]        ${storageSystem}
+    ${payload} =  Create Storage System Put Payload  ${storageSystem}
+    ${resp} =    Fusion Api Update Storage System     ${payload}    ${payload['uri']}
+    Wait For Task2    ${resp}  timeout=300  interval=10
+    [return]  ${resp}
+
+Edit Storage Systems Async
+    [Documentation]    Edit the storage systems and return the responses.
+    [Arguments]     ${storageSystems}     ${sse_status_code}=202
+    Log      Editing Storage Systems   console=True
+    ${resplist} =     Create List
+    :FOR    ${ss}    IN    @{storageSystems}
+    \    Log  Editing Storage System ${ss['name']}   console=True
+    \    ${resp} =  Edit Storage System  ${ss}
+    \   Run Keyword If  ${resp['status_code']}!=${sse_status_code}    Run Keyword And Continue On Failure     FAIL     Adding Storage System ${ss['name']} failed
+    \   Continue For Loop If    ${resp['status_code']}!=${sse_status_code}
+    \   Append To List  ${resplist}  ${resp}
+    [return]        ${resplist}
+
+Create Storage System PUT Payload
+    [Documentation]    Create PUT payload to edit the storage system.
+    [Arguments]        ${storageSystem}
+    ${name} =  Get from Dictionary  ${storageSystem}  name
+    ${payload} =  Get Resource  SSYS:${name}
+    # remove the status_code and headers in the response
+    remove from dictionary  ${payload}  status_code
+    remove from dictionary  ${payload}  headers
+    # For StoreServ, update managedDomain and managedPools in deviceSpecificAttributes
+    ${status}  ${rtn} =  Run Keyword and Ignore Error  Get From Dictionary  ${storageSystem}  deviceSpecificAttributes
+    Run keyword if  '${status}'=='PASS'  Update Dictionary Subset  ${payload['deviceSpecificAttributes']}  ${storageSystem['deviceSpecificAttributes']}
+    # For StoreVirtual, associate expected network for ports
+    ${status}  ${rtn} =  Run Keyword and Ignore Error  Get From Dictionary  ${storageSystem}  ports
+    ${ports} =  Run keyword if  '${status}'=='PASS'  Lookup Ports Expected Network URI  ${rtn}
+    ${ports} =  Run keyword if  '${status}'=='PASS'  Update Ports  ${payload['ports']}  ${ports}
+    [return]        ${payload}
+
+Lookup Ports Expected Network URI
+    [Documentation]    Lookup expectedNetworkUri in ports.
+    [Arguments]        ${portList}
+    :FOR    ${port}    IN    @{portList}
+    \   ${status}  ${rtn} =  Run Keyword and Ignore Error  Get From Dictionary  ${port}  expectedNetworkUri
+    \   ${expectedNetworkUri} =  set variable if  '${status}'=='PASS'  ${rtn}  ${None}
+    \   ${expectedNetworkUri} =  run keyword if  '${expectedNetworkUri}'!= '${None}'  Common URI lookup by name  ${expectedNetworkUri}
+    \   Set to Dictionary    ${port}    expectedNetworkUri    ${expectedNetworkUri}
+
+    \   ${status}  ${rtn} =  Run Keyword And Ignore Error  Get From Dictionary  ${port}  expectedSanUri
+    \   ${expectedSanUri} =  Set Variable If  '${status}'=='PASS'  ${rtn}  ${None}
+    \   ${expectedSanUri} =  Run Keyword If  '${expectedSanUri}'!='${None}'  Common URI lookup by name  ${expectedSanUri}
+    \   Run Keyword If  '${expectedSanUri}'!='${None}'  Set to Dictionary  ${port}  expectedSanUri  ${expectedSanUri}
+    [Return]    ${portList}
+
+Update Ports
+    [Documentation]    Update portList1 with portList2.
+    [Arguments]        ${portList1}  ${portList2}
+    ${len} =  get length  ${portList1}
+    :FOR    ${index}    ${item}    IN ENUMERATE    @{portList1}
+    \    ${index2}=     Get Specified Port item    ${item}  ${portList2}
+    \    Continue For Loop If  '${index2}'=='${None}'
+    \    Update Dictionary Subset  ${portList1[${index}]}  ${portList2[${index2}]}
+    [return]  ${portList1}
+
+Get Specified Port item
+    [Documentation]  Get port item from specified port list
+    [Arguments]   ${portItem}  ${portList}
+    :FOR    ${index}   ${item}    IN ENUMERATE     @{portList}
+    \     Return From Keyword If  '${portItem["name"]}'=='${item["name"]}'  ${index}
+    [Return]  ${None}
+
+Remove ALL Storage Systems Async
+    [Documentation]  Query the appliance for all storage systems, remove them, and return the responses.
+    Log  Removing ALL STORAGE SYSTEMS  console=yes
+    ${storageSystems} =  Fusion Api Get Storage System  param=?sort=name:ascending
+    Run Keyword If     ${storageSystems['count']}==0     Log     No Storage Systems to delete    WARN
+    ${responses} =  Create List
+    :FOR  ${ss}  IN  @{storageSystems['members']}
+    \   Log  Removing Storage System ${ss['name']}  console=yes
+    \   ${headers} =  fusion api get headers
+    \   set to dictionary  ${headers}  If-Match  ${ss['eTag']}
+    \   ${response} =  Fusion Api Delete Storage System  uri=${ss['uri']}  headers=${headers}
+    \   Append to List  ${responses}    ${response}
+    Wait For Task2  ${responses}
+    ${resp} =  Fusion Api Get Storage System
+    Run Keyword If  ${resp['count']}!=0  Run Keyword And Continue On Failure  FAIL  msg=All Storage Systems were not deleted
+
+Get Storage System URI
+    [Documentation]    Get storage system URI by name.
+    [Arguments]        ${ssName}
+    ${resp} =     Fusion Api Get Storage System  param=?filter="'name'=='${ssName}'"
+    Return From Keyword If  ${resp['count']}==0  /rest/storage_system_uri_${ssName}_not_found
+    ${uri} =     Get From Dictionary        ${resp['members'][0]}    uri
+    [Return]    ${uri}
+
+Get Storage System Template URI
+    [Documentation]    Get storage system template URI by name and param if given.
+    [Arguments]        ${ssName}  ${param}=${None}
+    ${ssUri} =     Get Storage System URI    ${ssName}
+    ${resp} =     Fusion Api Storage System Get Templates  ${ssUri}  param=${param}
+    Return From Keyword If  ${resp['count']}==0  /rest/storage-volume-templates/bad_uri
+    ${uri} =     Get From Dictionary        ${resp['members'][0]}    uri
+    [Return]    ${uri}
+
+Storage Systems Attribute ${attribute} Should Have Value ${value}
+    [Documentation]    Check attribute of Storage System
+    ...    Fail the test in case of attribute other than the expected
+    ${sss} =    Fusion Api Get Storage System
+    Run Keyword If  ${sss['count']}=='0'  Fail  msg=No Storage System found
+    ${res} =  Set Variable  ${empty}
+    :FOR  ${ss}  IN  @{sss['members']}
+    \  ${res} =  Run Keyword If  '${ss['${attribute}']}' != '${value}'  Catenate  ${res}
+    ...  \nStorage Systems name [${ss['name']}] Expected ${attribute} ${value} but found ${ss['${attribute}']}
+    \  ...  ELSE  Set Variable  ${res}
+    ${count} =  Get Length  ${res}
+    Run Keyword If  '${count}' > '0'  Fail  ${res}
+
+Storage Systems Actual and Expected Port Should Be Consistent
+    [Documentation]    Check Storage System Actual and Expected Port Should Be Consistent
+    ...    Fail the test in case of Storage System Actual and Expected Port are not Consistent
+    ${sss} =    Fusion Api Get Storage System
+    Return From Keyword If  ${sss['count']}=='0'
+    :FOR  ${ss}  IN  @{sss['members']}
+    \    Expected And Actual San Port Should Match    ${ss['ports']}
+
+Expected And Actual San Port Should Match
+    [Documentation]    Check Storage System Actual and Expected Port Should Be Consistent
+    [arguments]    ${ports}
+    ${res} =  Set Variable  ${empty}
+    :FOR  ${port}  IN  @{ports}
+    \  ${res} =  Run Keyword If  '${port['actualSanName']}' != '${port['expectedSanName']}'  Catenate  ${res}
+    ...  \nStorage System name [${port['name']}] Expected ${port['expectedSanName']} but found ${port['actualSanName']}
+    \  ...  ELSE  Set Variable  ${res}
+    ${count} =  Get Length  ${res}
+    Run Keyword If  '${count}' > '0'  Fail  ${res}

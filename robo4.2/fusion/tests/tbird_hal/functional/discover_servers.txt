@@ -1,0 +1,97 @@
+*** Settings ***
+Documentation     Verify discovery off blades in enclosure in Monitored state.
+...    = USAGE =
+...    | pybot | -v ENCLOSURE:<name> |
+...    = Variables =
+...    | ENCLOSURE | Required:  Enclosure name from variables.py
+...
+...    AM-DVT Rally Test User Story US37505
+
+Variables         ../resources/variables.py    ${ENCLOSURE}  # Variables file
+
+Library           FusionLibrary                  	   # DVTs Robot Framework extensions
+Resource          ${CURDIR}/../resources/defaults.txt      # Comet-DVT default variables
+Resource          ${CURDIR}/../resources/em_api.txt        # Fusion API interaction keywords
+Resource          ${CURDIR}/../resources/fusion_ssh.txt    # Fusion API interaction keywords
+Resource          ${CURDIR}/../resources/fusion_api.txt    # Fusion API interaction keywords
+Resource          ${CURDIR}/../resources/system_info.txt   # AM-DVT fusion API extensions
+Force Tags        DCS  HW
+
+Suite Setup       Run Keywords
+...		  Login to Fusion via REST
+...		  Login to Fusion via SSH
+...               EM Api Create Session
+Suite Teardown    Logout of Fusion Via REST
+
+*** Test Cases ***
+Verify All Servers Are Discovered
+    ${bayurl}=		Set Variable If		${DCS}==True		/rest/v1/chassis/1/BladeBays    /rest/v1/BladeBays
+    ${filled}  	${unfilled}=		Find Filled Bays	${bayurl}
+    ${nofilled} =	Get Length 		${filled}
+    ${response} =   	Fusion Api Get Server Hardware
+    ${members} =    	Get From Dictionary	${response}		members
+    ${nomembers} =   	Get Length 	  	${members}
+    ${status}  ${result}=   Run Keyword and Ignore Error
+    ...    Should Be Equal 	${nofilled}		${nomembers}
+    Run Keyword If   	"${status}" == "FAIL"
+    ...	   Log  	Not all servers were discovered		level=Warn
+    Set Suite Variable  ${filled}
+    Set Suite Variable	${members}
+
+Verify Servers In Monitored State
+    ${nomembers} =   	Get Length 	  	${members}
+    :For        ${i}  in range		0	${nomembers}
+    \	${server} =	 Get From List        ${members}	${i}
+    \	Verify Server	 ${server}
+
+Verify All Server Hardware Type
+    ${response} =   	Fusion Api Get Server Hardware Types
+    ${members}=		Get From Dictionary   ${response}	members
+    ${n_members}=	Get Length	      ${members}
+    :For	${i}     in range   0    ${n_members}
+    \	${bay}=		Get From List	      ${filled}		${i}
+    \   ${member}=	Get From List	      ${members}	${i}
+    \   ${name}=	Get From Dictionary   ${member}		name
+    \   Should match regexp  ${name}      	      SY 480 Gen9 \\d+
+
+Verify Power On/Off
+    ${member}=		Select Random Element From List 	${members}
+    ${uri}=		Get From Dictionary   ${member}		uri
+    ${power}=		Fusion API Get Server Hardware          uri=${uri}
+    Set/Verify Power    ${uri}		      Off
+    Set/Verify Power    ${uri}		      On
+
+Verify No Profile Targets
+    ${response}=	Fusion API Get Server Profiles	 param=/available-targets
+    ${targets}=		Get From Dictionary   ${response}	targets
+    ${n_targets}=	Get Length	      ${targets}
+    Should Be Equal	${n_targets}	      ${10}
+
+ *** Keywords ***
+
+Verify Server
+    [Arguments]		${server}
+    ${proctype}= 	Regexp Escape	Intel(R) Xeon(R) CPU E5-2695 v3 @ 2.30GHz
+    @{attributes}=	Create List	state    	 Monitored
+    ...		 	uuid   		\\w{8}\\-\\w{4}\\-\\w{4}\\-\\w{4}\\-\\w{12}
+    ...			model      	Synergy 480 Gen9
+    ...			mpModel  	iLO4
+    ...			memoryMb   	\\d{4}
+    ...			processorType	Intel.*Xeon.*CPU E5.*v3 @ 2.*GHz
+    ...			powerState	On
+    :For      ${attribute}   ${expected}	in 	    @{attributes}
+    \	${value} =	       Get From Dictionary	${server}	${attribute}
+    \	${value}=	       Convert to String	${value}
+    \   ${status}  ${r}=  Run Keyword and Ignore Error
+    \	...    Should Match RegExp    ${value}	   ${expected}
+    \	Run Keyword If   "${status}" == "FAIL"
+    \   ...    Log   Server attribute ${attribute} = ${value} did not match ${expected}.	level=WARN
+
+Set/Verify Power
+    [Arguments]	   ${ServerURI}	${State}
+    ${request}=		Create Dictionary     powerState        ${State}       powerControl    MomentaryPress
+    ${response}=	Fusion API Edit Server Hardware Power State	       ${request}      ${ServerURI}
+    Fusion API Wait For Task To Complete      ${response['uri']}
+    ${power}=		Fusion API Get Server Hardware          uri=${ServerURI}
+    ${power}=		Get From Dictionary   ${power}		powerState
+    Should Be Equal	${power}              ${State}

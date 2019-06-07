@@ -1,0 +1,138 @@
+*** Settings ***
+Documentation     PERM API keywords
+...               = Usage =
+...               | Library | ../resources/perm_api.txt |
+
+Library           Collections
+Library           String
+Library           RoboGalaxyLibrary            # DVTs Robot Framework extensions
+Library           FusionLibrary                # DVTs Robot Framework extensions
+Library           OperatingSystem
+Library           SSHLibrary
+Resource          ../resources/fusion_api.txt  # DVT fusion API extensions
+Resource          ../resources/em_api.txt
+Resource          ../resources/em_cli.txt
+Resource          ../resources/fusion_cli.txt
+Resource          ../resources/hal_webapp.txt
+Resource          ../resources/fusion_ssh.txt
+Resource          ../resources/enclosure_info.txt
+
+*** Keywords ***
+PERM Api Claim EM
+    [Documentation]    Tell Fusion through PERM layer to claim an Enclosure Manager
+    ...    Add force option to unclaim the enclosure if enclosure already claimed  (PERM Api Claim EM   ${True})
+    [Arguments]    ${force}=${False}
+
+    # Make sure EM is not already claimed
+    ${status}    ${rtn}=    Run Keyword And Ignore Error    Verify Unclaimed EM
+    Run Keyword If    '${status}'=='FAIL'
+    ...    Run Keyword If    '${force}'=='${False}'    Fail    msg = Enclosure claimed when not expected
+    Run Keyword If    '${status}'=='FAIL'
+    ...    Run Keyword If    '${force}'=='${True}'    Unclaim EM   # Unclaim upon force set
+
+    # Create Credentials
+    # LLDP credentials file not needed for DCS
+    # LLDP credentials file not needed for HW, David Gray, 2015/Jan.
+    # Run Keyword If    '${DCS}'=='${False}'    Create HAL LLDP Credentials
+
+    # Claim Enclosure Manager
+    # Get Fusion Claim IP from CiMgr lldpcli
+    Login to Fusion Via SSH
+    ${Response}=      Execute SSH Command    lldpcli show nei
+    Log    ${Response}
+    # SysDescr:     {"SN":"00HPMP3F70","ID":"Administrator","PW":"PVamMzGdf0PF","Owner":"fe80:0:0:0:e217:8f:408c:cffa"}
+    ${Match}    ${floater}=    Should Match Regexp    ${Response}    (fe80:0:0:0:.+:.+:.+:\\w+)
+    Log    ${floater}
+
+    ${FUSION_IP_CLAIM}=    Set Variable If    '${DCS}'=='${False}'    ${floater}    ${FUSION_IP}
+    Log    ${FUSION_IP_CLAIM}
+    ${Response}=    Perm Api Perform Claim    ${FUSION_IP}    ${FUSION_IP_CLAIM}
+    Log    ${Response}
+    Dictionary Should Not Contain Key    ${Response}    errorCode    Perm FTS returned error--See Response
+
+    # Validate that the EM is claimed with the correct IP address
+    # Make sure EM is not already claimed
+    Verify Claimed EM
+
+    # Make sure EM Claim Data contains an ID to work around AM52
+    AM56 Fix EM Claim Data
+
+Verify Claimed EM
+    [Documentation]    Verify that an EM is claimed by a specific Fusion instance
+    # Get Fusion Claim IP from CiMgr Lldpcli for HW.
+    # Get Fusion IPv6 from 'ifconfig' for DCS
+    ${FUSION_IP_CLAIM}=    Run Keyword If    '${DCS}'=='False'    Get Claimed IP from LLDP
+    ...    ELSE    Get CIM IPv6 address
+    # Get Fusion Claim IP from RIS
+    Login to Fusion via SSH
+    ${EM_IP}=    Get EM IP
+    ${encl_list}=    Get EM Enclosures
+    Get EM Token    ${encl_list[0]}
+    Get EM Sessions
+    ${ip}=    Get Fusion IP Claim Through EM RIS
+    # Verify LLDP reports the same Floating IP as EM RIS
+    ${match}=    Should Be Equal As Strings    ${ip}    "${FUSION_IP_CLAIM}"
+    Should Be Equal As Strings    ${match}    None    msg=EM not claimed by ${FUSION_IP_CLAIM} as it should be. LLDP Owner IP does not match AccountService Owner IP.
+    # Check that the credentials file contains the IP address for this EM
+    ${ipToCheck}=    Run Keyword If    '${dcs}'=='True'    Set Variable    ${EM_IPV6}           # Should be EM's IPv6 address
+    ...    ELSE    Get EM IP
+    # Get IPs from all claimed Enclosures from JSON credentials file
+    # Verify EM Floating IP is listed for the primary enclosure
+    ${ClaimedEncs}=    Get Known EM IPs From JSON Credentials
+    ${ipAddress}=    Get From Dictionary    ${ClaimedEncs}    ${ENC_SERIAL_NUMBER}
+    # Ensure the certificate has been appropriately stored from Fusion
+    # First, get it from the EM
+    Login to Fusion via SSH
+    ${EM Account Service}=    Get EM Account Service
+    ${count}=    Get Line Count    ${EM Account Service}
+    ${response_value}=    Run Keyword And Ignore Error    String.Get Lines Containing String    ${EM Account Service}    IpAddress
+    ${response_string}=    Set Variable    ${response_value}
+    ${response_string1}=    Set Variable    ${response_value[1]}
+    ${value_row} =    Split String    ${response_string1}    ,
+    Log    ${value_row}
+    ${EM_Cert}=    Get From List    ${value_row}    9
+    Log    ${EM_Cert}
+    ${EM_Cert}=    Remove String Using Regexp    ${EM Cert}    .*-----BEGIN CERTIFICATE-----
+    ${EM_Cert}=    Remove String Using Regexp    ${EM Cert}    -----END CERTIFICATE-----.*
+    # Convert escape sequences into their regular representation
+    ${EM_Cert}=    Evaluate    "${EM_Cert}".decode()
+    # Now get it from Fusion
+    ${Fusion_Cert}    Fusion API Get Resource    /rest/certificates/https
+    ${Fusion_Cert}    Get From Dictionary    ${Fusion_Cert}    base64Data
+    # Make this text (hopefully) match the EM Cert text
+    ${Fusion_Cert}    Remove String Using Regexp    ${Fusion_Cert}    .*-----BEGIN CERTIFICATE-----
+    ${Fusion_Cert}    Remove String Using Regexp    ${Fusion_Cert}    -----END CERTIFICATE-----.*
+    # Make sure they match
+    Should Be Equal As Strings    ${EM_Cert}    ${Fusion_Cert}    The certificate provided by Fusion was not properly stored by the EM after claim.
+
+Verify Unclaimed EM
+    [Documentation]    Verify that an EM is not claimed by a specific Fusion instance
+
+    ${ip}=    Get Fusion IP Claim Through EM RIS
+    Should Be Equal    ${ip}    ${Empty}    msg=EM is claimed by ${ip}; should not be claimed
+
+    ${status}    ${ip}=    Run Keyword and Ignore Error
+    ...    Get EM IP From JSON Credentials
+
+    # Good return back to caller if JSON credentials did not return with proper IP
+    Run Keyword If    '${status}'=='FAIL'    Return From Keyword
+
+    ${ipToCheck}=    Run Keyword If    '${dcs}'=='${True}'
+    ...    Set Variable    ${EM_IP}
+    ...    ELSE
+    ...    Get EM Floater IP Address
+
+    ${match}=   Run Keyword and Return Status
+    ...                IP Address Match     ${ip}    ${ipToCheck}
+    Run Keyword If     "${ip}" != "" and not ${match}
+    ...                Fail   msg=EM ${ipToCheck} is displayed in Fusion JSON Credentials file; it should NOT be
+
+Get CIM IPv6 address
+    [Documentation]    Parses IPv6 address from the ifconfig output.
+
+    Login To Fusion Via SSH
+    ${Buffer}=     Execute Command    ifconfig eth0 | grep inet6
+    ${SplitString}=    Split String    ${Buffer}
+    ${Match}    ${ip}=    Should Match Regexp    ${SplitString[2]}    ([\\w:]+)\\/
+    Logout of Fusion Via SSH
+    [Return]    ${ip}

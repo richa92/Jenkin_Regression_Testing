@@ -1,0 +1,110 @@
+*** Settings ***
+Library        RoboGalaxyLibrary
+Library        FusionLibrary
+Library        OperatingSystem
+Library        BuiltIn
+Library        Collections
+Library        SSHLibrary
+Library        String
+Library        robot.api.logger
+
+Variables        ${DATA}
+Variables        ${DATA_FILE}
+
+*** Variables ***
+${APPLIANCE_IP}    ${None}
+${DATA}    ${DATA_FILE}
+
+*** Keywords ***
+Clear Testing Environment
+    [Documentation]    Clear testing environment
+    [Arguments]    ${certs}
+    Run Keyword And Ignore Error    Delete Multiple CA Certificates    ${certs}
+    ${resp} =  Update Certificate Validation Configuration    ${disableAlertForCRL}
+    Should Be True    ${resp}    msg=Failed to update certificate validation configuration
+
+Filter Certificates by Multiple Parameters
+    [Documentation]    Used to filter certificates
+    [Arguments]     ${queryConfig}
+    # default "NOT cert_type: "STANDARD_ROOT"" if not specified
+    ${type} =  Get From Dictionary    ${queryConfig}    cert_type
+    ${query_items} =  Set Variable If    "${type}" != ""    cert_type:"${type}"    NOT cert_type:"STANDARD_ROOT"
+
+    # append cert status to index url if specified
+    ${status} =  Get From Dictionary    ${queryConfig}    cert_status
+    ${query_items} =  Run Keyword If  "${status}" != ""  catenate  ${query_items}  AND cert_status:"${status}"
+    ...    ELSE    Set Variable    ${query_items}
+
+    # append cert alias name to index url if specified
+    ${aliasName} =  Get From Dictionary    ${queryConfig}    cert_aliasName
+    ${query_items} =  Run Keyword If    "${aliasName}"    catenate    ${query_items}    AND cert_aliasName:/.*${aliasName}.*/
+    ...    ELSE    Set Variable    ${query_items}
+
+    ${state} =  Get From Dictionary    ${queryConfig}    cert_state
+    ${query_items} =  Run Keyword If    "${state}"    catenate    ${query_items}    AND cert_state:"${state}"
+    ...    ELSE    Set Variable    ${query_items}
+
+    ${expiration} =  Get From Dictionary    ${queryConfig}    cert_expiryDate
+    ${query_items} =  Run Keyword If    "${expiration}"    catenate    ${query_items}    AND cert_expiryDate:/.*${expiration}.*/
+    ...    ELSE    Set Variable    ${query_items}
+
+    Log    Filtering certificates by given items.     console=Yes
+    Log    Type: ${type}\nAliasName: ${aliasName}\nStatus: ${status}\nState: ${state}\nExpiration: ${expiration}    console=Yes
+    ${resp} =  Fusion Api Index Resource    ?category=certificates&query=(${query_items})
+    Log    ${resp['count']} certs were(was) filtered out.    console=Yes
+    Log    ${resp['members']}    console=Yes
+    [Return]    ${resp}
+
+Validate Filtered Certs as Expected
+    [Documentation]    Validate the certs been filterd out are as expected
+    [Arguments]    ${certs}    ${expected_count}    ${filter}
+
+    Log    \nValidate the count of filtered out certs is as expected.    console=Yes
+    ${len} =  Get length   ${certs}
+    ${type_filter} =  Get From Dictionary    ${filter}    cert_type
+    ${status_filter} =  Get From Dictionary    ${filter}    cert_status
+    ${alias_name_filter} =  Get From Dictionary    ${filter}    cert_aliasName
+    ${state_filter} =  Get From Dictionary    ${filter}    cert_state
+    ${expiryDate_filter} =  Get From Dictionary    ${filter}    cert_expiryDate
+    Run Keyword If    ${len} != ${expected_count}    Log    The count of filtered out certs doesn't meet expectation.    console=Yes
+    Run Keyword If    ${len} != ${expected_count}    Return from keyword    ${False}
+    ...    ELSE    Log    The count of filtered certs: ${len} matches with the expected: ${expected_count}.    console=Yes
+    Run keyword and return If    ${len} == 0    Return From Keyword    ${True}
+
+    Log    \nValidate the certs' attributes meet the filter conditions.    console=Yes
+    :For    ${cert}    IN    @{certs}
+    \    ${attrs} =  Get From Dictionary    ${cert}    attributes
+    \    Run keyword if    "${type_filter}" != ""    should be equal    ${attrs['cert_type']}    ${type_filter}
+    \    Run keyword if    "${status_filter}" != ""    should be equal    ${attrs['cert_status']}    ${status_filter}
+    \    Run keyword if    "${alias_name_filter}" != ""    should contain     ${attrs['cert_aliasName']}    ${alias_name_filter}
+    \    Run keyword if    "${state_filter}" != ""    should be equal    ${attrs['cert_state']}    ${state_filter}
+    \    Run keyword if    "${expiryDate_filter}" != ""    should contain    ${attrs['cert_expiryDate']}    ${expiryDate_filter}
+    \    Log    The cert: ${attrs['cert_aliasName']} meets the filter conditions.    console=Yes
+    Log    All the filtered certs are consistent with the filter conditions.    console=Yes
+    [Return]    ${True}
+
+Get CA Certs Count By Specified Attribute
+    [Documentation]    get the count of certificate in trust store by specified attribute
+    [Arguments]    ${item}    ${target_value}
+    ${target_certs} =  Create List
+    ${resp} =  Fusion Api Get CA Certificate
+    ${certs} =  Get From Dictionary    ${resp}    members
+    :For    ${cert}    IN    @{certs}
+    \    ${type} =  Get From Dictionary    ${cert}    certType
+    \    Continue For Loop If    "${type}"=="STANDARD_ROOT"
+    \    ${status}  ${actual_value} =  Run Keyword and Ignore Error    Get From Dictionary    ${cert}    ${item}
+    \    Run Keyword if   "${actual_value}"=="${target_value}"    Append to List    ${target_certs}    ${cert}
+    ${len} =  Get Length    ${target_certs}
+    [Return]    ${len}
+
+Update Certificate Validation Configuration
+    [Documentation]    Update certificate validation configuration and wait for appliance rebooting
+    [Arguments]    ${certValidationConfig}
+    Log    \nUpdating OneView certificate validation configuration    console=Yes
+    ${resp} =  Fusion api update certificate validation configuration    ${certValidationConfig}
+    Return from keyword if  ${resp['status_code']}!=202    ${None}
+    Log    Wating for OneView state to change to be STARTING    console=Yes
+    Wait For Appliance State To Be Expected State    ExpectedState=STARTING
+    Log    Wating for OneView state to change to be OK    console=Yes
+    Wait For Appliance State To Be Expected State    ExpectedState=OK
+    [Return]    ${True}

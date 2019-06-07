@@ -1,0 +1,162 @@
+*** Settings ***
+Library             RoboGalaxyLibrary
+Library             FusionLibrary
+Library             OperatingSystem
+Library             BuiltIn
+Library             Collections
+Library             XML
+Library             SSHLibrary
+Library             String
+Library             Dialogs
+Variables           ${DATA_FILE}
+Resource            ./../../../../Resources/api/fusion_api_resource.txt
+Resource            ../global_variables.robot
+
+*** Keywords ***
+Fetch Remote Server And Validate The Trusted Status As Expected
+   [Documentation]    Get Remote server Certificate in OV
+   [Arguments]        ${remote_servers}   ${expectedStatus}
+    Log  Getting Remote Server Certificate and validating the trust status   console=yes
+    :FOR    ${host}   IN  @{remote_servers}
+    \  ${cert} =    Fusion API Get Remote Certificate   ${host}
+    \  ${cert_status} =  get from dictionary   ${cert}  certificateStatus
+    \  Log   The remote server certificate status is: ${cert_status}   console=yes
+    \  Return From Keyword If    ${cert_status['trusted']} != ${expectedStatus}    ${False}
+    [Return]      ${True}
+    
+Fetch Remote LDAP Server And Validate The RootCA Trusted Status As Expected
+   [Documentation]    Get Remote server Certificate in OV
+   [Arguments]        ${OpenLDAP_RootCASigned_Cert_CMDS}   ${expectedStatus}
+    Log  Getting Remote Server Certificate and validating the trust status   console=yes
+    Log  ${OpenLDAP_RootCASigned_Cert_CMDS}
+    :FOR    ${CMD}   IN  @{OpenLDAP_RootCASigned_Cert_CMDS}
+    \  Log   ${CMD}
+    \  LDAPServer Pre-Condition suite        ${OpenLDAP_rootCA_server_name}         ${OpenLDAP_Backup_DBConfig_CMD}         ${CMD}
+    \  ${cert} =    Fusion API Get Remote Certificate   ${OpenLDAP_rootCA_server_with_Port}
+    \  ${cert_status} =  get from dictionary   ${cert}  certificateStatus
+    \  Log   The remote server certificate status is: ${cert_status}   console=yes
+    \  Log   ${cert}
+    \  Return From Keyword If    ${cert_status['trusted']} != ${expectedStatus}    ${False}
+    [Return]      ${True}
+
+Trust Self_signed Certificate
+   [Documentation]    Trust Self_Signed Certificate in OV
+   [Arguments]        ${self_signed_bodies}
+    ${responses} =    Create List
+    Log  Trusting the self_signed certificate   console=yes
+    :FOR    ${self_signed_body}    IN    @{self_signed_bodies}
+    \    ${resp} =    Fusion Api Import Server Certificate   ${self_signed_body}
+    \    append to list    ${responses}    ${resp}
+    \    run keyword and ignore error   wait for task2    ${responses}    timeout=60    interval=5
+    [Return]    ${responses}
+
+Trust RootCA_signed Or SubCA_signed Certificate
+   [Documentation]    Trust RootCA_Signed or SubCA_Signed Certificate in OV
+   [Arguments]        ${certificates}
+    ${responses} =    Create List
+    Log  Trusting the RootCA_Signed or SubCA_Signed certificate   console=yes
+    ${resp} =    Import Multiple External CA Certificates   ${certificates}
+    append to list    ${responses}    ${resp}
+    [Return]    ${responses}
+
+Remove RootCA_signed Or SubCA_signed Certificates
+   [Documentation]    Remove RootCA_Signed or SubCA_Signed Certificates in OV
+   [Arguments]        ${certificates}
+    ${responses} =    Create List
+    Log  Removing the RootCA_Signed or SubCA_Signed certificate   console=yes
+    :FOR    ${certs}    IN    @{certificates}
+    \    ${resp} =    Fusion api remove external ca certificates   ${certs}
+    \    Wait For Task2    ${resp}   timeout=60  interval=5
+    \    append to list    ${responses}    ${resp}
+    [Return]    ${responses}
+
+Validate The Remote Certificate Is Expired
+   [Documentation]    Validate the remote certificate is expired
+   [Arguments]        ${remote_servers}
+    Log  Validating the remote certificate is expired   console=yes
+    :FOR    ${host}   IN  @{remote_servers}
+    \  ${cert} =    Fusion API Get Remote Certificate   ${host}
+    \  Log    ${cert}    console=true
+    \  ${cert_details} =  get from dictionary   ${cert}  certificateDetails
+    \  Log    ${cert_details}    console=true
+    \  Log    The remote server certificate expiresInDays is: ${cert_details[0]['expiresInDays']}    console=true
+    \  Return From Keyword If     ${cert_details[0]['expiresInDays']} >= 0    ${False}
+    [Return]      ${True}
+
+Remove Active Directory And All Leaf Certificates
+   [Documentation]    Remove all Active Directories and all leaf certificates
+   [Arguments]        ${name}   ${Certificates}
+    Log  Removing all Active Directories and all leaf certificates   console=yes
+    Remove Active Directory By Name  ${name}
+    Fusion API Delete Server Certificate   ${Certificates}
+
+Remove Active Directory And All CA Certificates
+   [Documentation]    Remove all Active Directories and all CA certificates
+   [Arguments]      ${names}  ${Certificates}
+    Log  Removing all Active Directories and all CA certificates   console=yes
+    Remove Active Directory By Name    ${names}
+    Remove RootCA_signed or SubCA_signed Certificates   ${Certificates}
+
+Remove All Active Directories And All CA Certificates
+   [Documentation]    Remove all Active Directories and all CA certificates
+   [Arguments]        ${Certificates}
+    Log  Removing all Active Directories and all CA certificates   console=yes
+    Remove All Directories
+    Remove RootCA_signed or SubCA_signed Certificates   ${Certificates}
+
+Remove All Repo Servers And All Leaf Certificates
+   [Documentation]    Remove all repo servers and all leaf certificates
+   [Arguments]        ${name}   ${Certificates}
+    Log   Removing all repo servers and all leaf certificates   console=yes
+    ${response} =  Remove Repository By Name    ${name}
+    Wait For Task2   ${response}   timeout=120  interval=5
+    ${resp} =  Fusion API Delete Server Certificate   ${Certificates}
+    Wait For Task2  ${resp}   timeout=120  interval=5
+
+Remove All Repo Servers And All CA Certificates
+   [Documentation]    Remove all repo servers and all CA certificates
+   [Arguments]        ${name}   ${Certificates}
+    Log   Removing all repo servers and all CA certificates   console=yes
+    ${response} =  Remove Repository By Name    ${name}
+    Wait For Task2   ${response}  timeout=120   interval=5
+    ${resp} =  Remove RootCA_signed or SubCA_signed Certificates   ${Certificates}
+
+LDAPServer Pre-Condition suite
+	[Documentation]   Connect LDAP server and modify DB Config
+	[Arguments]      ${Remote_Server_IP}    ${BackUp_DB_CMD}    ${Update_DB_CMD}
+	${status}    ${resp}=    Run Keyword And Ignore Error    Open Connection    ${Remote_Server_IP}
+    Run Keyword If    '${status}'=='FAIL'        Fail    Failed to Open SSH Connection to the server with IP ${IP[0]}
+    ${newstatus}    ${resp}=    Run Keyword And Ignore Error    Login    ${FUSION_SSH_USERNAME}    ${FUSION_SSH_PASSWORD}
+    Run Keyword If    '${newstatus}'=='FAIL'        Fail    Failed to do SSH Login to the server with IP ${IP[0]}
+    Log    Back up LDAP Server DataBase with current Configuration
+    ${backup_DB_response}=    Execute Command    ${BackUp_DB_CMD}
+    Log    Updating LDAP database with expected certificate path
+    ${Update_DB_response}=    Run Keyword If  '${backup_DB_response}' == ''    Execute Command    ${Update_DB_CMD}
+    Log    Restarting LDAP service..
+    ${LDAP_restart_response}=    Run Keyword If  '${Update_DB_response}' == ''    Execute Command    ${LDAP_Service_Restart}
+    Should Not Contain    '${LDAP_restart_response}'    'config file testing succeeded'    msg='Failed to restart LDAP service'
+
+LDAPServer Post-Condition suite
+    [Documentation]   Revert LDAP Server with original DB Configuration 
+	[Arguments]      ${Remote_Server_IP}    ${Revert_DB_CMD}
+	${status}    ${resp}=    Run Keyword And Ignore Error    Open Connection    ${Remote_Server_IP}
+    Run Keyword If    '${status}'=='FAIL'        Fail    Failed to Open SSH Connection to the server with IP ${IP[0]}
+    ${newstatus}    ${resp}=    Run Keyword And Ignore Error    Login    ${FUSION_SSH_USERNAME}    ${FUSION_SSH_PASSWORD}
+    Run Keyword If    '${newstatus}'=='FAIL'        Fail    Failed to do SSH Login to the server with IP ${IP[0]}
+    Log    Reverting LDAP database with original DataBase Configuration
+    ${Revert_DB_response}=    Execute Command    ${Revert_DB_CMD}
+    Log    Restarting LDAP service..
+    ${LDAP_restart_response}=    Run Keyword If  '${Revert_DB_response}' == ''    Execute Command    ${LDAP_Service_Restart}
+    Should Not Contain    '${LDAP_restart_response}'    'config file testing succeeded'    msg='Failed to restart LDAP service'
+
+LDAPServer_Post_SelfSignCert_TC_Execution
+    [Documentation]   Post LDAP Server SelfSignedCert testcase execution
+	[Arguments]      ${Remote_Server_IP}    ${Revert_DB_CMD}
+    LDAPServer Post-Condition suite    ${Remote_Server_IP}    ${Revert_DB_CMD}
+    Remove Active Directory And All Leaf Certificates  ${OpenLDAP_self_signed_server_name}   ${Delete_OpenLDAP_self_signed}
+    
+LDAPServer_Post_RootCASignCert_TC_Execution
+    [Documentation]   Post LDAP Server SelfSignedCert testcase execution
+	[Arguments]      ${Remote_Server_IP}    ${Revert_DB_CMD}
+    LDAPServer Post-Condition suite    ${Remote_Server_IP}    ${Revert_DB_CMD}
+    Remove All Active Directories And All CA Certificates    ${Delete_LDAP_rootCA_signed_certs}

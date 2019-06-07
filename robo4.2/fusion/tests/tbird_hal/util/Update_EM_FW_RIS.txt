@@ -1,0 +1,100 @@
+*** Settings ***
+Documentation    This Test will validate EM firmware update process via RIS
+...    = USAGE =
+...    | pybot | -v ENCLOSURE:<name> | Update_EM_FW_RIS.txt |
+...    | pybot | -v ENCLOSURE:<name> | -v FORCE:True | Update_EM_FW_RIS.txt |
+...    | pybot | -v ENCLOSURE:<name> | -v EM_PASS_BUILD:17 | Update_EM_FW_RIS.txt |
+...    | pybot | -v ENCLOSURE:<name> | -v EM_PASS_BUILD:17 | -v FORCE:True | Update_EM_FW_RIS.txt |
+...    = Variables =
+...    | EM_PASS_BUILD | Optional: EM Pass Build Number (eg: 12) to update to |
+...    | FORCE    | Optional: Force Reinstall. |
+
+Library          SSHLibrary
+Library          OperatingSystem
+Resource         ../resources/em_api.txt
+Variables        ../resources/variables.py   ${ENCLOSURE}
+Suite Setup      Login to EM
+Suite Teardown    Logout of Fusion via SSH
+Force Tags             HW    RIS    FWU
+
+*** Variables ***
+${EM_FW_URL}          http://16.114.179.21:8080/userContent
+${EM_FW_FILE}         latest-em.tars
+${EM_FW_README}       latest-em-readme.txt
+
+${EM_PASS_BUILD}      ${None}
+${EM_PASS_FW_URL}     http://16.114.179.21:8080/userContent/builds/em_builds
+${EM_PASS_FW_FILE}    hp-firmware-image-production-devkey.p${EM_PASS_BUILD}.tars   
+${EM_PASS_README}     em_p${EM_PASS_BUILD}_release_notes.txt
+
+${Skip Update}       ${True}
+${FORCE}             ${False}
+
+*** Test Cases ***
+Get Expected EM Version
+     ${FW_URL}=    Set Variable If    '${EM_PASS_BUILD}'!='${None}'    ${EM_PASS_FW_URL}    ${EM_FW_URL}
+     Set Suite Variable    ${FW_URL}
+     ${FW_FILE}=    Set Variable If    '${EM_PASS_BUILD}'!='${None}'    ${EM_PASS_FW_FILE}    ${EM_FW_FILE}
+     Set Suite Variable    ${FW_FILE}
+     ${README}=    Set Variable If    '${EM_PASS_BUILD}'!='${None}'    ${EM_PASS_README}    ${EM_FW_README}
+     Set Suite Variable    ${README}
+
+     ${OUTPUT}  ${RC}=   SSHLibrary.Execute Command    rm ${README}    return_rc=True
+     ${OUTPUT}  ${RC}=   SSHLibrary.Execute Command    wget ${FW_URL}/${README}   return_rc=True
+     Should be Equal          ${RC}          ${0}    msg=Failed to download EM FW.
+     ${Expected EM Version}=    SSHLibrary.Execute Command    cat ${README} | grep 1.00.00 
+     ${Expected EM Version}=    Remove String Using Regexp    ${Expected EM Version}    \\r
+
+     Set Suite Variable    ${Expected EM Version}
+
+Update EM Via CIM/EM RIS
+     # Compare Current EM version with Expected EM version
+     ${Current EM Version}=    em_api.Get EM Version
+     Log To Console    EM is currently at version ${Current EM Version}
+
+     ${Skip Update}=    Set Variable If    ${FORCE}    ${False}    # Do not skip update if FORCE is true
+     ...                '${Current EM Version}'=='${Expected EM Version}'    ${True}    ${False}    # Skip update if versions are the same
+
+     Pass Execution If    ${Skip Update}    EM is already at version ${Expected EM Version}.
+     Log To Console    EM is being updated to version ${Expected EM Version}
+
+     ${FW Name}=    Set Variable If    '${EM_PASS_BUILD}'!='${None}'    Pass Build ${EM PASS BUILD}    Latest EM
+     Log To Console    Updating EM to ${FW Name} Firmware.
+
+     # Create new EM Session
+     Login to EM
+
+     # Perform Update
+     Set Client Configuration    timeout=10 minutes
+     ${OUTPUT}  ${RC}=   SSHLibrary.Execute Command    rm ${FW_FILE}    return_rc=True
+     ${OUTPUT}  ${RC}=   SSHLibrary.Execute Command    wget ${FW_URL}/${FW_FILE}    return_rc=True
+     Should be Equal          ${RC}          ${0}    msg=Failed to download EM FW.
+     ${response}=   HAL API Post EM RIS    ${FUSION_IP}    ${EM_IP}    /rest/v1/UpdateService    --data-binary @${FW_FILE}    -H "Content-Type: application/octet-stream" -H ${Auth_Header}
+     sleep         10
+     ${response}=   HAL API Get EM RIS   ${FUSION_IP}    ${EM_IP}    /rest/v1/UpdateService    -H ${Auth_Header}
+     Should Be equal as Integers    ${response['status_code']}    200    msg=Failed to Update EM.
+     ${result}=     Get Resource From Response         ${response}
+
+     # Verify Status
+     Should Be Equal As Strings  ${result['Successful']}    ${TRUE}    msg=EM Update failed.
+
+     # Verify Result Message
+     ${rest}    ${message}=    Split String From Right    ${result['ResultMessage']}    .    1
+     Should Be Equal  ${message}      UpdateSuccessful    msg=EM Update failed.
+
+     # Wait for update and reboot
+     Sleep          120
+     
+Verify EM Version
+     ${Current EM Version}=    Wait Until Keyword Succeeds    2 min    30 sec    
+     ...    em_api.Get EM Version
+
+     Log TO Console    EM is now at version ${Current EM Version}
+     Should Be Equal    ${Current EM Version}    ${Expected EM Version}    Updated EM version (${Current EM Version}) does not match expected version (${Expected EM Version}).
+
+*** Keywords ***
+Login to EM
+    Login to Fusion via SSH
+    ${EM_IP}    ${EMSessionID}    EM Api Create Session
+    ${Auth_Header}    Set Variable    "X-Auth-Token":"${EMSessionID}"
+    Set Suite Variable    ${Auth_Header}

@@ -1,0 +1,2986 @@
+*** Settings ***
+Documentation   Continuous Deployment and Test keywords and common variables
+Resource        ../../../Resources/api/fusion_api_resource.txt
+Resource        ./CDT_Keywords/appliance_certificates1.txt
+Resource        ./traffic_test_resource.txt
+Library         Collections
+Library         DateTime
+Library         ./lib/MaintenanceConsole.py
+
+*** Variables ***
+${production_env}               ${FALSE}    # Flag ti indicate when running in a production environment
+${initialConfigSuccess}         ${FALSE}    # Flag to indicate Initial Configuration status.
+${skipTeardown}                 ${FALSE}    # Flag to omit teardown.
+${rist_elk_server}              http://rist-elk.vse.rdlabs.hpecorp.net:9200
+${cdt-ci-restart_elk_index}     cdt-ci-restart/timer
+${cdt-ci-webapp-restart_elk_index}      cdt-ci-startup-timer/webapp
+${cdt-ci-upgrade_elk_index}     cdt-ci-upgrade/timer
+${REMOTE_SUPPORT_TIMEOUT}       600
+
+*** Keywords ***
+Get Errors
+    [Documentation]     Retrieves errors from the ciDebugLog
+    ${ERRORS}=          Run Keyword and Ignore Error    Get from ciDebug Log    ${TEST_NAME}
+
+Failover Setup
+    [Documentation]     Pre-conditions for Potash Failover test cases
+    Run Keyword If      "${traffic_pre_req_variable}" == "${FALSE}"    Traffic test setup
+    Generate Traffic    ${input}
+    Test Setup
+
+Test Setup
+    [Documentation]                 Pre-conditions for ALL test cases
+    Run Keyword and Ignore Error    Write To ciDebug Log
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+
+Test Teardown
+    [Documentation]     Post-conditions for ALL test cases
+    Run Keyword If      '${TEST_STATUS}' == 'PASS'      Validate Environment
+    fusion api logout appliance
+    Run Keyword If      '${TEST_STATUS}' == 'FAIL'      Get Errors
+
+Failover Teardown
+    [Documentation]                         Post-conditions for Potash Fail over test cases
+    Run Keyword And Continue On Failure     Analyse Traffic     ${input['entities']}    ${threshold}
+    Test Teardown
+
+# UNUSED
+#Run FTS and test-specific setup
+#   [Documentation]     Run FTS and test-specific setup
+#   First Time Setup    DATAFILE=${null}    password=${admin_credentials['password']}   interfaces=bond0
+#   Suite Setup
+
+Create Logical Enclosures
+    [Documentation]             Creates Logical Enclosures
+    [Arguments]                 ${logical_enclosures}
+    Run Keyword If      ${logical_enclosures} is not ${null}           Run Keyword for List    ${logical_enclosures}
+    ...                 Add Logical Enclosure from variable
+    ${l} =   Get Length   ${logical_enclosures}
+    :FOR   ${x}   IN RANGE   0   ${l}
+    \   ${resp}=            Get Logical Enclosure By Name   ${logical_enclosures[${x}]['name']}
+    \   Run keyword if      ${resp['status_code']}!=200
+        ...   Run Keyword And Continue on Failure  FAIL  ${logical_enclosures[${x}]['name']} creation is not successful
+    \   Run keyword if      '${resp['status']}'!='OK'
+        ...    Run Keyword And Continue on Failure  FAIL    ${logical_enclosures[${x}]['name']} is created with errors/warnings
+
+Create SP from SPT
+    [Documentation]             Creates a new server profile named <spname> from SPT named <sptname>
+    [Arguments]                 ${spname}                   ${sptname}                  ${timeout}=10m      ${interval}=20s
+    ${spt_uri} =                Common URI lookup by name   SPT:${sptname}
+    ${resp} =                   Fusion Api Get Server Profile Template New Profile      ${spt_uri}
+    remove from dictionary      ${resp}                     status_code                 headers
+    set to dictionary           ${resp}                     name                        ${spname}
+    ${resp} =                   fusion api create server profile                        body=${resp}
+    ${task} =                   Wait For Task               ${resp}                     ${timeout}          ${interval}
+    Should Match Regexp         ${task['taskState']}        ((?i)Warning|Completed)
+    [Return]                    ${resp}
+
+Assign Server Hardware To Existing Profiles From Variable
+    [Documentation]     Update Server Profiles with server hardware assigned to profile from mapping variable
+    [Arguments]         ${server_profile_to_bay_map}    ${concurrent_profiles}=24
+
+    ${existing_profiles} =                          Fusion Api Get Server Profiles
+    ${all_task_list} =      Create List
+    ${these_assign_list} =                          Create List
+    :FOR                    ${profile}              IN                      @{existing_profiles['members']}
+    \                       Run Keyword If          '${profile['serverHardwareUri']}' != '${NULL}'      Log
+    \                       ...                     ${profile['name']} is already assigned...skipping
+    \                       Continue For Loop If    '${profile['serverHardwareUri']}' != '${NULL}'
+    \                       Continue For Loop If    '${server_profile_to_bay_map['${profile['name']}']}' == '${null}'
+    \                       ${shUri} =              Get Server Hardware URI
+    \                       ...                     ${server_profile_to_bay_map['${profile['name']}']}
+    \                       ${shtUri} =             Get Server Hardware Type URI By Server Hardware
+    \                       ...                     ${server_profile_to_bay_map['${profile['name']}']}
+    \                       Set To Dictionary       ${profile}              serverHardwareUri=${shUri}
+    \                       Set To Dictionary       ${profile}              serverHardwareTypeUri=${shtUri}
+    \                       Remove From Dictionary                          ${profile}                  status_code
+    \                       ...                     headers
+    \                       Log                     Assigning server hardware URI \"${shUri}\" to profile \"${profile['name']}\"
+    \                       ...                     console=True
+    \                       ${resp} =               Fusion Api Edit Server Profile                      uri=${profile['uri']}
+    \                       ...                     body=${profile}
+    \                       ...                     param=?ignoreServerHealth=true
+    \                       Append To List          ${all_task_list}        ${resp}
+    \                       Append To List          ${these_assign_list}    ${resp}
+    \                       ${assigning} =          Get Length              ${these_assign_list}
+    \                       Run Keyword If          ${assigning}==${concurrent_profiles}                Wait For Assigning
+    \                       ...                     ${these_assign_list}
+    \                       ${these_assign_list} =                          Run Keyword If
+    \                       ...                     ${assigning}==${concurrent_profiles}
+    \                       ...                     Create List
+    \                       ...                     ELSE
+    \                       ...                     Set Variable
+    \                       ...                     ${these_assign_list}
+
+    # were there any not waited on?
+    ${assigning} =      Get Length          ${these_assign_list}
+    Run Keyword If      ${assigning}>0      Wait For Assigning      ${these_assign_list}
+    [Return]            ${all_task_list}
+
+Delete and Recreate Assigned Server Profiles
+    [Documentation]     Delete server profiles and create new server profile on the same server hardware
+    [Arguments]         ${profiles}
+    ${resplist} =       Create List
+    :FOR    ${sp}    in    @{profiles}
+    \    ${resp} =     Fusion Api Get Server Profiles        param=?filter="'name'=='${sp['name']}'"
+    \    ${sh} =   fusion api get server hardware     uri=${resp['members'][0]['serverHardwareUri']}
+    \    Power off Server    ${sh['name']}
+    \    ${removesp_resp}=    Remove Server Profile    ${resp['members'][0]}
+    \    wait for task2    ${removesp_resp}    3600    10
+    \    Set to Dictionary    ${sp}    serverHardwareUri    ${sh['name']}
+    \    ${resp}=    Add Server Profile    ${sp}
+    \   append to list      ${resplist}     ${resp}
+    [Return]    ${resplist}
+
+Wait For Assigning
+    [Documentation]     Wait For Assigning
+    [Arguments]         ${tasks}    ${timeout}=45m      ${interval}=30
+    Set Suite Variable    ${WFT2_CONTINUE_ON_ERROR}    ${TRUE}      # so WFT2 processes all tasks, not stop on failure.
+    Wait for Task2      ${tasks}    ${timeout}          ${interval}
+
+Remove All FC Licenses
+    [Documentation]     Remove All FC Licenses
+    ${us_uri} =         Get Uplinkset URI               ${US_name}
+    ${match}            ${value} =                      Run Keyword And Ignore Error            Should Contain      '${us_uri}'
+    ...                 bad_uplinkset_uri
+    ${resp} =           Run Keyword If                  '${match}' == 'FAIL'        Remove Uplinkset By Name        ${US_name}
+    Run Keyword If      ${resp}                         Wait For Task2              ${resp}     5m                  5
+    ${getlicresp}=      Fusion Api Get Licenses
+    :FOR                ${eachlic}                      IN                          @{getlicresp['members']}
+    \                   Continue For Loop If            '${eachlic["product"]}' != '${newLicenses["licenseType"]}'
+    \                   ${delResp}=                     Fusion Api Remove License   uri=${eachlic['uri']}
+    \                   Should Be Equal As Integers     ${delResp["status_code"]}   204
+
+Should Exist Valid Licenses In License Pool But Unassigned To ICM
+    [Documentation]         The licenses are existing in license pool, but unassigned to ICM
+    [Arguments]             ${LicensesDict}
+    ${licenses}=            Get All Licenses
+    ${validLicenses}=       Get From Dictionary         ${LicensesDict}     license
+    ${latestlLicense}=      Create List
+    :FOR                    ${ovLic}                    IN                  @{licenses}
+    \                       Continue For Loop If        '${ovLic["product"]}' != '${LicensesDict["licenseType"]}'
+    \                       Should Be Empty             ${ovLic["nodes"]}
+    \                       Append To List              ${latestlLicense}   ${ovLic["key"]}
+    :FOR                    ${validLicense}             IN                  @{validLicenses}
+    \                       List Should Contain Value   ${latestlLicense}   ${validLicense["key"]}
+    \                       ...                         msg=The licenses should be exisgting in license pool
+
+Should Exist Valid Licenses In License Pool And Assigned To ICM
+    [Documentation]     Validate Exist Valid Licenses In License Pool And Assigned To ICM
+    [Arguments]         ${LicenseDict}              ${li_resp}
+    ${licenses}=        Get All Licenses
+    ${validInterconnects}=                          Create List
+    :FOR                ${ovLic}                    IN                      @{licenses}
+    \                   Continue For Loop If        '${ovLic["product"]}' != '${LicenseDict["licenseType"]}'
+    \                   Should Not Be Empty         ${ovLic["nodes"]}
+    \                   Append To List              ${validInterconnects}   ${ovLic["nodes"][0]["nodeUri"]}
+    ${In_resp}=         Get From Dictionary         ${li_resp}              interconnects
+    :FOR                ${INC}                      IN                      @{validInterconnects}
+    \                   List Should Contain Value   ${In_resp}              ${INC}
+
+Logical Interconnect FC License Should Be Consumed
+    [Documentation]         Logical Interconnect FC License Should Be Consumed
+    [Arguments]             ${li}                   ${consumed}                 ${applied}
+    ${li_resp}=             Get Logical Interconnect Response Based On Name     ${li}
+    Should Not Be Equal As Strings                  ${li_resp}                  /bad_logical_uri
+    Convert To Integer      ${consumed}
+    Run Keyword If          '${applied}'=='No'      Should Be Equal             ${li_resp["icmLicenses"]}   ${None}
+    Run Keyword If          '${applied}'=='No'      Return From Keyword         ${li_resp}
+    ${sub_resp}=            Set Variable            ${li_resp["icmLicenses"]["license"][0]}
+    ${valDict} =            Create Dictionary       consumedCount=${consumed}
+    Validate Response       ${sub_resp}             ${valDict}
+    ${valDict} =            Create Dictionary       state=${applied}
+    Validate Response       ${sub_resp}             ${valDict}
+    [Return]                ${li_resp}
+
+Add FC Uplinkset For LI If Not Existing
+    [Documentation]         Adding fc uplinkset for LI if not existing.
+    ${us_uri}=              Get Uplinkset URI   ${US_name}
+    ${sourceFcUplinset}=    Deepcopy            ${fc_uplinkset}
+    Should Be Equal As Strings                  ${us_uri}               '/bad_uplinkset_uri'
+    ...                     msg=The fc uplinkset has exists, please remove it before rerun
+    ${task}=                Add Uplinkset From Variable                 ${sourceFcUplinset}
+    Should Not Be Equal As Strings              ${task['taskState']}    Error   msg=Uplinkset addition failed.
+
+Get Logical Interconnect Response Based On Name
+    [Documentation]     Get Logical Interconnect Response Based On Name
+    [Arguments]         ${liName}
+    ${lis}=             Fusion Api Get Li
+    :FOR                ${li}                       IN      @{lis["members"]}
+    \                   Return From Keyword If      '${li["name"]}' == '${liName}'      ${li}
+    \                   Continue For Loop
+    [Return]            /bad_logical_uri
+
+Teardown Profiles
+    [Documentation]         Removing all Profile related elements from OneView
+    Log                     Removing Profiles                   console=True
+    Power off ALL Servers   control=PressAndHold
+    All Servers Should Be Powered Off
+    ${resp_list}=           Remove All Server Profiles Async    force=${True}
+    Wait For Task2          ${resp_list}                        timeout=90m
+    ${profiles} =           Fusion Api Get Server Profiles
+    ${count}=               Convert To String                   ${profiles['count']}
+    Run Keyword If          '${count}'!='0'                     FAIL    Deleting all Server Profiles did not succeed
+    Remove All Server Profile Templates
+
+Teardown Logical Elements
+    [Documentation]     Removing all Logical elements (LE, EG, LIG, etc) from OneView
+    Log                 Removing Logical Elements     console=True
+    Remove ALL LS
+    Remove ALL LSGs
+    Remove All LEs
+    ${resp} =           Fusion Api Get Logical Enclosure
+    ${count} =          Get From Dictionary     ${resp}     count
+    Run keyword if      ${count}!=0             FAIL        Deleting all Logical Enclosures did not succeed
+    Remove ALL Enclosure Groups
+    ${encs} =           Fusion Api Get Enclosure Groups
+    ${count}=           Convert To String       ${encs['count']}
+    Run Keyword If      ${count}!=0             FAIL        Deleting all Enclosure Groups did not succeed
+    Remove ALL LIGs
+    ${ligs} =           Fusion Api Get LIG
+    ${count}=           Convert To String       ${ligs['count']}
+    Run Keyword If      '${count}'!='0'         FAIL        Deleting all Logical Interconnect Groups did not succeed
+    Remove All SAS LIGs
+    ${sas_ligs} =       Fusion Api Get SAS LIG
+    ${count}=           Convert To String       ${sas_ligs['count']}
+    Run Keyword If      '${count}'!='0'         FAIL        Deleting all SAS Logical Interconnect Groups did not succeed
+
+Teardown Networking
+    [Documentation]     Removing all Networking related elements from OneView
+    Log                 Removing Networking     console=True
+    Remove ALL Network Sets
+    ${networkSets} =    Fusion Api Get Network Set
+    ${count}=           Convert To String       ${networkSets['count']}
+    Run Keyword If      '${count}'!='0'         FAIL        Deleting all Network Sets did not succeed
+    Remove ALL Ethernet Networks Async
+    ${networks} =       Fusion Api Get Ethernet Networks
+    ${count}=           Convert To String       ${networks['count']}
+    Run Keyword If      '${count}'!='0'         FAIL        Deleting all Ethernet networkss did not succeed
+    Remove ALL FC Networks Async
+    ${fc_networks} =    Fusion Api Get FC Networks
+    ${count}=           Convert To String       ${fc_networks['count']}
+    Run Keyword If      '${count}'!='0'         FAIL        Deleting all FC networks did not succeed
+    Remove ALL FCoE Networks
+    ${resp} =           Fusion Api Get FCoE Networks
+    Run Keyword If      ${resp['count']}!=0     FAIL        Deleting all FCOE networks did not succeed
+
+Teardown Storage
+    [Documentation]     Removing all Storage related elements from OneView
+    Log                 Removing Storage                    console=True
+    Remove ALL Storage Volume Templates Async
+    Remove ALL Storage Volumes Async                        param=?suppressDeviceUpdates=true
+    ...                 # Currently not creating Volumes. Only importing. Thefore deleting from OneView only.
+    ${volumes} =        Fusion Api Get Storage Volumes      param=?sort=name:ascending
+    Run keyword if      len(${volumes['members']})!=0       FAIL    All volumes are not deleted.
+    Remove ALL Storage Systems Async
+    Remove ALL San Managers Async
+
+Teardown System
+    [Documentation]     Removing all System elements from OneView
+    Log                 Removing System Elements    console=True
+    Remove All FC Licenses
+    Remove ALL Users
+
+Validate Environment
+    [Documentation]     Validate entire system status and all setup actions
+    # Validate Traffic on OS
+    # Validate Profiles are in a good state
+    # Validate LE is in a good state
+    # Validate LIGs and LIs are in a good state
+    # Validate Networks are in a good state
+    # Valiate no active Critical Alerts
+    pass execution      Validation not implemented yet.
+
+Power Off Servers Async
+    [Documentation]     Powers off specified list of servers (by name) asynchronously
+    ...                 Power Off Servers Async     ${server_names}
+    ...                 Power Off Servers Async     ${server_names}     control=PressAndHold
+    [Arguments]         ${servers}                  ${control}=MomentaryPress
+    ${body} =           Create Dictionary           powerState=Off
+    ...                 powerControl=${control}
+    ${resp_list} =      Create List
+    Log                 Powering off specified servers                  console=True
+    :FOR                ${name}                     IN                  @{servers}
+    \                   ${server}=                  Get Resource        SH:${name}
+    \                   Continue For Loop If        '${server['powerState']}'=='Off'
+    \                   Log                         Powering Off ${server['name']}, uri ${server['uri']}    console=True
+    \                   ${resp} =                   Fusion Api Edit Server Hardware Power State             body=${body}
+    \                   ...                         uri=${server['uri']}
+    \                   Append To List              ${resp_list}        ${resp}
+
+    ${count} =                  Get Length          ${resp_list}
+    Run Keyword If              '${count}'=='0'     Log     All specified servers were off, no need to Wait For Task
+    Return From Keyword If      '${count}'=='0'
+
+    :FOR    ${resp}     IN              @{resp_list}
+    \       ${task} =   Wait For Task   ${resp}     360s    5s
+
+Power Off Server By Uri
+    [Documentation]    Power off the server by its uri.
+    ...                    Power off Server  ${ENC1SHBAY1}
+    [Arguments]     ${server}
+    ${body} =     Create Dictionary    powerState=Off
+    ...                                powerControl=PressAndHold
+    Log      \nPowering off ${server}    console=True
+    ${resp} =     Fusion Api Edit Server Hardware Power State        body=${body}    uri=${server}
+    ${task} =    Wait For Task     ${resp}     240s    5s
+
+Check Resources Existing by variable
+    [Documentation]     Check if the resources exists based on the name list provided.
+    ...                 Example: Check Resources Existing by variable                       ${volumeName}   SVOL
+    [Arguments]         ${resources}    ${prefix}               ${expected_status_code}='200'
+    :FOR                ${resource}     in                      @{resources}
+    \                   Run Keyword and Continue On Failure     Check Resource Existing     ${prefix}:${resource}
+    \                   ...             ${expected_status_code}
+    \                   Log             Verified ${prefix}:${resource} exists.              console=True
+
+All Servers Should Be Powered Off
+    [Documentation]     Verify all the servers are powered on
+    Log                 Verify All Servers Are Powered Off      console=True
+    ${error_code} =     Set Variable            0
+    ${servers} =        Fusion Api Get Server Hardware
+    :FOR                ${server}               IN              @{servers['members']}
+    \                   Continue For Loop If    '${server['powerState']}'=='Off'
+    \                   ${error_code} =         Set Variable    1
+    \                   Log                     Failed! Server:${server['name']} is On!     console=True
+    Run Keyword If      '${error_code}'=='1'    Fail            Verify All Servers Are Powered Off Failed!
+
+Get First SPP Firmware Bundle URI
+    [Documentation]     Get Firmware Bundle URI
+    ${resp} =           Fusion Api Get Firmware Driver
+    Return From Keyword If       ${resp['status_code']}!=200    ${None}
+    [Return]            ${resp['members'][0]['uri']}
+
+Get OneView Time
+    [Documentation]     Fetching OneView time
+    ${resp}=            get appliance time and locale
+    ${x}=               Get Variable Value      ${resp['dateTime']}
+    Log                 \n\nOneView time : ${x}\n
+    [return]            ${x}
+
+Verify Any Critical Alert In Server Profile
+    [Documentation]     Used for vaildating baseline firmware update is causing any major failure
+    [Arguments]         ${resplist}
+    :FOR                ${resp}                 IN                      @{resplist}
+    \                   ${task_resp} =    Fusion Api Get Task    uri=${resp['headers']['Location']}
+    \                   ${resourceName}=        Get From Dictionary     ${task_resp['associatedResource']}   resourceName
+    \                   ${startTime}=           Get From Dictionary     ${resp}                         startTime
+    \                   ${alerts}=              Get ALL Alerts by Param
+    \                   ...                     param=?filter="associatedResource.resourceName='${resourceName}' AND created gt ${startTime}"
+    \                   Log                     ${alerts}
+    \                   ${len}=                 get length              ${alerts['members']}
+    \                   Run Keyword If          ${len} == 0             Log
+    \                   ...                     There is no suspicious alert exists on ResourceName:${resourceName}
+    \                   ...                     ELSE                    Log
+    \                   ...                     There are some alert exists in SP resourceName:${resourceName}
+    \                   continue for loop if    ${len} == 0
+    \                   ${active_alerts}=       Get ALL Alerts by Param
+    \                   ...                     param=?filter="associatedResource.resourceName='${resourceName}' AND created gt ${startTime} AND severity = 'Critical' AND alertState = 'Active'"
+    \                   ${len1}=                get length              ${active_alerts['members']}
+    \                   ${locked_alerts}=       Get ALL Alerts by Param
+    \                   ...                     param=?filter="associatedResource.resourceName='${resourceName}' AND created gt ${startTime} AND severity = 'Critical' AND alertState = 'Locked'"
+    \                   ${len2}=                get length              ${locked_alerts['members']}
+    \                   ${count}=               Evaluate                ${len1}+${len2}
+    \                   run keyword if          ${count} != 0           Fail
+    \                   ...                     Server profile has some Critical/Locked alert
+
+Get Data from Array by name
+    [Documentation]     Returns specific data structure from data varibale array based on a given name.
+    ...     ${Profile 1}=    Get Ddata from Array by name    ${assigned_profiles}   name="P1"
+    [Arguments]         ${array}                    ${name}
+    :FOR                ${data}                     in      @{array}
+    \                   return from keyword if      '${data['name']}' == '${name}'      ${data}
+
+Edit Server Profile With Firmware Baseline from variable offline
+    [Documentation]     Edit Server Profiles from a variable which contains a list of dicts with the entire payload
+    Log                 Editing SERVER PROFILES     console=True
+    ${resplist} =       Create List
+    :FOR    ${index}    in range    0   len(${edit_server_profiles_baseline_spp})
+    \   ${profile} =     Get Resource  SP:${edit_server_profiles_baseline_spp[${index}]}
+    \   ${profile_uri} =  Get From Dictionary        ${profile}  uri
+    \   ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    \   run keyword if              '${firmware_baseline_uri}'!='${None}'          Set to Dictionary
+    \   ...                         ${firmware_only_offline_mode}
+    \   ...                         firmwareBaselineUri
+    \   ...                         ${firmware_baseline_uri}
+    \   ...                         ELSE IF                 '${firmware_baseline_uri}'=='${None}'       FAIL        Could not get the firmware baseline uri
+    \   Remove From Dictionary      ${profile}              firmware
+    \   Set to Dictionary           ${profile}              firmware        ${firmware_only_offline_mode}
+    \   Remove from dictionary  ${profile}  status_code
+    \   Remove from dictionary  ${profile}  headers
+    \   Power Off Server By Uri            ${profile['serverHardwareUri']}
+    \   ${startTime}=               Get OneView Time
+    \   ${resp} =  Fusion Api Edit Server Profile  body=${profile}  uri=${profile_uri}
+    \   wait for task2  ${resp}     7200    300
+    \   Set To Dictionary           ${resp}                 startTime       ${startTime}
+    \   append to list              ${resplist}             ${resp}
+    [return]            ${resplist}
+
+Edit Server Profile With Firmware Baseline from variable online
+    [Documentation]     Edit Server Profiles from a variable which contains a list of dicts with the entire payload
+    [Arguments]         ${firmware_mode}=${firmware_and_os_drivers_mode}
+    Log                 Editing SERVER PROFILES     console=True
+    ${resplist} =       Create List
+    :FOR    ${index}    in range    0   len(${edit_server_profiles_baseline_spp})
+    \   ${profile} =     Get Resource  SP:${edit_server_profiles_baseline_spp[${index}]}
+    \   ${profile_uri} =  Get From Dictionary        ${profile}  uri
+    \   ${firmware_baseline_uri}=   Get First SPP Firmware Bundle URI
+    \   run keyword if              '${firmware_baseline_uri}'!='${None}'          Set to Dictionary
+    \   ...                         ${firmware_and_os_drivers_mode}
+    \   ...                         firmwareBaselineUri
+    \   ...                         ${firmware_baseline_uri}
+    \   ...                         ELSE IF                 '${firmware_baseline_uri}'=='${None}'       FAIL        Could not get the firmware baseline uri
+    \   Remove From Dictionary      ${profile}              firmware
+    \   Set to Dictionary           ${profile}              firmware        ${firmware_and_os_drivers_mode}
+    \   Remove from dictionary  ${profile}  status_code
+    \   Remove from dictionary  ${profile}  headers
+    \   Power Off Server By Uri            ${profile['serverHardwareUri']}
+    \   ${startTime}=               Get OneView Time
+    \   ${resp} =  Fusion Api Edit Server Profile  body=${profile}  uri=${profile_uri}
+    \   wait for task2  ${resp}     7200    300
+    \   Set To Dictionary           ${resp}                 startTime       ${startTime}
+    \   append to list              ${resplist}             ${resp}
+    Power on selected server     ${edit_server_profiles_baseline_spp}
+    SP Firmware state check      ${edit_server_profiles_baseline_spp}
+    [return]            ${resplist}
+
+Power on selected server
+    [Documentation]     Edit Server Profiles from a variable which contains a list of dicts with the entire payload
+    [Arguments]         ${profiles}
+    :FOR                ${profile_name}                  IN                  @{profiles}
+    \   ${profile}=    Get Data from Array by name    ${assigned_sps}    ${profile_name}
+    \   should not be equal   ${profile} == ${None}   Given server profile name not available in \@{assigned_sps} list
+    \   Power on server            name=${profile['serverHardwareUri']}
+
+SP Firmware state check
+    [Documentation]     Checking Server Profile Firmware state
+    [Arguments]         ${profiles}
+    :FOR                ${profile_name}                  IN                  @{profiles}
+    \   ${profile}=    Get Data from Array by name    ${assigned_sps}    ${profile_name}
+    \   ${state}=    Verify Server Profile Firmware State    ${profile}
+
+Verify Server Profile Firmware State
+    [Arguments]                     ${profile}
+    [Documentation]                 Check if profile firmware Activation
+    Wait Until Keyword Succeeds     8000    20      Firmware Should Be Activated    ${profile}
+    ${state} =                      Get Server Profile Firmware Install State       ${profile}
+    [Return]                        ${state}
+
+Firmware Should Be Activated
+    [Documentation]     Validate firmware applied on server profile
+    [Arguments]         ${profile}
+    ${state} =          Get Server Profile Firmware Install State   ${profile}
+    Log                 ${state}    console= True
+    Should be equal     ${state}    Activated     msg=Server Profile State is i'${state}'
+
+Check Enclosure URI In Serverprofile
+    [Documentation]     Checks whether the enclosure name exisits in the enclosureUri field of server profile
+    ...                 and returns True if the URI exisits otherwise returns False
+    [Arguments]         ${elist}    ${sp}
+
+    :FOR    ${e}                        IN                          @{elist}
+    \       ${match} =                  Evaluate                    re.match('.*'+'${e}', '${sp['enclosureUri']}')
+    \       ...                         modules=re
+    \       Return From Keyword If      '${match}' != '${None}'     ${True}
+
+    [Return]    False
+
+Create SP Alert Pattern List
+    [Documentation]     When the ICM is removed from the enclosure, Server profiles having connections configured to that ICM will display critical alerts
+    ...                 This Keyword gets all the server profiles, finds which server profiles have connections to the ICM that is removed and generates
+    ...                 Alert Pattern list which will be used to validate the critical alerts as a part of ICM removal test case
+
+    [Arguments]         ${enc_list}             ${bay_no}               ${icm_name}
+    ${sp_dict} =        Create Dictionary
+    ${len} =            Get Length              ${enc_list}
+    # if number of enclosures in the enclosure list is 1, then it is a single Enc test. For e.g. Carbon effuse case or Potash effuse case in single Enc setup
+    ${enc_name} =       Run Keyword If          ${len} == 1             Get From List               ${enc_list}     0
+    # In case of Potash effuse in multi enclosure scenario, Lowest bay potash is always in first enclosure and high bay Potash is in the second enclosure
+    ...                 ELSE IF                 ${len} > 1 and ${bay_no} == ${testvar_low_bay}      Get From List   ${enc_list}
+    ...                 0
+    ...                 ELSE IF                 ${len} > 1 and ${bay_no} == ${testvar_high_bay}     Get From List   ${enc_list}
+    ...                 1
+    ${sps} =            Fusion Api Get Server Profiles
+    :FOR                ${sp}                   IN                      @{sps['members']}
+    \                   ${match} =              Check Enclosure URI In Serverprofile                ${enc_list}     ${sp}
+    \                   Continue For Loop If    '${sp['serverHardwareUri']}' == '${NULL}' or '${match}' == '${False}'
+    \                   ${conn_list} =          Evaluate                ${sp['connectionSettings']}.get('connections',{})
+    \                   ${ret_val}              ${clist} =              Check For Match             ${bay_no}
+    \                   ...                     ${conn_list}
+    \                   ${spval} =              Convert To Bytes        ${sp['name']}
+    \                   Run Keyword If          ${ret_val} == ${True}   Set To Dictionary           ${sp_dict}
+    \                   ...                     ${spval}=${clist}
+    Log                 Server Profile list is ${sp_dict}               console=True
+    # create alert list that is expected to apear in the server profile for                         connections corresponding to removed ICM
+    ${sp_pat_list} =    Evaluate
+    ...                 ['%s: An error has occurred on connection %i.\\s*There is no interconnect in \\{"name":"%s","uri":.*\\}, bay %i. A %s.* is expected.' %(sp, port, '${enc_name}',${bay_no}, '${icm_name}') for sp in ${sp_dict}.keys() for port in $sp_dict[sp]]
+    [Return]            ${sp_pat_list}
+
+Set Bay Variables
+    [Documentation]     Set the Low and High Bay test variables corresponding to the ICM under effuse test. For e.g. if the potash is in bayset 3, then
+    ...                 ${testvar_low_bay} will have value of 3 and ${testvar_high_bay} will have value of 6
+    [Arguments]         ${ic_list}
+    @{b_list} =         Create List
+    :FOR                ${item}                 IN          @{ic_list}
+    \                   Append To List          ${b_list}   ${item['bay']}
+    @{tmp} =            Remove Duplicates       ${b_list}
+    Sort List           ${tmp}
+    ${len} =            Get Length              ${tmp}
+    Should Be Equal As Integers                 ${len}      2   Unable to get ICM details
+    ${lbay}=            Get From List           ${tmp}      0
+    ${hbay} =           Get From List           ${tmp}      1
+    Set Test Variable   ${testvar_low_bay}      ${lbay}
+    Set Test Variable   ${testvar_high_bay}     ${hbay}
+
+Set Enclosure Variables
+    [Documentation]     Set the ${testvar_encs_list} test variables consisting of list of enclosure names
+    ...                 In case of Potash in ME config, it contains all the enclosure names with first encl
+    ...                 in position 0, second encl in position 1 and son on. In case of Carbon effuse test
+    ...                 it consists of only one enclosure in which the the carbon (under effuse test) is present
+    ...                 Arguemnt to this keyword is the dict with encl index as key and encl name as value
+    [Arguments]         ${enc_dict}
+    @{encs_list} =      Create List
+
+    ${val} =            Get Dictionary Keys     ${enc_dict}
+    :FOR                ${item}                 IN                      @{val}
+    \                   Append To List          ${encs_list}            &{enc_dict}[${item}]
+    \                   ${i} =                  Evaluate                int(${item}) + 1
+    \                   Set Test Variable       ${testvar_enc${i}}      &{enc_dict}[${item}]
+    \                   Log                     TestVar_enc : ${testvar_enc${i}}
+    Set Test Variable   ${testvar_encs_list}    ${encs_list}
+
+Get ICM Info
+    [Documentation]     Creates a dictionary with name, model, bay of ICM corresponding to LI and another dictionary
+    ...                 with encl index (enclosure that has ICM corresponding to LI under effuse test) as key and enc name as value
+    [Arguments]         ${li_name}    ${li_type}=${None}
+    &{ic_dict}          Create Dictionary
+    &{encl_dict}        Create Dictionary
+    ${m} =              Set Variable            -1
+    @{ic1_list}         Create List
+    ${lis} =            Run Keyword If    '${li_type}'=='${None}'    Fusion Api Get LI
+    ...                 ELSE IF            '${li_type}'=='SAS'      Fusion Api Get SAS LI
+    # Make sure we get (more than zero) Logical interconnects listed.
+    ${count}            Get From Dictionary     ${lis}                  count
+    Run Keyword If      '${count}'=='0'         Fail                    msg=No Logical interconnects found
+    :FOR                ${li}                   IN                      @{lis['members']}
+    \                   Log                     Name ${li['name']}      console=True
+    \                   ${m} =                  Evaluate                '${li_name}'.find('${li['name']}')
+    \                   Run Keyword if          ${m} >= 0               Exit For Loop
+    Should Be True      ${m} >= 0               Could not find LI with name ${li_name}
+    @{ent} =            Get Variable Value      ${li['interconnectMap']['interconnectMapEntries']}
+    ${l}=               Get Length              ${ent}
+    Log                 Length is ${l}          console=True
+
+    :FOR    ${X}                    IN RANGE                        0           ${l}
+    \       ${loc} =                Get From List                   ${ent}      ${X}
+    \       ${bay_num} =            Get Bay Number From Location    ${loc}
+    \       Should Not Be Equal     '${bay_num}'                    '${None}'   Unable to get the Bay location details from LI
+    \       ${encl_num} =           Get Variable Value              ${loc['enclosureIndex']}    1
+    \       ${resp} =    Run Keyword If   '${li_type}'=='${None}'    Fusion Api Get Interconnect        ${loc['interconnectUri']}
+    \       ...          ELSE IF          '${li_type}'=='SAS'   Fusion Api Get SAS Interconnects        ${loc['interconnectUri']}
+    \       Dictionary Should Not Contain Key                       ${resp}     'errorCode'
+    \       ${icm_name} =           Get Variable Value              ${resp['name']}
+    \       ${icm_model} =          Get Variable Value              ${resp['model']}
+    \       ${encl_name} =           Get Variable Value             ${resp['enclosureName']}
+    \       ${index} =              Evaluate                        ${encl_num} - 1
+    \       Set To Dictionary       ${encl_dict}                    '${index}'=${encl_name}
+    \       Set To Dictionary       ${ic_dict}                      encl_name=${encl_name}      encl_idx=${encl_num}
+    \       ...                     icm_name=${icm_name}
+    \       ...                     icm_model=${icm_model}
+    \       ...                     bay=${bay_num}
+    \       &{t_dict} =             Copy Dictionary                 ${ic_dict}
+    \       Append To List          ${ic1_list}                     ${t_dict}
+
+    Log         IC list is ${ic1_list}      console=True
+    [Return]    ${ic1_list}                 ${encl_dict}
+
+Get Bay Number From Location
+    [Documentation]     Helper keyword to get the ICM bay numbers list from Location entity
+    [Arguments]         ${loc}
+    @{val} =            Get Variable Value          ${loc['location']['locationEntries']}
+    ${l}=               Get Length                  ${val}
+    :FOR                ${X}                        IN RANGE                    0           ${l}
+    \                   ${ret} =                    Get From List               ${val}      ${X}
+    \                   Return From Keyword If      '${ret['type']}' == 'Bay'   ${ret['value']}
+    [Return]            ${None}
+
+Edit Server Profile BIOS from variable
+    [Documentation]     Edit Server Profiles from a variable which contains a list of dicts with the entire payload
+    Log                 Editing SERVER PROFILES     console=True
+    ${resplist} =       Create List
+    :FOR    ${index}    in range    0   len(${edit_server_profiles_BIOS})
+    \   ${profile} =     Get Resource  SP:${edit_server_profiles_BIOS[${index}]}
+    \   ${profile_uri} =  Get From Dictionary        ${profile}  uri
+    \   Set to Dictionary     ${profile}              bios            ${BIOS_settings_add}
+    \   Remove from dictionary  ${profile}  status_code
+    \   Remove from dictionary  ${profile}  headers
+    \   Power Off Server By Uri            ${profile['serverHardwareUri']}
+    \   ${startTime}=               Get OneView Time
+    \   ${resp} =  Fusion Api Edit Server Profile  body=${profile}  uri=${profile_uri}
+    \   wait for task2  ${resp}     900    10
+    \   Set To Dictionary           ${resp}                 startTime       ${startTime}
+    \   append to list              ${resplist}             ${resp}
+    [return]            ${resplist}
+
+Edit Server Profile Connections from variable
+    [Documentation]     Edit Server Profiles from a variable which contains a list of dicts with the entire payload
+    Log                 Editing SERVER PROFILES     console=True
+    ${resplist} =       Create List
+    :FOR    ${index}    in range    0   len(${edit_server_profiles_Connections})
+    \   ${profile} =     Get Resource  SP:${edit_server_profiles_Connections[${index}]}
+    \   ${profile_uri} =  Get From Dictionary        ${profile}  uri
+    \   ${conn1}                    Get From Dictionary     ${profile}      connectionSettings
+    \   ${conn2}                    Get From Dictionary     ${conn1}        connections
+    \   ${conn3} =    Get slice from list   ${conn2}    0    8
+    \   set to dictionary           ${profile['connectionSettings']}        connections         ${conn3}
+    \   Log                         ${profile}              console=True
+    \   Remove from dictionary  ${profile}  status_code
+    \   Remove from dictionary  ${profile}  headers
+    \   Power Off Server By Uri            ${profile['serverHardwareUri']}
+    \   ${startTime}=               Get OneView Time
+    \   ${resp} =  Fusion Api Edit Server Profile  body=${profile}  uri=${profile_uri}
+    \   wait for task2  ${resp}     900    10
+    \   Set To Dictionary           ${resp}                 startTime       ${startTime}
+    \   append to list              ${resplist}             ${resp}
+    [return]            ${resplist}
+
+Edit Server Profile to add san volumes multiple times
+    [Documentation]     Edit Server Profile to add multiple san volumes multiple times
+    [Arguments]     ${profile_params}
+    :FOR    ${index}    in range    1   len(${profile_params})
+    \   ${profile} =     Get Resource  SP:${profile_params[0]}
+    \   ${profile_etag} =     Get From Dictionary        ${profile}    eTag
+    \   ${profile_uri} =  Get From Dictionary        ${profile}  uri
+    \   Set to dictionary    ${profile}    eTag    ${profile_etag}
+    \   Remove from dictionary  ${profile}  status_code
+    \   Remove from dictionary  ${profile}  headers
+    \   ${new_vols}=    Verify Storage Volume   ${profile_params[${index}]['sanStorage']}
+    \   ${new_vols}=    Get From Dictionary     ${new_vols}     volumeAttachments
+    \   ${profile_update}=    Combine lists    ${profile['sanStorage']['volumeAttachments']}    ${new_vols}
+    \   Set to dictionary    ${profile['sanStorage']}    volumeAttachments    ${profile_update}
+    \   ${resp} =  Fusion Api Edit Server Profile  body=${profile}  uri=${profile_uri}
+    \   wait for task2  ${resp}     7200    10
+
+Edit Server Profile to add Bigbird volumes multiple times
+    [Documentation]     Edit Server Profile to add multiple Bigbird volumes multiple times
+    [Arguments]     ${profile_params}
+    :FOR    ${index}    in range    1   len(${profile_params})
+    \   ${profile} =     Get Resource  SP:${profile_params[0]}
+    \   ${profile_etag} =     Get From Dictionary        ${profile}    eTag
+    \   ${profile_uri} =  Get From Dictionary        ${profile}  uri
+    \   Set to dictionary    ${profile}    eTag    ${profile_etag}
+    \   Remove from dictionary  ${profile}  status_code
+    \   Remove from dictionary  ${profile}  headers
+    \   ${profile_update_controllers}=    Combine lists    ${profile['localStorage']['controllers'][0]['logicalDrives']}    ${profile_params[${index}]['controllers'][0]['logicalDrives'][0]}
+    \   ${profile_update_sasLogicalJBODs}=    Combine lists    ${profile['localStorage']['sasLogicalJBODs']}    ${profile_params[${index}]['sasLogicalJBODs'][0]}
+    \   Set to dictionary    ${profile['localStorage']['controllers'][0]}    logicalDrives    ${profile_update_controllers}
+    \   Set to dictionary    ${profile['localStorage']}    sasLogicalJBODs    ${profile_update_sasLogicalJBODs}
+    \   ${resp} =  Fusion Api Edit Server Profile  body=${profile}  uri=${profile_uri}
+    \   wait for task2  ${resp}     7200    10
+
+Edit Server Profile template from variable
+    [Documentation]     Edit Server Profiles template from a variable
+    [Arguments]      ${profile_template_list}
+    :FOR    ${template}    IN    @{profile_template_list}
+    \   ${profile_template} =     Get Resource  SPT:${template}
+    \   ${profile_template_uri} =  Get From Dictionary        ${profile_template}  uri
+    \   ${conn1}                    Get From Dictionary     ${profile_template}      connectionSettings
+    \   ${conn2}                    Get From Dictionary     ${conn1}        connections
+    \   ${sp_conns_9_uri} =     Lookup Connection Uris  ${sp_conns_9}
+    \   ${conn3} =    Combine Lists   ${conn2}    ${sp_conns_9_uri}
+    \   set to dictionary           ${profile_template['connectionSettings']}        connections         ${conn3}
+    \   Remove from dictionary  ${profile_template}  status_code
+    \   Remove from dictionary  ${profile_template}  headers
+    \   ${resp} =  Fusion Api Edit Server Profile Template  body=${profile_template}  uri=${profile_template_uri}
+    \   wait for task2  ${resp}     60    2
+
+SP Compliance check
+    [Documentation]  Verify the SP compliance level with its associated template
+    [Arguments]  ${sp_name}  ${compliance_level}
+    Sleep  10s
+    :FOR    ${index}    in range    0   len(${update_server_profiles_template})
+    \   ${profile} =     Get Resource  SP:${update_server_profiles_template[${index}]}
+    \   Should Be Equal  ${profile['templateCompliance']}  ${compliance_level}
+
+verify server profile error alert
+    [Documentation]     Verifying Server Profile Inconsistency alerts existence.
+     ${sp_uri_result}=    Get Server Profile URI      ${sp_name}
+     ${server_profile_alert} =  Get All Alerts By Param   param=?filter="description like 'The server profile is inconsistent with its server profile template*' and alertState = 'Active' and resourceUri EQ '${sp_uri_result}'"&sort=created:descending&count=1
+     ${len1}=                get length              ${server_profile_alert['members']}
+     Run Keyword If          ${len1} == 0             Log        There is no server profile inconsistent error alert
+     ...                     ELSE                    Log        There is server profile inconsistent error alert
+
+Initialize Effuse LE And Enclosures Test Variables
+    [Documentation]     To create and initialize LE and Enclosures variables that are used to validate the state, status of enclosure
+    ...                 at the end of every effuse operation. Only enclosures hosting the ICMs under effuse test are validated
+    [Arguments]         ${enclosure_list}
+    ${dict6} =          Evaluate
+    ...                 { '${LE1}': { 'state': 'Consistent', 'status': 'OK', 'scalingState': 'NotScaling', 'powerMode': 'RedundantPowerFeed', 'deleteFailed': False, 'ambientTemperatureMode': 'Standard' }}
+    Set Test Variable   ${testvar_logical_enclosures}   ${dict6}
+
+    ${tmpenc} =         Create Dictionary
+    :FOR                ${encl}                 IN          @{enclosure_list}
+    \                   ${dict7} =              Evaluate
+    \                   ...                     { 'state': 'Configured', 'refreshState': 'NotRefreshing', 'enclosureType': 'SY12000', 'reconfigurationState': 'NotReapplyingConfiguration' }
+    \                   Set To Dictionary       ${tmpenc}   ${encl}=${dict7}
+    Set Test Variable   ${testvar_enclosures}   ${tmpenc}
+
+Initialize Potash Effuse Test Variables
+    [Documentation]     To create effuse specific test variables for Potash effuse test
+    [Arguments]         ${li_name}
+    Initialize Effuse Common Test Variables
+    Initialize Potash Effuse Health Test Variables          ${li_name}
+    Initialize Potash Effuse LI Test Variables              ${li_name}
+    Initialize Effuse LE And Enclosures Test Variables      ${testvar_encs_list}
+    Initialize Potash Effuse Alert Test Variables           ${testvar_encs_list}    True    ${testvar_low_bay}      ${li_name}
+    Initialize Potash Effuse Alert Test Variables           ${testvar_encs_list}    False   ${testvar_high_bay}     ${li_name}
+    Log                 testvar_sp_kcl_alert_pat_list_lowbay:=${testvar_sp_kcl_alert_pat_list_lowbay}, testvar_sp_kcl_alert_pat_list_highbay:=${testvar_sp_kcl_alert_pat_list_highbay}
+    ...                 console=True
+
+Initialize Effuse Common Test Variables
+    [Documentation]     To create effuse Timeout related test variables and define health, stacking, consistent status
+    [Arguments]         ${li_name}=LE1-PotashLIG2
+    Set Test Variable   ${testvar_li_state_timeout}     30 min
+    Set Test Variable   ${testvar_icm_state_timeout}    30 min
+    Set Test Variable   ${testvar_alarm_timeout}        30 min
+    Set Test Variable   ${testvar_poll_time}            50 sec
+
+    Set Test Variable   ${testvar_critical_health}      Critical
+    Set Test Variable   ${testvar_warning_health}       Warning
+    Set Test Variable   ${testvar_good_health}          OK
+
+    Set Test Variable   ${testvar_consistant_status}        CONSISTENT
+    Set Test Variable   ${testvar_bad_stacking_status}      Disconnected
+    Set Test Variable   ${testvar_good_stacking_status}     BiConnected
+
+    Set Test Variable   ${testvar_redundant_state}          Redundant
+    Set Test Variable   ${testvar_nonredundant_state}       Degraded
+
+Initialize Potash Effuse Health Test Variables
+    [Documentation]     To create effuse health validation related test variables
+    [Arguments]         ${li_name}
+
+    Set Test Variable           @{testvar_cxp}      ${1}            ${2}
+    ${ic_list}                  ${encl_dict} =      Get ICM Info    ${li_name}
+    Set Enclosure Variables     ${encl_dict}
+    Set Bay Variables           ${ic_list}
+    &{dict} =                   Create Dictionary
+    @{mad_list} =               Create List
+    ${d_ok} =                   Evaluate            {'state': 'Configured', 'status': 'OK'}
+
+    :FOR                ${item}                 IN          @{ic_list}
+    \                   Set To Dictionary       ${dict}     ${item['icm_name']}=${d_ok}
+    \                   Run Keyword If          '${item['icm_model']}' == '${POTASH}'   Append To List      ${mad_list}
+    \                   ...                     ${item['icm_name']}
+    Set Test Variable   ${testvar_kcl_after_effuse_off}     ${dict}
+    Set Test Variable   ${testvar_mad_list}     ${mad_list}
+
+    ${kcl_lowbay_icm_after_effuse_on} =     Initialize Effuse KCL Test Variables    ${ic_list}      ${testvar_low_bay}
+    ...                 ${testvar_high_bay}
+    ${kcl_highbay_icm_after_effuse_on} =    Initialize Effuse KCL Test Variables    ${ic_list}      ${testvar_high_bay}
+    ...                 ${testvar_low_bay}
+    Set Test Variable   ${testvar_kcl_lowbay_icm_after_effuse_on}                   ${kcl_lowbay_icm_after_effuse_on}
+    Set Test Variable   ${testvar_kcl_highbay_icm_after_effuse_on}                  ${kcl_highbay_icm_after_effuse_on}
+
+    Log     testvar_kcl_after_effuse_off:=${testvar_kcl_after_effuse_off}, testvar_kcl_lowbay_icm_after_effuse_on:=${testvar_kcl_lowbay_icm_after_effuse_on}, testvar_kcl_highbay_icm_after_effuse_on:=${testvar_kcl_highbay_icm_after_effuse_on}
+    ...     console=True
+    Log     low_bay:=${testvar_low_bay}, high_bay=${testvar_high_bay}, encs_list:=${testvar_encs_list}, ic_list:=${ic_list}
+    ...     console=True
+
+Initialize Effuse KCL Test Variables
+    [Documentation]     To create and initialize Lowbay and highbay Potash and chloride ICMs state and status variables
+    [Arguments]         ${ic_list}      ${bay_x}    ${bay_y}
+
+    &{dict_ret} =   Create Dictionary
+    ${dict_ok} =    Evaluate    {'state': 'Configured', 'status': 'OK'}
+    ${d_absent} =   Evaluate    {'state': 'Absent', 'status': 'Critical'}
+    ${d_crit} =     Evaluate    {'state': 'Configured', 'status': 'Critical'}
+
+    :FOR    ${item}             IN          @{ic_list}
+    \       Run Keyword If      '${item['icm_model']}' == '${POTASH}' and '${item['bay']}' == '${bay_x}'
+    \       ...                 Set To Dictionary
+    \       ...                 ${dict_ret}
+    \       ...                 ${item['icm_name']}=${d_absent}
+    \       ...                 ELSE IF     '${item['icm_model']}' == '${CL20}' and '${item['bay']}' == '${bay_x}'
+    \       ...                 Set To Dictionary
+    \       ...                 ${dict_ret}
+    \       ...                 ${item['icm_name']}=${d_crit}
+    \       ...                 ELSE IF     '${item['icm_model']}' == '${CL10}' and '${item['bay']}' == '${bay_x}'
+    \       ...                 Set To Dictionary
+    \       ...                 ${dict_ret}
+    \       ...                 ${item['icm_name']}=${d_crit}
+
+    \           ...     ELSE IF     '${item['bay']}' == '${bay_y}'      Set To Dictionary   ${dict_ret}
+    \           ...     ${item['icm_name']}=${dict_ok}
+    [Return]    ${dict_ret}
+
+Initialize Potash Effuse Alert Test Variables
+    [Documentation]         To create interface, server profiles, LI and ILT alert messages that apears after effuse of Potash and associated CL ICMs
+    ...                     Alert list created by this keyword will be used for validation of alerts after effuse of Potash
+    [Arguments]             ${enclosure_list}   ${is_low_bayset}                ${bay}              ${li_name}
+    ${tmp_encs_list} =      Copy List           ${enclosure_list}
+    @{icm_absent_alert} =   Create List
+    ${len} =                Get Length          ${enclosure_list}
+    Run Keyword If          ${len} > 1 and ${is_low_bayset} == ${True}          Remove From List    ${tmp_encs_list}    0
+    ...                     ELSE IF             ${len} > 1 and ${is_low_bayset} == ${False}         Remove From List
+    ...                     ${tmp_encs_list}
+    ...                     1
+    ${ENCX} =               Run Keyword If      ${is_low_bayset} == ${True}     Get From List       ${enclosure_list}   0
+    ...                     ELSE IF             ${is_low_bayset} == ${False} and ${len} > 1         Get From List
+    ...                     ${enclosure_list}
+    ...                     1
+    ...                     ELSE IF             ${is_low_bayset} == ${False} and ${len} == 1        Get From List
+    ...                     ${enclosure_list}
+    ...                     0
+
+    ${ilt1} =   Run Keyword If      ${len} > 1      Evaluate
+    ...         ['%s, interconnect %i: Interconnect port L%i is either disconnected or connected to an outside management ring.' % (e, ${bay}, j) for e in ${tmp_encs_list} for j in ${testvar_cxp}]
+    ${ilt2} =   Run Keyword If      ${len} > 1      Evaluate
+    ...         ['%s: Invalid interconnect link topology cabling. Cable from \{"name":"%s, interconnect %i","uri":.*, port L%i is either disconnected or connected to an outside management ring.' % (e, e, ${bay}, j) for e in ${tmp_encs_list} for j in ${testvar_cxp}]
+    ${ilt3} =   Run Keyword If      ${len} > 1 and ${bay} == ${testvar_high_bay}    Evaluate
+    ...         ['%s: Invalid interconnect link topology' % ('${ENCX}')]
+    ...         ELSE IF             ${len} > 1 and ${bay} == ${testvar_low_bay}
+    ...         Evaluate            ['%s: Invalid interconnect link topology.*%s not present at A-side of bay set 3 in enclosure {"name":"%s","uri":"/rest/enclosures/.*}.' % (e, '${POTASH}', '${ENCX}') for e in ${enclosure_list}]
+
+    @{sp_pattern_list} =    Create SP Alert Pattern List    ${testvar_encs_list}    ${bay}                  ${POTASH}
+    ${sp_len} =             Get Length                      ${sp_pattern_list}
+    ${alist} =              Evaluate
+    ...                     ['%s, interconnect %s: The interconnect module is absent.*%s is expected. One or more server profile connections are affected.' % ('${ENCX}', '${bay}', '${POTASH}')]
+    ${alist1} =             Evaluate
+    ...                     ['%s, interconnect %s: The interconnect module is absent.*%s is expected.' % ('${ENCX}', '${bay}', '${POTASH}')]
+    ${icm_absent_alert} =   Run Keyword If                  ${sp_len} > 0           Evaluate                ${alist} + ${alist1}
+    ...                     ELSE IF                         ${sp_len} == 0          Get Variable Value      ${alist1}
+
+    ${li_alert} =           Evaluate
+    ...                     ['%s: The stacking health has changed to disconnected.' % ('${li_name}')]
+    ${li_alert_pattern} =   Evaluate
+    ...                     ['%s: The following interconnects are absent: {"name":"%s, interconnect %s","uri":"/rest/interconnects/.*"}.' % ('${li_name}', '${ENCX}', '${bay}')]
+    @{alerts_list} =        Run Keyword If      ${len} > 1          Combine Lists       ${ilt1}                 ${ilt2}
+    ...                     ${ilt3}
+    ...                     ${icm_absent_alert}
+    ...                     ${li_alert}
+    ...                     ${li_alert_pattern}
+    ...                     ${sp_pattern_list}
+    ...                     ELSE IF             ${len} == 1         Combine Lists       ${icm_absent_alert}     ${li_alert}
+    ...                     ${li_alert_pattern}
+    ...                     ${sp_pattern_list}
+    Run Keyword If          ${is_low_bayset} == ${True}             Set Test Variable   ${testvar_sp_kcl_alert_pat_list_lowbay}
+    ...                     ${alerts_list}
+    ...                     ELSE                Set Test Variable   ${testvar_sp_kcl_alert_pat_list_highbay}    ${alerts_list}
+
+Initialize Potash Effuse LI Test Variables
+    [Documentation]     To create effuse Potash LI health validation related test variables
+    [Arguments]         ${kcl}
+    ${dict1} =          Evaluate
+    ...                 { 'status': '${testvar_critical_health}', 'stackingHealth': '${testvar_bad_stacking_status}', 'consistencyStatus': '${testvar_consistant_status}'}
+    Set Test Variable   &{testvar_li_after_effuse_on}       ${kcl}=${dict1}
+    ${dict2} =          Evaluate
+    ...                 { 'status': '${testvar_good_health}', 'stackingHealth': '${testvar_good_stacking_status}', 'consistencyStatus': '${testvar_consistant_status}'}
+    Set Test Variable   &{testvar_li_after_effuse_off}      ${kcl}=${dict2}
+
+Initialize Natasha Effuse Test Variables
+    [Documentation]     To create effuse specific test variables for Natasha ICM
+    [Arguments]         ${li_name}
+    Initialize Effuse Common Test Variables
+    Initialize Natasha Effuse Health Test Variables      ${li_name}
+    Initialize Natasha Effuse LI Test Variables          ${li_name}
+    Initialize Effuse Natasha Test Variables
+    Initialize Effuse LE And Enclosures Test Variables          ${testvar_encs_list}
+
+Initialize Natasha Effuse Health Test Variables
+    [Documentation]     To create effuse health validation related test variables
+    [Arguments]         ${li_name}
+
+    ${ic_list}                  ${encl_dict} =      Get ICM Info    ${li_name}    li_type=SAS
+    Set Enclosure Variables     ${encl_dict}
+    Set Bay Variables           ${ic_list}
+
+    :FOR                ${item}                     IN              @{ic_list}
+    \                   Run Keyword If              ${item['bay']} == ${testvar_low_bay}                    Set Test Variable
+    \                   ...                         ${testvar_low_bay_natasha}
+    \                   ...                         ${item['icm_name']}
+    \                   ...                         ELSE IF         ${item['bay']} == ${testvar_high_bay}   Set Test Variable
+    \                   ...                         ${testvar_high_bay_natasha}
+    \                   ...                         ${item['icm_name']}
+    &{tmp_dict} =       Get From List               ${ic_list}      0
+    Set Test Variable   ${testvar_natasha_icm_name}                  ${tmp_dict['icm_model']}
+    Set Test Variable   ${testvar_encl_natasha}      ${tmp_dict['encl_name']}
+    Log                 Model:${testvar_natasha_icm_name} lowbay:${testvar_low_bay} Highbay:${testvar_high_bay} LowbayNatashaName: ${testvar_low_bay_natasha} HighbayNatashaName:${testvar_high_bay_natasha}
+    ...                 console=True
+
+Initialize Natasha Effuse LI Test Variables
+    [Documentation]     To create effuse Natasha LI health validation related test variables
+    [Arguments]         ${natasha_li}
+    ${dict1} =          Evaluate
+    ...                 { 'status': '${testvar_warning_health}', 'consistencyStatus': '${testvar_consistant_status}', 'state': '${testvar_nonredundant_state}'}
+    Set Test Variable   &{testvar_li_after_effuse_on}       ${natasha_li}=${dict1}
+    ${dict2} =          Evaluate
+    ...                 { 'status': '${testvar_good_health}', 'consistencyStatus': '${testvar_consistant_status}', 'state': '${testvar_redundant_state}'}
+    Set Test Variable   &{testvar_li_after_effuse_off}      ${natasha_li}=${dict2}
+
+Initialize Effuse Natasha Test Variables
+    [Documentation]     To create and initialize Low bay and high bay Natasha ICMs state and status variables
+    ...                 These varibles will be used to validatte the state and status of Natasha ICMs after
+    ...                 each effuse operation
+
+    ${dict_ok} =        Evaluate            {'state': 'Configured', 'status': 'OK'}
+    #${d_absent} =       Evaluate            {'state': 'Absent', 'status': 'Critical'}
+    ${dict_warn} =      Evaluate            {'state': 'Configured', 'status': 'Warning'}
+    ${tmp} =            Create Dictionary   ${testvar_high_bay_natasha}=${dict_warn}
+    Set Test Variable   ${testvar_natasha_lowbay_icm_after_effuse_on}                ${tmp}
+    ${tmp} =            Create Dictionary   ${testvar_low_bay_natasha}=${dict_warn}
+    Set Test Variable   ${testvar_natasha_highbay_icm_after_effuse_on}               ${tmp}
+    Set Test Variable   &{testvar_natasha_after_effuse_off}                          ${testvar_low_bay_natasha}=${dict_ok}
+    ...                 ${testvar_high_bay_natasha}=${dict_ok}
+
+Initialize Carbon Effuse Test Variables
+    [Documentation]     To create effuse specific test variables for Carbon ICM
+    [Arguments]         ${li_name}
+    Initialize Effuse Common Test Variables
+    Initialize Carbon Effuse Health Test Variables      ${li_name}
+    Initialize Carbon Effuse LI Test Variables          ${li_name}
+    Initialize Effuse Carbon Test Variables
+    Initialize Effuse LE And Enclosures Test Variables          ${testvar_encs_list}
+    ${sp_carbon_pat_list_lowbay}=                       Set Carbon Alert Pattern List
+    ...                 ${testvar_encl_carbon}
+    ...                 ${testvar_low_bay}
+    ...                 ${testvar_carbon_icm_name}
+    ...                 ${li_name}
+    Set Test Variable   ${testvar_sp_carbon_pat_list_lowbay}    ${sp_carbon_pat_list_lowbay}
+    ${sp_carbon_pat_list_highbay}=                      Set Carbon Alert Pattern List
+    ...                 ${testvar_encl_carbon}
+    ...                 ${testvar_high_bay}
+    ...                 ${testvar_carbon_icm_name}
+    ...                 ${li_name}
+    Set Test Variable   ${testvar_sp_carbon_pat_list_highbay}   ${sp_carbon_pat_list_highbay}
+    Log                 Carbon ALert patern list bay2 is ${testvar_sp_carbon_pat_list_lowbay}               console=True
+    Log                 Carbon ALert patern list bay5 is ${testvar_sp_carbon_pat_list_highbay}              console=True
+    Log                 Carbon LI after effuse On is &{testvar_li_after_effuse_on}
+    Log                 Carbon bay2 ICM after effuse on is ${testvar_carbon_lowbay_icm_after_effuse_on}     console=True
+    Log                 Carbon bay5 ICM after effuse on is ${testvar_carbon_highbay_icm_after_effuse_on}    console=True
+    Log                 Carbon ICM after effuse off is ${testvar_carbon_after_effuse_off}                   console=True
+
+Initialize Carbon Effuse Health Test Variables
+    [Documentation]     To create effuse health validation related test variables
+    [Arguments]         ${li_name}
+
+    ${ic_list}                  ${encl_dict} =      Get ICM Info    ${li_name}
+    Set Enclosure Variables     ${encl_dict}
+    Set Bay Variables           ${ic_list}
+
+    :FOR                ${item}                     IN              @{ic_list}
+    \                   Run Keyword If              ${item['bay']} == ${testvar_low_bay}                    Set Test Variable
+    \                   ...                         ${testvar_low_bay_carbon}
+    \                   ...                         ${item['icm_name']}
+    \                   ...                         ELSE IF         ${item['bay']} == ${testvar_high_bay}   Set Test Variable
+    \                   ...                         ${testvar_high_bay_carbon}
+    \                   ...                         ${item['icm_name']}
+    &{tmp_dict} =       Get From List               ${ic_list}      0
+    Set Test Variable   ${testvar_carbon_icm_name}                  ${tmp_dict['icm_model']}
+    Set Test Variable   ${testvar_encl_carbon}      ${tmp_dict['encl_name']}
+    Log                 name:${testvar_carbon_icm_name} lowbay:${testvar_low_bay} Highbay:${testvar_high_bay} LowbayCarbonName: ${testvar_low_bay_carbon} HighbayCarbonName:${testvar_high_bay_carbon}
+    ...                 console=True
+
+Initialize Carbon Effuse LI Test Variables
+    [Documentation]     To create effuse Carbon LI health validation related test variables
+    [Arguments]         ${carbon_li}
+    ${dict1} =          Evaluate
+    ...                 { 'status': '${testvar_critical_health}', 'consistencyStatus': '${testvar_consistant_status}'}
+    Set Test Variable   &{testvar_li_after_effuse_on}       ${carbon_li}=${dict1}
+    ${dict2} =          Evaluate
+    ...                 { 'status': '${testvar_good_health}', 'consistencyStatus': '${testvar_consistant_status}'}
+    Set Test Variable   &{testvar_li_after_effuse_off}      ${carbon_li}=${dict2}
+
+Initialize Effuse Carbon Test Variables
+    [Documentation]     To create and initialize Low bay and high bay Carbon ICMs state and status variables
+    ...                 These varibles will be used to validatte the state and status of Carbon ICMs after
+    ...                 each effuse operation
+
+    ${dict_ok} =        Evaluate            {'state': 'Configured', 'status': 'OK'}
+    ${d_absent} =       Evaluate            {'state': 'Absent', 'status': 'Critical'}
+    ${tmp} =            Create Dictionary   ${testvar_low_bay_carbon}=${d_absent}   ${testvar_high_bay_carbon}=${dict_ok}
+    Set Test Variable   ${testvar_carbon_lowbay_icm_after_effuse_on}                ${tmp}
+    ${tmp} =            Create Dictionary   ${testvar_high_bay_carbon}=${d_absent}      ${testvar_low_bay_carbon}=${dict_ok}
+    Set Test Variable   ${testvar_carbon_highbay_icm_after_effuse_on}               ${tmp}
+    Set Test Variable   &{testvar_carbon_after_effuse_off}                          ${testvar_low_bay_carbon}=${dict_ok}
+    ...                 ${testvar_high_bay_carbon}=${dict_ok}
+
+Set Carbon Alert Pattern List
+    [Documentation]         Creates all the alert variable for verification after removal of Carbon ICM
+    [Arguments]             ${enc_name}                     ${bay_no}           ${icm_name}             ${li_name}
+    @{enc_li} =             Create List                     ${enc_name}
+    ${sp_alert_list} =      Create SP Alert Pattern List    ${enc_li}           ${bay_no}               ${icm_name}
+    ${sp_len} =             Get Length                      ${sp_alert_list}
+    ${alist} =              Evaluate
+    ...                     ['%s, interconnect %i: The interconnect module is absent.*%s is expected. One or more server profile connections are affected.' % ('${enc_name}', ${bay_no}, '${icm_name}')]
+    ${alist1} =             Evaluate
+    ...                     ['%s, interconnect %i: The interconnect module is absent.*%s is expected.' % ('${enc_name}', ${bay_no}, '${icm_name}')]
+    ${icm_absent_alert} =   Run Keyword If                  ${sp_len} > 0       Evaluate                ${alist} + ${alist1}
+    ...                     ELSE IF                         ${sp_len} == 0      Get Variable Value      ${alist1}
+
+    ${LI_alert_pattern} =   Evaluate
+    ...                     ['%s: The following interconnects are absent: {"name":"%s, interconnect %i","uri":"/rest/interconnects/.*"}.' % ('${li_name}', '${enc_name}', ${bay_no})]
+    @{alert_list} =         Combine Lists   ${sp_alert_list}    ${icm_absent_alert}     ${LI_alert_pattern}
+    [Return]                ${alert_list}
+
+Perform ICM Failover
+    [Documentation]     Performs effuse of interconnects and verify the state, alerts
+    [Arguments]         ${enclosure_name}               ${bay_no}               ${li_effuse_on}     ${li_effuse_off}
+    ...                 ${icm_effuse_on}                ${icm_effuse_off}       ${alert_list}=${None}       ${icm_type}=${None}
+    # Before starting the test verify that the ICMs are in proper state. If they are in critical state, fail the test
+    Interconnects State And Status Should Be As Expected       ${icm_type}    &{icm_effuse_off}
+    ${start_count} =    Get Active Alert Count
+    ${EM_IP} =          Get EM IP                       ${enclosure_name}
+    ${EM_TOKEN} =       Get EM Token                    ${enclosure_name}
+    EFuse ICM           EFuseOn                         ${bay_no}
+    Resource Status Should Be As Expected               ${li_effuse_on}         ${icm_effuse_on}    True    ${icm_type}
+    ...                 ${testvar_poll_time}
+    Run Keyword If    ${alert_list} != ${None}    Run Keyword And Continue On Failure                   Wait Until Keyword Succeeds                 ${testvar_alarm_timeout}
+    ...                 ${testvar_poll_time}
+    ...                 Confirm Alerts Presence         ${alert_list}
+    ...    ELSE    Log    Alert Implementation not done     console=True
+    ${EM_TOKEN} =       Get EM Token                    ${enclosure_name}
+    EFuse ICM           EFuseOff                        ${bay_no}
+    Resource Status Should Be As Expected               ${li_effuse_off}        ${icm_effuse_off}   False   ${icm_type}
+    ...                 ${testvar_poll_time}
+    Run Keyword If    ${alert_list} != ${None}    Run Keyword And Continue On Failure                    Wait Until Keyword Succeeds                 ${testvar_alarm_timeout}
+    ...                 ${testvar_poll_time}
+    ...                 Confirm Alerts Absence          ${alert_list}
+    ...    ELSE    Log    Alert Implementation not done     console=True
+    Run Keyword If      '${icm_type}' == 'Potash'       MAD Should Not Exist    ${testvar_mad_list}
+    ${end_count} =      Get Active Alert Count
+    Run Keyword If      ${end_count} > ${start_count}   Run Keyword And Continue On Failure         Fail
+    ...                 Some critical alerts have not not been cleared or unexpected alerts raised after effuse off
+
+Resource Status Should Be As Expected
+    [Documentation]     Status of Resources such as LI,ICM,LE and Enclosures should be validated after effuse
+    [Arguments]         ${li_list}          ${icm_dict}                     ${effuse_state}     ${icm_type}         ${poll_time}
+    Run Keyword And Continue On Failure     Wait Until Keyword Succeeds     ${testvar_li_state_timeout}             ${poll_time}
+    ...                 Logical Interconnect Health And Status Should Be As Expected
+    ...                 ${icm_type}    &{li_list}
+    Run Keyword And Continue On Failure     Wait Until Keyword Succeeds     ${testvar_icm_state_timeout}            ${poll_time}
+    ...                 Interconnects State And Status Should Be As Expected
+    ...                 ${icm_type}    &{icm_dict}
+    Run Keyword And Continue On Failure     Logical Enclosure Should Be In Expected State
+    Run Keyword And Continue On Failure     Enclosure Should Be In Expected State               ${effuse_state}     ${icm_type}
+
+MAD Should Not Exist
+    [Documentation]     Ensure that there is no Multi Active Detection condition where both Potashes are masters exists in Potash ICMs
+    ...                 This is applicable for Potash ICMS only
+    [Arguments]         ${potash_icms_list}
+    @{stack_role} =     Create List
+    ${name} =           Copy List               ${potash_icms_list}
+    ${len} =            Get Length              ${name}
+    ${ics} =            Fusion Api Get Interconnect
+    # Make sure we get (more than zero) interconnects listed
+    ${count}            Get From Dictionary     ${ics}                  count
+    Run Keyword If      '${count}'=='0'         Fail                    msg=No interconnects found
+    :FOR                ${ic}                   IN                      @{ics['members']}
+    \                   Log                     Name ${ic['name']}, stackingDomainRole ${ic['stackingDomainRole']}
+    \                   ${idx} =                Get Index From List     ${name}         ${ic['name']}
+    \                   Run Keyword if          ${idx} == -1            Continue For Loop
+    \                   Append To List          ${stack_role}           ${ic['stackingDomainRole']}
+    \                   Remove From List        ${name}                 ${idx}
+    \                   ${len} =                Get Length              ${name}
+    \                   Exit For Loop If        ${len} == 0
+    Run Keyword If      ${len}>0                Fail                    Failed to validate state of one or more ICMs
+    ...                 console=True
+    Run Keyword If      '${stack_role[0]}' == '${stack_role[1]}'        Fail
+    ...                 Stacking Domain roles are same in both Potash ICMs, ${stack_role[0]}, ${stack_role[1]}
+    ...                 ELSE IF                 '${stack_role[0]}' == 'Master'          Should Be Equal As Strings
+    ...                 '${stack_role[1]}'
+    ...                 'Subordinate'
+    ...                 ELSE IF                 '${stack_role[0]}' == 'Subordinate'     Should Be Equal As Strings
+    ...                 '${stack_role[1]}'
+    ...                 'Master'
+    ...                 ELSE                    Fail                    Stacking Domain Role is not proper in Potash ICMS
+
+Check For Match
+    [Documentation]     Check for the matching mezz slot based on bay number of ICM.
+    ...                 Returns True and connection ID list corresponding to Mezz slot/ ICM bay number.
+    ...                 This information is used to create Alert list of server profiles
+    [Arguments]         ${bay_no}           ${conn_list}
+    ${ret_list} =       Create List
+    Run Keyword If      ${bay_no} == 3      Set Test Variable   ${testvar_pattern}      Mezz 3\:1\.*
+    ...                 ELSE IF             ${bay_no} == 6      Set Test Variable       ${testvar_pattern}      Mezz 3\:2\.*
+    ...                 ELSE IF             ${bay_no} == 2      Set Test Variable       ${testvar_pattern}      Mezz 2\:1\.*
+    ...                 ELSE IF             ${bay_no} == 5      Set Test Variable       ${testvar_pattern}      Mezz 2\:2\.*
+    ...                 ELSE IF             ${bay_no} == 1      Set Test Variable       ${testvar_pattern}      Mezz 1\:1\.*
+    ...                 ELSE IF             ${bay_no} == 4      Set Test Variable       ${testvar_pattern}      Mezz 1\:2\.*
+
+    :FOR                ${conn}             IN                      @{conn_list}
+    \                   ${match} =          Evaluate                re.match('${testvar_pattern}', '${conn['portId']}')
+    \                   ...                 modules=re
+    \                   Run Keyword If      '${match}' != '${None}' and '${conn['state']}' == 'Deployed'    Append To List
+    \                   ...                 ${ret_list}
+    \                   ...                 ${conn['id']}
+    ${len} =            Get Length          ${ret_list}
+    Run Keyword If      ${len} > 0          Return From Keyword     ${True}     ${ret_list}
+    ...                 ELSE                Return From Keyword     ${False}    ${ret_list}
+
+Check Data
+    [Documentation]     Check that LHS dictionary data is matching the RHS dictionary data. LHS could be a subset of RHS.
+    [Arguments]         ${lhs}                      ${rhs}
+    ${mismatches} =     Create Dictionary
+    :FOR                ${k}                        IN                          @{lhs.keys()}
+    \                   ${retval} =                 Run Keyword If              '${lhs['${k}']}' == '${rhs['${k}']}'    Log
+    \                   ...                         Checking ${k}...[OK]
+    \                   ...                         console=${True}
+    \                   ...                         ELSE                        Set Variable        ${False}
+    \                   Run Keyword If              ${retval} is ${False}       Set To Dictionary   ${mismatches}
+    \                   ...                         ${k}='${k}' expected data '${lhs['${k}']}' is NOT equal to resource data '${rhs['${k}']}'.
+    Run Keyword If      ${mismatches} != &{EMPTY}   Log All Data Mismatches     ${mismatches}
+    Return From Keyword If                          ${mismatches} != &{EMPTY}   ${False}
+    [Return]            ${True}
+
+Log All Data Mismatches
+    [Documentation]     Log all data mismatches.
+    [Arguments]         ${mismatches}
+    :FOR                ${k}    IN                          @{mismatches.keys()}
+    \                   Log     Checking ${k}...[Failed]    console=${True}
+    \                   Log     Failure: ${mismatches['${k}']}      console=${True}
+
+Interconnects State And Status Should Be As Expected
+    [Documentation]         Check status of Interconnects and warn user in case of status is not OK
+    ...                     Warning shown where status is Warning
+    ...                     Fail test where status is other than OK and Warning
+    [Arguments]             ${icm_type}    &{icm_dict}
+    ${name} =               Get Dictionary Keys         ${icm_dict}
+    ${len} =                Get Length                  ${name}
+    Should Not Be Empty     ${name}                     msg=ICM list is empty
+    ${ics} =                Run Keyword If    '${icm_type}' == 'SAS'    Fusion Api Get SAS Interconnects
+    ...                     ELSE              Fusion Api Get Interconnect
+    # Make sure we get (more than zero) interconnects listed
+    ${count}                Get From Dictionary         ${ics}                  count
+    Run Keyword If          '${count}'=='0'             Fail                    msg=No interconnects found
+    :FOR                    ${ic}                       IN                      @{ics['members']}
+    \                       Log                         Name ${ic['name']}, Status ${ic['status']}, State ${ic['state']}
+    \                       ${idx} =                    Get Index From List     ${name}                 ${ic['name']}
+    \                       Run Keyword if              ${idx} == -1            Continue For Loop
+    \                       ${icm} =                    Evaluate                ${icm_dict}.get('${ic['name']}' , {})
+    \                       Run Keyword If              ${icm} == &{EMPTY}      Log
+    \                       ...                         Your data variable file INTERCONNECTS does not contain '${ic['name']}'.
+    \                       ...                         WARN
+    \                       ...                         console=${True}
+    \                       ${icmExpected} =            Run Keyword If          ${icm} != &{EMPTY}      Check Data      ${icm}
+    \                       ...                         ${ic}
+    \                       Run Keyword If              '${icmExpected}' == '${False}'                  Fail
+    \                       ...                         Name ${ic['name']}, Status ${ic['status']}, State ${ic['state']}
+    \                       Remove From List            ${name}                 ${idx}
+    \                       ${len} =                    Get Length              ${name}
+    \                       Exit For Loop If            ${len} == 0
+    Run Keyword If          ${len}>0                    Fail                    Failed to validate state of one or more ICMs
+    ...                     console=True
+
+Logical Interconnect Health And Status Should Be As Expected
+    [Documentation]         Check status of Interconnects and warn user in case of status is not OK
+    ...                     Warning shown where status is Warning
+    ...                     Fail test where status is other than OK
+    [Arguments]             ${icm_type}    &{li_dict}
+    ${name} =               Get Dictionary Keys     ${li_dict}
+    ${idx} =                Set Variable            ${-1}
+    Should Not Be Empty     ${name}                 msg=Li name can not be blank
+    ${lis} =                Run Keyword If    '${icm_type}' == 'SAS'    Fusion Api Get SAS LI
+    ...                     ELSE              Fusion Api Get LI
+    # Make sure we get (more than zero) Logical interconnects listed
+    ${count}                Get From Dictionary     ${lis}                  count
+    Run Keyword If          '${count}'=='0'         Fail                    msg=No Logical interconnects found
+    :FOR                    ${li}                   IN                      @{lis['members']}
+    \                       Log                     Name ${li['name']}, Health ${li['status']}, Consistency State ${li['consistencyStatus']}
+    \                       ...                     console=True
+    \                       ${idx} =                Get Index From List     ${name}         ${li['name']}
+    \                       Run Keyword if          ${idx} >= 0             Exit For Loop
+    Run Keyword If          ${idx} == -1            Fail                    Failed to get the LI status
+    ${li_data} =            Evaluate                ${li_dict}.get('${li['name']}' , {})
+    Run Keyword If          ${li} == &{EMPTY}       Log
+    ...                     Data variable file for LI does not contain '${li['name'}'.
+    ...                     WARN
+    ...                     console=${True}
+    ${li_expected} =        Run Keyword If          ${li} != &{EMPTY}       Check Data      ${li_data}      ${li}
+    Run Keyword If          '${li_expected}' == '${False}'                  Fail
+    ...                     Failed to match the status for LI : Name ${li['name']}
+
+Logical Enclosure Should Be In Expected State
+    [Documentation]     Check that logical enclosures are in expected states based on the testvariables defined by the effuse initialization keyword.
+    [Arguments]         ${maxRetry}=${10}   ${retryInterval}=1m
+    :FOR                ${retry}            IN RANGE                    1   ${maxRetry}+1
+    \                   ${result} =         Compare Logical Enclosure Attributes To Expected Values
+    \                   Run Keyword If      '${result}' == '${True}'    Exit For Loop
+    \                   ...                 ELSE IF                     ${retry} != ${maxRetry}     Sleep   ${retryInterval}
+    \                   ...                 reason=One or more logical enclosure attribute is not in the expected value. Sleeping for ${retryInterval} before a retry...
+    \                   ...                 ELSE                        Fail
+    \                   ...                 msg=One or more logical enclosure attribute is not in the expected value and ${maxRetry} retries were exhausted.
+    Log                 \n Logical enclosures attributes compare completed in ${retry} attempt(s)   console=${True}
+
+Compare Logical Enclosure Attributes To Expected Values
+    [Documentation]     Check that logical enclosures are in expected states. Returns boolean.
+    Log                 \n Checking OV Logical Enclosures State...                  console=${True}
+    ${resp}=            Fusion Api Get Resource     /rest/logical-enclosures
+    ${lencs}=           Get From Dictionary         ${resp}                         members
+    ${l}=               Get Length                  ${lencs}
+    :FOR                ${x}                        IN RANGE                        0                   ${l}
+    \                   ${leName}=                  Get From Dictionary             ${lencs[${x}]}      name
+    \                   ${le} =                     Evaluate                        $testvar_logical_enclosures.get($leName, {})
+    \                    Continue For Loop If        ${le} == &{EMPTY}
+    \                   ${leExpected} =             Run Keyword If                  ${le} != &{EMPTY}   Check Data      ${le}
+    \                   ...                         ${lencs[${x}]}
+    \                   Return From Keyword If      '${leExpected}' == '${False}'   ${False}
+    [Return]            ${True}
+
+Enclosure Should Be In Expected State
+    [Documentation]     Check that enclosures are in expected states based on the testvariables defined by the effuse initialization keyword.
+    [Arguments]         ${effuse_state}     ${icm_type}=None            ${maxRetry}=${20}       ${retryInterval}=1m
+    :FOR                ${retry}            IN RANGE                    1                       ${maxRetry}+1
+    \                   ${result} =         Compare Enclosure Attributes To Expected Values     ${effuse_state}     ${icm_type}
+    \                   Run Keyword If      '${result}' == '${True}'    Exit For Loop
+    \                   ...                 ELSE IF                     ${retry} != ${maxRetry}                     Sleep
+    \                   ...                 ${retryInterval}
+    \                   ...                 reason=One or more enclosure attribute is not in the expected value. Sleeping for ${retryInterval} before a retry...
+    \                   ...                 ELSE                        Fail
+    \                   ...                 msg=One or more enclosure attribute is not in the expected value and ${maxRetry} retries were exhausted.
+    Log                 \n Enclosures attributes compare completed in ${retry} attempt(s)       console=${True}
+
+Compare Enclosure Attributes To Expected Values
+    [Documentation]     Check that enclosures are in expected states. Returns boolean.
+    [Arguments]         ${effuse_state}             ${icm_type}
+    Log                 \n Checking OV Enclosures State...                  console=${True}
+    ${resp}=            Fusion Api Get Resource     /rest/enclosures
+    ${encs}=            Get From Dictionary         ${resp}                 members
+    ${l}=               Get Length                  ${encs}
+    :FOR                ${x}                        IN RANGE                0                       ${l}
+    \                   ${encName}=                 Get From Dictionary     ${encs[${x}]}           name
+    \                   ${enc} =                    Evaluate                $testvar_enclosures.get($encName, {})
+    \                    Continue For Loop If                            ${enc} == &{EMPTY}
+    \                   Run Keyword If              ${effuse_state} == True and '${icm_type}' == 'Potash'
+    \                   ...                         Set To Dictionary
+    \                   ...                         ${enc}
+    \                   ...                         status=Critical
+    \                   ...                         ELSE                    Set To Dictionary       ${enc}
+    \                   ...                         status=OK
+    \                   ${encExpected} =            Run Keyword If          ${enc} != &{EMPTY}      Check Data      ${enc}
+    \                   ...                         ${encs[${x}]}
+    \                   Return From Keyword If      '${encExpected}' == '${False}'                  ${False}
+    [Return]            ${True}
+
+Confirm Alerts Presence
+    [Documentation]     Verify all the expected alerts apear in active alert list after effuse on
+    [Tags]              Alerts
+    [Arguments]         ${alert_pattern_list}
+
+    ${al} =                 Get Active Alert List
+    ${len_al} =         Get Length              ${al}
+    Run Keyword If      ${len_al} == 0   Fail
+    ...                 Could not verify alerts as the active alert list is empty
+    ...    ELSE         Alert Should Contain    ${al}   ${alert_pattern_list}
+
+Confirm Alerts Absence
+    [Documentation]     Verify all the alerts rasied after effuse on are cleared after effuse off
+    [Tags]              Alerts
+    [Arguments]         ${alert_pattern_list}
+
+    ${al} =             Get Active Alert List
+    ${len_al} =         Get Length              ${al}
+    Run Keyword If      ${len_al} == 0    Log    Active alert list in the system is empty    console=True
+    ...       ELSE      Alert Should Not Contain    ${al}    ${alert_pattern_list}
+
+Get Active Alert Count
+    [Documentation]     Get Critical and active alerts count in appliance
+    ${alerts_list}=     Create List
+    ${response} =       Get ALL Alerts by Param     param=?filter="severity EQ 'Critical' and not alertState EQ 'Cleared'"
+    ${count}=           Get From Dictionary         ${response}             count
+    :For                ${alert}                    IN                      @{response['members']}
+    \                   continue for loop if        ${count} == 0
+    \                   ${uri} =                    Get From Dictionary     ${alert}    uri
+    \                   ${response}=                Get Resource by URI     ${uri}
+    \                   Log                         ${response['associatedResource']['resourceName']}: ${alert['description']}
+    \                   ...                         WARN
+    \                   ...                         console=True
+    #Append To List     ${alerts_list}              ${response['associatedResource']['resourceName']}: ${alert['description']}
+    [Return]            ${count}
+
+Get Active Alert List
+    [Documentation]     Get Critical alerts count in appliance
+    [Arguments]        ${time}=${None}
+    ${alerts_list}=     Create List
+    ${response} =       Run Keyword If    '${time}' != '${None}'    Get ALL Alerts by Param     param=?filter="severity EQ 'Critical' and not alertState EQ 'Cleared' AND created gt ${time}"
+    ...    ELSE    Get ALL Alerts by Param     param=?filter="severity EQ 'Critical' and not alertState EQ 'Cleared'
+
+    ${count}=   Get From Dictionary     ${response}             count
+    Return From Keyword If    ${count} == 0    ${alerts_list}
+    :For        ${alert}                IN                      @{response['members']}
+    \           Append To List          ${alerts_list}
+    \           ...                     ${alert['associatedResource']['resourceName']}: ${alert['description']}
+    [Return]    ${alerts_list}
+
+Alert Should Contain
+    [Documentation]     Verifying that the alerts should be available
+    [arguments]         ${alerts}               ${alert_pattern_list}
+    ${len_pattern} =    Get Length              ${alert_pattern_list}
+    :FOR                ${item}                 IN              @{alert_pattern_list}
+    \                   Should Contain Match    ${alerts}       regexp=${item}      case_insensitive=True
+    \                   ...                     whitespace_insensitive=True
+
+Alert Should Not Contain
+    [Documentation]     Verifying that the alerts should be available
+    [arguments]         ${alerts}       ${alert_pattern_list}
+    ${len_pattern} =    Get Length      ${alert_pattern_list}
+    :FOR    ${item}                     IN          @{alert_pattern_list}
+    \       Should Not Contain Match    ${alerts}   regexp=${item}      case_insensitive=True   whitespace_insensitive=True
+
+Clear Alerts
+    [Documentation]     Clear all the alerts
+    ${del_resp} =       Fusion Api Delete Alert
+    ${task}             Wait For Task2      ${del_resp}     120     20
+
+Restart Appliance
+    [Documentation]         Restart Appliance and measure time to restart milestones.
+    ...                     Returns a dictionary containing duration until appliance was pingable and reported OK state.
+    ...                     Dictionary meant to be used to post data to ELK.
+    ${resp}=                Fusion Api Appliance Shutdown   REBOOT
+    Run Keyword If          '${resp['status_code']}' != '202'               Fail    ELSE    log to console
+    ...                     \n-Task is in progress\n
+    ${initiated_time}=      Get Current Time                Initiated Reboot
+    Wait For Task2          ${resp}                         timeout=2000    interval=5
+
+    # Sleep since appliance ip won't be pingable
+    sleep                   400s
+    Wait For Appliance To Become Pingable       ${APPLIANCE_IP}     30 minutes      30 s
+    ${time_to_pingable}=    Get Time Duration   ${initiated_time}   pingable_state
+
+    Wait Until Keyword Succeeds     60min               30s                 Check Appliance State   ${APPLIANCE_IP}     OK
+    ${time_to_appliance_ok}=        Get Time Duration   ${initiated_time}   appliance_ok_state
+
+    ${ci_managers}=     Get HA Nodes
+    ${num_cims}=        Get Length      ${ci_managers}
+
+    # Compile Performance Data for ELK
+    ${payload}=         Create Dictionary
+    Set To Dictionary   ${payload}
+    ...                 time_to_pingable_state      ${time_to_pingable}
+    ...                 time_to_appliance_ok_state      ${time_to_appliance_ok}
+    ...                 number_of_ci_managers       ${num_cims}
+    ...                 host                        ${HOSTNAME}
+    [Return]            ${payload}
+
+Download Nuvo Log File From Env Variable
+    [Documentation]    Downloads Nuvo Log file from Env variable WORKSPACE
+    ...                This env variable is expected to be initialized by Nuvo reimage script
+    
+    ${nuvo_clog_path}=    Get Environment Variable   WORKSPACE     default=${EMPTY}
+    Run Keyword If    '${nuvo_clog_path}' == '${EMPTY}'    FAIL
+    ...                Ensure Environment Variable WORKSPACE is set to nuvo.log path
+    Set Test Variable    ${THREADNUM}    1
+
+    # Now download the NUVO console log
+    ${nuvo_clog_path} =    Catenate    SEPARATOR=/    ${nuvo_clog_path}    nuvo.log
+    ${file} =    Download Specified SPP to Local Path    ${nuvo_clog_path}
+    ...          WEB_USERNAME=${WEB_USERNAME}   WEB_PASSWORD=${WEB_PASSWORD}
+    
+    OperatingSystem.File Should Exist   ${SPP_LOCAL_FILE}
+    ...     Nuvo CIM reimage console log file could not be downloaded from ${nuvo_clog_path}    
+    [Return]    ${SPP_LOCAL_FILE}
+
+Parse Nuvo Log And Return Matching String
+    [Documentation]    Parse Nuvo for matching string and return matching line entry
+    [Arguments]   ${logfile}   ${str_to_match}
+
+    ${sumstr} =   Set Variable   EXECUTION SUMMARY
+
+    ${log_content} =     OperatingSystem.Get File    ${logfile}
+    @{lines} =    Split String    ${log_content}    \n
+    ${idx} =    Get Index From List    ${lines}    ${sumstr}
+    ${TotLen} =    Get Length   ${lines}
+    ${len} =    Evaluate    ${TotLen} - 1
+
+    # Form a sub list from line having text "EXECUTION SUMMARY" till the end of line
+    # as we want to parse only after execution summary line of Nuvo Log
+    ${sublist} =   Get Slice From List   ${lines}   ${idx}   ${len}
+
+    # Match the line in the log for each of the CIM
+    ${match_list} =    Get Matches    ${sublist}  regexp=${str_to_match}   case_insensitive=True  whitespace_insensitive=True
+    ${listlength} =    Get Length    ${match_list}
+    Return From Keyword If  ${listlength} == 0   ${None}
+    ${match_str} =      Get From List   ${match_list}     0
+    [Return]    ${match_str}
+
+
+Parse Nuvo Log And Extract CIM Startup Time
+    [Documentation]    Extracts following lines after 'EXECUTION SUMMARY' line and return them
+    ...    2018-12-11 08:14:19 cim1: Returned from reimage, enclosure .......
+    ...    2018-12-11 08:31:17 cim1: Appliance startup complete ........
+    ...    2018-12-11 08:14:19 cim2: Returned from reimage, enclosure .......
+    ...    2018-12-11 08:31:17 cim2: Appliance startup complete ........
+    [Arguments]   ${logfile}     ${no_of_cims}
+
+    Set Test Variable    ${THREADNUM}    1
+    Set Test Variable    ${cim2_reimage_ts}    ${None}
+    Set Test Variable    ${cim2_complete_ts}    ${None}
+
+    # Match the line in the log for each of the CIM
+    ${cim1_reimage_ts} =    Parse Nuvo Log And Return Matching String   ${logfile}   .* cim1: Returned from reimage, enclosure .*
+    ${cim1_complete_ts} =   Parse Nuvo Log And Return Matching String   ${logfile}   .* cim1: Appliance startup complete .*
+    ${cim2_reimage_ts} =    Run Keyword If    ${no_of_cims} == 2    Parse Nuvo Log And Return Matching String   ${logfile}   .* cim2: Returned from reimage, enclosure .*
+    ${cim2_complete_ts} =   Run Keyword If    ${no_of_cims} == 2    Parse Nuvo Log And Return Matching String   ${logfile}   .* cim2: Appliance startup complete .*
+
+    Run Keyword If  "${cim1_reimage_ts}" == "${None}" or "${cim1_complete_ts}" == "${None}"    FAIL    Failed to get the Reimage Start and completion time of CIM1
+    Run Keyword If  "${cim2_reimage_ts}" == "${None}" or "${cim2_complete_ts}" == "${None}"    Log    Failed to get the Reimage Start and completion time of CIM1    WARN    console=True
+    [Return]    ${cim1_reimage_ts}    ${cim1_complete_ts}
+    ...         ${cim2_reimage_ts}    ${cim2_complete_ts}
+
+Create CIM Startup Time Payload
+    [Documentation]    Extract the timestamp from each line and Calculate
+    ...                the restart time in seconds for each of the CIMs.
+    ...                create and return Payload to be pushed in to ELK
+    [Arguments]    ${no_of_cims}     ${cim1_reimage}     ${cim1_complete}    ${cim2_reimage}     ${cim2_complete}
+    # e.g. pattern to match is 2018-12-11 08:14:19
+    ${pattern} =     Set Variable    r'^(\\d\\d\\d\\d-\\d\\d?-\\d\\d? \\d\\d?:\\d\\d?:\\d\\d?).*'
+
+    ${cim1_startTS} =    Evaluate    re.match(${pattern}, '${cim1_reimage}').group(1)    modules=re
+    ${cim1_completeTS} =    Evaluate    re.match(${pattern}, '${cim1_complete}').group(1)    modules=re
+    ${cim2_startTS} =    Run Keyword If    '${cim2_reimage}' != '${None}'      Evaluate    re.match(${pattern}, '${cim2_reimage}').group(1)    modules=re
+    ${cim2_completeTS} =    Run Keyword If    '${cim2_complete}' != '${None}'     Evaluate    re.match(${pattern}, '${cim2_complete}').group(1)    modules=re
+
+    ${cim1_startup_time} =   Subtract Date From Date    ${cim1_completeTS}     ${cim1_startTS}
+    ${cim2_startup_time} =   Run Keyword If    '${cim2_reimage}' != '${None}' and '${cim2_complete}' != '${None}'
+    ...                      Subtract Date From Date    ${cim2_completeTS}     ${cim2_startTS}
+
+    Log    cim1 time is ${cim1_startup_time}, cim2 time is ${cim2_startup_time}    console=True
+    ${payload}=         Create Dictionary
+    Set To Dictionary   ${payload}
+    ...                 cim1_startup_time      ${cim1_startup_time}
+    ...                 number_of_ci_managers       ${no_of_cims}
+    ...                 host                        ${HOSTNAME}
+    Run Keyword If    '${cim2_reimage}' != '${None}' and '${cim2_complete}' != '${None}'
+    ...                Set To Dictionary    ${payload}    cim2_startup_time      ${cim2_startup_time}
+    [Return]            ${payload}
+
+Get Fusion Nodes
+    [Documentation]    Get the Fusion HA nodes list having node serial numbers
+    ${nodes} =          Create List
+    #Fusion Api Login Appliance              ${APPLIANCE_IP}     ${admin_credentials}
+    #Login to Fusion Via SSH
+    ${resp} =           Fusion Api Get HA Nodes     /rest/appliance/ha-nodes
+    :FOR                ${c}                        IN          @{resp['members']}
+    \    Append To List    ${nodes}    ${c['location']['enclosure']['resourceName']}
+    [Return]    ${nodes}
+
+
+Get Current Time
+    [Documentation]     Returns the current time as a timestamp.
+    ...                 Message is a description used for logging.
+    [Arguments]         ${message}
+    ${time}=            Get Time                        epoch
+    ${readable_time}=   Convert Date                    ${time}     result_format=timestamp
+    Log                 ${message} : ${readable_time}   console=True
+    [Return]            ${time}
+
+Get Time Duration
+    [Documentation]         Calculate duration of time passed since a given time.
+    ...                     Message is a description used for logging.
+    [Arguments]             ${since_time}               ${message}
+    ${current_time}=        Get Time                    epoch
+    ${duration}=            Subtract Time From Time     ${current_time}         ${since_time}
+    ${readable_duration}=   Convert Time                ${duration}             compact
+    Log                     Time duration to ${message}: ${readable_duration}   console=True
+    [Return]                ${duration}
+
+Post Data to ELK
+    [Documentation]     Record the timing data to ELK via a REST command
+    ...                 Example REST call: curl -X POST http://rist-elk.vse.rdlabs.hpecorp.net:9200/testindex -d "{\"testval\": 1}"
+    [Arguments]         ${index}            ${payload}
+    ${created_time}=    Evaluate            datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")    datetime
+    ${ov_build}=        Get OneView Version
+    ${payload}=         Set To Dictionary   ${payload}
+    ...                 oneview_version     ${ov_build}
+    ...                 created             ${created_time}
+    ...                 runId               ${RUN_UUID}
+    ${payload}=         Evaluate            json.dumps(${payload})      json
+    ${payload}=         Replace String      ${payload}                  "   \\"
+    ${command}=         Set Variable        curl -X POST -ik ${rist_elk_server}/${index} -d "${payload}"
+    Log                 ${command}          console=True
+    ${response}         Execute Command     ${command}
+    Log                 ${response}         console=True
+    Should Contain      ${response}         "created":true
+
+Get OneView Version
+    [Documentation]     To get the OV version
+    ${Command}=         Set Variable    cat /ci/etc/version
+    ${stdout}           ${stderr}       ${rc}=      Execute Command     ${Command}      return_stderr=True
+    ...                 return_rc=True}
+    Should Be Equal As Integers         ${rc}       0                   msg=Failed to get Fusion Version.
+    Log To Console      \nFusion Version: ${stdout}
+    [Return]            ${stdout}
+
+CIM Failover
+    [Documentation]             Get the roles, perform failover and verify that role changed.
+    [Arguments]                 ${wait_task_timeout}=60m                        ${wait_task_interval}=60s    ${cycle_sleep}=1m
+    ${preFailoverRoles} =       Get HA Nodes
+    Set To Dictionary           ${preFailoverRoles['Active']}                   role=Standby
+    Log                         \nActivating standby CIM...                     console=${True}
+    Log                         Current active: ${preFailoverRoles['Active']['name']}                       console=${True}
+    Log                         Current standby: ${preFailoverRoles['Standby']['name']}                     console=${True}
+    ${resp} =                   Fusion Api Edit HA Nodes                        ${preFailoverRoles['Active']}
+    ...                         ${preFailoverRoles['Active']['uri']}
+    Wait For Task               ${resp}     timeout=${wait_task_timeout}        interval=${wait_task_interval}
+    Log                         Standby CIM activation complete, Waiting for appliance status to be OK\n   console=${True}
+    Wait Until Keyword Succeeds     60min           1min               Check Appliance State   ${APPLIANCE_IP}     OK
+    ${postFailoverRoles} =      Get HA Nodes
+    CIM Role Should Have Changed            ${preFailoverRoles}                 ${postFailoverRoles}
+
+Get HA Nodes
+    [Documentation]     Build roles dictionary for ease-of-access.
+    Log To Console      Getting HA Nodes and building dictionary off it...
+    ${resp} =           Fusion Api Get HA Nodes     /rest/appliance/ha-nodes
+    ${roles} =          Create Dictionary
+    :FOR                ${c}                        IN          @{resp['members']}
+    \                   Set To Dictionary           ${roles}    ${c['role']}=${c}
+    [Return]            ${roles}
+
+Get VLUNs for Volume ${volume}
+    [Documentation]         Returns list of VLUN names for a given volume.
+    ${vluns_in_volume}=     Create List
+    ${vluns}=               Storage3par Get VLUNs
+    :FOR                    ${vlun}             IN              @{vluns}
+    \                       Run Keyword IF      '${volume}' == '${vlun['volumeName']}'      Append To List
+    \                       ...                 ${vluns_in_volume}
+    \                       ...                 ${vlun}
+    ${num_vluns}=           Get Length          ${vluns_in_volume}
+    Log                     ${volume} has ${num_vluns} VLUNs.   console=True
+    [Return]                ${vluns_in_volume}
+
+Delete VLUNs
+    [Documentation]     Delete specified VLUNs
+    [Arguments]         ${vluns}
+    :FOR                ${vlun}                     IN                      @{vluns}
+    \                   Log                         Deleteing VLUN ${vlun['volumeName']}-VLUN${vlun['lun']} for ${vlun['hostname']}
+    \                   ...                         console=True
+    \                   Storage3Par Delete VLUN     ${vlun['volumeName']}   ${vlun['lun']}      ${vlun['hostname']}
+    \                   ...                         ${vlun['portPos']}
+
+Create Assigned Server Profiles
+    [Documentation]     Create all assigned server profiles asynchronously and wait for all tasks to reach a terminal state.
+    [Arguments]         ${assigned_sps}
+    ${responses}=       Add Server Profiles from variable       ${assigned_sps}
+    Run Keyword If      ${responses} is not ${null}
+    ...                 run keyword and continue on failure     Wait For Task2      ${responses}
+    ...                 timeout=1800
+    ...                 interval=10
+
+Create Assigned Server Profiles by Batch size
+    [Documentation]     Create server profiles asynchronously in batches and wait for tasks to reach terminal state.
+    [Arguments]         ${assigned_sps}     ${batch_size}
+
+    ${sp_len}=      Evaluate                    len(${assigned_sps})
+    Log             Total profiles: ${sp_len}   console=True
+
+    :FOR    ${index}            in range    0                       ${sp_len}   ${batch_size}
+    \       ${range}=           Evaluate    ${index}+${BATCH_SIZE}
+    \       Log                 Adding profiles ${index} through ${range}       console=True
+    \       ${responses}=       Add Server Profiles from variable   ${assigned_sps[${index}:${range}]}
+    \       Run Keyword If      ${responses} is not ${null}
+    \       ...                 run keyword and continue on failure             Wait For Task2      ${responses}
+    \       ...                 timeout=1800
+    \       ...                 interval=10
+
+CIM Role Should Have Changed
+    [Documentation]   Verify that role changed and fail if not.
+    [Arguments]   ${pre}   ${post}
+    Log   Verifying that CIM role has changed, state is OK, status is OK and uri is correct...   console=${True}
+    Log   Previous active: ${pre['Active']['name']}   console=${True}
+    Log   Current active: ${post['Active']['name']}   console=${True}
+    Log   Active State: ${post['Standby']['state']}   console=${True}
+    Log   Active Status: ${post['Standby']['status']}   console=${True}
+    Should Be Equal As Strings   ${pre['Active']['name']}   ${post['Standby']['name']}   msg=The expected new active CIM should now be ${pre['Standby']['name']}.
+    Should Be Equal As Strings   ${pre['Active']['state']}   ${post['Standby']['state']}   msg=The expected state should be ${pre['Standby']['state']}.
+    Should Be Equal As Strings   ${pre['Active']['status']}   ${post['Standby']['status']}   msg=The expected status should be ${pre['Standby']['status']}.
+    Should Be Equal As Strings   ${pre['Active']['uri']}   ${post['Standby']['uri']}   msg=The expected uri should be ${pre['Standby']['uri']}.
+    Log   CIM role change was successful.   console=${True}
+
+###################################################################
+# Keywords for re-assigning server profiles to new server hardware
+###################################################################
+
+Get All Server Hardware By Type As Dictionary
+    [Documentation]  Returns a dictionary populated with all server harwdare and enlosure uri grouped by server hardware type.
+    ...     Example:  ${AvailableSH}  =  { 'SY 480 Gen9 1': [['/rest/enclosures/000000CN754404R9', 'CN754404R9, bay 4']],
+    ...                                    'SY 660 Gen9 1': [['/rest/enclosures/000000CN754404R9', 'CN754404R9, bay 5'], ['/rest/enclosures/000000CN754404R9', 'CN754404R9, bay 6']]}
+    ${AvailableSH}=    Create Dictionary
+    ${resp} =    Fusion Api Get Server Hardware
+    ${sh_list} =    Get From Dictionary    ${resp}    members
+    :FOR   ${sh}   in  @{sh_list}
+    \    ${sht_uri}=    Get Variable Value    ${sh['serverHardwareTypeUri']}
+    \    Run keyword if     '${sht_uri}'=='None'    Continue for loop
+    \    ${sht_name}=    Get Server Hardware Type name from uri   ${sht_uri}
+    \    ${status}=    run keyword and return status   Dictionary Should Contain Key    ${AvailableSH}    ${sht_name}
+    \    ${servers}=   Run Keyword If   '${status}'=='${True}'
+    \    ...   Get From Dictionary   ${AvailableSH}  ${sht_name}
+    \    ...   ELSE   create list
+    \    ${enc_server}      Create list
+    \    Append to list     ${enc_server}    ${sh['locationUri']}
+    \    Append to list     ${enc_server}    ${sh['name']}
+    \    Append to list   ${servers}    ${enc_server}
+    \    Set To Dictionary   ${AvailableSH}  ${sht_name}  ${servers}
+
+    Log Dictionary    ${AvailableSH}
+    [Return]    ${AvailableSH}
+
+Get Server Hardware Type name from uri
+    [Arguments]    ${uri}
+    [Documentation]    Returns Server Hardware Type name from specified uri.
+    ${resp}=    Fusion Api Get Server Hardware Types    uri=${uri}
+    ${sht_name} =    Get From Dictionary    ${resp}    name
+    [Return]    ${sht_name}
+
+Get Random Server Hardware by Type from Available Server Hardware
+    [Arguments]    ${sht_name}    ${AvailableSH}    ${enc_uri}      ${exclude_server_list}=[]
+    [Documentation]   Removes and returns a random server hardware based on the given server hardware type with same enclosure.
+    ...    from the server hardware dictionary specified. Specify the list of servers supposed to excluded from random assignment in 'exclude_server_list'.
+    ...    Example:  ${AllSH}=   Get All Server Hardware By Type As Dictionary
+    ...              # Get Server Hardware by type
+    ...              ${sh1}=  Get Random Server Hardware by Type from Available Server Hardware    ${sht_480_1}    ${AllSH}    ${enc_uri}    ${exclude_server_list}
+    ...              ${sh2}=  Get Random Server Hardware by Type from Available Server Hardware    ${sht_480_1}    ${AllSH}    ${enc_uri}    ${exclude_server_list}
+    ...              ${sh3}=  Get Random Server Hardware by Type from Available Server Hardware    ${sht_480_1}    ${AllSH}    ${enc_uri}    ${exclude_server_list}
+    ${sh_list}=    Get From Dictionary    ${AvailableSH}   ${sht_name}
+    ${enc_sh}    Create list
+    ${exclude_server_length}    Set Variable    ${None}
+    ${exclude_server_length}    Run keyword if    ${exclude_server_list}!=[]    Get Length    ${exclude_server_list}
+    ${exclude_list_exists}    Set Variable    ${None}
+    ${exclude_list_exists}    Run keyword if    '${exclude_server_length}'!='0' and '${exclude_server_length}'!='None'    Set Variable    ${True}
+    :FOR    ${server}   in  @{sh_list}
+    \    Run keyword if     '${exclude_list_exists}'=='True' and '${server[1]}' in ${exclude_server_list}    Remove Values From List   ${sh_list}   ${server}
+    \    Run keyword if     '${exclude_list_exists}'=='True' and '${server[1]}' in ${exclude_server_list}    continue for loop
+    \    Run keyword if     '${server[0]}'=='${enc_uri}'    Append to list    ${enc_sh}     ${server[1]}
+    ${sh}=    Select list Item Randomly    ${enc_sh}
+    :FOR    ${remaining_sh}     in      @{sh_list}
+    \    Run keyword if     '${remaining_sh[1]}'=='${sh}'    Remove Values From List   ${sh_list}   ${remaining_sh}
+    Set To Dictionary   ${AvailableSH}   ${sht_name}   ${sh_list}
+    [Return]    ${sh}
+
+Select list Item Randomly
+    [Documentation]    Select list item randomly from given list
+    [Arguments]        ${list}
+    ${length}=       Get Length     ${list}
+    ${random_no} =   Evaluate       random.randint(0, ${length}-1)    modules=random
+    ${item}=         Set variable   ${list[${random_no}]}
+    [Return]         ${item}
+
+cluster synchronization validation
+    [Documentation]     Validating HA Cluster
+    HA Node State Should Be OK  Active
+    Wait For Appliance Became HA Cluster  Active    30m    10s
+    HA Node State Should Be OK  Standby
+    Wait For Appliance Became HA Cluster  Standby    30m    10s
+    Ensure Appliance is HA Cluster
+    Ensure CIM Can be Ping Through
+
+HA Node State Should Be OK
+    [Documentation]    Check the HA node state, it should be OK
+    [Arguments]  ${role}
+    ${resp}=    Get Specified Node from HA Nodes  ROLE=${role}
+    Log  Now state is: ${resp["state"]}
+    Should Be Equal As Strings    ${resp["state"]}  OK
+
+Wait For Appliance Became HA Cluster
+    [Documentation]    Wait for OV beca to HA cluster from single node
+    [Arguments]    ${role}  ${timeout}=60m  ${interval}=10s
+    Wait Until Keyword Succeeds  ${timeout}  ${interval}  HA Node State Should Be OK  ${role}
+
+Ensure Appliance is HA Cluster
+    [Documentation]    Get HA nodes counts
+    Log    Check HA cluster counts
+    ${resp}=    Fusion Api Get HA Nodes
+    ${counts}=  Set Variable  ${resp["count"]}
+    Run Keyword If    ${counts} != 2
+    ...               Fatal Error  msg=The ENV isn't a HA Cluster, stops the whole test execution
+
+Ensure CIM Can be Ping Through
+    [Documentation]    Verify both of CIMs can be pinged.
+    Log    Verify CIM, both of CIMs can be pinged.
+    :FOR    ${host}    IN    @{CIM_HOSTS.keys()}
+    \       ${return}=    Run    ping ${CIM_HOSTS["${host}"]}
+    \       ${match}  ${value}=   Run Keyword And Ignore Error
+    \       ...                  Should Contain  ${return}  Ping request could not find host ${CIM_HOSTS["${host}"]}
+    \       Run Keyword If    '${match}' == 'PASS'
+    \       ...     Fatal Error  msg=The CIM can not be ping through, stops the whole test execution
+
+Get Existing CIManager Presence Count
+    [Documentation]    Validate test environment contains 2 CIManagers
+    ${filled}=    Create List
+    ${response}=    Fusion Api Get Enclosures
+    # Validate CIMs counts
+    ${appliance_num_1}=    Get From Dictionary    ${response['members'][0]}    applianceBayCount
+    ${appliance_num_2}=    Get From Dictionary    ${response['members'][1]}    applianceBayCount
+    ${appliance_num_3}=    Get From Dictionary    ${response['members'][2]}    applianceBayCount
+    ${appliance_num} =      Evaluate    ${appliance_num_1}+${appliance_num_2}+${appliance_num_3}
+    :FOR    ${index}    IN RANGE    0    ${appliance_num}
+    \    ${device_presence}    ${bay_number}    ${powered_On}=    Get CIM Presence with power status     ${response}    ${index}    ${response}
+    \    Run Keyword If    '${device_presence}'=='Present' and '${powered_On}'=='True'    Append To List    ${filled}    ${bay_number}
+    ...   ELSE    Log    No CIManager Available in bay number, ${bay_number}
+    ${presence_cnt}=    Get Length    ${filled}
+    [Return]    ${presence_cnt}
+
+Get CIM Presence with power status
+    [Documentation]    Get CIManagers current presence
+    [Arguments]    ${response}    ${index}    ${response}
+    ${appliances_1}=    Get From Dictionary    ${response['members'][0]}    applianceBays
+    ${appliances_2}=    Get From Dictionary    ${response['members'][1]}    applianceBays
+    ${appliances_3}=    Get From Dictionary    ${response['members'][2]}    applianceBays
+    ${appliances} =    combine lists   ${appliances_1}  ${appliances_2}  ${appliances_3}
+    ${appliance_bay}=    Get From List    ${appliances}    ${index}
+    ${device_presence}=    Get From Dictionary    ${appliance_bay}    devicePresence
+    ${bay_number}=    Get From Dictionary    ${appliance_bay}    bayNumber
+    ${powered_On}=    Get From Dictionary    ${appliance_bay}    poweredOn
+    [Return]    ${device_presence}    ${bay_number}    ${powered_On}
+
+Update Logical Interconnect from Group for performance
+    [Documentation]  Update Logical interconnect from group
+    ...              Example:
+    ...                Update Logical interconnect from Group  ${dto}
+    ...              Data Required:
+    ...                Logical Enclosure DTO
+    [Arguments]  ${LI}   ${timeout}=3000    ${interval}=10
+    ${name} =  Get From Dictionary  ${LI}  name
+    ${liuri} =  Get LI URI  ${name}
+    Log     liuri:${liuri}
+    Log     ${\n}Update Logical Interconnect ${name} from group
+    ${resp} =    Fusion Api Update From Group    ${liuri}
+    ${status}  ${task_uri} =  Run Keyword and Ignore Error  Get From Dictionary  ${resp['headers']}  location
+    Return From Keyword If    '${status}'=='FAIL'    ${resp}
+    Log  The task URI is ${task_uri}
+    ${task} =  Fusion Api Get Task  uri=${task_uri}
+    Wait For Task2  ${task}  timeout=${timeout}  interval=${interval}
+
+Parse CSV And Post Webapp Startup Time
+    [Documentation]     Parse the CSV file consisting of RMs start timestamp(epoch), End Time Stamp(epoch),
+    ...                 Total start time(Sec) and upload this timing data to Logstash DB
+    [Arguments]         ${path}                     ${filename}
+    ${file} =           OperatingSystem.Get File    ${path}/${filename}
+    @{list}=            Split to lines              ${File}
+    ${payload}=         Create Dictionary
+    # pattern of Webapp startup time is Webapp Name, Start time stamp(epoch), End Time Stamp(epoch), Total start time(Sec)
+    ${pattern} =        Set Variable                .*, *(\\d+\\.?\\d*,) *(\\d+\.?\\d*,) *(\\d+\\.?\\d*)
+
+    :FOR                ${line}                 IN                      @{list}
+    \                   ${value} =              Get Variable Value      ${line}
+    \                   ${status} =             Run Keyword And Return Status               Should Match Regexp     ${value}
+    \                   ...                     ${pattern}
+    \                   Continue For Loop If    '${status}'=='False'
+    \                   ${data} =               Split String            ${value}            separator=,
+    \                   ${rawname} =            Get Variable Value      ${data[0]}
+    \                   ${rm} =                 Replace String Using Regexp                 ${rawname}              [Ss]tart *
+    \                   ...                     ${EMPTY}
+    \                   Set To Dictionary       ${payload}
+    ...                 rm_name                 ${rm}
+    ...                 rm_start_time(epoch)    ${data[1]}
+    ...                 rm_end_time(epoch)      ${data[2]}
+    ...                 rm_total_startup_time(sec)                      ${data[3]}
+    ...                 host                    ${HOSTNAME}
+    \                   Run Keyword If    "${production_env}" == "${True}"
+    \   ...             Post Data to ELK    ${cdt-ci-webapp-restart_elk_index}     ${payload}
+    [Return]            ${payload}
+
+Download And Install perl-Module-Pluggable
+    [Documentation]     Downloads a perl-Module-Pluggable RPM and installs it in the OV appliance. For e.g. RPM_WEB_URL = {7:'http://wpstwork4.vse.rdlabs.hpecorp.net/CDT/RPM/Pluggable/centos/7'}"
+
+    # Arguments are url to download the RPM pkg, dir to install pkg in appliance plugrpm is a pattern for rpm file name
+    [Arguments]    ${url}    ${dir}    ${plugrpm}   ${plugrpmpattern}
+    ${rpm_url} =    Get Variable Value    ${url}
+    Run Keyword If   ${rpm_url} == ${None}    FAIL    "Please specify variable with name RPM_WEB_URL and its value is a dictionary with key set to cent OS version and value set to url to download RPM for perl-Module-Pluggable"
+    ${command} =     Set Variable     cat /etc/centos-release
+    ${response}         Execute Command     ${command}
+    ${centos_ver} =    Evaluate     '${response}'.split('release ')[1].split('.')[0]
+    ${download_url} =  Evaluate    ${rpm_url}.get('${centos_ver}','')
+    Run Keyword If   '${download_url}' == ''    FAIL    Failed to get url to download perl-Module-Pluggable RPM for Cent OS '${centos_ver}'
+
+    ${path}         ${pluggablerpm}=    Download File In Remote System   ${dir}   ${download_url}   ${plugrpm}   ${plugrpmpattern}
+    Install RPM       ${path}    ${pluggablerpm}
+
+Download File In Remote System
+        [Documentation]    Downloads a file or file matching the specific pattern in remote system at a specific folder using SSH
+        [Arguments]    ${dest_dir}    ${download_uri}    ${filename}   ${pattern}
+        ${command}=    Set Variable    wget -r -l1 -np -nH -nd ${download_uri} -P ${dest_dir} -A ${filename}
+
+        ${stdout}           ${stderr}       ${rc}=      Execute Command     ${command}      return_stderr=True
+        ...                 return_rc=True
+        Should Be Equal As Integers         ${rc}       0                   msg=Failed to get ${filename} ${stderr}.
+
+        ${stderr1}=    Remove String    ${stderr}   \n    (    )    '    "
+        # Find the name of the downloaded RPM
+        ${rpm} =    Evaluate    re.search(r'.*(${pattern}).*', '${stderr1}').group(1)   modules=re
+
+        SSHLibrary.File Should Exist    ${dest_dir}/${rpm}
+        [Return]    ${dest_dir}    ${rpm}
+
+Extract RPM
+    [Documentation]     Extracts the RPM using rpm2cpio command in a specified path
+    [Arguments]         ${path}         ${rpm}
+    SSHLibrary.File Should Exist        ${path}/${rpm}
+    ${command}=         Set Variable    cd ${path};rpm2cpio ${rpm} | cpio \\-idmv
+    ${stdout}           ${stderr}       ${rc}=      Execute Command     ${command}      return_stderr=True
+    ...                 return_rc=True
+    Should Be Equal As Integers         ${rc}       0                   msg=Failed to extract ${rpm} ${stderr}.
+
+Install RPM
+    [Documentation]     Installs the RPM in a specified path
+    [Arguments]         ${path}         ${rpm}
+    SSHLibrary.File Should Exist        ${path}/${rpm}
+    ${command}=         Set Variable    cd ${path};rpm -ivh ${rpm} --force
+    ${stdout}           ${stderr}       ${rc}=      Execute Command     ${command}      return_stderr=True
+    ...                 return_rc=True
+    Should Be Equal As Integers         ${rc}       0                   msg=Failed to install ${rpm} ${stderr}.
+
+Get RM Performance Data
+    [Documentation]         Executes Brad Newman's script at the appliance and get the RMs start up time data in the
+    ...                     form of csv and downloads this file to Testhead
+    [Arguments]             ${path}                     ${perf_file}
+    ${csvfilename} =        Set Variable                rm_csv
+    SSHLibrary.File Should Exist                        ${path}/${perf_file}
+    ${command} =            Set Variable                cd ${path};perl ${perf_file} --csv ${csvfilename}
+    ${stdout}               ${stderr}                   ${rc}=      Execute Command     ${command}      return_stderr=True
+    ...                     return_rc=True
+    Should Be Equal As Integers                         ${rc}       0
+    ...                     msg=Failed to get RMs performance CSV file : ${stderr}.
+    SSHLibrary.File Should Exist                        ${path}/${csvfilename}
+    SSHLibrary.Get File     ${path}/${csvfilename}      destination=.
+
+Login As ${username} who is a ${password}
+    [Documentation]    Login to OV appliance
+    ${admin_credentials}=    Create Dictionary    userName=${username}    password=${password}
+    Log    ${admin_credentials}
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+
+Get All Server Hardware Uri As Dictionary
+    [Documentation]  Returns a dictionary populated with server harwdare Type URI as Key and server hardware type as value.
+    ...     Example:  ${AvailableSH}  =  { 'SH:CN754404R9, bay 4':"/rest/server-hardware-types/A90668D9-FCC1-4369-932F-25AB4461EDAD" }
+    ${typeuri_to_name}=    Create Dictionary
+    ${resp} =    Fusion Api Get Server Hardware
+    ${sh_list} =    Get From Dictionary    ${resp}    members
+    :FOR   ${sh}   IN  @{sh_list}
+    \    ${sht_uri} =    Get Variable Value    ${sh['serverHardwareTypeUri']}
+    \    ${sh_name} =    Get Variable Value    ${sh['name']}
+    \    Set To Dictionary   ${typeuri_to_name}  SH:${sh_name}    ${sht_uri}
+
+    Log Dictionary    ${typeuri_to_name}
+    [Return]    ${typeuri_to_name}
+
+Get All Server Hardware Type As Dictionary
+    [Documentation]    Returns All Server Hardware Types in appliance as dict with uri as key and type as value.
+    ...    ${type_dict} =  {"uri": "/rest/server-hardware-types/A90668D9-FCC1-4369-932F-25AB4461EDAD":'SY 480 Gen10 1'}
+    ${type_dict} =          Create Dictionary
+    ${resp}=    Fusion Api Get Server Hardware Types
+    :FOR                ${entry}                   IN                      @{resp['members']}
+    \           ${sht_name} =    Get From Dictionary    ${entry}    name
+    \           ${sht_uri} =     Get From Dictionary    ${entry}    uri
+    \           Set To Dictionary    ${type_dict}     ${sht_uri}    ${sht_name}
+    [Return]    ${type_dict}
+
+Device Reached State
+    [Documentation]    This keyword will get the current device state
+    [Arguments]    ${uri}    ${state}   ${stateStr}=['state']
+    ${resp} =   fusion api get resource    ${uri}
+    Should Match Regexp    ${resp${stateStr}}    ${state}
+    [Return]    ${resp}
+
+Wait Until Enclosures Reached State
+    [Documentation]   Based on a timeout and polling interval times, keyword will wait for the enclosures to be in a certain state.
+    [Arguments]   ${state}   ${timeout}   ${interval}    ${stateStr}=['state']
+    ${resp} =   Fusion Api Get Enclosures
+    :FOR        ${entry}                   IN                      @{resp['members']}
+    \           ${uri} =    Get From Dictionary    ${entry}    uri
+    \           Log    Waiting for ${uri} to reach ${state}   console=True
+    \           Run Keyword And Continue On Failure    Wait Until Keyword Succeeds   ${timeout}   ${interval}
+    \           ...                                    Device reached state   ${uri}    ${state}   ${stateStr}
+
+Wait Until Interconnects Reached State
+    [Documentation]   Based on a timeout and polling interval times, keyword will wait for the ICMs to be in a certain state.
+    ...               It skips checking state of ICM that matches the ${skipPattern} variable
+    [Arguments]   ${state}   ${timeout}   ${interval}    ${stateStr}=['state']    ${skipPattern}=${None}
+    ${resp} =   Fusion Api Get Interconnect
+    :FOR                ${entry}                   IN                      @{resp['members']}
+    \                   ${status} =    Run Keyword If    '${skipPattern}' != '${None}'
+    \           ...     Run Keyword And Return Status    Should Match Regexp    ${entry['productName']}    ${skipPattern}
+    \           Run Keyword If    '${status}'=='True'    Log    continue:${entry['productName']}    console=True
+    \           Continue For Loop If    '${status}'=='True'
+    \           ${uri} =    Get From Dictionary    ${entry}    uri
+    \           Log    Waiting for ${uri} to reach ${state}   console=True
+    \           Run Keyword And Continue On Failure    Wait Until Keyword Succeeds   ${timeout}   ${interval}
+    \           ...                                    Device reached state   ${uri}    ${state}    ${stateStr}
+
+Wait Until SAS Interconnects Reached State
+    [Documentation]   Based on a timeout and polling interval times, keyword will wait for the SAS ICMs to be in a certain state.
+    [Arguments]   ${state}   ${timeout}   ${interval}    ${stateStr}=['state']
+    ${resp} =   Fusion Api Get SAS Interconnects
+    :FOR                ${entry}                   IN                      @{resp['members']}
+    \           ${uri} =    Get From Dictionary    ${entry}    uri
+    \           Log    Waiting for ${uri} to reach ${state}   console=True
+    \           Run Keyword And Continue On Failure    Wait Until Keyword Succeeds   ${timeout}   ${interval}
+    \           ...                                    Device reached state   ${uri}    ${state}    ${stateStr}
+
+
+Wait Until Servers Reached State
+    [Documentation]   Based on a timeout and polling interval times, keyword will wait for the servers to be in a certain state.
+    [Arguments]   ${state}   ${timeout}   ${interval}    ${stateStr}=['state']
+    ${resp} =   Fusion Api Get Server Hardware
+    :FOR        ${entry}                   IN                      @{resp['members']}
+    \           ${uri} =    Get From Dictionary    ${entry}    uri
+    \           Log    Waiting for ${uri} to reach ${state}   console=True
+    \           Run Keyword And Continue On Failure    Wait Until Keyword Succeeds   ${timeout}   ${interval}
+    \           ...                                    Device reached state   ${uri}    ${state}   ${stateStr}
+
+Create Logical JBODs from variable
+    [Documentation]    Add a list of logical jbods and return the responses.
+    [Arguments]     ${ljbs}     ${ljb_status_code}=202
+    ${resplist} =  Create List
+    Log  Adding SAS Logical jbods   console=True
+    :FOR    ${ljb}  IN  @{ljbs}
+    \   ${status} =  Check Resource Existing  SASLJBOD:${ljb['name']}
+    \   run keyword if  ${status}=='PASS'  Log  ljbod ${ljb['name']} already present in OneView  WARN
+    \   continue for loop if  ${status}=='PASS'
+    \   ${resp} =  CREATE Logical JBOD by Drive Bay  ${ljb}
+    \   Run Keyword If  ${resp['status_code']}!=${ljb_status_code}    Run Keyword And Continue On Failure     FAIL     Adding Logical JBOD ${ljb['name']} failed
+    \   Continue For Loop If    ${resp['status_code']}!=${ljb_status_code}
+    \   Append To List  ${resplist}  ${resp}
+    [Return]    ${resplist}
+
+CREATE Logical JBOD by Drive Bay
+    [Documentation]    Add Logical jbod and return the response.
+    [Arguments]      ${ljbod}
+    ${name} =  Get From Dictionary  ${ljbod}  name
+    Log     \nCreating Logical JBOD ${name}    console=yes
+    ${payload} =    Create Logical JBOD POST Payload  ${ljbod}
+    ${resp} =   Fusion Api Post Sas Logical Jbods    body=${payload}
+    [Return]    ${resp}
+
+Create Logical JBOD POST Payload
+    [Documentation]    Create Logical JBOD POST Payload
+    [Arguments]        ${ljbod}
+    ${payload} =  copy dictionary  ${ljbod}
+
+    #Drive Enclosure Location
+    ${de} =  Get From Dictionary  ${ljbod}  driveEnclosure
+
+    #Drive Bay Uris
+    ${db_list} =  Get From Dictionary  ${ljbod}  driveBayUris
+    ${db_uris} =    Lookup DriveBay uris    ${de}   ${db_list}
+    Set to Dictionary   ${payload}  driveBayUris    ${db_uris}
+    Remove from dictionary  ${payload}  driveEnclosure
+    [return]  ${payload}
+
+Lookup DriveBay uris
+    [Documentation]    Get Drive Bay URIs
+    [Arguments]     ${de}    ${baylist}
+    ${baylist_len} =   Get Length   ${baylist}
+    ${bayuris} =    Create List
+    ${resp} =   Get Drive Enclosure    ${de}
+    ${drivebays} =  Get From Dictionary  ${resp}    driveBays
+    ${l} =   Get Length   ${drivebays}
+    :FOR   ${x}   IN RANGE   0   ${l}
+    \   ${drivebaylocation} =   Get From Dictionary  ${drivebays[${x}]}    driveBayLocation
+    \   ${location} =   Get From Dictionary  ${drivebaylocation}    locationEntries
+    \   Run Keyword If    "${location[0]['value']}" in ${baylist}    Append To List   ${bayuris}    ${drivebays[${x}]['uri']}
+    \   ${bayuri_len} =   Get Length   ${bayuris}
+    \   Exit For Loop If    ${bayuri_len} == ${baylist_len}
+    [Return]    ${bayuris}
+
+Enable HPE Remote Support
+    [Documentation]     Enable remote support registration to HPE
+    [Arguments]    ${rem_supp_edit}
+    ...            ${time_out}=${REMOTE_SUPPORT_TIMEOUT}
+    #Set Log Level    Trace
+    ${response}=    Fusion Api Edit Remote Support    ${rem_supp_edit}
+    Log    ${response}
+    Run Keyword If  ${response['status_code']}==200  Log   Enabled Remote Support Successfully on oneview Appliance  console=True
+    ...    ELSE IF  ${response['status_code']}==202  Wait For Task2  ${response}  ${time_out}
+    ...    ELSE     Fail  msg=Failed to Enable Remote Support in oneview Settings
+
+HPE Remote Support Connection Should Be
+    [Documentation]     Check if Remote Support is connected to HPE
+    [Arguments]    ${status}
+    #Set Log Level    TRACE
+    ${response} =   Get Resource by URI   /rest/support/registration
+    Log    ${response}    console=True
+    Should Be Equal    ${response['connected']}    ${status}  ignore_case=True
+
+First Time Remote Support Registration
+    [Documentation]     First Time Remote Support Registration
+    [Arguments]    ${rem_supp_edit}
+    ...            ${time_out}=${REMOTE_SUPPORT_TIMEOUT}
+    #Set Log Level    Trace
+    #${response}    ${sessionid}    Fusion Api Login Appliance  ${FUSION_IP}  ${cred}
+    #Run Keyword If    ${response['status_code']}==200    Log    Successful login    console=True
+    ${state}=   Get HPE Remote Support Registration Status
+    #${state}=   Set Variable    ${FALSE}
+    Run Keyword If    ${state} == ${FALSE}    Enable HPE Remote Support    rem_supp_edit=${remotesupport_edit}
+    ...  ELSE     Run Keywords    Log    HPE Registration is already done.Now RS Enable and Disable Action should be performed   WARN   console=True
+    ...           AND   Enable HPE Remote Support   rem_supp_edit=${remotesupport_enable}
+
+Get HPE Remote Support Registration Status
+     [Documentation]     Validate if Remote Support is registered
+     #Set Log Level    TRACE
+     ${response} =   Get Resource by URI   /rest/support/registration
+     Log    ${response}    console=True
+     [Return]  ${response['registered']}
+
+Traffic test setup
+   [Documentation]     Pre-conditions for traffic generation test cases
+    Power on selected blades
+    Wait for Server OS to come up
+    Set Global variable     ${traffic_pre_req_variable}     ${TRUE}
+
+Power on selected blades
+   [Documentation]     Power on selected blades
+   [Tags]              Profiles
+   ${selected_server_profiles} =       Create List
+   ${l} =   Get Length   ${rhel_server_ips}
+   :FOR   ${x}   IN RANGE   0   ${l}
+   \    ${server_profiles} =            Get Dictionary Keys     ${rhel_server_ips[${x}]}
+   \    Power on selected server    ${server_profiles}
+
+Wait for Server OS to come up
+   [Documentation]     Wait for Server OS to come up
+   [Tags]              server_ips
+   Wait for server to boot    ${rhel_server_ips}
+
+Wait for server to boot
+    [Documentation]     Check Whether Server is OS has come up
+    [Arguments]      ${rhel_server_ips}
+    :FOR  ${ip}  in  @{rhel_server_ips}
+    \   ${server_profile_ip} =            Get Dictionary Values     ${ip}
+    \   ${hostname} =  Get From Dictionary    ${server_profile_ip[0]}   name
+    \   ${username} =  Get From Dictionary    ${server_profile_ip[0]}   username
+    \   ${password} =  Get From Dictionary    ${server_profile_ip[0]}   password
+    \   ${id}=           Open Connection   ${hostname}
+    \   Log     ${\n}Checking SSH connection for ${hostname}
+    \   ${status}    ${output}=  Run Keyword And Ignore Error  Wait Until Keyword Succeeds     90min               120s    Login    ${username}     ${password}
+    \   Run Keyword If  '${status}'=='FAIL'   Run Keyword And Continue on Failure  Fail    Failed to Open SSH Connection for server
+    \   Close All Connections
+
+Add Remote Enclosure Setup
+    [Documentation]     Adding Remote Enclosures to OV
+    [Arguments]      ${FLM_IPv6}
+    ${password} =    Get FLM Factory Password    ${FLM_IPv6[0]}
+    ${session} =    Get Session From Factory Password    ${FLM_IPv6[0]}    ${password}
+    ${isactive} =    Is This FLM Active    ${FLM_IPv6[0]}    ${session}
+    Run Keyword If  '${isactive}'=='Not Authorized'   Fail    Failed to get Authorized IPV6 Address
+    ${active} =    Set Variable if    '${isactive}'=='No'    ${FLM_IPv6[1]}    ${FLM_IPv6[0]}
+    ${resp} =    Add Remote Enclosure    ${active}
+    Wait For Task2    ${resp}      timeout=900  interval=20
+
+Enclosure Interconnect Link Topology Should Be In Expected State
+    [Documentation]     Check specific Enclosure ILT
+    ${ilts}=  Fusion Api Get Interconnect Link Topology
+    ${members} =  Get From Dictionary    ${ilts}   members
+    ${l} =   Get Length   ${members}
+    :FOR   ${x}   IN RANGE   0   ${l}
+    \   ${ilt_status} =    Get From Dictionary  ${members[${x}]}    status
+    \   ${topologyerrors} =     Get From Dictionary  ${members[${x}]}    topologyErrors
+    \   Run Keyword If  '${topologyerrors}'!='[]' or '${ilt_status}'!='OK'    Run Keyword And Continue On Failure     FAIL     Interconnect Link Topology Validation failed
+
+Assign Hardware type to SPT
+    [Documentation]     Assigning server hardware type to SPT
+    ${spt_sp_list}    Create List
+    :FOR    ${sp}    in    @{assigned_sps}
+    \    ${presence}    ${value}    Run keyword and ignore error    Get from Dictionary    ${sp}    serverProfileTemplateUri
+    \    ${spt_sp_dict}    Run keyword if    '${presence}'=='PASS' and "${value}"!='None'    Create Dictionary
+    \    Run keyword if    '${presence}'=='PASS' and "${value}"!='None'    Set to dictionary    ${spt_sp_dict}    spt    ${sp['serverProfileTemplateUri']}
+    \    Run keyword if    '${presence}'=='PASS' and "${value}"!='None'    Set to dictionary    ${spt_sp_dict}    hw    ${sp['serverHardwareUri']}
+    \    Run keyword if    '${presence}'=='PASS' and "${value}"!='None'    Append to list    ${spt_sp_list}    ${spt_sp_dict}
+    ${len}    Get Length    ${spt_sp_list}
+    Run keyword if    ${len}==0    Return from keyword
+    :FOR    ${spt}    in    ${spts}
+    \    Set hardware type value to spt     ${spt}    ${spt_sp_list}
+
+Set hardware type value to spt
+    [Documentation]    Set hardware type value to spt
+    [Arguments]    ${spt}    ${spt_sp_list}
+    ${key}    Get Dictionary Keys    ${spt}
+    :FOR    ${spspt}    in    @{spt_sp_list}
+    \    ${spt_name}    Fetch from right    ${spspt['spt']}    :
+    \    ${resp}    Run keyword if    '${spt['${key[0]}']['name']}'=='${spt_name}'     Get resource    ${spspt['hw']}
+    \    ${sht_resp}    Run keyword if    '${spt['${key[0]}']['name']}'=='${spt_name}'    Get resource    ${resp['serverHardwareTypeUri']}
+    \    Run keyword if    '${spt['${key[0]}']['name']}'=='${spt_name}'    Set To Dictionary    ${spt['${key[0]}']}   serverHardwareTypeUri    SHT:${sht_resp['name']}
+
+Enclosure Manager Bays Should Be In Expected State
+    [Documentation]   Check that enclosures Manager Bays are in expected states.
+    [Arguments]      ${enclosures}
+    Log   \n Checking OV Enclosures Manager Bays State...   console=${True}
+    ${enc_serialno} =   Create List
+    ${enc_serialno_fromOV} =   Create List
+    ${resp}=   Fusion Api Get Resource   /rest/enclosures
+    ${encs}=   Get From Dictionary   ${resp}   members
+    :FOR    ${mem}  in  @{enclosures}
+    \   ${enc} =            Get Dictionary Keys     ${mem}
+    \   Append To List   ${enc_serialno}    ${enc[0]}
+    :For    ${enc}  in  @{encs}
+    \   ${encName}=   Get From Dictionary   ${enc}  name
+    \   Append To List   ${enc_serialno_fromOV}    ${encName}
+    \   ${index}=   Get Index From List    ${enc_serialno}    ${encName}
+    \   Run Keyword If   "${encName}" in ${enc_serialno}   Compare Enclosure Manager Attributes To Expected Values   ${enc}    ${enclosures}    ${index}
+    Run Keyword And Continue on Failure  List Should Contain Sub List   ${enc_serialno_fromOV}    ${enc_serialno}
+
+Compare Enclosure Manager Attributes To Expected Values
+    [Documentation]   Check that enclosure manager attributes are in expected states. Returns boolean.
+    ...               Required argument is enclosures->members[${i}] dictionary value
+    ...               Returns true on matching expected values. Otherwise, false
+    [Arguments]   ${enc}   ${encdata_from_file}    ${index}
+    :FOR   ${x}   IN RANGE   1   3
+    \   ${encName} =   Get From Dictionary   ${enc}   name
+    \   ${emBays} =   Get From Dictionary   ${enc}   managerBays
+    \   ${emBays_from_datafile} =   Get Dictionary Values   ${encdata_from_file[${index}]}
+    \   ${emBays_from_datafile} =            Get From List  ${emBays_from_datafile}  0
+    \   ${encMgrBay} =   Get Enclosure Manager Bay Data   ${emBays}   ${x}
+    \   ${encMgrBay_from_datafile} =   Get Enclosure Manager Bay Data   ${emBays_from_datafile}   ${x}
+    \   Run Keyword And Continue on Failure     Dictionary Should Contain Sub Dictionary   ${encMgrBay}    ${encMgrBay_from_datafile}
+
+Get Enclosure Manager Bay Data
+   [Documentation]   Get enclosure manager bay data from OneView enclosures->members[${i}] dictionary value
+   [Arguments]   ${emBays}   ${bayNumber}
+   Set Test Variable   ${bayFound}   ${False}
+   ${l} =   Get Length   ${emBays}
+   :FOR   ${x}   IN RANGE   0   ${l}
+   \   Run Keyword If   ${emBays[${x}]['bayNumber']} == ${bayNumber}   Set Test Variable   ${bayFound}   ${True}
+   \   Run Keyword If   ${emBays[${x}]['bayNumber']} == ${bayNumber}   Exit For Loop
+   Run Keyword If   '${bayFound}' == '${False}'   Fail   msg=Bay number ${bayNumber} was not found in managerBays->bayNumber.
+   [Return]   ${emBays[${x}]}
+
+Wait Until Drive Enclosures Reached State
+    [Documentation]   Based on a timeout and polling interval times, keyword will wait for the Drive Enclosures to be in a certain state.
+    [Arguments]   ${state}   ${timeout}   ${interval}    ${stateStr}=['state']
+    ${resp} =   Fusion Api Get Drive Enclosure
+    :FOR        ${entry}                   IN                      @{resp['members']}
+    \           ${uri} =    Get From Dictionary    ${entry}    uri
+    \           Log    Waiting for ${uri} to reach ${state}   console=True
+    \           Run Keyword And Continue On Failure    Wait Until Keyword Succeeds   ${timeout}   ${interval}
+    \           ...                                    Device reached state   ${uri}    ${state}   ${stateStr}
+
+Post LE creation checks
+    [Documentation]     Check for state of resources post LE creation
+    [Arguments]     ${curr_time}
+    ${enclosure_resps} =   Fusion Api Get Enclosures
+    Run keyword and continue on failure     Check Any Active Alerts on resources    ${enclosure_resps}    ${curr_time}
+    ${server_resps} =   Fusion Api Get Server Hardware
+    Run keyword and continue on failure     Check Any Active Alerts on resources    ${server_resps}    ${curr_time}
+    ${drive_enclosure_resps} =   Fusion Api Get Drive Enclosure
+    Run keyword and continue on failure     Check Any Active Alerts on resources    ${drive_enclosure_resps}    ${curr_time}
+
+Wait For Resources To Reach Desired State
+    [Documentation]    Wait for all managed devices to reach desired terminal state
+    [Arguments]    ${beforeLE}=True
+    
+    Log    Wait For Resources To Reach Desired State has been invoked. This may take little longer to finish    console=True
+    ${before_le_state} =    Create List    Monitored    Monitored    Monitored
+    ${after_le_state} =     Create List    Configured   Configured|Inventory    .*ProfileApplied
+
+    ${state}   ${drvState}   ${svrState} =    Run Keyword If    '${beforeLE}'=='True'
+    ...                                       Set Variable    ${before_le_state}
+    ...                               ELSE    Set Variable    ${after_le_state}
+
+
+    Wait Until Keyword Succeeds           30min          1min      Check Appliance State   ${APPLIANCE_IP}     OK
+    Wait Until Keyword Succeeds           90min          5min      Cluster HA State Should Be OK
+    Wait Until Enclosures Reached State           ${state}       15 min   1 min
+    Wait Until Servers Reached State              ${svrstate}    1 min    30s
+    Wait Until Interconnects Reached State        ${state}       5 min    1 min
+    Wait Until SAS Interconnects Reached State    ${state}       5 min    1 min
+    Wait Until Drive Enclosures Reached State     ${drvState}    5 min    1 min
+
+Check Any Active Alerts on resources
+    [Documentation]     Used for vaildating baseline firmware update is causing any major failure
+    [Arguments]         ${resps}    ${time}
+    ${total}    Set Variable    0
+    ${total}    convert to integer    ${total}
+    :FOR                ${resp}                 IN                      @{resps['members']}
+    \                   ${resourceName}=        Get From Dictionary     ${resp}    name
+    \                   ${alerts}=              Get ALL Alerts by Param
+    \                   ...                     param=?filter="associatedResource.resourceName='${resourceName}' AND created gt ${time}"
+    \                   Log                     ${alerts}
+    \                   ${len}=                 get length              ${alerts['members']}
+    \                   Run Keyword If          ${len} == 0             Log
+    \                   ...                     There is no suspicious alert exists on ResourceName:${resourceName}
+    \                   ...                     ELSE                    Log
+    \                   ...                     There are some alert existing in resourceName:${resourceName}
+    \                   continue for loop if    ${len} == 0
+    \                   ${active_alerts}=       Get ALL Alerts by Param
+    \                   ...                     param=?filter="associatedResource.resourceName='${resourceName}' AND created gt ${time} AND severity = 'Critical' AND alertState = 'Active'"
+    \                   ${len1}=                get length              ${active_alerts['members']}
+    \                   ${locked_alerts}=       Get ALL Alerts by Param
+    \                   ...                     param=?filter="associatedResource.resourceName='${resourceName}' AND created gt ${time} AND severity = 'Critical' AND alertState = 'Locked'"
+    \                   ${len2}=                get length              ${locked_alerts['members']}
+    \                   ${count}=               Evaluate                ${len1}+${len2}
+    \                   run keyword if          ${count} != 0           Log
+    \                   ...                     Resource ${resourceName} has Critical/Locked alert    console=True
+    \                   ${total}                Evaluate    ${total}+${count}
+    \                   run keyword and continue on failure    Should be equal as integers    ${count}    0
+    Run keyword if      ${total} != 0    Fail    Active/Locked Alerts Exist.
+
+Check uplink sets and uplink ports
+    [Documentation]     Check uplink sets and uplink ports
+    ${resp} =   Fusion Api Get Uplink Set
+    ${eth_nets}    Fusion Api Get Ethernet Networks
+    ${fc_nets}    Fusion Api Get FC Networks
+    ${fcoe_nets}    Fusion Api Get FCoE Networks
+    ${eth_net_dict}    Create dictionary
+    :FOR    ${enet}    in    @{eth_nets['members']}
+    \    Set to dictionary    ${eth_net_dict}    ${enet['uri']}    ${enet['name']}
+    ${fc_net_dict}    Create dictionary
+    :FOR    ${fcnet}    in    @{fc_nets['members']}
+    \    Set to dictionary    ${fc_net_dict}    ${fcnet['uri']}    ${fcnet['name']}
+    ${fcoe_net_dict}    Create dictionary
+    :FOR    ${fcoenet}    in    @{fcoe_nets['members']}
+    \    Set to dictionary    ${fcoe_net_dict}    ${fcoenet['uri']}    ${fcoenet['name']}
+    :FOR    ${uplinkset}   IN    @{resp['members']}
+    \    ${up}    Create Dictionary
+    \    Set to dictionary    ${up}    uri    ${uplinkset['uri']}
+    \    Set to dictionary    ${up}    name    ${uplinkset['name']}
+    \    Set to dictionary    ${up}    state    ${uplinkset['state']}
+    \    Set to dictionary    ${up}    status    ${uplinkset['status']}
+    \    Set to dictionary    ${up}    networkType    ${uplinkset['networkType']}
+    \    ${eth_names}    Run keyword if    '${uplinkset['networkType']}'=='Ethernet' and ${uplinkset['networkUris']}!=[]    Get network names    ${uplinkset['networkUris']}    ${eth_net_dict}
+    \    Run keyword if    '${uplinkset['networkType']}'=='Ethernet' and ${uplinkset['networkUris']}!=[]    Set to dictionary    ${up}    networkUris    ${eth_names}
+    \    ${fc_names}    Run keyword if    '${uplinkset['networkType']}'=='FibreChannel'    Get network names    ${uplinkset['fcNetworkUris']}    ${fc_net_dict}
+    \    Run keyword if    '${uplinkset['networkType']}'=='FibreChannel'    Set to dictionary    ${up}    networkUris    ${fc_names}
+    \    ${fcoe_names}    Run keyword if    '${uplinkset['networkType']}'=='Ethernet' and ${uplinkset['networkUris']}==[]    Get network names    ${uplinkset['fcoeNetworkUris']}    ${fcoe_net_dict}
+    \    Run keyword if    '${uplinkset['networkType']}'=='Ethernet' and ${uplinkset['networkUris']}==[]    Set to dictionary    ${up}    networkUris    ${fcoe_names}
+    \    ${pdata}    Get port configuration from uplink set    ${uplinkset['portConfigInfos']}
+    \    Set to dictionary    ${up}    port_details    ${pdata}
+    \    ${li}    Get resource by uri    ${uplinkset['logicalInterconnectUri']}
+    \    ${lig}    Get resource by uri    ${li['logicalInterconnectGroupUri']}
+    \    ${lig_name}    Get from dictionary    ${lig}    name
+    \    Set to dictionary    ${up}    lig_name    ${lig_name}
+    \    Run keyword and continue on failure    Compare uplinkset data against lig data    ${up}    ${lig_name}
+
+Get network names
+    [Documentation]    Get network name by uri
+    [Arguments]    ${nets}    ${all_nets}
+    ${net_names}    Create List
+    :FOR    ${net}    in    @{nets}
+    \    Append to list    ${net_names}    ${all_nets['${net}']}
+    [Return]    ${net_names}
+
+Compare uplinkset data against lig data
+    [Documentation]    Compare uplinkset data against lig data
+    [Arguments]    ${upl_data}    ${name_lig}
+    ${k}=    Get Dictionary Keys    ${ligs}
+    ${com}    Set variable    ${True}
+    ${l_data}    Set variable    ${None}
+    ${usm}    Set variable    ${None}
+    :FOR    ${item}    in    @{k}
+    \    ${l_data}    Run keyword if    '${ligs['${item}']['name']}'=='${upl_data['lig_name']}'    Set variable    ${item}
+    \    Run keyword if    '${ligs['${item}']['name']}'=='${upl_data['lig_name']}'    Exit For Loop
+    Run keyword if    '${l_data}'=='${None}'    FAIL    No match found
+    :FOR    ${us}    in    @{ligs['${l_data}']['uplinkSets']}
+    \    ${usm}=    Run keyword if    '${us['name']}'=='${upl_data['name']}'    Set variable    ${us}
+    \    Run keyword if    '${us['name']}'=='${upl_data['name']}'    Exit For Loop
+    Run keyword if    ${usm} is None    FAIL    No match found
+    Run keyword if    '${usm['name']}'!='${upl_data['name']}'    FAIL
+    Run keyword if    '${usm['networkType']}'!='${upl_data['networkType']}'    FAIL
+    Sort list    ${usm['networkUris']}
+    Sort list    ${upl_data['networkUris']}
+    Lists should be equal    ${usm['networkUris']}    ${upl_data['networkUris']}
+    ${ulen}    Get Length    ${upl_data['port_details']}
+    ${llen}    Get Length    ${usm['logicalPortConfigInfos']}
+    Run keyword if    ${ulen}!=${llen}    FAIL
+    :FOR    ${prt}    in    @{upl_data['port_details']}
+    \    Run keyword and continue on failure    Should be equal    ${prt['portStatus']}    Linked
+    \    Run keyword and continue on failure    Should be equal    ${prt['status']}    OK
+    \    Run keyword and continue on failure    compare port values    ${prt}    ${usm['logicalPortConfigInfos']}
+
+Compare port values
+    [Documentation]    compare port values
+    [Arguments]    ${u_prt}    ${l_prt}
+    ${com}    Set variable    ${None}
+    :FOR    ${p}    in    @{l_prt}
+    \    ${port}    replace string    ${p['port']}    .    :
+    \    ${com}    Run keyword if    '${p['bay']}'=='${u_prt['Bay']}' and '${port}'=='${u_prt['Port']}'    Set variable    ${True}
+    \    Run keyword if    '${p['bay']}'=='${u_prt['Bay']}' and '${port}'=='${u_prt['Port']}'    Exit for loop
+    Run keyword if    '${com}'!='True'    FAIL    Ports are not matching.
+
+Get port configuration from uplink set
+    [Documentation]     Get port configuration from uplink set
+    [Arguments]     ${port_data}
+    ${ps}    Create list
+    :FOR    ${port}     in      @{port_data}
+    \    ${port_dict}    Create dictionary
+    \    Get port location details    ${port['location']['locationEntries']}    ${port_dict}
+    \    ${details}    Get resource by uri    ${port['portUri']}
+    \    Set to dictionary    ${port_dict}    portName    ${details['portName']}
+    \    Set to dictionary    ${port_dict}    portType    ${details['portType']}
+    \    Set to dictionary    ${port_dict}    portStatus    ${details['portStatus']}
+    \    Set to dictionary    ${port_dict}    status    ${details['status']}
+    \    Append to list    ${ps}    ${port_dict}
+    [Return]    ${ps}
+
+Get port location details
+    [Documentation]     Get port number details
+    [Arguments]     ${location_entries}    ${p_dict}
+    :FOR    ${location_entry}      in      @{location_entries}
+    \    Run keyword if     '${location_entry['type']}'=='Port'    Set to dictionary    ${p_dict}    Port      ${location_entry['value']}
+    \    Run keyword if     '${location_entry['type']}'=='Bay'    Set to dictionary    ${p_dict}    Bay      ${location_entry['value']}
+    \    Run keyword if     '${location_entry['type']}'=='Enclosure'    Set to dictionary    ${p_dict}    Enclosure      ${location_entry['value']}
+
+Get health status and State
+    [Documentation]    Get state and status of resources
+    ${all_resources}    Create dictionary
+    ${enclosure_resps} =   Fusion Api Get Enclosures
+    ${enclosure_values}=    Get state and status of each resource    ${enclosure_resps}
+    Set to dictionary    ${all_resources}    enclosures    ${enclosure_values}
+    ${le_resps}=    Fusion Api Get Logical Enclosure
+    ${le_values}=    Get state and status of each resource    ${le_resps}
+    Set to dictionary    ${all_resources}    les    ${le_values}
+    ${server_resps} =   Fusion Api Get Server Hardware
+    ${server_values}=    Get state and status of each resource    ${server_resps}
+    Set to dictionary    ${all_resources}    servers    ${server_values}
+    ${drive_enclosure_resps} =   Fusion Api Get Drive Enclosure
+    ${drive_enclosure_values}=    Get state and status of each resource    ${drive_enclosure_resps}
+    Set to dictionary    ${all_resources}    drive_enclosures    ${drive_enclosure_values}
+    ${int_resps}=    Fusion Api Get Interconnect
+    ${int_values}=    Get state and status of each resource    ${int_resps}
+    Set to dictionary    ${all_resources}    interconnects    ${int_values}
+    ${sasint_resps}=    Fusion Api Get Sas Interconnects
+    ${sasint_values}=    Get state and status of each resource    ${sasint_resps}
+    Set to dictionary    ${all_resources}    sas_interconnects    ${sasint_values}
+    ${li_resps}=    Fusion Api Get LI
+    ${li_values}=    Get state and status of each resource    ${li_resps}
+    Set to dictionary    ${all_resources}    lis    ${li_values}
+    ${sasli_resps}=    Fusion Api Get SAS LI
+    ${sasli_values}=    Get state and status of each resource    ${sasli_resps}
+    Set to dictionary    ${all_resources}    sas_lis    ${sasli_values}
+    ${sanm_resps}=    Fusion API Get SAN Manager
+    ${sanm_values}=    Get state and status of each resource    ${sanm_resps}
+    Set to dictionary    ${all_resources}    san_managers    ${sanm_values}
+    ${ss_resps}=    Fusion Api Get Storage System
+    ${ss_values}=    Get state and status of each resource    ${ss_resps}
+    Set to dictionary    ${all_resources}    storage_systems    ${ss_values}
+    ${sv_resps}=    Fusion Api Get Storage Volumes
+    ${sv_values}=    Get state and status of each resource    ${sv_resps}
+    Set to dictionary    ${all_resources}    storage_volumes    ${sv_values}
+    ${sp_resps}=    fusion api get server profiles
+    ${sp_values}=    Get state and status of each resource    ${sp_resps}
+    Set to dictionary    ${all_resources}    server_profiles    ${sp_values}
+    [Return]    ${all_resources}
+
+Get state and status of each resource
+    [Documentation]    Get state and status of each resource
+    [Arguments]    ${resps}
+    ${values}    Create dictionary
+    :FOR    ${resp}    IN    @{resps['members']}
+    \    ${val}    Create dictionary
+    \    Set to dictionary    ${val}    status    ${resp['status']}
+    \    Set to dictionary    ${val}    state    ${resp['state']}
+    \    Set to dictionary    ${val}    type    ${resp['type']}
+    \    Set to dictionary    ${values}    ${resp['name']}    ${val}
+    [Return]    ${values}
+
+Get Degraded Health and State Resources
+    [Documentation]    Get Degraded Health and State Resources
+    [Arguments]    ${before_reimage}    ${after_reimage}
+    ${status_mismatch_list}    Create list
+    ${state_mismatch_list}    Create list
+    :FOR    ${key}    IN    @{before_reimage}
+    \    Dictionary Should Contain Key    ${after_reimage}    ${key}
+    \    Compare and eliminate degraded health and state resources    ${before_reimage['${key}']}    ${after_reimage['${key}']}    ${status_mismatch_list}    ${state_mismatch_list}
+
+Compare and eliminate degraded health and state resources
+    [Documentation]    Compare and eliminate degraded health and state resources
+    [Arguments]    ${values1}    ${values2}    ${hmismatch_list}    ${stmismatch_list}
+    :FOR    ${k}    IN    @{values1}
+    \    Dictionary Should Contain Key    ${values2}    ${k}
+    \    Run keyword if    '${values1['${k}']['status']}'!='${values2['${k}']['status']}'    Append to list    ${hmismatch_list}    ${values2['${k}']}
+    \    Run keyword if    '${values1['${k}']['state']}'!='${values2['${k}']['state']}'    Append to list    ${stmismatch_list}    ${values2['${k}']}
+
+Compare Health Before And After Restore
+    [Documentation]    Compare Health Before And After Restore
+    [Arguments]    ${v1}    ${v2}
+    :FOR    ${k}    in    @{v1}
+    \    Dictionary Should Contain Key    ${v2}    ${k}
+    \    Check for health degradation     ${v1['${k}']}    ${v2['${k}']}    ${health_desired['${k}']}
+
+Compare State Before And After Restore
+    [Documentation]    Compare State Before And After Restore
+    [Arguments]    ${v1}    ${v2}
+    :FOR    ${k}    in    @{v1}
+    \    Dictionary Should Contain Key    ${v2}    ${k}
+    \    Check for state degradation     ${v1['${k}']}    ${v2['${k}']}    ${state_desired['${k}']}
+
+Check for health degradation
+    [Documentation]    Check for degradation of health
+    [Arguments]    ${vals1}    ${vals2}    ${hd}
+    ${hl1}    Create list
+    ${hl2}    Create list
+    ${hl3}    Create list
+    ${hl4}    Create list
+    :FOR    ${ke}    in    @{vals1}
+    \    Dictionary Should Contain Key    ${vals2}    ${ke}
+    \    Run keyword if    '${vals1['${ke}']['status']}'!='${hd}'    Append to list    ${hl1}    ${vals1['${ke}']}
+    \    Run keyword if    '${vals1['${ke}']['status']}'=='${hd}' and '${vals1['${ke}']['status']}'=='${vals2['${ke}']['status']}'    Append to list    ${hl2}    ${vals1['${ke}']}
+    \    Run keyword if    '${vals1['${ke}']['status']}'!='${hd}' and '${vals1['${ke}']['status']}'=='${vals2['${ke}']['status']}'    Append to list    ${hl3}    ${vals1['${ke}']}
+    \    Run keyword if    '${vals2['${ke}']['status']}'!='${hd}' and '${vals2['${ke}']['status']}'!='${vals1['${ke}']['status']}'    Append to list    ${hl4}    ${vals2['${ke}']}
+    [Return]    ${hl1}    ${hl2}    ${hl3}    ${hl4}
+
+Check for state degradation
+    [Documentation]    Check for degradation of state
+    [Arguments]    ${vals1}    ${vals2}    ${sd}
+    ${sl1}    Create list
+    ${sl2}    Create list
+    ${sl3}    Create list
+    ${sl4}    Create list
+    :FOR    ${ke}    in    @{vals1}
+    \    Dictionary Should Contain Key    ${vals2}    ${ke}
+    \    Run keyword if    '${vals1['${ke}']['state']}'!='${sd}'    Append to list    ${sl1}    ${vals1['${ke}']}
+    \    Run keyword if    '${vals1['${ke}']['state']}'=='${sd}' and '${vals1['${ke}']['state']}'=='${vals2['${ke}']['state']}'    Append to list    ${sl2}    ${vals1['${ke}']}
+    \    Run keyword if    '${vals1['${ke}']['state']}'!='${sd}' and '${vals1['${ke}']['state']}'=='${vals2['${ke}']['state']}'    Append to list    ${sl3}    ${vals1['${ke}']}
+    \    Run keyword if    '${vals2['${ke}']['state']}'!='${sd}' and '${vals2['${ke}']['state']}'!='${vals1['${ke}']['state']}'    Append to list    ${sl4}    ${vals2['${ke}']}
+    [Return]    ${sl1}    ${sl2}    ${sl3}    ${sl4}
+
+Compare Health After Reimage and Restore
+    [Documentation]    Compare Health After Reimage and Restore
+    [Arguments]    ${areimage}    ${arestore}
+    ${res}    Create list
+    ${count}    Set variable    ${0}
+    :FOR    ${k}    in    @{areimage}
+    \    Dictionary Should Contain Key    ${arestore}    ${k}
+    \    ${cnt}    ${mlist}     Check mismatch in Health After Reimage and Restore    ${areimage['${k}']}    ${arestore['${k}']}    ${health_desired['${k}']}
+    \    Run keyword if    ${cnt}!=0    Log    Degraded health of '${k}' resource after restore : ${mlist}
+    \    ${count}=    Run keyword if    ${cnt}!=0 and '${cnt}'!='None'    Evaluate    ${cnt}+${count}
+    \    ...              ELSE    Set variable    ${count}
+    [Return]    ${count}
+
+Check mismatch in Health After Reimage and Restore
+    [Documentation]    Check mismatch in Health After Reimage and Restore
+    [Arguments]    ${res_areimage}    ${res_arestore}    ${h}
+    ${rcnt}    Set variable    ${0}
+    ${m}    Create list
+    ${res_arestore_copy}=    copy dictionary    ${res_arestore}
+    :FOR    ${r}    in    @{res_areimage}
+    \    Dictionary Should Contain Key    ${res_arestore_copy}    ${r}
+    \    Run keyword if    '${res_areimage['${r}']['status']}'!='${h}'    remove from dictionary    ${res_arestore_copy}    ${r}
+    :FOR    ${re}    in    @{res_arestore_copy}
+    \    ${rcnt}    Run Keyword If    '${res_arestore_copy['${re}']['status']}'!='${h}'    Evaluate    ${rcnt}+1
+    \    ...            ELSE    Set variable    ${rcnt}
+    \    Run keyword if    '${res_arestore_copy['${re}']['status']}'!='${h}'    Append to list    ${m}    ${res_arestore_copy['${re}']}
+    [Return]    ${rcnt}    ${m}
+
+Compare State After Reimage and Restore
+    [Documentation]    Compare State After Reimage and Restore
+    [Arguments]    ${areimage}    ${arestore}
+    ${res}    Create list
+    ${count}    Set variable    ${0}
+    :FOR    ${k}    in    @{areimage}
+    \    Dictionary Should Contain Key    ${arestore}    ${k}
+    \    ${cnt}    ${mlist}     Check mismatch in State After Reimage and Restore    ${areimage['${k}']}    ${arestore['${k}']}    ${state_desired['${k}']}
+    \    Run keyword if    ${cnt}!=0    Log    Degraded health of '${k}' resource after restore : ${mlist}
+    \    ${count}=    Run Keyword If    ${cnt}!=0 and '${cnt}'!='None'    Evaluate    ${cnt}+${count}
+    \    ...              ELSE    Set variable    ${count}
+    [Return]    ${count}
+
+Check mismatch in State After Reimage and Restore
+    [Documentation]    Check mismatch in State After Reimage and Restore
+    [Arguments]    ${res_areimage}    ${res_arestore}    ${s}
+    ${rcnt}    Set variable    ${0}
+    ${m}    Create list
+    ${res_arestore_copy}=    copy dictionary    ${res_arestore}
+    :FOR    ${r}    in    @{res_areimage}
+    \    Dictionary Should Contain Key    ${res_arestore_copy}    ${r}
+    \    Run keyword if    '${res_areimage['${r}']['state']}'!='${s}'    remove from dictionary    ${res_arestore_copy}    ${r}
+    :FOR    ${re}    in    @{res_arestore_copy}
+    \    ${rcnt}    Run Keyword If    '${res_arestore_copy['${re}']['state']}'!='${s}'    Evaluate    ${rcnt}+1
+    \    ...            ELSE    Set variable    ${rcnt}
+    \    Run keyword if    '${res_arestore_copy['${re}']['state']}'!='${s}'    Append to list    ${m}    ${res_arestore['${re}']}
+    [Return]    ${rcnt}    ${m}
+
+Perform Restore Via Maintenance Console
+    [Documentation]    Copies the back file to USB of CIM and Performs the restore
+    ...                operation through maintenance console. Waits for completion
+    ...                and does validations followed by deletion of backup from USB of CIM
+    [Arguments]    ${backup_filename}    ${restore_timeout}    ${restore_poll_interval}
+
+    Copy Backup File To USB Of CIM    ${backup_filename}    /mnt/usb
+    Log    Restoring Backup via Console. This may take several miniutes...\n    console=True
+    Cleanup Backup Staging Area
+    Restore From Backup Via Maintenance Console    ${backup_filename}
+    ${restore_start_time} =    Restore Should have Started Successfully
+    Wait for restore to complete    ${restore_timeout}    ${restore_poll_interval}
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+    Log To Console       Restore has been done. Waiting for CIM Cluster Sync to Complete.
+    Wait For Resources To Reach Desired State    False
+    Perform Topology Validations          After Restore operations has been completed
+    Remove Backup File From USB Of CIM    ${backup_filename}    /mnt/usb
+    [Return]    ${restore_start_time}
+
+Cluster HA State Should Be OK
+    [Documentation]     Checks for the cluster sync state
+    Fusion Api Login Appliance              ${APPLIANCE_IP}     ${admin_credentials}
+    ${resp} =           Fusion Api Get HA Nodes     /rest/appliance/ha-nodes
+    :FOR                ${c}                        IN          @{resp['members']}
+    \    ${sync} =    Get From Dictionary    ${c}    synchronizationPercentComplete
+    \    ${state} =   Get From Dictionary    ${c}    state
+    \    ${status} =   Get From Dictionary    ${c}    status
+    \    Should Contain    ${state}     OK
+    \    Should Contain    ${status}    OK
+    \    Should Be Equal As Integers         ${sync}       100
+
+Restore Should have Started Successfully
+    [Documentation]     Checks to see if restoring from backup operation has started successfully
+    ${resp} =    Fusion Api Get Restore Status
+    ${count} =    Get From Dictionary    ${resp}    count
+    Should Be Equal As Integers    ${count}    1    msg=Restore task has not started successfully
+    [Return]    ${resp['members'][0]['restoreStartTime']}
+
+Cleanup Backup Staging Area
+    [Documentation]  Remove any unwanted dirs in backup staging area of cim
+    Login to Fusion Via SSH
+    @{dir}=    SSHLibrary.List Directory    /backup_staging
+    ${command} =    Set Variable    ${EMPTY}
+    ${match} =    Get Matches    ${dir}    regexp=.*support.*dumps?
+    ${len} =    Get Length    ${match}
+    Return From Keyword If    ${len}==0
+    :FOR    ${i}    IN    @{match}
+    \    ${t}=            Get Time    epoch
+    \    ${newpath} =    Catenate    SEPARATOR=_    /root/${i}    ${t}
+    \    ${path} =    Catenate    SEPARATOR=/    /backup_staging    ${i}
+    \    ${command} =    Catenate    SEPARATOR=;    mv -f ${path} ${newpath}    ${command}
+    Log    ${command}\n\n    console=True
+    ${response}           ${stderr}       ${rc}=      Execute Command     ${Command}      return_stderr=True
+    ...                 return_rc=True}
+    Should Be Equal As Integers         ${rc}       0        msg=Problem in cleaning up backup staging area
+    Close Connection
+
+
+Restore From Backup Via Maintenance Console
+    [Documentation]  Test of maintenance console dump
+    [Arguments]    ${backupfile}
+
+    MaintenanceConsole.execute maintenance login    ${APPLIANCE_IP}
+    Read From Maintenance Console Session       (?s).*OK
+    MaintenanceConsole.send response   \n
+
+    Read From Maintenance Console Session    (?is).*User.*Password
+    MaintenanceConsole.execute user login
+
+    Read From Maintenance Console Session        (?is).*\\[T\\] Restore from backup
+    MaintenanceConsole.send response   T
+
+    Read From Maintenance Console Session        (?is).*\\[Y\\] Yes, restore from backup
+    MaintenanceConsole.send response   Y
+
+    ${s}=    Read From Maintenance Console Session     (?is).*USB:.*\\[${backupfile}\\]
+    ${ind} =    Determine And Return Position Of Backupfile Entry In Menu    ${s}    ${backupfile}
+    Log    Need to issue ${ind} tabs to select backup file ${backupfile}    console=True
+    :FOR    ${i}    IN RANGE   0   ${ind}
+    \     MaintenanceConsole.send response   \t
+    MaintenanceConsole.read data
+    MaintenanceConsole.send response   \n
+
+    ${pattern} =    Set Variable   (?is).*Restore the selected backup, USB:/${backupfile}.*\\[Y\\] Yes, restore from backup
+    Read From Maintenance Console Session       ${pattern}
+    MaintenanceConsole.send response   Y
+    Read From Maintenance Console Session       (?is).*Restoring
+
+Read From Maintenance Console Session
+    [Documentation]    Reads the output of maintenance console session till the
+    ...                desired text is present in its output
+    [Arguments]        ${text}
+    ${status} =    Set Variable    False
+    :FOR    ${i}    IN RANGE  0    20
+    \    ${s} =    MaintenanceConsole.read data
+    \    Log    ${s}    console=True
+    \    ${status} =    Run Keyword And Return Status     Should Match Regexp    ${s}    ${text}
+    \    Exit For Loop If    '${status}'=='True'
+    Run Keyword If    '${status}'=='False'    Fail    Failed to perform restore from Maintenance Console
+    [Return]    ${s}
+
+
+Determine And Return Position Of Backupfile Entry In Menu
+    [Documentation]    Compute the number of tabs to be sent to select the backup
+    ...                file in the Restore From Backup menu of Maintenance Console
+    [Arguments]     ${s}    ${backupfile}
+    @{files} =    Split To Lines    ${s}
+
+    @{usbmatch} =    Get Matches    ${files}    regexp=.*USB:.*
+    @{filematch} =    Get Matches    ${files}    regexp=.*${backupfile}.*
+    Length Should Be    ${usbmatch}    1
+    Length Should Be    ${filematch}    1
+    ${item} =    Get From List    ${usbmatch}    0
+    ${usbidx} =    Get Index From List    ${files}       ${item}
+    ${ind} =    Evaluate    ${usbidx} + 2
+    ${item} =    Get From List    ${filematch}    0
+    ${fileidx} =    Get Index From List    ${files}       ${item}
+    ${ind} =     Evaluate    ${fileidx}-${ind}
+    [Return]    ${ind}
+
+Login to Nuvo via SSH
+    [Documentation]             Connect to Nuvo VM Bash via SSH
+    [Arguments]                 ${IP}=${NUVO_IP}      ${USERNAME}=${NUVO_SSH_USERNAME}
+    ...                         ${PASSWORD}=${NUVO_SSH_PASSWORD}    ${PROMPT}=${NUVO_PROMPT}
+    ...                         ${TIMEOUT}=${FUSION_TIMEOUT}    ${ALIAS}=Fusion_SSH
+    Log Many                    ${IP}                   ${USERNAME}     ${PASSWORD}     ${PROMPT}   ${TIMEOUT}
+    Set Default Configuration   prompt=${PROMPT}        timeout=${TIMEOUT}
+    ${Id}=                      Open Connection         ${IP}    alias=${ALIAS}
+    ${Output}=                  Login                   ${USERNAME}     ${PASSWORD}
+
+Enclosure Refresh Tasks Should Be OK
+    [Documentation]    Get Refresh task status of each of the enclosure and ensure that it is successfully completed
+    [Arguments]    ${restore_start}
+
+    ${fail_count} =    Set Variable    ${0}
+    ${resp}=    Fusion Api Get Task    param=?filter="name='Refresh' AND associatedResource.resourceCategory='enclosures' AND taskState='Completed' AND created gt ${restore_start}"
+    ${count} =    Get From Dictionary    ${resp}    count
+    :FOR    ${j}    IN RANGE    0    ${count}
+    \    ${status} =  Run keyword and return status  Should Be Empty   ${resp['members'][${j}]['taskErrors']}
+    \    ${fail_count} =    Run Keyword If   '${status}' == 'False'    Evaluate    ${fail_count}+1
+    \    ...    ELSE       Set Variable    ${fail_count}
+    \    Run Keyword If   '${status}' == 'False'    Log
+    \   ...      Enclosure ${resp['members'][${j}]['associatedResource']['resourceName']} has task Errors : ${resp['members'][${j}]['taskErrors']}    console=True
+
+    ${resp}=    Fusion Api Get Task    param=?filter="name='Refresh' AND associatedResource.resourceCategory='enclosures' AND taskState='Error' AND created gt ${restore_start}"
+    ${count} =    Get From Dictionary    ${resp}    count
+    Return From Keyword If    ${count}==0       ${fail_count}
+
+    :FOR    ${i}    IN RANGE    0    ${count}
+    \    ${fail_count} =    Evaluate     ${fail_count} + 1
+    \    Log    Refresh Task Failed Enclosure: ${resp['members'][${i}]['associatedResource']['resourceName']} Task Errors : ${resp['members'][${i}]['taskErrors']}    console=True
+
+    [Return]    ${fail_count}
+
+Install Oneview Using Nuvo
+    [Documentation]    Installs oneview in CIMs using Nuvo
+    ${timestamp} =    Get Current Date    result_format=epoch
+    ${nuvo_log} =    Catenate    SEPARATOR=.    nuvo.log    ${timestamp}
+    Log    Starting OV installation. This may take up to 100 min to complete    console=True
+    Initiate OV Reimage Using Nuvo    /home/testNuvo/${nuvo_log}
+    ${status} =    Is Nuvo Reimage Complete    150min    5min    /home/testNuvo/${nuvo_log}
+
+    Run Keyword If    '${status}'=='True'    Run Keywords    Fusion Api Login Appliance    ${APPLIANCE_IP}   ${admin_credentials}
+    ...    AND   Return From Keyword
+
+    # Trying to see whether OV reimage is partially successful to proceed.
+    Login to Nuvo via SSH
+    SSHLibrary.File Should Exist             /home/testNuvo/${nuvo_log}
+    SSHLibrary.Get File     /home/testNuvo/${nuvo_log}      destination=.
+    OperatingSystem.File Should Exist    ${nuvo_log}
+    ${hw_setup} =   Parse Nuvo Log And Return Matching String   ${nuvo_log}   .*HW setup completed successfully.*
+
+    Run Keyword If  "${hw_setup}" == "${None}"    FAIL    Hardware setup also failed. No point in continuing further
+    ...       ELSE   Log    Reimage of CIMs seem to be successful, but cluster sync timed out.\n    console=True
+    Close Connection
+
+    Fusion Api Login Appliance              ${APPLIANCE_IP}     ${admin_credentials}
+
+Initiate OV Reimage Using Nuvo
+    [Documentation]    Issue a OV Reimage Command in Nuvo VM to initiate OV reimage in CIM
+    [Arguments]    ${filename}
+    Login to Nuvo via SSH
+    ${nuvo_vol} =    Get Variable Value    ${NUVO_VOL}
+    ${nuvo_reimage_script} =    Get Variable Value    ${NUVO_REIMAGE_FILE}
+    Run Keyword If    '${nuvo_vol}' == '${None}'    FAIL    Variable NUVO_VOL must be defined
+    Run Keyword If    '${nuvo_reimage_script}' == '${None}'    FAIL    Variable NUVO_REIMAGE_FILE must be defined
+
+    ${command} =     Set Variable    nohup docker run --rm --network host -v ${nuvo_vol} ${nuvo_reimage_script} > ${filename} 2>&1 &
+    ${response} =    Execute Command    ${command}
+    Log    ${response}    console=True
+    Close Connection
+
+Is Nuvo Reimage Complete
+    [Documentation]    Wait for Nuvo reimage to complete
+    [Arguments]    ${timeout}    ${polltime}   ${nuvo_log}
+    @{verify_text_list} =    Create List    ovreimage completed successfully     Returncode: 0
+    ${status} =    Run Keyword And Return Status    Wait Until Keyword Succeeds    ${timeout}    ${polltime}    Check For Reimage Completion Status    ${verify_text_list}    ${nuvo_log}
+    [Return]    ${status}
+
+Check For Reimage Completion Status
+    [Documentation]    Checks for the OV install completion text in the Nuvo log
+    [Arguments]    ${text_list}     ${nuvo_log}
+    Login to Nuvo via SSH
+    ${path}   ${file} =    Split Path    ${nuvo_log}
+    ${file} =    Fetch From Right    ${nuvo_log}    /
+    ${path} =    Evaluate    '${nuvo_log}'.split('${file}')[0]
+    ${success_pattern} =    Get From List    ${text_list}    0
+    ${return_code} =    Get From List    ${text_list}    1
+    ${command} =     Set Variable    cd ${path}; grep "${success_pattern}" ${file}; grep "${return_code}" ${file}
+    ${response}           ${stderr}       ${rc}=      Execute Command     ${command}      return_stderr=True
+    ...                 return_rc=True}
+    Log To Console    .    no_newline=True
+    Should Be Equal As Integers         ${rc}       0                   msg=Return Value is False
+
+    Run Keyword And Continue On Failure    Should Contain    ${response}     ${success_pattern}
+    Run Keyword And Continue On Failure    Should Contain    ${response}     ${return_code}
+    Log      \n${response}     console=True
+    Close Connection
+
+Create Backup And Download To Local
+    [Documentation]    Create Backup in OV
+    ...                Also downloads the backup file to Test head
+    Cleanup Backup Staging Area
+    Create Backup
+    ${backup} =    Get Backup
+    ${backup_uri} =    Set Variable    ${backup['uri']}
+    ${file} =    Fetch From Right    ${backup_uri}    /
+    ${backup_filename} =    Catenate    SEPARATOR=.    ${file}   bkp
+    ${backup_filename_withpath} =    Catenate    SEPARATOR=/   /backup_staging    ${backup_filename}
+    Login to Fusion Via SSH
+    SSHLibrary.File Should Exist   ${backup_filename_withpath}
+
+    Download Backup    ${backup_uri}    ${backup_filename}
+    OperatingSystem.File Should Exist    ${backup_filename}
+    Close Connection
+    [Return]    ${backup_filename}
+
+Copy Backup File To USB Of CIM
+    [Documentation]    Copies the backup file from test head to Active CIM's /mnt/usb
+    [Arguments]    ${source}    ${destination}
+    Login to Fusion Via SSH
+    OperatingSystem.File Should Exist    ${source}
+    SSHLibrary.Put File    ${source}    ${destination}/
+    SSHLibrary.File Should Exist    ${destination}/${source}
+    Close Connection
+
+Remove Backup File From USB Of CIM
+    [Documentation]    Moves the back file present at /mnt/usb of curretnly active CIM to /root
+    [Arguments]    ${source}    ${destination}
+    Login to Fusion Via SSH
+    ${status} =    Run Keyword And Return Status   SSHLibrary.File Should Not Exist    ${destination}/${source}
+    Return From Keyword If    '${status}' == 'True'
+    ${command} =    Set Variable    mv -f ${destination}/${source} /root/
+    Execute Command    ${command}
+    Run Keyword And Continue On Failure    SSHLibrary.File Should Not Exist     ${destination}/${source}
+    Close Connection
+
+Compare And Get Actual Restore Alerts
+    [Documentation]    Compare the alerts at various stages (before backup, after OV install,
+    ...                during restore operation and return alerts
+    ...                that have been raised due to restore alone
+    [Arguments]    ${before_backup}    ${ov_install}     ${restore_alerts}
+
+    ${fail_count} =    Set Variable    ${0}
+    ${res_len} =    Get Length    ${restore_alerts}
+    Return From Keyword If    ${res_len}==0    ${restore_alerts}
+    ${combined_list} =    Combine Lists    ${before_backup}    ${ov_install}
+    ${combined_list} =    Remove Uri From Alert Desc    ${combined_list}
+    ${combined_list} =    Remove Duplicates    ${combined_list}
+    ${actual_restore_list} =    Copy List    ${restore_alerts}
+    ${actual_restore_list} =    Remove Uri From Alert Desc    ${actual_restore_list}
+    :FOR   ${alert}    IN    @{combined_list}
+    \    ${idx} =    Get Index From List    ${actual_restore_list}    ${alert}
+    \    Run Keyword If    '${idx}' != '-1'    Remove From List   ${actual_restore_list}    ${idx}
+    ${len} =    Get Length    ${actual_restore_list}
+    ${fail_count} =    Run Keyword If   ${len} > 0      Evaluate    ${fail_count} + 1
+    ...    ELSE       Set Variable    ${fail_count}
+    Run Keyword If   ${len} > 0     Log    Critical Active Alerts created After Restore is: \n ${actual_restore_list}
+    ...    WARN    console=True
+    [Return]    ${fail_count}
+
+Wait for Restore to Complete
+    [Documentation]    Wait for the restore operation to complete
+    [Arguments]    ${timeout}    ${polltime}
+    Wait Until Keyword Succeeds    ${timeout}    ${polltime}    OneView Restore Complete
+
+Perform Topology Validations
+    [Documentation]     Performs the ILT and FLM toplogy validations
+    [Arguments]    ${msg}
+
+    Log    Topology Validations : ${msg} \n    console=True
+    Enclosure Manager Bays Should Be In Expected State    ${ENCLOSURES_MGRBays}
+    Enclosure Interconnect Link Topology Should Be In Expected State
+
+Gather interconnect uri and port number and status
+    [Documentation]    Gather interconnect uri and port number and status
+    [Arguments]    ${pports}
+    ${l} =    create list
+    :FOR    ${p}    in    @{pports}
+    \    ${pdict}    create dictionary
+    \    Set to dictionary    ${pdict}    interconnect    ${p['interconnectUri']}
+    \    Set to dictionary    ${pdict}    port    ${p['portNumber']}
+    \    ${pstatus}    Get interconnect port status    ${p['interconnectUri']}    ${p['portNumber']}
+    \    Set to dictionary    ${pdict}    port_status    ${pstatus}
+    \    Append to list    ${l}    ${pdict}
+    [Return]    ${l}
+
+Get interconnect port status
+    [Documentation]    Get interconnect port status
+    [Arguments]    ${int}    ${port}
+    ${resp} =   fusion api get resource    ${int}
+    ${pl}    Run keyword if    '${resp['category']}'=='sas-interconnects'    copy list    ${resp['sasPorts']}
+    ...     ELSE    copy list    ${resp['ports']}
+    ${stat}    Set variable    ${None}
+    :FOR    ${p}    in    @{pl}
+    \    ${iport}    Run keyword if    '${p['type']}'!='sas-port'    catenate    SEPARATOR=    d    ${port}
+    \    ${chk}    Set variable if    '${p['portType']}'=='Downlink' and '${p['name']}'=='${port}' or '${p['name']}'=='${iport}'    ${True}    ${False}
+    \    Continue for loop if    '${chk}'=='False'
+    \    ${stat}    Set variable if    '${p['type']}'=='sas-port'    ${p['state']}    ${p['portStatus']}
+    \    exit for loop if    '${stat}'!='None'
+    [Return]    ${stat}
+
+Remove Uri From Alert Desc
+    [Documentation]    Remove uri string from alert description text
+    ...                Argument is list of alerts from which the uri to be removed
+    [Arguments]    ${alerts_desc}
+
+    ${ret_list} =    Create List
+    :FOR    ${desc}    IN    @{alerts_desc}
+    \    ${str} =    Remove String Using Regexp    ${desc}    \\"uri\\":\\".*\\"
+    \    Append To List    ${ret_list}    ${str}
+
+    [Return]    ${ret_list}
+
+Efuseon Appliance
+   [Documentation]   CIM EfuseOn
+   ${preEFuseOnRoles} =       Get HA Nodes
+   Set To Dictionary           ${preEFuseOnRoles['Active']}                   role=Standby
+   Log                         Current active: ${preEFuseOnRoles['Active']['name']}                       console=${True}
+   Log                          Current active Bay:${preEFuseOnRoles['Active']['location']['bay']}          console=${True}
+   Log                         Current standby: ${preEFuseOnRoles['Standby']['name']}                     console=${True}
+   ${active_bay}      Set Variable    ${preEFuseOnRoles['Active']['location']['bay']}
+   ${standby_bay}      Set Variable    ${preEFuseOnRoles['Standby']['location']['bay']}
+   #Efuse On the Master Appliance
+   ${enclosure_resource}    Set Variable    ${preEFuseOnRoles['Active']['location']['enclosure']}
+   ${EM_IP} =   Get EM IP   ${enclosure_resource['resourceName']}
+   ${EM_TOKEN} =    Get EM Token    ${enclosure_resource['resourceName']}
+   ${before_efuseon_alerts} =    Get Active Alert List
+   Log  ${before_efuseon_alerts}
+   ${time_before_efuseon}=      Get Current Time                Before EfuseOn
+   EFuse CIM   EFuseOn  ${active_bay}
+   Log                         Appliance EFuseOn is Completed, Waiting for appliance status to be OK\n   console=${True}
+   Wait For Appliance To Become Pingable       ${APPLIANCE_IP}     30 minutes      30 s
+   ${time_before_Appliance_ok_state}=      Get Current Time                Before Appliance state OK
+   Wait Until Keyword Succeeds     60min           1min               Check Appliance State   ${APPLIANCE_IP}     OK
+   ${postEFuseOnRoles} =      Get HA Nodes
+   Appliance Role Should Have Changed            ${preEFuseOnRoles}                 ${postEFuseOnRoles}
+   Check Maintenance Console Access
+   ${time_for_alerts}=      Add Time To Date	${time_before_efuseon}	00:00:30
+   ${efuseon_alerts} =    Get Active Alert List    ${time_for_alerts}
+   ${alert_count} =    Get Length    ${efuseon_alerts}
+   Run Keyword If          ${alert_count} == 0             Log
+   ...                     There are no new alerts existing in OV'
+   ...                     ELSE                    Log
+   ...                     There are new alerts existing in OV
+   log  ${efuseon_alerts}
+   #To delay the EfuseOff Appliance, Otherwise GET EM IP and HET EM Token are failing to get details within 30s
+   Sleep  45s
+
+Efuseoff Appliance
+    [Documentation]   CIMS EfuseOff
+    ${EfuseOfRoles} =       Get HA Nodes
+    Log                         Current active: ${EfuseOfRoles['Active']['name']}                       console=${True}
+    Log                         Current standby: ${EfuseOfRoles['Standby']['name']}                     console=${True}
+    ${active_bay}      Set Variable    ${EfuseOfRoles['Active']['location']['bay']}
+    ${standby_bay}      Set Variable    ${EfuseOfRoles['Standby']['location']['bay']}
+    #Efuse Off the Primary Appliance
+    ${enclosure_resource}   Set Variable    ${EfuseOfRoles['Standby']['location']['enclosure']}
+    $temp_timeout}=    Get Variable Value    ${FUSION_TIMEOUT}
+    ${FUSION_TIMEOUT}=    Set Variable    60s
+    ${EM_IP} =  Get EM IP   ${enclosure_resource['resourceName']}
+    ${EM_TOKEN} =   Get EM Token    ${enclosure_resource['resourceName']}
+    ${time_before_efuseoff}=      Get Current Time                Before EfuseOff
+    EFuse CIM   EFuseOff  ${standby_bay}
+    Log                         Appliance EFuseOff is Completed, Waiting for appliance status to be OK\n   console=${True}
+    Wait Until Keyword Succeeds     60min           1min               Check Appliance State   ${APPLIANCE_IP}     OK
+    Wait Until Keyword Succeeds           90min          5min      Cluster HA State Should Be OK
+    ${postEFuseOffRoles} =      Get HA Nodes
+    Appliance Role Should be Same            ${EfuseOfRoles}                 ${postEFuseOffRoles}
+    ${FUSION_TIMEOUT}=    Set Variable    $temp_timeout}
+    ${time_for_alerts}=      Add Time To Date	${time_before_efuseoff}	00:00:30
+    ${efuseoff_alerts} =    Get Active Alert List    ${time_for_alerts}
+    ${alert_count} =    Get Length    ${efuseoff_alerts}
+    Run Keyword If          ${alert_count} == 0             Log
+    ...                     There are no new alerts existing in OV'
+    ...                     ELSE                    Log
+    ...                     There are new alerts existing in OV
+    log  ${efuseoff_alerts}
+
+Appliance Role Should Have Changed
+    [Documentation]   Verify that role changed and fail if not.
+    [Arguments]   ${pre}   ${post}
+    Log   Verifying that CIM role has changed, state is OK, status is OK and uri is correct...   console=${True}
+    Log   Previous active: ${pre['Active']['name']}   console=${True}
+    Log   Current active: ${post['Active']['name']}   console=${True}
+    Log   Active State: ${post['Standby']['state']}   console=${True}
+    Log   Active Status: ${post['Standby']['status']}   console=${True}
+    Should Be Equal As Strings   ${pre['Active']['name']}   ${post['Standby']['name']}   msg=The expected new active CIM should now be ${pre['Standby']['name']}.
+    Should Be Equal As Strings   ${post['Standby']['state']}    Unknown    msg=The expected state should be ${pre['Standby']['state']}.
+    Should Be Equal As Strings   ${post['Standby']['status']}   Critical    msg=The expected status should be ${pre['Standby']['status']}.
+    Should Be Equal As Strings   ${pre['Active']['uri']}   ${post['Standby']['uri']}   msg=The expected uri should be ${pre['Standby']['uri']}.
+    Log   CIM role change was successful.   console=${True}
+
+Appliance Role Should be Same
+    [Documentation]   Verify that role should be same.
+    [Arguments]   ${pre}   ${post}
+    Log   Verifying that Appliance role has changed, state is OK, status is OK and uri is correct...   console=${True}
+    Log   Previous active: ${pre['Active']['name']}   console=${True}
+    Log   Current active: ${post['Active']['name']}   console=${True}
+    Log   Active State: ${post['Standby']['state']}   console=${True}
+    Log   Active Status: ${post['Standby']['status']}   console=${True}
+    Should Be Equal As Strings   ${pre['Active']['name']}   ${post['Active']['name']}   msg=The expected new active CIM should now be ${pre['Standby']['name']}.
+    Should Be Equal As Strings   ${pre['Active']['state']}   ${post['Active']['state']}   msg=The expected state should be ${pre['Standby']['state']}.
+    Should Be Equal As Strings   ${pre['Active']['status']}   ${post['Active']['status']}   msg=The expected status should be ${pre['Standby']['status']}.
+    Should Be Equal As Strings   ${pre['Active']['uri']}   ${post['Active']['uri']}   msg=The expected uri should be ${pre['Standby']['uri']}.
+    Log   CIM role change was successful.   console=${True}
+
+Check Maintenance Console Access
+    [Documentation]   Maintenance Console Access Check
+    MaintenanceConsole.execute maintenance login    ${APPLIANCE_IP}
+    Read From Maintenance Console Session       (?s).*OK
+    MaintenanceConsole.send response   \n
+
+    Read From Maintenance Console Session    (?is).*User.*Password
+    MaintenanceConsole.execute user login
+    ${s} =    MaintenanceConsole.read data
+    Log    ${s}    console=True
+    MaintenanceConsole.login_exit
+
+Enable Feature Toggle
+    [Documentation]    Enables a feature toggle. Wait for the appliance to reboot or factory reset
+    ...                depending on the feature toggle. If factory reset occurs, it performs FTS
+    ...                and initiates hardware discovery
+    [Arguments]    ${toggle_name}    ${factory_reset}=False
+
+    Log    Enables Feature Toggle ${toggle_name}    console=True
+    Login to Fusion Via SSH
+
+    ${command} =    Set Variable      /ci/bin/set-feature-toggles --enable ${toggle_name}
+    
+    ${response}     ${stderr}       ${rc}=      Execute Command     ${command}      return_stderr=True      return_rc=True
+
+    Close Connection
+    
+    Should Be Equal As Integers     ${rc}    0    msg=Actual Result: Command to enable feature toggle ${toggle_name} failed
+    
+    Run Keyword And Continue On Failure    Should Match Regexp    ${response}     .*${toggle_name}
+    Should Match Regexp    ${stderr}    .*The system will reboot in \\d* seconds.*    msg=Actual Result: Appliance reboot message did not apear after enabling the feature switch
+
+    # Sleep is required as appliance reboot will be triggered only 15 seconds after issuing FT enable cmd
+    Sleep    16s    
+    
+    Run Keyword If   '${factory_reset}' == 'False'    Run Keywords    Wait For Appliance To Become Pingable       ${APPLIANCE_IP}     30 minutes      30 s    
+    ...    AND    Wait For Resources To Reach Desired State
+    
+    Run Keyword If   '${factory_reset}' == 'True'    Run Keywords    First Time Setup    password=${admin_credentials['password']}    
+    ...    AND    Invoke Hardware Setup
+    ...    AND    Wait For Resources To Reach Desired State
+
+
+Enable Feature Switch 
+    [Documentation]    Enables a feature switch in OV
+    [Arguments]    ${feature_switch}
+    
+    Log    Enables Feature Switch ${feature_switch}    console=True
+    Login to Fusion Via SSH
+    ${cmd_list} =    Create List  source /ci/lib/feature-switch.sh   feature-enable ${feature_switch} product    feature-is-enabled ${feature_switch}  
+    :FOR    ${command}    IN    @{cmd_list}
+    \    Write    ${command}
+    ${ret} =    Read
+    Run Keyword And Continue On Failure    Should Match Regexp    ${ret}     1\r\n\\[root@.*\\]#.*    msg=Actual Result: Could not enable ${feature_switch} Feature switch 
+    
+    Close Connection
+        
+Exporters Should Be Running In OV
+    [Documentation]   Check whether Prometheius exporters are running in OV
+    
+    Log    Ensure that exporters are running in appliance    console=True
+    Login to Fusion Via SSH
+    :FOR    ${exporter}    IN    @{OVF5956_APPMETRICS}
+    \    ${command} =    Set Variable      ps -ef | grep -i ${exporter} | grep -v "grep" | wc -l
+    \    ${response}     ${stderr}       ${rc}=      Execute Command     ${command}      return_stderr=True      return_rc=True
+    \    Should Be Equal As Integers     ${rc}    0    msg=Return Value is False
+    \    Run Keyword And Continue On Failure    Should Be Equal As Integers    ${response}     1    msg=Actual Result: ${exporter} is not running in OV even after enabling FT OVF5956_APPMETRICS
+    
+    Close Connection    

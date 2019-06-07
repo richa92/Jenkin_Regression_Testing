@@ -1,0 +1,132 @@
+*** Settings ***
+Documentation   Verifies Login Banner displayed in the Fusion CLI.
+...             = Usage =
+...             | pybot | -L DEBUG | -v FUSION_IP:<IP> | cli_login_banner.txt |
+...             = Variables =
+...             | FUSION IP     | Required; IP address of the FusionVM to use |
+...             = Preconditions =
+...             None
+
+Variables         ../resources/variables.py    ${ENCLOSURE}
+
+Library             RoboGalaxyLibrary              # DVTs Robot Framework extensions
+Library             FusionLibrary                  # DVTs Robot Framework extensions
+Resource            ../resources/fusion_ssh.txt    # Comet-DVT fusion CLI extensions
+Resource            ../resources/fusion_api.txt    # Comet-DVT fusion API extensions
+Resource            ../resources/fusion_cli.txt    # Comet-DVT fusion CLI extensions
+Resource            ../resources/defaults.txt      # Comet-DVT default variables
+Force Tags          CLI    DCS     HW              # Force tags on all test cases
+Suite Setup         Run Keywords
+...                 Login to Fusion Via REST
+...                 Login to Fusion via SSH
+...                 Backup Login Banner Message File
+Suite Teardown      Run Keywords
+...                 Restore Login Banner Message File
+...                 Logout of Fusion via SSH
+...                 Logout of Fusion Via REST
+
+
+*** Variables ***
+${banner msg file}      /etc/issue
+${Banner Message}   Custom Banner message
+
+
+*** Test Cases ***
+Verify CLI Login Banner Message against API
+    # Compare with Fusion API
+    ${API Login Message}=   Get Login Banner from Fusion API
+    ${CLI Login Message}=   Get Login Banner from Fusion CLI
+    ${status}   ${msg}=   Run Keyword and Ignore Error
+    ...    Should Be Equal as Strings      ${API Login Message}    ${CLI Login Message}
+    ...                     msg=CLI Login Banner message does not match API Login Banner message.
+    Run Keyword If	    "${status}" == "FAIL"
+    ...	   Log		    AMD75: ${msg}	level=Warn
+
+Verify CLI Login Banner Message against Source
+    # Compare with message source file
+    ${Source Login Message}=    Get Login Banner from Source File
+    ${CLI Login Message}=       Get Login Banner from Fusion CLI
+    ${status}   ${msg}=   Run Keyword and Ignore Error
+    ...    Should Be Equal as Strings      ${Source Login Message}     ${CLI Login Message}
+    ...                         msg=CLI Login Banner message does not match Source File Login Banner message.
+    Run Keyword If	    "${status}" == "FAIL"
+    ...	   Log		    AMD75: ${msg}	level=Warn
+
+Modify Banner Message and Verify
+    # Modify Banner Message
+    ${rc}=      Execute Command     rm ${banner msg file}
+    ${rc}=      Execute Command     echo '${Banner Message}' > ${banner msg file}
+
+    # Verify CLI Login Banner Message
+    ${CLI Login Message}=   Get Login Banner from Fusion CLI
+    ${status}   ${msg}=   Run Keyword and Ignore Error
+    ...    Should Be Equal as Strings      ${Banner Message}   ${CLI Login Message}
+    ...                     msg=CLI Login Banner message does not match Source File Login Banner message.
+    Run Keyword If	    "${status}" == "FAIL"
+    ...	   Log		    AMD75: ${msg}	level=Warn
+
+
+*** Keywords ***
+Backup Login Banner Message File
+    [Arguments]     ${file}=${banner msg file}
+    # Create Backup of Message source file
+    ${rc}=          Execute Command     cp ${file} ${file}.original
+
+Restore Login Banner Message File
+    [Arguments]     ${file}=${banner msg file}
+    # Restore Message source file
+    ${rc}=          Execute Command     rm ${file}
+    ${rc}=          Execute Command     mv ${file}.original ${file}
+
+Get Login Banner from Fusion API
+    [Documentation]     Returns the Login Banner text from the Fusion Login Domain Global Settings.
+
+    # Get Login Message
+    ${Response}=        Fusion API Get Login Domains Global Settings
+    Log Dictionary      ${Response}
+    ${LoginMessage}=    Get From Dictionary     ${Response}         loginMessage
+    ${Message}=         Get From Dictionary     ${LoginMessage}     message
+
+    [Return]    ${Message}
+
+Get Login Banner from Source File
+    [Documentation]     Returns the Login Banner text from the Fusion Source file.
+
+    # Get text from source file
+    ${output}=      Execute Command     cat ${banner msg file}
+    ${lines}=       Split to lines      ${output}
+    Log List        ${lines}
+    ${Message}=     Get From List       ${lines}    0
+
+    [Return]    ${Message}
+
+Get Login Banner from Fusion CLI
+    [Documentation]     Returns the Login Banner text as seen in the CLI Login process.
+
+    # Execute SSH Oneliner to see login banner
+    Write           ssh ${CLI_USERNAME}@${FUSION_IP} "help"
+    #${output}=      Read Until      ${CLI_USERNAME}@${FUSION_IP}'s password:
+
+    # Take care of authenticity issue when asked for entering yes or no
+    ${response}=    Read Until Regexp    (yes|password)
+    ${line}=    Get Line    ${response.strip()}    -1
+    ${tmp}=     Get Substring    ${line.strip()}    -3
+    Run Keyword If    '${tmp}'=='yes'    
+    ...    Write    yes
+    ${response}=    Run Keyword If    '${tmp}'=='yes'
+    ...    Read Until     password:
+    ...             ELSE    Set Variable    ${response}
+
+    # Return to Fusion Bash shell
+    Write           ${CLI_PASSWORD}
+    Read Until      ${FUSION_PROMPT}
+
+    # Process output
+    ${lines}=       Split to Lines      ${response}
+    Log List        ${lines}
+    ${Message}=     Run Keyword If    '${tmp}'=='yes'    
+    ...                                Get From List    ${lines}    2
+    ...             ELSE               Get From List    ${lines}    0
+
+    [Return]    ${Message}
+

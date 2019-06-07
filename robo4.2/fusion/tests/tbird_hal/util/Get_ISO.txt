@@ -1,0 +1,76 @@
+*** Settings ***
+Documentation    Copy latest ISO from Jiji to Jenkins
+...              (Omit the copy if latest version already present).
+...              = USAGE =
+...              | pybot | Get_ISO.txt |
+Library          SSHLibrary
+Library          robot.api.logger
+
+*** Variables ***
+${SOURCE_HOSTNAME}    jiji.rsn.hp.com
+${SOURCE_USERNAME}    devel
+${SOURCE_PASSWORD}    hpvse1
+${SOURCE_LOCATION}    /home/iso
+
+${DESTINATION_HOSTNAME}    jenkins.rsn.hp.com
+${DESTINATION_USERNAME}    userContent
+${DESTINATION_PASSWORD}    hpvse123
+${DESTINATION_LOCATION}    /var/lib/jenkins/userContent/builds
+
+*** Test Cases ***
+Get latest ISO
+    # Open a connection to Jenkins (the destination) and retrieve the last build Id
+    Set Default Configuration   prompt=\$        timeout=30
+    Open Connection    ${DESTINATION_HOSTNAME}
+    Login    ${DESTINATION_USERNAME}    ${DESTINATION_PASSWORD}
+
+    # Determine the latest ISO file present
+    ${stdout}    ${stderr}    ${rc}=    Execute Command    
+    ...    cd ${DESTINATION_LOCATION} ; ls -l fusion-install* | tr -s " " | cut -d " " -f6-9
+    ...    return_stderr=True    return_rc=True
+    Log    ${rc} ${Stdout}
+    ${Match}    ${File}    ${DestinationBuild}=    Should Match Regexp    ${Stdout}    (fusion-install-dp2-DVT-2.00.00-(\\d+).iso)$
+    Console    \nLatest Present (on ${DESTINATION_HOSTNAME}): ${File}   
+    Log    ${File} ${DestinationBuild}
+    Close Connection
+
+    # Open a connection to Jiji (the source) where the ISO files are stored
+    Set Default Configuration   prompt=\$        timeout=300
+    Open Connection    ${SOURCE_HOSTNAME}
+    Login    ${SOURCE_USERNAME}     ${SOURCE_PASSWORD}
+  
+    # Determine the latest ISO file present
+    ${stdout}    ${stderr}    ${rc}=    Execute Command    
+    ...    cd ${SOURCE_LOCATION} ; ls -l fusion-install* | tr -s " " | cut -d " " -f6-9
+    ...    return_stderr=True    return_rc=True
+    Log    ${rc} ${Stdout}
+    ${Match}    ${File}    ${SourceBuild}=    Should Match Regexp    ${Stdout}    (fusion-install-dp2-DVT-2.00.00-(\\d+).iso)$
+    Console    \nLatest Available (on ${SOURCE_HOSTNAME}): ${File}   
+
+    # No need to copy if ISO is already present
+    Run Keyword if    '${SourceBuild}'=='${DestinationBuild}'
+    ...    Fail    No need to copy ${File} already present on ${DESTINATION_HOSTNAME}
+
+    # SFTP the file from Jiji to Jenkins builds directory
+    Console    \nCopying ${File} .....
+    SSHLibrary.Write    sftp ${DESTINATION_USERNAME}@${DESTINATION_HOSTNAME}
+    Read Until    password:
+    SSHLibrary.Write    ${DESTINATION_PASSWORD}
+    Read Until    sftp>
+    SSHLibrary.Write    put ${SOURCE_LOCATION}/${File} ${DESTINATION_LOCATION}
+    ${Output}    Read Until    sftp>
+    Log    ${Output}
+    Should Contain    ${Output}    100%    msg=Couldnt transfer ${File}
+    Should Not Contain    ${Output}    Failure    msg=Couldnt transfer ${File}
+
+    # Create/update a symbolic link named 'latest-fusion.iso'
+    Console    \nCreating symlink: latest-fusion.iso .....
+    SSHLibrary.Write    rm latest-fusion.iso
+    ${Output}    Read Until    sftp>
+
+    SSHLibrary.Write    ln ${DESTINATION_LOCATION}/${File} latest-fusion.iso
+    ${Output}    Read Until    sftp>
+    Should Not Contain    ${Output}    Failure    msg=Couldnt symlink ${File}
+    SSHLibrary.Write    quit
+    Read Until    \$
+    Close Connection

@@ -1,0 +1,484 @@
+*** Settings ***
+Documentation     HAL Webapp keywords
+...               = Usage =
+...               | Resource | ../resources/hal_webapp.txt |
+
+Library           Collections
+Library           String
+Library           RoboGalaxyLibrary            # DVTs Robot Framework extensions
+Library           FusionLibrary                # DVTs Fusion extensions
+Resource          ../resources/fusion_cli.txt
+
+
+*** Variables ***
+${start cmd}=        /ci/bin/restart-webapp tbird
+${stop cmd}=         /ci/bin/stop-webapp tbird
+${HAL CLAIM ID}=     0000000010
+${HAL CLAIM USER}=   Administrator
+${HAL CLAIM PW}=     admin
+${HAL CLAIM FPW}=    admin
+
+*** Keywords ***
+# -----------------------------------------------------------------------------
+#		HAL WEBAPP CONTROL
+# -----------------------------------------------------------------------------
+
+Restart HAL Webapp
+	[Documentation]    Start/Restart the eHAL Webapp
+	Login to Fusion via SSH
+	Set Client Configuration    timeout=300
+    Write    ${start cmd}
+    Read Until    ]${FUSION PROMPT}
+	Logout of Fusion Via SSH
+
+Stop HAL Webapp
+	[Documentation]    Terminate the eHAL Webapp
+	Login to Fusion via SSH
+	Set Client Configuration    timeout=300
+	Write    ${stop cmd}
+    Read Until    ]${FUSION PROMPT}
+	Logout of Fusion Via SSH
+
+
+Get HAL Webapp Status
+	[Documentation]    Return true/false indicator of eHAL Webapp status
+	${Response}=    HAL API Perform Discover
+	${Status}       Get From Dictionary    ${Response}    status
+
+	# Webapp is running
+    Return From Keyword If    '${Status}'=='503'    ${FALSE}
+
+    # Webapp is not running
+    Return From Keyword    ${TRUE}
+
+Create HAL LLDP Credentials
+    [Documentation]    For hardware, create the LLDP Credentials File needed for the HAL tbird webapp
+    [Arguments]    ${line}=${EMPTY}
+    Login to Fusion via SSH
+
+    # Remove LLDP Emulator file
+    ${Buffer}=    Execute Command    rm -rf ${LLDP Emulator File}
+    Logout of Fusion via SSH
+
+    # Create LLDP Emulator file
+    # Starting with FS6, need to look for factory password for EM via LLDP
+    # Use lldpcli at Fusion prompt.  Expected output:
+    # -------------------------------------------------------------------------------
+    # LLDP neighbors:
+    # -------------------------------------------------------------------------------
+    # Interface:    eth0, via: LLDP, RID: 1, Time: 0 day, 19:33:25
+    #   Chassis:
+    #   ChassisID:    mac 00:00:00:00:00:00
+    #   SysDescr:     {"SN":"0000000010", "ID":"Administrator","PW":"mLxy2SbxYj43","Owner":""}
+    #   MgmtIP:       fe80::af43:7811:a647:1d9
+    #   Port:
+    #   PortID:       ifname emCPU
+    #   PortDescr:    EnclosureManager1_CIManager1
+    # -------------------------------------------------------------------------------
+
+    ${EM_FLOATER_IP}=    Get EM Floater IP Address
+
+    # Above output needs to be reformatted in the LLDP credentials file to look like:
+    # {"credentials":[{"id":"0000000010","ipAddr":"","user":"Administrator","fpw":"mLxy2SbxYj43"}]}
+    Login To Fusion Via SSH
+    ${Buffer}=     Execute Command    lldpcli show neighbors | grep SysDescr
+    Log    ${Buffer}
+
+    ${Buffer}=     Replace String                 ${Buffer}    SN                 id
+    ${Buffer}=     Replace String                 ${Buffer}    ID                 user
+    ${Buffer}=     Replace String                 ${Buffer}    PW                 fpw
+    ${Buffer}=     Replace String Using Regexp    ${Buffer}    Owner":".*?"       ipAddr":"${EM_FLOATER_IP}"
+    ${Buffer}=     Replace String                 ${Buffer}    SysDescr:          {"credentials":[
+
+    ${Buffer}=     Catenate    ${Buffer}    ]}
+
+    # Override if $line not EMPTY
+    Run Keyword Unless    '${line}'=='${EMPTY}'    Set Variable    ${buffer}    ${line}
+    ${Command}=    Catenate    echo '${Buffer}' > ${LLDP Emulator File}
+    ${out}=        Execute Command    ${Command}
+    ${out}=        Execute Command    cat ${LLDP Emulator File}
+    Log            ${out}
+
+    Logout of Fusion via SSH
+
+Get EM Floater IP Address
+    [Documentation]    Gets the EM Floater IP Address from LLDP data on the CIM
+    Login To Fusion Via SSH
+    ${Buffer}=     Execute Command    lldpcli show neighbors | grep MgmtIP
+    ${SplitString}=    Split String    ${Buffer}
+    ${ip}=    Get From List    ${SplitString}    1
+    Log    ${ip}
+    Logout of Fusion Via SSH
+    [Return]    ${ip}
+
+Get Claimed IP from LLDP
+    # Use FUSION IP if running on DCS.
+    Return From Keyword If    '${DCS}'=='${True}'    ${FUSION_IP}
+
+    Login to Fusion Via SSH
+    ${Response}=      Execute SSH Command    lldpcli show nei | grep SysDescr
+    Log    ${Response}
+    # SysDescr:     {"SN":"00HPMP3F70","ID":"Administrator","PW":"PVamMzGdf0PF","Owner":"fe80:0:0:0:e217:8f:408c:cffa"}
+    Should Not Contain    ${Response}    Unable to connect to lldpd daemon    msg=Failed to execute 'lldp show neighbors' command on the ci manager.
+
+    ${Match}    ${FLOATING_IP}=    Should Match Regexp    ${Response}    (fe80:0:0:0:.+:.+:.+:\\w+)
+    Log    ${FLOATING_IP}
+
+    [Return]    ${FLOATING_IP}
+
+Get Known EM IPs From JSON Credentials
+    [Documentation]    Retrieve EM IP address from EM Credentials File in Fusion, empty if no creds
+    ${JSON}=    Get EM Claim Data
+    Run Keyword If    "${JSON}" == ""    Return from Keyword     ${Empty}
+    @{credentials}=    Get From Dictionary    ${JSON}    credentials
+    ${IPs}=    Create Dictionary
+    :FOR    ${credential}    IN     @{credentials}
+    \    Log    ${credential}
+    \    ${Match}    ${ip}=    Should Match Regexp    ${credential['ipAddr']}    ([\\w:]+)%?
+    \    Set To Dictionary   ${IPs}    ${credential['sn']}    ${ip}
+    [Return]    ${IPs}
+
+Get EM Claim Data
+    [Documentation]    Returns the JSON data from the EM Credentials file if claimed.  Empty if not claimed
+    [Arguments]    ${file}=${EM Credentials File}
+
+    Login to Fusion via SSH
+    ${Buffer}=    Execute Command    cat ${file}
+    Log    ${Buffer}
+    ${status}   ${JSON_TRY}=   Run Keyword and Ignore Error
+    ...    Evaluate    json.loads('''${Buffer}''')    json
+    ${JSON}=    Set Variable If    "${status}" == "PASS"    ${JSON_TRY}    ${Empty}
+
+    Log Dictionary    ${JSON}
+    Logout of Fusion via SSH
+    [Return]    ${JSON}
+
+Get EM Version
+    [Documentation]    Returns the version string of the Enclosure Manager Firmware
+    [Arguments]    ${Manager}=1
+    ${Response}=    Get EM Enclosure Manager Resource    ${Manager}
+    ${Resource}=    Get Resource From Response    ${Response}
+    ${status}    ${Firmware}=    Run Keyword and Ignore Error    Get From Dictionary    ${Resource}    Firmware
+    ${status}    ${Current}=    Run Keyword and Ignore Error    Get From Dictionary    ${Firmware}    Current
+    ${status}    ${VersionString}=    Run Keyword and Ignore Error    Get From Dictionary    ${Current}    VersionString
+    [Return]    ${VersionString}
+
+AM56 Fix EM Claim Data
+    [Documentation]    Fix EM Credentials File only if "id" field is an empty string.  AM56.
+    [Arguments]    ${file}=${EM Credentials File}
+
+    Login to Fusion via SSH
+    ${Buffer}=    Execute Command    cat ${file}
+    Log    ${Buffer}
+
+    ${out}    ${status}=    Run Keyword And Ignore Error    Should Not Match    ${Buffer}    "id":""
+    Run Keyword If    '${status}'=='FAIL'
+    ...    Log    AM56 defect found:  id value set to empty string incorrectly    level=warn
+    ...    ${Buffer}=     Replace String    ${Buffer}    "id":""    "id":"${ENC_SERIAL_NUMBER}"
+    ...    ${Buffer}=     Replace String    ${Buffer}    "sn":""    "sn":"${ENC_SERIAL_NUMBER}"
+    ...    ${Command}=    Catenate    echo '${Buffer}' > ${LLDP Emulator File}
+    ...    ${out}=        Execute Command    mv ${LLDP Emulator File} ${LLDP Emulator File}.bak
+    ...    ${out}=        Execute Command    ${Command}
+    ...    ${out}=        Execute Command    cat ${LLDP Emulator File}
+    ...    Log            ${out}
+
+    Logout of Fusion via SSH
+
+
+# -----------------------------------------------------------------------------
+#		HAL WEB API
+# -----------------------------------------------------------------------------
+
+Get EM Root Resource
+	[Documentation]    Returns Enclosure Manager Root Resource
+	[Arguments]    ${FUSION IP}=${FUSION IP}    ${EM IP}=${EM IP}
+	${Response}=    HAL API Get Resource    ${FUSION IP}    ${EM IP}    /rest/v1/
+        [Return]    ${Response}
+
+Get EM Enclosure Manager Resource
+    [Documentation]    Returns Enclosure Manager Resource
+	[Arguments]    ${Manager}=1    ${FUSION IP}=${FUSION IP}    ${EM IP}=${EM IP}
+	${Response}=    HAL API Get Resource    ${FUSION IP}    ${EM IP}    /rest/v1/EnclosureManager/${Manager}
+	[Return]    ${Response}
+
+Get EM Account Service Resource
+	[Documentation]    Returns Enclosure Manager Account Service Resource
+	[Arguments]    ${FUSION IP}=${FUSION IP}    ${EM IP}=${EM IP}
+	${Response}=    HAL API Get Resource    ${FUSION IP}    ${EM IP}    /rest/v1/AccountService
+	[Return]    ${Response}
+
+Get EM Blade Manager Resource
+    [Documentation]    Returns Blade Manager Resource
+    [Arguments]    ${Manager}=1    ${FUSION IP}=${FUSION IP}    ${EM IP}=${EM IP}
+    ${EM_IP}=    Get EM IP
+    ${encl_list}=    Get EM Enclosures
+    Get EM Token    ${encl_list[0]}
+    Get EM Sessions
+    ${Response}=    HAL API Get Resource    ${FUSION IP}    ${EM IP}    /rest/v1/BladeManager/${Manager}    ${EMPTY}    5    ${EM_TOKEN}
+    [Return]    ${Response}
+
+Get EM Chassis Resource
+	[Documentation]    Returns Enclosure Manager Chassis Resource
+	[Arguments]    ${Chassis}    ${FUSION IP}=${FUSION IP}    ${EM IP}=${EM IP}
+	${Response}=    HAL API Get Resource    ${FUSION IP}    ${EM IP}    /rest/v1/Chassis/${Chassis}/
+	[Return]    ${Response}
+
+Get EM Power Metrics Resource
+	[Documentation]    Returns Enclosure Manager Chassis Power Metrics Resource
+	[Arguments]    ${Chassis}    ${FUSION IP}=${FUSION IP}    ${EM IP}=${EM IP}
+	${Response}=    HAL API Get Resource    ${FUSION IP}    ${EM IP}    /rest/v1/Chassis/${Chassis}/PowerMetrics
+	[Return]    ${Response}
+
+Get EM Power Meter Resource
+	[Documentation]    Returns Enclosure Manager Chassis Power Meter Resource
+	[Arguments]    ${Chassis}    ${FUSION IP}=${FUSION IP}    ${EM IP}=${EM IP}
+	${Response}=    HAL API Get Resource    ${FUSION IP}    ${EM IP}    /rest/v1/Chassis/${Chassis}/PowerMetrics/PowerMeter
+	[Return]    ${Response}
+
+Get EM MidPlane FRU Resource
+	[Documentation]    Returns Enclosure Manager Chassis MidPlane FRU Resource
+	[Arguments]    ${Chassis}    ${FUSION IP}=${FUSION IP}    ${EM IP}=${EM IP}
+    ${MidplaneFru Resource}=    Set Variable If    '${DCS}'=='${True}'    /rest/v1/Chassis/${Chassis}/MidPlaneFru    /rest/v1/MidplaneFru
+	${Response}=    HAL API Get Resource    ${FUSION IP}    ${EM IP}    ${MidplaneFru Resource}
+	[Return]    ${Response}
+
+Get EM Blade Bay Resource
+	[Documentation]    Returns Enclosure Manager Chassis Blade Bay Resource
+	[Arguments]    ${Chassis}    ${Bay}    ${FUSION IP}=${FUSION IP}    ${EM IP}=${EM IP}
+	${Response}=    HAL API Get Resource    ${FUSION IP}    ${EM IP}    /rest/v1/Chassis/${Chassis}/BladeBays/${Bay}/
+	[Return]    ${Response}
+
+Get EM Blade Resource
+	[Documentation]    Returns Enclosure Manager Enclosure Blade Resource
+	[Arguments]    ${Bay}    ${FUSION IP}=${FUSION IP}    ${EM IP}=${EM IP}
+	${Response}=    HAL API Get Resource    ${FUSION IP}    ${EM IP}    /rest/v1/Blades/${Bay}
+	[Return]    ${Response}
+
+Is EM Blade Bay Empty
+    [Documentation]    Returns Enclosure Manager Blade Status
+	[Arguments]    ${Bay}    ${FUSION IP}=${FUSION IP}    ${EM IP}=${EM IP}
+	${Response}=    HAL API Get Resource    ${FUSION IP}    ${EM IP}    /rest/v1/BladeBays/${Bay}
+    ${Resource}=    Get Resource from Response    ${Response}
+    ${empty}=    Get From Dictionary    ${Resource}    Empty
+	[Return]    ${empty}
+
+Get EM Blade FRU Resource
+	[Documentation]    Returns Enclosure Manager Enclosure Blade FRU Resource
+	[Arguments]    ${Bay}    ${FUSION IP}=${FUSION IP}    ${EM IP}=${EM IP}
+	${Response}=    HAL API Get Resource    ${FUSION IP}    ${EM IP}    /rest/v1/BladeFru/${Bay}
+	[Return]    ${Response}
+
+Get ICM Bay Status
+	[Documentation]    Returns ICM Bay status via DCS API
+	[Arguments]    ${Bay}    ${FUSION IP}=${FUSION IP}    ${EM IP}=${EM IP}
+	${Response}=    HAL API Get Resource    ${FUSION IP}    ${EM IP}    /rest/v1/Interconnects/${Bay}/
+	[Return]    ${Response}
+
+Is EM ICM Bay Empty
+    [Documentation]    Returns Enclosure Manager Blade Status
+	[Arguments]    ${Bay}    ${FUSION IP}=${FUSION IP}    ${EM IP}=${EM IP}
+	${Response}=    HAL API Get Resource    ${FUSION IP}    ${EM IP}    /rest/v1/InterconnectBays/${Bay}
+    ${Resource}=    Get Resource from Response    ${Response}
+    ${empty}=    Get From Dictionary    ${Resource}    Empty
+	[Return]    ${empty}
+
+Get EM ICM FRU Resource
+	[Documentation]    Returns ICM FRU Resource
+	[Arguments]    ${Bay}    ${FUSION IP}=${FUSION IP}    ${EM IP}=${EM IP}
+	${Response}=    HAL API Get Resource    ${FUSION IP}    ${EM IP}    /rest/v1/InterconnectFru/${Bay}
+	[Return]    ${Response}
+
+Get EM Power Supply FRU Resource
+	[Documentation]    Returns Power Supply FRU Resource
+	[Arguments]    ${Bay}    ${FUSION IP}=${FUSION IP}    ${EM IP}=${EM IP}
+	${Response}=    HAL API Get Resource    ${FUSION IP}    ${EM IP}    /rest/v1/PowerSupplyFru/${Bay}
+	[Return]    ${Response}
+
+Is EM Power Supply Bay Empty
+    [Documentation]    Returns Enclosure Manager Blade Status
+	[Arguments]    ${Bay}    ${FUSION IP}=${FUSION IP}    ${EM IP}=${EM IP}
+	${Response}=    HAL API Get Resource    ${FUSION IP}    ${EM IP}    /rest/v1/PowerSupplyBays/${Bay}
+    ${Resource}=    Get Resource from Response    ${Response}
+    ${empty}=    Get From Dictionary    ${Resource}    Empty
+	[Return]    ${empty}
+
+Get EM Fan FRU Resource
+	[Documentation]    Returns Fan FRU Resource
+	[Arguments]    ${Bay}    ${FUSION IP}=${FUSION IP}    ${EM IP}=${EM IP}
+	${Response}=    HAL API Get Resource    ${FUSION IP}    ${EM IP}    /rest/v1/FanFru/${Bay}
+	[Return]    ${Response}
+
+Is EM Fan Bay Empty
+    [Documentation]    Returns Enclosure Manager Blade Status
+	[Arguments]    ${Bay}    ${FUSION IP}=${FUSION IP}    ${EM IP}=${EM IP}
+	${Response}=    HAL API Get Resource    ${FUSION IP}    ${EM IP}    /rest/v1/FanBays/${Bay}
+    ${Resource}=    Get Resource from Response    ${Response}
+    ${empty}=    Get From Dictionary    ${Resource}    Empty
+	[Return]    ${empty}
+
+Get EM EM FRU Resource
+	[Documentation]    Returns EM FRU Resource
+	[Arguments]    ${Bay}    ${FUSION IP}=${FUSION IP}    ${EM IP}=${EM IP}
+	${Response}=    HAL API Get Resource    ${FUSION IP}    ${EM IP}    /rest/v1/EnclosureManagerFru/${Bay}
+	[Return]    ${Response}
+
+Is EM EM Bay Empty
+    [Documentation]    Returns Enclosure Manager EM Status
+	[Arguments]    ${Bay}    ${FUSION IP}=${FUSION IP}    ${EM IP}=${EM IP}
+	${Response}=    HAL API Get Resource    ${FUSION IP}    ${EM IP}    /rest/v1/EnclosureManagerBays/${Bay}
+    ${Resource}=    Get Resource from Response    ${Response}
+    ${empty}=    Get From Dictionary    ${Resource}    Empty
+	[Return]    ${empty}
+
+Set ICM Bay Power State
+	[Documentation]    Sets ICM Bay Power status via DCS API
+	[Arguments]    ${Bay}    ${State}    ${FUSION IP}=${FUSION IP}    ${EM IP}=${EM IP}
+	${Parameters}=    Create Dictionary    PowerState=${State}
+	${Response}=    HAL API Patch Resource    ${FUSION IP}    ${EM IP}    /rest/v1/Interconnects/${Bay}/    ${Parameters}
+	[Return]    ${Response}
+
+HAL Action
+	[Documentation]    Perform a HAL action, decode response, Fail on error.  Invalid calls accepted.
+	[Arguments]    ${Action}   ${Bay}    ${case}=valid
+	${Params}=     Create Dictionary	     BayNumber	     ${Bay}
+	${Response}    HAL API Perform POST Action   ${FUSION_IP}    ${Action}    ${Params}
+	${CallStatus}  Find Errors in HAPI Response  Device	     ${Response}  performAction		${Action}	  ${Params}
+	Run Keyword If        '${case}'=='valid'    Fail On Any Errors in HAPI Response	     ${CallStatus}
+	Run Keyword unless    '${case}'=='valid'    Should Not Contain    ${Response}     SUCCESS
+
+
+# -----------------------------------------------------------------------------
+#		HAL FORMAT RESPONSE
+# -----------------------------------------------------------------------------
+
+Get Resource from Response
+    [Documentation]    Parses out and returns the resource body from the API Response Dictionary
+    [Arguments]    ${Response}
+    ${count}=    Get Line Count    ${Response}
+    Log    ${Response}
+    ${response_row}=    Run Keyword And Ignore Error    String.Get Lines Containing String    ${Response}    {
+    ${response_value}=    set Variable    ${response_row[1]}
+    [Return]    ${response_value}
+
+Remove REST Headers
+	[Documentation]    Removes Response Header information from Response Dictionary.
+	...                This is required as the header and body information are merged together.
+    [Arguments]    ${Dict}
+    Remove From Dictionary    ${Dict}    -content-encoding
+    ...                                  cache-control
+    ...                                  content-length
+    ...                                  content-location
+    ...                                  content-type
+    ...                                  date
+    ...                                  etag
+    ...                                  status_code
+    ...                                  transfer-encoding
+    ...                                  vary
+    ...                                  via
+    [Return]    ${Dict}
+
+# -----------------------------------------------------------------------------
+#		HAL VALIDATE RESPONSE
+# -----------------------------------------------------------------------------
+
+Find Errors In HAPI Response
+    [Documentation]    Looks for signs of trouble in a HAL Webapp API (HAPI) response.
+    ...    This could include status != SUCCESS, a non-empty exception list,
+    ...    or the wrong action being performed.
+    ...    Arguments:
+    ...    ${Device} : Printable name for the device you were trying to interact with in the HAPI call,
+    ...    e.g. "EM1" or "Chassis".  Used for logging only.
+    ...    ${Response} : API response from the HAPI call
+    ...    ${ExpectedOperation} : What you sent as the "PemOperation" in the JSON body of your HAPI request
+    ...    ${ExpectedActionName} : What you sent as the "ActionName" in the JSON body of your HAPI request.  Put ${EMPTY} if you omitted this parameter.
+    ...    ${ExpectedParams} : What you sent as the "ActionParameters" or "OperationParameters" in the JSON body of your HAPI request
+    ...    Returns:
+    ...    ${Flags} : A dictionary of values that can be sent to other keywords for further analysis.
+    [Arguments]    ${Device}    ${Response}    ${ExpectedOperation}    ${ExpectedActionName}    ${ExpectedParams}
+    # First, if the "response_string" key exists, this is a sign of a HAPI error
+    ${HAPI Failure}    Run Keyword And Return Status
+    ...    Get From Dictionary    ${Response}    response_string
+    Return From Keyword If    ${HAPI Failure}    ${Response}
+    ${FaultAreas}    Create Dictionary
+    # Set some initial parameters in the FaultAreas dictionary to contain state info
+    Set To Dictionary    ${FaultAreas}    Device    ${Device}
+    Set To Dictionary    ${FaultAreas}    expectedActionName    ${ExpectedActionName}
+    Set To Dictionary    ${FaultAreas}    expectedParameters    ${ExpectedParams}
+    Set To Dictionary    ${FaultAreas}    expectedOperation    ${ExpectedOperation}
+    # Get the size of the Exceptions list
+    ${Exceptions}    Get From Dictionary    ${Response}    Exceptions
+    ${ExcSize}    Get Length    ${Exceptions}
+    Set To Dictionary    ${FaultAreas}    exceptionsLength    ${ExcSize}
+    # Store the Webapp's status string (should be SUCCESS)
+    ${Status}    Get From Dictionary    ${Response}    CallStatus
+    Set To Dictionary    ${FaultAreas}    operationStatus    ${Status}
+    # Store the Webapp's status_code (should be 200)
+    ${HAPIStatus}    Get From Dictionary    ${Response}    status_code
+    Set To Dictionary    ${FaultAreas}    hapiStatus    ${HAPIStatus}
+    # Make sure HAPI actually ran the specified action with the parameters & didn't change anything
+    ${Parameters}    Get From Dictionary    ${Response}    OperationParameters
+    # Store the specific PEM operation run by the Webapp
+    ${PemOperation}    Get From Dictionary    ${Parameters}    PemOperation
+    Set To Dictionary    ${FaultAreas}    pemOperation    ${PemOperation}
+    # Store the action name as indicated by the Webapp, if an ActionName was specified in the first place
+    ${ActionName}    Run Keyword Unless    '${ExpectedActionName}' == '${Empty}'
+    ...    Get From Dictionary    ${Parameters}    ActionName
+    Run Keyword Unless    '${ExpectedActionName}' == '${Empty}'
+    ...    Set To Dictionary    ${FaultAreas}    actionName    ${ActionName}
+    # Dig down and fetch the parameters returned by the Webapp - check under both ActionParameters & OperationParameters
+    ${Status}    ${DummyVal}    Run Keyword And Ignore Error
+    ...    Dictionary Should Contain Key    ${Parameters}    ActionParameters
+    ${ActionParameters}    Run Keyword If    '${Status}' == 'FAIL'
+    ...    Get From Dictionary    ${Parameters}    operationParameters
+    ...    ELSE
+    ...    Get From Dictionary    ${Parameters}    ActionParameters
+    Set To Dictionary    ${FaultAreas}    actionParams    ${ActionParameters}
+    # TODO: Fetch SN of the device affected, once supported
+    [Return]    ${FaultAreas}
+
+Fail On Any Errors In HAPI Response
+    [Documentation]    Fails on 5 potential errors:
+    ...    1. Exception list is non-zero in length, indicating exceptions happened.
+    ...    2. HAPI call status is not SUCCESS.
+    ...    3. HAPI overall status is not 200 OK.
+    ...    4. Action name returned as run by HAPI is not what the user specified.
+    ...    5. Action parameters returned as used by HAPI are not what the user specified.
+    ...    Arguments:
+    ...    ${CallStatus} : Output from "Find Errors in HAPI Response"
+    [Arguments]    ${CallStatus}
+    # See if the "response_string" key exists: this indicates a HAPI error
+    ${HAPI Failure}    Run Keyword And Return Status
+    ...    Get From Dictionary    ${Response}    response_string
+    Run Keyword If    ${HAPI Failure}
+    ...    Fail    msg=There was an error running the HAPI request, and the server returned a zero-length response.
+    # Get state info from the CallStatus dictionary so we can elaborate on what we were doing in the error message
+    ${Device}    Get From Dictionary    ${CallStatus}    Device
+    ${ExpectedActionName}    Get From Dictionary    ${CallStatus}    expectedActionName
+    ${ExpectedParameters}    Get From Dictionary    ${CallStatus}    expectedParameters
+    ${ExpectedPemOperation}    Get From Dictionary    ${CallStatus}    expectedOperation
+    # Make sure the exceptions list is empty
+    ${ExcsEmpty}    Get From Dictionary    ${CallStatus}    exceptionsLength
+    Should Be Equal    ${ExcsEmpty}    ${0}    msg="The list of exceptions was not empty."
+    # Check the operation status: it should equal SUCCESS
+    ${OperationStatus}    Get From Dictionary    ${CallStatus}    operationStatus
+    # Come up with a non-blank value to put in the error message, if needed
+    ${Action Or Operation}    Run Keyword If    '${ExpectedActionName}' == '${Empty}'
+    ...    Evaluate    '${ExpectedPemOperation}'
+    ...    ELSE
+    ...    Evaluate    '${ExpectedActionName}'
+    Should Be Equal    ${OperationStatus}    SUCCESS    msg=The HAPI action "${Action Or Operation}" on ${Device} appears to have failed with status ${OperationStatus}, though HAPI itself worked as expected.
+    # Make sure the overall HAPI status is 200 OK
+    ${HAPIStatus}    Get From Dictionary    ${CallStatus}    hapiStatus
+    Should Be Equal    ${HAPIStatus}    ${200}    msg=HAPI indicated an internal problem by returning status ${HAPIStatus} when attempting to run action "${ExpectedActionName}" on device ${Device}.
+    # Make sure the operation name is the same
+    ${PemOperation}    Get From Dictionary    ${CallStatus}    pemOperation
+    Should Be Equal    ${PemOperation}    ${ExpectedPemOperation}    msg=The PEM operation performed by the system was shown to be ${PemOperation} when ${ExpectedPemOperation} was expected.
+    # Make sure the action name is the same (if specified)
+    ${Status}    ${ActionName}    Run Keyword And Ignore Error
+    ...    Get From Dictionary    ${CallStatus}    actionName
+    Run Keyword If    '${Status}' == 'PASS'
+    ...   Should Be Equal    ${ActionName}    ${ExpectedActionName}    msg=The action performed by the system was shown to be ${ActionName} when ${ExpectedActionName} was expected.
+    # Make sure the action parameters are all equivalent
+    ${ActionParameters}    Get From Dictionary    ${CallStatus}    actionParams
+    Dictionaries Should Be Equal    ${ActionParameters}    ${ExpectedParameters}    msg=The action parameters returned as run by the Webapp did not match those sent.
+    # TODO: Validate the SN of the device when this becomes available, if possible

@@ -1,0 +1,465 @@
+*** Settings ***
+Documentation     Verifies properties are set in Fusion from what is defined from the EM RIS
+...    = Usage =
+...    | pybot | -L DEBUG | verify_prop.txt | 
+...    = Variables =
+...    | FUSION IP        | Required; IP address of the FusionVM to use |
+...    = Preconditions =
+...    None
+
+# From user story parents content about what should be working overall for a claimed and added
+# enclosure:
+#
+# API for GET /rest/enclosures/{IP}
+# The OneView user can, via the OneView API, issue a GET on /rest/enclosures/{IP}.  
+# The Enclosure object returned is populated with all information that can be obtained 
+# by interrogating the EM:
+#  UUID, Serial Number, Part Number, Enclosure Type (string), Enclosure Group URI, name, 
+#  description, status, resource type, and management port statuses.
+#  TBD: device bay count, interconnect bay count, EM bay count, number of EMs, 
+#  EM IP Addresses, EM FW revision.
+
+# Specifically, this test case will test at minimum that the following RIS data
+# is used to populate Fusion after an enclosure is added:
+#
+# FanBayBuilder.java 
+#  -- retrieve FanState from RIS
+#  -- Set Model/partnumber/sparepartnumber from Fru
+#* PowerSupplyBayBuilder
+# -- Set model/serialNumber/partnumber/sparepartnumber from Fru
+#* EnclosureBuilder (EM data)
+#- Set model/serialNumber/partnumber/sparepartnumber from Fru
+#- Retrieve MGMT/LINK port speeds from Fru
+# 
+
+# Additional areas we need to cover from dev US:
+# - Blade Bay
+
+
+Library           RoboGalaxyLibrary            # DVTs Robot Framework extensions
+Library           FusionLibrary                # DVTs Robot Framework extensions
+Library           OperatingSystem
+Variables         ../resources/variables.py    ${ENCLOSURE}
+Resource          ../resources/compare_json.txt
+Resource          ../resources/perm_api.txt
+Resource          ../resources/fusion_api.txt  # Comet-DVT fusion API extensions
+Resource          ../resources/hal_webapp.txt  # Comet-DVT HAL webapp extensions
+Resource          ../resources/defaults.txt    # Comet-DVT default variables
+Suite Setup       Login to Fusion Via REST
+Suite Teardown    Logout of Fusion Via REST
+Force Tags        DCS  HW  HAL
+
+*** Variables ***
+
+
+*** Test Cases ***
+
+Retrieve RIS Fru Data
+    Get RIS Blade Fru Data
+    Get RIS Power Supply Fru Data
+    Get RIS Fan Fru Data
+    Get RIS EM Fru Data
+    
+Retrieve Fusion Api Data With No Claim
+    ${skip}=    Verify Claimed EM
+    Pass Execution If    ${skip} 
+    ...    Skip Test--EM Claimed--Skipping test
+    
+    # We should not be seeing any enclosures at this point
+    Run Keyword and Expect Error    Fusion Api Get Enclosures
+
+Retrieve Fusion Api Data With Claim
+    ${skip}=     Verify Unclaimed EM 
+    Pass Execution If    ${skip} 
+    ...    Skip Test--EM Not Claimed--Skipping test
+    
+    ${EnclosureCollection}=    Fusion Api Get Enclosures
+    ${count}=    Get From Dictionary      ${EnclosureCollection}    count
+    Should not be Equal as Integers       ${count}      0           msg=Failed to find Enclosure
+    ${members}=    Get From Dictionary    ${EnclosureCollection}    members
+    ${member}=     Get From List          ${members}                0
+    Log Dictionary    ${member}
+    ${deviceBays}=    Get From Dictionary    ${member}    deviceBays
+    Set Suite Variable    ${Fusion Enclosure Data}    ${member}
+    
+Validate Fusion EM UnPop Fru
+    ${skip}=     Verify Unclaimed EM
+    Pass Execution If    ${skip} 
+    ...    Skip Test--EM Not Claimed--Skipping test
+    
+    # Validate an EM bay unpopulated shows up unpopulated in Fusion
+    Pass Execution If    '${EM EM Bay UnPopulated}'=='-1'    
+    ...    Skip Test--No unpopulated EM bays
+
+    ${Index}=    Evaluate    ${EM EM Bay UnPopulated}-1
+    ${managers}=    Get From Dictionary    ${Fusion Enclosure Data}    managers
+    Should Not Be Empty    ${managers}    Error--Fusion Api enclosure manager bay data shows empty
+    ${manager}=   Get From List    ${managers}    ${Index}
+    Log    ${manager}
+    ${present}=    Get From Dictionary    ${manager}    devicePresence
+    Should Be Equal    '${present}'    'Absent'    msg=Fusion thinks EM is present. EM RIS reports absent.
+    
+Validate Fusion EM Pop Fru
+    ${skip}=     Verify Unclaimed EM
+    Pass Execution If    ${skip}
+    ...    Skip Test--EM Not Claimed--Skipping test
+
+    # Validate a populated EM bay for following Fru:
+    # model/serialNumber/partnumber/sparepartnumber
+    ${EM_RIS}=         Create Dictionary
+    ${FUSION_REST}=    Create Dictionary
+
+    Log    ${EM EM Fru Resource}
+    ${parsed}=    Get From Dictionary    ${EM EM Fru Resource}    Parsed
+    ${preamble}=    Get From Dictionary    ${parsed}    Preamble
+    ${model}=    Get From Dictionary    ${preamble}    Model
+    Set To Dictionary    ${EM_RIS}    model    ${model}
+    ${productInfo}=    Get From Dictionary    ${parsed}    ProductInfo
+    ${partnumber}=    Get From Dictionary    ${productInfo}    PartNumber
+    Set To Dictionary    ${EM_RIS}    partNumber    ${partnumber}
+    ${pcaserial}=    Get From Dictionary    ${productInfo}    PCASerialNumber
+    Set To Dictionary    ${EM_RIS}    serialNumber    ${pcaserial}
+    ${pcasparepartnumber}=    Get From Dictionary    ${productInfo}    PCASparePartNumber
+    Set To Dictionary    ${EM_RIS}    sparePartNumber    ${pcasparepartnumber}
+    ${eminfo}=    Get From Dictionary    ${parsed}    EMInfo
+    ${mgmtlinks}=    Get From Dictionary    ${eminfo}    MgmtLinks
+
+    : FOR    ${link}    IN    @{mgmtlinks}
+    \    ${connectType}=    Get From Dictionary    ${link}    ConnectType
+    \    ${speed}=          Get From Dictionary    ${link}    LinkRate
+    \    Run Keyword If     '${connectType}'=='Serial'     
+    \    ...    Set To Dictionary    ${EM_RIS}    mgmtPortSpeed    ${speed}
+    \    Run Keyword If     '${connectType}'=='Network'     
+    \    ...    Set To Dictionary    ${EM_RIS}    linkPortSpeed    ${speed}
+    Log    ${EM_RIS}
+
+    ${managers}=    Get From Dictionary    ${Fusion Enclosure Data}    managers
+    Should Not Be Empty    ${managers}    Error--Fusion Api enclosure manager bay data shows empty
+
+    ${Index}=    Evaluate    ${EM EM Bay Populated}-1
+    ${manager}=   Get From List    ${managers}    ${Index}
+    Log    ${manager}
+    ${present}=    Get From Dictionary    ${manager}    devicePresence
+    Should Be Equal    '${present}'    'Present'    msg=Fusion thinks EM is absent. EM RIS reports present.
+
+    ${partNumber}=    Get From Dictionary    ${manager}    partNumber
+    Set To Dictionary    ${FUSION_REST}    partNumber    ${partNumber}
+    ${model}=    Get From Dictionary    ${manager}    model
+    Set To Dictionary    ${FUSION_REST}    model    ${model}
+    ${sparePartNumber}=    Get From Dictionary    ${manager}    sparePartNumber
+    Set To Dictionary    ${FUSION_REST}    sparePartNumber    ${sparePartNumber}
+    ${linkPortSpeed}=    Get From Dictionary    ${manager}    linkPortSpeed 
+    Set To Dictionary    ${FUSION_REST}    linkPortSpeed    ${linkPortSpeed}
+    ${mgmtPortSpeed}=    Get From Dictionary    ${manager}    mgmtPortSpeed 
+    Set To Dictionary    ${FUSION_REST}    mgmtPortSpeed    ${mgmtPortSpeed}
+    ${serialNumber}=    Get From Dictionary    ${manager}    serialNumber 
+    Set To Dictionary    ${FUSION_REST}    serialNumber    ${serialNumber}
+    Log    ${FUSION_REST}
+
+    Dictionaries Should Be Equal    ${FUSION_REST}    ${EM_RIS}    msg=Fusion REST API Data and EM RIS Data Different For EM Populated Bay
+
+Validate Fusion Port Statuses
+    ${skip}=     Verify Unclaimed EM
+    Pass Execution If    ${skip}
+    ...    Skip Test--EM Not Claimed--Skipping test
+
+    # Get the [Negotiated] Mgmt Port <Speed|Mode|Isolated> properties - this usually lives on EM switch port 22
+    ${Mgmt Port}    Hal Api Get Resource    ${FUSION_IP}    ${EM_IP}    /rest/v1/EnclosureManagerSwitchPorts/122
+    ${Mgmt Port}    Get Resource from Response    ${Mgmt Port}
+    ${Mgmt Mode}    Get From Dictionary    ${Mgmt Port}    MgmtPortMode
+    ${Mgmt Speed}    Get From Dictionary    ${Mgmt Port}    LinkSpeed
+    # LinkSpeed is reported in Mb/s; Fusion API reports in GB/s
+    ${Mgmt Speed}    Evaluate    ${Mgmt Speed} / 1000
+    # PortIsolated is usually only in the RIS tree if it's defined as True
+    ${Mgmt Isolated}    Set Variable    ${False}
+    ${Isolated Key Exists}    Evaluate    'PortIsolated' in ${Mgmt Port}
+    Run Keyword If    ${Isolated Key Exists} == ${True}
+    ...    ${Mgmt Isolated}    Get From Dictionary    ${Mgmt Port}    PortIsolated
+
+    # Get the [Negotiated] Link Port <Speed|Isolated> properties - this usually lives on EM switch port 23
+    ${Link Port}    Hal Api Get Resource    ${FUSION_IP}    ${EM_IP}    /rest/v1/EnclosureManagerSwitchPorts/123
+    ${Link Port}    Get Resource from Response    ${Link Port}
+    ${Link Speed}    Get From Dictionary    ${Link Port}    LinkSpeed
+    # LinkSpeed is reported in Mb/s; Fusion API reports in GB/s
+    ${Link Speed}    Evaluate    ${Link Speed} / 1000
+    # PortIsolated is usually only in the RIS tree if it's defined as True
+    ${Link Isolated}    Set Variable    ${False}
+    ${Isolated Key Exists}    Evaluate    'PortIsolated' in ${Link Port}
+    Run Keyword If    ${Isolated Key Exists} == ${True}
+    ...    ${Link Isolated}    Get From Dictionary    ${Link Port}    PortIsolated
+
+    # Prepare the Fusion API output
+    ${Index}=    Evaluate    ${EM EM Bay Populated}-1
+    ${managers}=    Get From Dictionary    ${Fusion Enclosure Data}    managers
+    Should Not Be Empty    ${managers}    Error--Fusion Api enclosure manager bay data shows empty
+    ${manager}=   Get From List    ${managers}    ${Index}
+    Log    ${manager}
+    # Compare these parameters to Fusion API output
+    # MgmtPortMode
+    ${Expected Mgmt Mode}    Get From Dictionary    ${manager}    mgmtPortMode
+    Run Keyword And Continue On Failure
+    ...    Should Be Equal    ${Mgmt Mode}    ${Expected Mgmt Mode}    msg=MgmtPortMode was reported differently between EM RIS & Fusion API.
+    # Mgmt. LinkSpeed
+    ${Expected Mgmt Speed}    Get From Dictionary    ${manager}    negotiatedMgmtPortSpeedGbs
+    Run Keyword And Continue On Failure
+    ...    Should Be Equal    ${Mgmt Speed}    ${Expected Mgmt Speed}    msg=Mgmt port LinkSpeed was reported differently between EM RIS & Fusion API.
+    # Mgmt. PortIsolated
+    ${Expected Mgmt Isolated}    Get From Dictionary    ${manager}    mgmtPortIsolated
+    Run Keyword And Continue On Failure
+    ...    Should Be Equal    ${Mgmt Isolated}    ${Expected Mgmt Isolated}    msg=Mgmt port PortIsolated was reported differently between EM RIS & Fusion API.
+    # Link Port LinkSpeed
+    ${Expected Link Speed}    Get From Dictionary    ${manager}    negotiatedLinkPortSpeedGbs
+    Run Keyword And Continue On Failure
+    ...    Should Be Equal    ${Link Speed}    ${Expected Link Speed}    msg=Link port LinkSpeed was reported differently between EM RIS & Fusion API.
+    # Link PortIsolated
+    ${Expected Link Isolated}    Get From Dictionary    ${manager}    linkPortIsolated
+    Run Keyword And Continue On Failure
+    ...    Should Be Equal    ${Link Isolated}    ${Expected Link Isolated}    msg=Link port PortIsolated was reported differently between EM RIS & Fusion API.
+    # TODO: linkPortSpeedGbs & mgmtPortSpeedGbs are still hard-coded but should come from FRU data...
+
+Validate Fusion Fan UnPop Fru
+    ${skip}=     Verify Unclaimed EM 
+    Pass Execution If    ${skip} 
+    ...    Skip Test--EM Not Claimed--Skipping test
+    
+    # Validate a Fan bay unpopulated shows up unpopulated in Fusion
+    Pass Execution If    '${EM Fan Bay UnPopulated}'=='-1'   
+    ...    Skip Test--No unpopulated fan bays
+    
+    ${Index}=    Evaluate    ${EM Fan Bay UnPopulated}-1
+    ${fans}=    Get From Dictionary    ${Fusion Enclosure Data}    fanBays
+    Should Not Be Empty    ${fans}    Error--Fusion Api fan bay data shows empty
+    ${fan}=   Get From List    ${fans}    ${Index}
+    Log    ${fan}
+    ${present}=    Get From Dictionary    ${fan}    devicePresence
+    Should Be Equal    '${present}'    'Absent'    msg=Fusion thinks Fan is present. EM RIS reports absent.
+    
+Validate Fusion Fan Pop Fru
+    ${skip}=     Verify Unclaimed EM 
+    Pass Execution If    ${skip} 
+    ...    Skip Test--EM Not Claimed--Skipping test
+
+    # Validate a populated Fan bay for following Fru:
+    # Model/partnumber/sparepartnumber/state
+    ${EM_RIS}=         Create Dictionary
+    ${FUSION_REST}=    Create Dictionary
+
+    Log    ${EM Fan Fru Resource}
+    ${parsed}=    Get From Dictionary    ${EM Fan Fru Resource}    Parsed
+    ${preamble}=    Get From Dictionary    ${parsed}    Preamble
+    ${model}=    Get From Dictionary    ${preamble}    Model
+    Set To Dictionary    ${EM_RIS}    model    ${model}
+    ${productInfo}=    Get From Dictionary    ${parsed}    ProductInfo
+    ${partnumber}=    Get From Dictionary    ${productInfo}    PartNumber
+    Set To Dictionary    ${EM_RIS}    partNumber    ${partnumber}
+    ${pcasparepartnumber}=    Get From Dictionary    ${productInfo}    PCASparePartNumber
+    Set To Dictionary    ${EM_RIS}    sparePartNumber    ${pcasparepartnumber}
+
+    Log    ${EM_RIS}
+    
+    ${fans}=    Get From Dictionary    ${Fusion Enclosure Data}    fanBays
+    Should Not Be Empty    ${fans}    Error--Fusion Api fan bay data shows empty
+    
+    ${Index}=    Evaluate    ${EM Fan Bay Populated}-1
+    ${fan}=   Get From List    ${fans}    ${Index}
+    Log    ${fan}
+    ${present}=    Get From Dictionary    ${fan}    devicePresence
+    Should Be Equal    '${present}'    'Present'    msg=Fusion thinks Fan is absent. EM RIS reports present.
+    
+    ${partNumber}=    Get From Dictionary    ${fan}    partNumber
+    Set To Dictionary    ${FUSION_REST}    partNumber    ${partNumber}
+    ${model}=    Get From Dictionary    ${fan}    model
+    Set To Dictionary    ${FUSION_REST}    model    ${model}
+    ${sparePartNumber}=    Get From Dictionary    ${fan}    sparePartNumber
+    Set To Dictionary    ${FUSION_REST}    sparePartNumber    ${sparePartNumber}
+    #${state}=    Get From Dictionary    ${fan}    state
+    #Set To Dictionary    ${FUSION_REST}    state    ${state}
+    Log    ${FUSION_REST}
+    
+    Dictionaries Should Be Equal    ${FUSION_REST}    ${EM_RIS}    msg=Fusion REST API Data and EM RIS Data Different For Fan Populated Bay
+    
+Validate Fusion Power Supply UnPop Fru
+    ${skip}=     Verify Unclaimed EM 
+    Pass Execution If    ${skip} 
+    ...    Skip Test--EM Not Claimed--Skipping test
+
+    # Validate a Power Supply bay unpopulated shows up unpopulated in Fusion
+    Pass Execution If    '${EM Power Supply Bay UnPopulated}'=='-1'   
+    ...    Skip Test--No unpopulated power supply bays
+    
+    ${Index}=    Evaluate    ${EM Power Supply Bay UnPopulated}-1
+    ${powersupplies}=    Get From Dictionary    ${Fusion Enclosure Data}    powerSupplyBays
+    Should Not Be Empty    ${powersupplies}    Error--Fusion Api power supply bay data shows empty
+    
+    ${powersupply}=   Get From List    ${powersupplies}    ${Index}
+    Log    ${powersupplies}
+    ${present}=    Get From Dictionary    ${powersupply}    devicePresence
+    Should Be Equal    '${present}'    'Absent'    msg=Fusion thinks Power Supply is present. EM RIS reports absent.
+    
+Validate Fusion Power Supply Pop Fru
+    ${skip}=     Verify Unclaimed EM 
+    Pass Execution If    ${skip} 
+    ...    Skip Test--EM Not Claimed--Skipping test
+
+    # Validate a populated Power Supply bay for following Fru:
+    # model/serialNumber/partnumber/sparepartnumber
+    ${EM_RIS}=         Create Dictionary
+    ${FUSION_REST}=    Create Dictionary
+
+    Log    ${EM Power Supply Fru Resource}
+    ${parsed}=    Get From Dictionary    ${EM Power Supply Fru Resource}    Parsed
+    ${preamble}=    Get From Dictionary    ${parsed}    Preamble
+    ${model}=    Get From Dictionary    ${preamble}    Model
+    Set To Dictionary    ${EM_RIS}    model    ${model}
+    ${productInfo}=    Get From Dictionary    ${parsed}    ProductInfo
+    ${partnumber}=    Get From Dictionary    ${productInfo}    PartNumber
+    Set To Dictionary    ${EM_RIS}    partNumber    ${partnumber}
+    ${serialnumber}=    Get From Dictionary    ${productInfo}    SerialNumber
+    Set To Dictionary    ${EM_RIS}    serialNumber    ${serialnumber}
+    ${pcasparepartnumber}=    Get From Dictionary    ${productInfo}    PCASparePartNumber
+    Set To Dictionary    ${EM_RIS}    sparePartNumber    ${pcasparepartnumber}
+ 
+    Log    ${EM_RIS}
+    
+    ${powersupplies}=    Get From Dictionary    ${Fusion Enclosure Data}    powerSupplyBays
+    Should Not Be Empty    ${powersupplies}    Error--Fusion Api power supply bay data shows empty
+    
+    ${Index}=    Evaluate    ${EM Power Supply Bay Populated}-1
+    ${powersupply}=   Get From List    ${powersupplies}    ${Index}
+    Log    ${powersupply}
+    ${present}=    Get From Dictionary    ${powersupply}    devicePresence
+    Should Be Equal    '${present}'    'Present'    msg=Fusion thinks Power Supply is absent. EM RIS reports present.
+    
+    ${partNumber}=    Get From Dictionary    ${powersupply}    partNumber
+    Set To Dictionary    ${FUSION_REST}    partNumber    ${partNumber}
+    ${model}=    Get From Dictionary    ${powersupply}    model
+    Set To Dictionary    ${FUSION_REST}    model    ${model}
+    ${sparePartNumber}=    Get From Dictionary    ${powersupply}    sparePartNumber
+    Set To Dictionary    ${FUSION_REST}    sparePartNumber    ${sparePartNumber}
+    ${serialNumber}=    Get From Dictionary    ${powersupply}    serialNumber 
+    Set To Dictionary    ${FUSION_REST}    serialNumber    ${serialNumber}
+    Log    ${FUSION_REST}
+    
+    Dictionaries Should Be Equal    ${FUSION_REST}    ${EM_RIS}    msg=Fusion REST API Data and EM RIS Data Different For Power Supply Populated Bay
+    
+Validate Fusion Blade UnPop Fru
+    ${skip}=     Verify Unclaimed EM 
+    Pass Execution If    ${skip} 
+    ...    Skip Test--EM Not Claimed--Skipping test
+
+    # Validate a Blade bay unpopulated shows up unpopulated in Fusion
+    Pass Execution If    '${EM Blade Bay UnPopulated}'=='-1'   
+    ...    Skip Test--No unpopulated power supply bays
+    
+    ${Index}=    Evaluate    ${EM Blade Bay UnPopulated}-1
+    ${blades}=    Get From Dictionary    ${Fusion Enclosure Data}    deviceBays
+    Should Not Be Empty    ${blades}    Error--Fusion Api blade bay data shows empty
+    ${blade}=   Get From List    ${blades}    ${Index}
+    Log    ${blades}
+    ${present}=    Get From Dictionary    ${blade}    devicePresence
+    Should Be Equal    '${present}'    'Absent'    msg=Fusion thinks Blade is present. EM RIS reports absent.
+    
+Validate Fusion Blade Pop Fru
+    ${skip}=     Verify Unclaimed EM 
+    Pass Execution If    ${skip} 
+    ...    Skip Test--EM Not Claimed--Skipping test
+
+    # Validate a populated Blade bay for following Fru:
+    # model
+    ${EM_RIS}=         Create Dictionary
+    ${FUSION_REST}=    Create Dictionary
+
+    Log    ${EM Blade Fru Resource}
+    ${parsed}=    Get From Dictionary    ${EM Blade Fru Resource}    Parsed
+    ${preamble}=    Get From Dictionary    ${parsed}    Preamble
+    ${model}=    Get From Dictionary    ${preamble}    Model
+    Set To Dictionary    ${EM_RIS}    model    ${model}
+
+    Log    ${EM_RIS}
+    
+    ${blades}=    Get From Dictionary    ${Fusion Enclosure Data}    deviceBays
+    Should Not Be Empty    ${blades}    Error--Fusion Api blade bay data shows empty
+    
+    ${Index}=    Evaluate    ${EM Blade Bay Populated}-1
+    ${blade}=   Get From List    ${blades}    ${Index}
+    
+    Log    ${blade}
+    ${present}=    Get From Dictionary    ${blade}    devicePresence
+    Should Be Equal    '${present}'    'Present'    msg=Fusion thinks Blade is absent. EM RIS reports present.
+    
+    ${model}=    Get From Dictionary    ${blade}    model
+    Set To Dictionary    ${FUSION_REST}    model    ${model}
+
+    Log    ${FUSION_REST}
+    
+    Dictionaries Should Be Equal    ${FUSION_REST}    ${EM_RIS}    msg=Fusion REST API Data and EM RIS Data Different For Blade Populated Bay
+    
+*** Keywords ***
+Get RIS Blade Fru Data
+    ${pop}=      Set Variable    -1
+    ${unpop}=    Set Variable    -1
+    : FOR    ${Index}    IN RANGE    1    13
+	\    ${empty}=    Is EM Blade Bay Empty    ${Index}
+    \    ${pop}=      Set Variable If    '${empty}'=='False'    ${Index}    ${pop}
+    \    ${unpop}=    Set Variable If    '${empty}'=='True'     ${Index}    ${unpop}
+    
+    Set Suite Variable    ${EM Blade Bay Populated}      ${pop}
+    Set Suite Variable    ${EM Blade Bay UnPopulated}    ${unpop}
+    
+    ${Response}=    Get EM Blade Fru Resource    ${pop}
+    ${Status}       Get From Dictionary    ${Response}    status_code
+    ${Resource}=    Get Resource from Response    ${Response}
+    Log Dictionary    ${Resource}
+    Set Suite Variable    ${EM Blade Fru Resource}    ${Resource}
+    
+Get RIS Power Supply Fru Data
+    ${pop}=      Set Variable    -1
+    ${unpop}=    Set Variable    -1
+    : FOR    ${Index}    IN RANGE    1    7
+	\    ${empty}=    Is EM Power Supply Bay Empty    ${Index}
+    \    ${pop}=      Set Variable If    '${empty}'=='False'    ${Index}    ${pop}
+    \    ${unpop}=    Set Variable If    '${empty}'=='True'     ${Index}    ${unpop}
+    
+    Set Suite Variable    ${EM Power Supply Bay Populated}      ${pop}
+    Set Suite Variable    ${EM Power Supply Bay UnPopulated}    ${unpop}
+    
+    ${Response}=    Get EM Power Supply Fru Resource    ${pop}
+    ${Status}       Get From Dictionary    ${Response}    status_code
+    ${Resource}=    Get Resource from Response    ${Response}
+    Log Dictionary    ${Resource}
+    Set Suite Variable    ${EM Power Supply Fru Resource}    ${Resource}
+    
+Get RIS Fan Fru Data
+    ${pop}=      Set Variable    -1
+    ${unpop}=    Set Variable    -1
+    : FOR    ${Index}    IN RANGE    1    7
+	\    ${empty}=    Is EM Fan Bay Empty    ${Index}
+    \    ${pop}=      Set Variable If    '${empty}'=='False'    ${Index}    ${pop}
+    \    ${unpop}=    Set Variable If    '${empty}'=='True'     ${Index}    ${unpop}
+    
+    Set Suite Variable    ${EM Fan Bay Populated}      ${pop}
+    Set Suite Variable    ${EM Fan Bay UnPopulated}    ${unpop}
+    
+    ${Response}=    Get EM Fan Fru Resource    ${pop}
+    ${Status}       Get From Dictionary    ${Response}    status_code
+    ${Resource}=    Get Resource from Response    ${Response}
+    Log Dictionary    ${Resource}
+    Set Suite Variable    ${EM Fan Fru Resource}    ${Resource}
+    
+Get RIS EM Fru Data
+    ${pop}=      Set Variable    -1
+    ${unpop}=    Set Variable    -1
+    : FOR    ${Index}    IN RANGE    1    3
+	\    ${empty}=    Is EM EM Bay Empty    ${Index}
+    \    ${pop}=      Set Variable If    '${empty}'=='False'    ${Index}    ${pop}
+    \    ${unpop}=    Set Variable If    '${empty}'=='True'     ${Index}    ${unpop}
+    
+    Set Suite Variable    ${EM EM Bay Populated}      ${pop}
+    Set Suite Variable    ${EM EM Bay UnPopulated}    ${unpop}
+    
+    ${Response}=    Get EM EM Fru Resource    ${pop}
+    ${Status}       Get From Dictionary    ${Response}    status_code
+    ${Resource}=    Get Resource from Response    ${Response}
+    Log Dictionary    ${Resource}
+    Set Suite Variable    ${EM EM Fru Resource}    ${Resource}
+

@@ -1,0 +1,460 @@
+*** Settings ***
+Documentation    Test suite executes scenarios how OV handles iLO5 disable MCTP UI feature with presence of a multiple networking-based adapters
+
+...    = GENERIC USAGE =
+...    pybot -L Trace -v APPLIANCE_IP:<APP_IPv4-IPv6> -v Server_Bay:<server bay> -v Enclosures:<Enclosure_Serial_no.>    MCTP_Multiple_Adapters.txt
+...    = Variables =
+...    | GIT_REPO_ROOT |      Required: Repo root path if NOT defined in environment variable this is mgmtfw root location|
+...    | APPLIANCE_IP |       Required: OneView IPv4 address |
+
+
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/data_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+#Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/petest_resource.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Library           ${GIT_REPO_ROOT}${RESOURCE_ROOT}/iLO/PERISClient.py
+Library           ${GIT_REPO_ROOT}${RESOURCE_ROOT}/iLO/ILOAPIKeywords.py
+Library           RoboGalaxyLibrary
+Library           MgmtFWLibrary
+Library           FusionLibrary
+Library           Collections
+Library           BuiltIn
+Library           Selenium2Library
+
+Suite Setup       Run Keywords    Login to Fusion Via REST    AND    Login to Fusion via SSH    AND    Login to EM And Create Session
+Suite Teardown    Run Keywords    Clean UP Environment    AND    Logout of Fusion Via REST    AND    Logout of Fusion Via SSH
+
+*** Variables ***
+${DisableMCTPOnServeruri}      /redfish/v1/Chassis/1/Actions/Oem/Hpe/HpeServerChassis.DisableMCTPOnServer/
+${FactoryResetMCTPuri}         /redfish/v1/Chassis/1/Actions/Oem/Hpe/HpeServerChassis.FactoryResetMCTP/
+
+*** Test Cases ***
+TC 01:: MultiAdapters - NO Server Profile: Validate Disabling MCTP Level to SINGLE Adapter
+    [Documentation]    This TC validates Disabled MCTP to a SINGLE adapter function work PROPERLY in a server that has MULTIPLE adapters and NO Server Profile Configured in OneView
+    [Tags]    MCTP    Automated    OVD21686
+    [Setup]    Set Library Search Order    fusion_api_appliance_teardown    ILOAPIKeywords    MgmtFWLibrary
+    ${AdaptersPresentInAllSlots}    ${DeviceNumbers} =    Get Adapters Present In All Slots    ${Server_Bay}
+    ${AdaptersCount} =    Get Length    ${AdaptersPresentInAllSlots}
+    Should Be True    ${AdaptersCount}>1    msg=Server does not have multiple adapters
+    ${last_fusion_event_id}=    Get Last Fusion Event Id
+    ${ilo_ip}=    Get Server iLO IP    ${Server_Bay}
+    Set Global Variable    ${ilo_ip}
+    ${status}=    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    Should Be Equal    ${status}    PASS
+    ${server_details}=    Get Server Information    ${Server_Bay}
+    ${post}=    ILOAPIKeywords.iLo Ris Patch Object    mezzslot=${DeviceNumbers[0]}
+    Should Be Equal    ${post["error.@Message.ExtendedInfo"][0]["MessageId"]}    Base.1.0.Success    ignore_case=True
+    Sleep    60
+    ${Output} =   Efuse Server Device    EFuseOn    ${Server_Bay}
+    Sleep    60
+    ${Output} =   Efuse Server Device    EFuseOff    ${Server_Bay}
+    Wait For OV To Add Specify Server    Critical    ${Server_Bay}
+    Sleep    200
+    #Refresh Server Hardware Bay    ${Server_Bay}
+    ${alertStatus}=    Validate alertID in fusion events    ${last_fusion_event_id}    ${MCTPDisabled_Alert}
+    Should Be Equal    ${alertStatus}    PASS
+    ${server_details}=    Get Server Information    ${Server_Bay}
+    #Should Be Equal    ${server_details['portMap']}    ${None}
+    ${deviceSlots}=    Get From Dictionary    ${server_details['portMap']}    deviceSlots
+    ${physicalPorts}=    Get from Dictionary    ${deviceSlots[${DeviceNumbers[0]}-1]}     physicalPorts
+    ${isPhysicalPortsEmpty}=    Should Be Empty    ${physicalPorts}
+    ${loginstatus} =    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    Should Be Equal    ${loginstatus}    PASS
+    ${obj} =    ILOAPIKeywords.iLo Ris Get Object    uri=/redfish/v1/Chassis/1/Devices/${DeviceNumbers[0]}
+    ${mctp_state}=    Get From Dictionary    ${obj}    MCTPProtocolDisabled
+    ${TRUE}=    Convert to Boolean    true
+    Should Be Equal    ${mctp_state}    ${TRUE}
+    ${last_fusion_event_id}=    Get Last Fusion Event Id
+    ${reset}=    ILOAPIKeywords.iLo Ris Post Object    uri=${FactoryResetMCTPuri}
+    Should Be Equal    ${reset["error.@Message.ExtendedInfo"][0]["MessageId"]}    Base.1.0.Success    ignore_case=True
+    Sleep    60
+    ${Output} =   Efuse Server Device    EFuseOn    ${Server_Bay}
+    Sleep    60
+    ${Output} =   Efuse Server Device    EFuseOff    ${Server_Bay}
+    Wait For OV To Add Specify Server    OK    ${Server_Bay}
+    Sleep    200
+    #Refresh Server Hardware Bay    ${Server_Bay}
+    ${alertStatus}=    Validate alertID in fusion events    ${last_fusion_event_id}    ${MCTPEnabled_Alert}
+    Should Be Equal    ${alertStatus}    PASS
+    ${server_details}=    Get Server Information    ${Server_Bay}
+    ${deviceSlots}=    Get From Dictionary    ${server_details['portMap']}    deviceSlots
+    ${physicalPorts}=    Get from Dictionary    ${deviceSlots[${DeviceNumbers[0]}-1]}    physicalPorts
+    ${isPhysicalPortsEmpty}=    Should Not Be Empty    ${physicalPorts}
+    ${loginstatus} =    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    Should Be Equal    ${loginstatus}    PASS
+    ${obj} =    ILOAPIKeywords.iLo Ris Get Object    uri=/redfish/v1/Chassis/1/Devices/${DeviceNumbers[0]}
+    ${mctp_state}=    Get From Dictionary    ${obj}    MCTPProtocolDisabled
+    ${FALSE}=    Convert to Boolean    false
+    Should Be Equal    ${mctp_state}    ${FALSE}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    ...    AND    ILOAPIKeywords.iLo Ris Post Object    uri=${FactoryResetMCTPuri}    AND    Sleep    60
+    ...    AND    Refresh Server Hardware Bay    ${Server_Bay}    AND    Wait For OV To Add Specify Server    OK    ${Server_Bay}
+
+TC 02:: MultiAdapters - NO Server Profile: Validate Disabling MCTP Level to ALL Available Adapters
+    [Documentation]    This TC validates Disabled MCTP to ALL Available Adapters function work PROPERLY in a server that has MULTIPLE adapters and NO Server Profile Configured in OneView
+    [Tags]    MCTP    Automated    OVD21686
+    [Setup]    Set Library Search Order    ILOAPIKeywords    MgmtFWLibrary
+    ${AdaptersPresentInAllSlots}    ${DeviceNumbers} =    Get Adapters Present In All Slots    ${Server_Bay}
+    ${AdaptersCount} =    Get Length    ${AdaptersPresentInAllSlots}
+    Should Be True    ${AdaptersCount}>1    msg=Server does not have multiple adapters
+    ${last_fusion_event_id}=    Get Last Fusion Event Id
+    ${ilo_ip}=    Get Server iLO IP    ${Server_Bay}
+    Set Global Variable    ${ilo_ip}
+    ${loginstatus} =    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    Should Be Equal    ${loginstatus}    PASS
+    :FOR    ${adapterbay}    IN RANGE    0    ${AdaptersCount}
+    \    ${post}=    ILOAPIKeywords.iLo Ris Patch Object    mezzslot=${DeviceNumbers[${adapterbay}]}
+    \    Should Be Equal    ${post["error.@Message.ExtendedInfo"][0]["MessageId"]}    Base.1.0.Success    ignore_case=True
+    Sleep    60
+    ${Output} =   Efuse Server Device    EFuseOn    ${Server_Bay}
+    Sleep    60
+    ${Output} =   Efuse Server Device    EFuseOff    ${Server_Bay}
+    Wait For OV To Add Specify Server    Critical    ${Server_Bay}
+    Sleep    200
+    #Refresh Server Hardware Bay    ${Server_Bay}
+    ${alert_status}=    Validate alertID in fusion events    ${last_fusion_event_id}    ${MCTPDisabled_Alert}
+    Should Be Equal    ${alert_status}    PASS
+    :FOR    ${adapterbay}    IN RANGE    0    ${AdaptersCount}
+    \    ${server_details}=    Get Server Information    ${Server_Bay}
+    #\    Should Be Equal    ${server_details['portMap']}    ${None}
+    \    ${deviceSlots}=    Get From Dictionary    ${server_details['portMap']}    deviceSlots
+    \    ${physicalPorts}=    Get from Dictionary    ${deviceSlots[${DeviceNumbers[${adapterbay}]}-1]}    physicalPorts
+    \    ${isPhysicalPortsEmpty}=    Should Be Empty    ${physicalPorts}
+    ${loginstatus} =    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    Should Be Equal    ${loginstatus}    PASS
+    :FOR    ${adapterbay}    IN RANGE   0    ${AdaptersCount}
+    \    ${obj} =    ILOAPIKeywords.iLo Ris Get Object    uri=/redfish/v1/Chassis/1/Devices/${DeviceNumbers[${adapterbay}]}
+    \    ${mctp_state}=    Get From Dictionary    ${obj}    MCTPProtocolDisabled
+    \    ${TRUE}=    Convert to Boolean    true
+    \    Should Be Equal    ${mctp_state}    ${TRUE}
+    ${last_fusion_event_id}=    Get Last Fusion Event Id
+    ${reset}=    ILOAPIKeywords.iLo Ris Post Object    uri=${FactoryResetMCTPuri}
+    Should Be Equal    ${reset["error.@Message.ExtendedInfo"][0]["MessageId"]}    Base.1.0.Success    ignore_case=True
+    Sleep    60
+    ${Output} =   Efuse Server Device    EFuseOn    ${Server_Bay}
+    Sleep    60
+    ${Output} =   Efuse Server Device    EFuseOff    ${Server_Bay}
+    Wait For OV To Add Specify Server    OK    ${Server_Bay}
+    Sleep    200
+    #Refresh Server Hardware Bay    ${Server_Bay}
+    ${status}=    Validate alertID in fusion events    ${last_fusion_event_id}    ${MCTPEnabled_Alert}
+    Should Be Equal    ${status}    PASS
+    :FOR    ${adapterbay}    IN RANGE    0    ${AdaptersCount}
+    \    ${server_details}=    Get Server Information    ${Server_Bay}
+    \    ${deviceSlots}=    Get From Dictionary    ${server_details['portMap']}    deviceSlots
+    \    ${physicalPorts}=    Get from Dictionary    ${deviceSlots[${DeviceNumbers[${adapterbay}]}-1]}    physicalPorts
+    \    ${isPhysicalPortsEmpty}=    Should Not Be Empty    ${physicalPorts}
+    ${loginstatus} =    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    Should Be Equal    ${loginstatus}    PASS
+    :FOR    ${adapterbay}    IN RANGE   0    ${AdaptersCount}
+    \    ${obj} =    ILOAPIKeywords.iLo Ris Get Object    uri=/redfish/v1/Chassis/1/Devices/${DeviceNumbers[${adapterbay}]}
+    \    ${mctp_state}=     Get From Dictionary    ${obj}    MCTPProtocolDisabled
+    \    ${FALSE}=    Convert to Boolean    false
+    \    Should Be Equal    ${mctp_state}    ${FALSE}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    ...    AND    ILOAPIKeywords.iLo Ris Post Object    uri=${FactoryResetMCTPuri}    AND    Sleep    60
+    ...    AND    Refresh Server Hardware Bay    ${Server_Bay}    AND    Wait For OV To Add Specify Server    OK    ${Server_Bay}
+
+TC 03:: MultiAdapters - NO Server Profile: Validate Disabling MCTP at Server Level 
+    [Documentation]    This TC validates Disabled MCTP to a SERVER function work PROPERLY in a server that has MULTIPLE adapters and NO Server Profile Configured in OneView
+    [Tags]    MCTP    Automated    OVD21686
+    [Setup]    Set Library Search Order    ILOAPIKeywords    MgmtFWLibrary
+    ${AdaptersPresentInAllSlots}    ${DeviceNumbers} =    Get Adapters Present In All Slots    ${Server_Bay}
+    ${AdaptersCount} =    Get Length    ${AdaptersPresentInAllSlots}
+    Should Be True    ${AdaptersCount}>1    msg=Server does not have multiple adapters
+    ${last_fusion_event_id}=    Get Last Fusion Event Id
+    ${ilo_ip}=    Get Server iLO IP    ${Server_Bay}
+    Set Global Variable    ${ilo_ip}
+    ${TRUE}=    Convert to Boolean    true
+    ${FALSE}=    Convert to Boolean    false
+    ${status}=    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    Should Be Equal    ${status}    PASS
+    ${post}=    ILOAPIKeywords.iLo Ris Post Object    uri=${DisableMCTPOnServeruri}
+    Should Be Equal    ${post["error.@Message.ExtendedInfo"][0]["MessageId"]}    Base.1.0.Success    ignore_case=True
+    Sleep    60
+    ${Output} =   Efuse Server Device    EFuseOn    ${Server_Bay}
+    Sleep    60
+    ${Output} =   Efuse Server Device    EFuseOff    ${Server_Bay}
+    Wait For OV To Add Specify Server    Critical    ${Server_Bay}
+    Sleep    200
+    #Refresh Server Hardware Bay    ${Server_Bay}
+    ${alert_status}=    Validate alertID in fusion events    ${last_fusion_event_id}    ${MCTPDisabled_Alert}
+    Should Be Equal    ${alert_status}    PASS
+    :FOR    ${adapterbay}    IN RANGE    0    ${AdaptersCount}
+    \    ${server_details}=    Get Server Information    ${Server_Bay}
+    \    ${deviceSlots}=    Get From Dictionary    ${server_details['portMap']}    deviceSlots
+    \    ${physicalPorts}=    Get from Dictionary    ${deviceSlots[${DeviceNumbers[${adapterbay}]}-1]}    physicalPorts
+    \    ${isPhysicalPortsEmpty}=    Should Be Empty    ${physicalPorts}
+    ${status}=    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    Should Be Equal    ${status}    PASS
+    ${obj}=    Ris Get Chassis Info
+    ${state}=    Get From Dictionary    ${obj}    Oem
+    ${mctp_state}=    Get From Dictionary    ${state['Hpe']}    MCTPEnabledOnServer
+    Should Be Equal    ${mctp_state}    ${FALSE}
+    ${last_fusion_event_id}=    Get Last Fusion Event Id
+    ${reset}=    ILOAPIKeywords.iLo Ris Post Object    uri=${FactoryResetMCTPuri}
+    Should Be Equal    ${reset["error.@Message.ExtendedInfo"][0]["MessageId"]}    Base.1.0.Success    ignore_case=True
+    Sleep    60
+    ${Output} =   Efuse Server Device    EFuseOn    ${Server_Bay}
+    Sleep    60
+    ${Output} =   Efuse Server Device    EFuseOff    ${Server_Bay}
+    Wait For OV To Add Specify Server    OK    ${Server_Bay}
+    Sleep    200
+    #Refresh Server Hardware Bay    ${Server_Bay}
+    ${status}=    Validate alertID in fusion events    ${last_fusion_event_id}    ${MCTPEnabled_Alert}
+    Should Be Equal    ${status}    PASS
+    :FOR    ${adapterbay}    IN RANGE    0    ${AdaptersCount}
+    \    ${server_details}=    Get Server Information    ${Server_Bay}
+    \    ${deviceSlots}=    Get From Dictionary    ${server_details['portMap']}    deviceSlots
+    \    ${physicalPorts}=    Get from Dictionary    ${deviceSlots[${DeviceNumbers[${adapterbay}]}-1]}    physicalPorts
+    \    ${isPhysicalPortsEmpty}=    Should Not Be Empty    ${physicalPorts}
+    ${status}=    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    Should Be Equal    ${status}    PASS
+    ${obj}=    Ris Get Chassis Info
+    ${state}=    Get From Dictionary    ${obj}    Oem
+    ${mctp_state}=    Get From Dictionary    ${state['Hpe']}    MCTPEnabledOnServer
+    Should Be Equal    ${mctp_state}    ${TRUE}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    ...    AND    ILOAPIKeywords.iLo Ris Post Object    uri=${FactoryResetMCTPuri}    AND    Sleep    60
+    ...    AND    Refresh Server Hardware Bay    ${Server_Bay}    AND    Wait For OV To Add Specify Server    OK    ${Server_Bay}
+
+TC 04:: MultiAdapters - WITH Server Profile: Validate Disabling MCTP Level to SINGLE Adapter
+    [Documentation]    This TC validates Disabled MCTP to a SINGLE adapter function work PROPERLY in a server that has MULTIPLE adapters and Server Profile Configured in OneView
+    [Tags]    MCTP    Automated    OVD21686
+    [Setup]    Set Library Search Order    ILOAPIKeywords    MgmtFWLibrary
+    ${AdaptersPresentInAllSlots}    ${DeviceNumbers} =    Get Adapters Present In All Slots    ${Server_Bay}
+    ${AdaptersCount} =    Get Length    ${AdaptersPresentInAllSlots}
+    Should Be True    ${AdaptersCount}>1    msg=Server does not have multiple adapters
+    Clean UP Environment
+    Set To Dictionary    ${encl_group['interconnectBayMappings'][0]}    logicalInterconnectGroupUri    LIG:${LIG_Name}
+    Setup Ethernet FCoE Appliance
+    Set To Dictionary    ${enet_connection['connections'][0]}    networkUri    ETH:${Ethernet_Name}
+    ${server_profile_body}=    Update Ethernet Server Profile body    ${Server_Bay}    ${server_profiles[0]}
+    Set to dictionary    ${server_profile_body}    connectionSettings    ${None}
+    Power OFF Server Blade Bay    ${Server_Bay}
+    Create Server Profile    ${server_profile_body}
+    ${server_state}=    Get Server State    ${Server_Bay}
+    Should Be Equal    ${server_state}    ProfileApplied
+    ${last_fusion_event_id}=    Get Last Fusion Event Id
+    ${ilo_ip}=    Get Server iLO IP    ${Server_Bay}
+    Set Global Variable    ${ilo_ip}
+    ${loginstatus} =    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    Should Be Equal    ${loginstatus}    PASS
+    ${post}=    ILOAPIKeywords.iLo Ris Patch Object    mezzslot=${DeviceNumbers[0]}
+    Should Be Equal    ${post["error.@Message.ExtendedInfo"][0]["MessageId"]}    Base.1.0.Success    ignore_case=True
+    Sleep    60
+    ${Output} =   Efuse Server Device    EFuseOn    ${Server_Bay}
+    Sleep    60
+    ${Output} =   Efuse Server Device    EFuseOff    ${Server_Bay}
+    Wait For OV To Add Specify Server    Critical    ${Server_Bay}
+    Sleep    200
+    #Refresh Server Hardware Bay    ${Server_Bay}
+    ${alertStatus}=    Validate alertID in fusion events    ${last_fusion_event_id}    ${MCTPDisabled_Alert}
+    Should Be Equal    ${alertStatus}    PASS
+    ${server_details}=    Get server Information    ${Server_Bay}
+    ${profile_details}=    Fusion Api Get Server Profiles    ${server_details['serverProfileUri']}
+    Should be Equal    ${profile_details['status']}    Critical
+    ${server_details}=    Get Server Information    ${Server_Bay}
+    ${deviceSlots}=    Get From Dictionary    ${server_details['portMap']}    deviceSlots
+    ${physicalPorts}=    Get from Dictionary    ${deviceSlots[${DeviceNumbers[0]}-1]}    physicalPorts
+    ${isPhysicalPortsEmpty}=    Should Be Empty    ${physicalPorts}
+    ${loginstatus} =    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    Should Be Equal    ${loginstatus}    PASS
+    ${obj} =    ILOAPIKeywords.iLo Ris Get Object    uri=/redfish/v1/Chassis/1/Devices/${DeviceNumbers[0]}
+    ${mctp_state}=    Get From Dictionary    ${obj}    MCTPProtocolDisabled
+    ${TRUE}=    Convert to Boolean    true
+    Should Be Equal    ${mctp_state}    ${TRUE}
+    ${last_fusion_event_id}=    Get Last Fusion Event Id
+    ${reset}=    ILOAPIKeywords.iLo Ris Post Object    uri=${FactoryResetMCTPuri}
+    Should Be Equal    ${reset["error.@Message.ExtendedInfo"][0]["MessageId"]}    Base.1.0.Success    ignore_case=True
+    Sleep    60
+    ${Output} =   Efuse Server Device    EFuseOn    ${Server_Bay}
+    Sleep    60
+    ${Output} =   Efuse Server Device    EFuseOff    ${Server_Bay}
+    Wait For OV To Add Specify Server    OK    ${Server_Bay}
+    Sleep    200
+    #Refresh Server Hardware Bay    ${Server_Bay}
+    ${alertStatus}=    Validate alertID in fusion events    ${last_fusion_event_id}    ${MCTPEnabled_Alert}
+    Should Be Equal    ${alertStatus}    PASS
+    ${server_details}=    Get Server Information    ${Server_Bay}
+    ${deviceSlots}=    Get From Dictionary    ${server_details['portMap']}    deviceSlots
+    ${physicalPorts}=    Get from Dictionary    ${deviceSlots[${DeviceNumbers[0]}-1]}    physicalPorts
+    ${isPhysicalPortsEmpty}=    Should Not Be Empty    ${physicalPorts}
+    ${server_details}=    Get server Information    ${Server_Bay}
+    ${profile_details}=    Fusion Api Get Server Profiles     ${server_details['serverProfileUri']}
+    Should be Equal    ${profile_details['status']}    OK
+    ${loginstatus} =     Login to iLO ipv4     ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    Should Be Equal    ${loginstatus}    PASS
+    Sleep    60
+    ${obj} =    ILOAPIKeywords.iLo Ris Get Object    uri=/redfish/v1/Chassis/1/Devices/${DeviceNumbers[0]}
+    ${mctp_state}=     Get From Dictionary    ${obj}    MCTPProtocolDisabled
+    ${FALSE}=    Convert to Boolean    false
+    Should Be Equal    ${mctp_state}    ${FALSE}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    ...    AND    ILOAPIKeywords.iLo Ris Post Object    uri=${FactoryResetMCTPuri}    AND    Sleep    60
+    ...    AND    Refresh Server Hardware Bay    ${Server_Bay}    AND    Wait For OV To Add Specify Server    OK    ${Server_Bay}
+
+
+TC 05:: MultiAdapters - WITH Server Profile: Validate Disabling MCTP Level to ALL Available Adapters
+    [Documentation]    This TC validates Disabled MCTP to ALL Available Adapters function work PROPERLY in a server that has MULTIPLE adapters and Server Profile Configured in OneView
+    [Tags]    MCTP    Automated    OVD21686
+    [Setup]    Set Library Search Order    ILOAPIKeywords    MgmtFWLibrary
+    ${AdaptersPresentInAllSlots}    ${DeviceNumbers} =    Get Adapters Present In All Slots    ${Server_Bay}
+    ${AdaptersCount} =    Get Length    ${AdaptersPresentInAllSlots}
+    Should Be True    ${AdaptersCount}>1    msg=Server does not have multiple adapters
+    Clean UP Environment
+    Set To Dictionary    ${encl_group['interconnectBayMappings'][0]}    logicalInterconnectGroupUri    LIG:${LIG_Name}
+    Setup Ethernet FCoE Appliance
+    Set To Dictionary    ${enet_connection['connections'][0]}    networkUri    ETH:${Ethernet_Name}
+    ${server_profile_body}=    Update Ethernet Server Profile body    ${Server_Bay}    ${server_profiles[0]}
+    Set to dictionary  ${server_profile_body}    connectionSettings   ${None}
+    Power OFF Server Blade Bay    ${Server_Bay}
+    Create Server Profile    ${server_profile_body}
+    ${server_state}=    Get Server State    ${Server_Bay}
+    Should Be Equal    ${server_state}    ProfileApplied
+    ${last_fusion_event_id}=    Get Last Fusion Event Id
+    ${ilo_ip}=    Get Server iLO IP    ${Server_Bay}
+    Set Global Variable    ${ilo_ip}
+    ${loginstatus} =    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    Should Be Equal    ${loginstatus}    PASS
+    :FOR    ${adapterbay}    IN RANGE   0    ${AdaptersCount}
+    \    ${post}=    ILOAPIKeywords.iLo Ris Patch Object    mezzslot=${DeviceNumbers[${adapterbay}]}
+    \    Should Be Equal    ${post["error.@Message.ExtendedInfo"][0]["MessageId"]}    Base.1.0.Success    ignore_case=True
+    Sleep    60
+    ${Output} =   Efuse Server Device    EFuseOn    ${Server_Bay}
+    Sleep    60
+    ${Output} =   Efuse Server Device    EFuseOff    ${Server_Bay}
+    Wait For OV To Add Specify Server    Critical    ${Server_Bay}
+    Sleep    200
+    #Refresh Server Hardware Bay    ${Server_Bay}
+    ${alertStatus}=    Validate alertID in fusion events    ${last_fusion_event_id}    ${MCTPDisabled_Alert}
+    Should Be Equal    ${alertStatus}    PASS
+    ${server_details}=    Get server Information    ${Server_Bay}
+    ${profile_details}=    Fusion Api Get Server Profiles    ${server_details['serverProfileUri']}
+    Should be Equal    ${profile_details['status']}    Critical
+    :FOR    ${adapterbay}    IN RANGE    0    ${AdaptersCount}
+    \    ${server_details}=    Get Server Information    ${Server_Bay}
+    \    ${deviceSlots}=    Get From Dictionary    ${server_details['portMap']}    deviceSlots
+    \    ${physicalPorts}=    Get from Dictionary    ${deviceSlots[${DeviceNumbers[${adapterbay}]}-1]}    physicalPorts
+    \    ${isPhysicalPortsEmpty}=    Should Be Empty    ${physicalPorts}
+    ${status}=    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    Should Be Equal    ${status}    PASS
+    :FOR    ${adapterbay}    IN RANGE   0    ${AdaptersCount}
+    \    ${obj} =    ILOAPIKeywords.iLo Ris Get Object    uri=/redfish/v1/Chassis/1/Devices/${DeviceNumbers[${adapterbay}]}
+    \    ${mctp_state}=    Get From Dictionary    ${obj}    MCTPProtocolDisabled
+    \    ${TRUE}=    Convert to Boolean    true
+    \    Should Be Equal    ${mctp_state}    ${TRUE}
+    ${last_fusion_event_id}=    Get Last Fusion Event Id
+    ${reset}=    ILOAPIKeywords.iLo Ris Post Object    uri=${FactoryResetMCTPuri}
+    Should Be Equal    ${reset["error.@Message.ExtendedInfo"][0]["MessageId"]}    Base.1.0.Success    ignore_case=True
+    Sleep    60
+    ${Output} =   Efuse Server Device    EFuseOn    ${Server_Bay}
+    Sleep    60
+    ${Output} =   Efuse Server Device    EFuseOff    ${Server_Bay}
+    Wait For OV To Add Specify Server    OK    ${Server_Bay}
+    Sleep    200
+    #Refresh Server Hardware Bay    ${Server_Bay}
+    ${alertStatus}=    Validate alertID in fusion events    ${last_fusion_event_id}    ${MCTPEnabled_Alert}
+    Should Be Equal    ${alertStatus}    PASS
+    :FOR    ${adapterbay}    IN RANGE    0    ${AdaptersCount}
+    \    ${server_details}=    Get Server Information    ${Server_Bay}
+    \    ${deviceSlots}=    Get From Dictionary    ${server_details['portMap']}    deviceSlots
+    \    ${physicalPorts}=    Get from Dictionary    ${deviceSlots[${DeviceNumbers[${adapterbay}]}-1]}    physicalPorts
+    \    ${isPhysicalPortsEmpty}=    Should Not Be Empty    ${physicalPorts}
+    ${server_details}=    Get server Information    ${Server_Bay}
+    ${profile_details}=    Fusion Api Get Server Profiles    ${server_details['serverProfileUri']}
+    Should be Equal    ${profile_details['status']}    OK
+    ${loginstatus} =    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    Should Be Equal    ${loginstatus}    PASS
+    :FOR    ${adapterbay}    IN RANGE    0    ${AdaptersCount}
+    \    ${obj} =    ILOAPIKeywords.iLo Ris Get Object    uri=/redfish/v1/Chassis/1/Devices/${DeviceNumbers[${adapterbay}]}
+    \    ${mctp_state}=    Get From Dictionary    ${obj}    MCTPProtocolDisabled
+    \    ${FALSE}=    Convert to Boolean    false
+    \    Should Be Equal    ${mctp_state}    ${FALSE}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    ...    AND    ILOAPIKeywords.iLo Ris Post Object    uri=${FactoryResetMCTPuri}    AND    Sleep    60
+    ...    AND    Refresh Server Hardware Bay    ${Server_Bay}    AND    Wait For OV To Add Specify Server    OK    ${Server_Bay}
+
+TC 06:: MultiAdapters - WITH Server Profile: Validate Disabling MCTP at Server Level
+    [Documentation]    This TC validates Disabled MCTP to a SERVER function work PROPERLY in a server that has MULTIPLE adapters and Server Profile Configured in OneView
+    [Tags]    MCTP    Automated    OVD21686
+    [Setup]    Set Library Search Order    ILOAPIKeywords    MgmtFWLibrary
+    ${AdaptersPresentInAllSlots}    ${DeviceNumbers} =    Get Adapters Present In All Slots    ${Server_Bay}
+    ${AdaptersCount} =    Get Length    ${AdaptersPresentInAllSlots}
+    Should Be True    ${AdaptersCount}>1    msg=Server does not have multiple adapters
+    Clean UP Environment
+    Set To Dictionary    ${encl_group['interconnectBayMappings'][0]}    logicalInterconnectGroupUri    LIG:${LIG_Name}
+    Setup Ethernet FCoE Appliance
+    Set To Dictionary    ${enet_connection['connections'][0]}    networkUri    ETH:${Ethernet_Name}
+    ${server_profile_body}=    Update Ethernet Server Profile body     ${Server_Bay}    ${server_profiles[0]}
+    Set to dictionary  ${server_profile_body}    connectionSettings   ${None}
+    Power OFF Server Blade Bay    ${Server_Bay}
+    Create Server Profile    ${server_profile_body}
+    ${server_state}=    Get Server State    ${Server_Bay}
+    Should Be Equal    ${server_state}    ProfileApplied
+    ${last_fusion_event_id}=    Get Last Fusion Event Id
+    ${ilo_ip}=    Get Server iLO IP    ${Server_Bay}
+    Set Global Variable    ${ilo_ip}
+    ${loginstatus} =     Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    Should Be Equal    ${loginstatus}    PASS
+    ${post}=    ILOAPIKeywords.iLo Ris Post Object    uri=${DisableMCTPOnServeruri}
+    Should Be Equal    ${post["error.@Message.ExtendedInfo"][0]["MessageId"]}    Base.1.0.Success    ignore_case=True
+    Sleep    60
+    ${Output} =   Efuse Server Device    EFuseOn    ${Server_Bay}
+    Sleep    60
+    ${Output} =   Efuse Server Device    EFuseOff    ${Server_Bay}
+    Wait For OV To Add Specify Server    Critical    ${Server_Bay}
+    Sleep    200
+    #Refresh Server Hardware Bay    ${Server_Bay}
+    ${alert_status}=    Validate alertID in fusion events    ${last_fusion_event_id}    ${MCTPDisabled_Alert}
+    Should Be Equal    ${alert_status}    PASS
+    ${server_details}=    Get Server Information    ${Server_Bay}
+    ${profile_details}=    Fusion Api Get Server Profiles     ${server_details['serverProfileUri']}
+    Should be Equal    ${profile_details['status']}    Critical
+    :FOR    ${adapterbay}    IN RANGE    0    ${AdaptersCount}
+    \    ${server_details}=    Get Server Information    ${Server_Bay}
+    \    ${deviceSlots}=    Get From Dictionary    ${server_details['portMap']}    deviceSlots
+    \    ${physicalPorts}=    Get from Dictionary    ${deviceSlots[${DeviceNumbers[${adapterbay}]}-1]}    physicalPorts
+    \    ${isPhysicalPortsEmpty}=    Should Be Empty    ${physicalPorts}
+    ${loginstatus} =    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    Should Be Equal    ${loginstatus}    PASS
+    ${obj}=    Ris Get Chassis Info
+    ${state}=    Get From Dictionary    ${obj}    Oem
+    ${mctp_state}=    Get From Dictionary    ${state['Hpe']}    MCTPEnabledOnServer
+    ${FALSE}=    Convert to Boolean    false
+    Should Be Equal    ${mctp_state}    ${FALSE}
+    ${last_fusion_event_id}=    Get Last Fusion Event Id
+    ${reset}=    ILOAPIKeywords.iLo Ris Post Object    uri=${FactoryResetMCTPuri}
+    Should Be Equal    ${reset["error.@Message.ExtendedInfo"][0]["MessageId"]}    Base.1.0.Success    ignore_case=True
+    Sleep    60
+    ${Output} =   Efuse Server Device    EFuseOn    ${Server_Bay}
+    Sleep    60
+    ${Output} =   Efuse Server Device    EFuseOff    ${Server_Bay}
+    Wait For OV To Add Specify Server    OK    ${Server_Bay}
+    Sleep    200
+    #Refresh Server Hardware Bay    ${Server_Bay}
+    ${status}=    Validate alertID in fusion events    ${last_fusion_event_id}    ${MCTPEnabled_Alert}
+    Should Be Equal    ${status}    PASS
+    :FOR    ${adapterbay}    IN RANGE    0    ${AdaptersCount}
+    \    ${server_details}=    Get Server Information    ${Server_Bay}
+    \    ${deviceSlots}=    Get From Dictionary    ${server_details['portMap']}    deviceSlots
+    \    ${physicalPorts}=    Get from Dictionary    ${deviceSlots[${DeviceNumbers[${adapterbay}]}-1]}    physicalPorts
+    \    ${isPhysicalPortsEmpty}=    Should Not Be Empty    ${physicalPorts}
+    ${loginstatus} =    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password} 
+    Should Be Equal    ${loginstatus}    PASS
+    ${obj}=    Ris Get Chassis Info
+    ${state}=    Get From Dictionary    ${obj}    Oem
+    ${mctp_state}=    Get From Dictionary    ${state['Hpe']}    MCTPEnabledOnServer
+    ${TRUE}=    Convert to Boolean    true
+    Should Be Equal    ${mctp_state}    ${TRUE}
+    ${server_details}=    Get server Information    ${Server_Bay}
+    ${status}=    Get From Dictionary    ${server_details}    status
+    Should be Equal    ${status}    OK
+    ${profile_details}=    Fusion Api Get Server Profiles    ${server_details['serverProfileUri']}
+    Should be Equal    ${profile_details['status']}    OK
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    ...    AND    ILOAPIKeywords.iLo Ris Post Object    uri=${FactoryResetMCTPuri}    AND    Sleep    60
+    ...    AND    Refresh Server Hardware Bay    ${Server_Bay}    AND    Wait For OV To Add Specify Server    OK    ${Server_Bay}
+ 

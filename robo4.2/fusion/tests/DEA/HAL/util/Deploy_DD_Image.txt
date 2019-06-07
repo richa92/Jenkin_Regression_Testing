@@ -1,0 +1,168 @@
+*** Settings ***
+Documentation    Deploy Fusion ISO onto CIM using Atlas USB Key
+...    = Usage =
+...    pybot |-v ENCLOSURE:tesla |-v ISO_URL:<Fusion ISO Image> Deploy_CIM_Fusion.txt
+...    = Variables =
+...    | ENCLOSURE | (required) Name of the enclosure to Deploy upon. (values from variables.py) |
+...    | ISO_URL | (optional) URL of Fusion ISO Image To Install (defaulted) |
+
+Library           String
+Library           Collections
+Library           DateTime
+Library           SSHLibrary
+Library           robot.api.logger
+Library           RoboGalaxyLibrary
+Library           FusionLibrary
+Variables         ../resources/variables.py    ${ENCLOSURE}
+Resource          ../resources/em_api.txt
+Resource          ../resources/fusion_api.txt
+Resource          ../resources/defaults.txt
+Resource          ../resources/fusion_ssh.txt
+
+*** Variables ***
+${ISO_URL}=                    http://jenkins.rsn.hp.com:8080/userContent/latest-ov-dd.zip
+${Installation_Time}           60 minutes
+${ADMIN_PASSWORD_POLL}         60 seconds
+${ADMIN_PASSWORD_RETRIES}      40
+${DUMP_FILE}                   fusion_dump.sdmp
+
+*** Test Cases ***
+Prepare for Firmware Update
+    [Tags]    Pre-Deploy
+    Log Variables
+    Console    \nDeploying from: ${ISO_URL} onto: ${ENCLOSURE}
+    Get Firmware Versions
+    Run Keyword and Ignore Error
+    ...    Verify Claimed Enclosure
+
+#EM Factory Reset
+#    [Tags]    Factory Reset EM
+#    Verify Claimed Enclosure
+#    # Store current EM IP
+#    Set Suite Variable    ${Original_EM_IP}    ${EM_IP}
+#    # Peform Factory Reset on Active EM
+#    EM Factory Reset
+    # Verify EM Floating IP is different.
+#    Run Keyword If    "${EM_IP}"=="${ORIGINAL_EM_IP}"
+#    ...    Log    EM_IP did not change. Did EM Factory Reset fail?    level=WARN
+
+Deploy Firmware Updates
+    [Tags]    Deploy Firmware
+    Initiate DD Image Update
+    Wait For Fusion Install and Startup
+    Assign Administrator Password
+
+Setup Fusion after Deploy
+    [Tags]    Post-Deploy
+    Appliance Login
+    Set Fusion Version Metadata
+    Write Fusion Properties
+    Get Firmware Versions
+    # This should be "Run Keyword and Continue on Failure" to fail the Test case if enclosure is not claimed.
+    Run Keyword and Ignore Error
+    ...    Verify Claimed Enclosure
+    Prevent CIM iLo Reset From Fusion Factory Reset
+    Generate Fusion Dump and Log After Network Initialization
+
+
+*** Keywords ***
+Get Firmware Versions
+    Login to Fusion via SSH
+    Get Fusion Version
+    Get iLO Version
+    # TODO: Issue warning if Intelligent Provisioning is not installed. (N/A)
+    Get NIC Version
+
+Verify Claimed Enclosure
+    ${Command}=    Set Variable    /ci/bin/tbird/appliance-hal.sh list-enclosures
+    ${stdout}    ${stderr}    ${rc}=    Execute Command    ${Command}    return_stderr=True    return_rc=True
+    Should Be Equal As Integers    ${rc}    0    msg=Failed to get claimed enclosures.
+    Should Not Be Equal As Strings    ${stdout}     ${empty}    msg=Failed to get an enclosure name returned
+    Log To Console    Found Claimed Enclosure: ${stdout}    console=True
+
+Initiate DD Image Update
+    Login to Fusion via SSH
+    ${OV_PATH}    ${LATEST_OV_IMAGE}=    Split String From Right    ${ISO_URL}    /    1
+    Console    Modfying permissions on developer_usb_reimage.sh
+    Execute Command    chmod a+x /ci/etc/usb-reimage/developer_usb_reimage.sh
+
+    # Initiate USB update
+    # Set Client Configuration    timeout=80 minutes
+    ${Command}=    Set Variable    /ci/etc/usb-reimage/developer_usb_reimage.sh -u ${OV_PATH} -f ${LATEST_OV_IMAGE}
+    Console    Executing Command '${Command}'.
+    SSHLibrary.Write    ${Command}
+    Console    developer_usb_reimage.sh script is running...
+
+    # Sample Output form Update script:
+    # HP Lights-Out Online Configuration utility
+    # Version 4.3.0 Date 12/10/2013 (c) Hewlett-Packard Company, 2014
+    # Firmware Revision = 2.30 Device type = iLO 4 Driver name = hpilo
+    # Script succeeded
+    # End time: Thu May 14 20:14:35 UTC 2015
+    # Preparing USB for reimage has completed successfully - rebooting now.
+
+    # Wait for script messages
+    Wait Until Keyword Succeeds    20 minutes    2 minutes
+    ...    Read Until    Script succeeded
+    Console    developer_usb_reimage.sh script is succeeded. Waiting for reboot...
+    Run Keyword And Ignore Error
+    ...    Wait Until Keyword Succeeds    16 minutes    2 minutes
+    ...    Read Until    rebooting now
+    Console    Rebooting CIM now.
+
+Wait For Fusion Install and Startup
+    [Documentation]    Sleep for ${Installation_Time}.
+    ${DateTime}=    Get Current Date
+    Log    Time: ${DateTime}    console=True
+    Console    \nSleep for ${Installation_Time}.
+    Sleep    ${Installation_Time}    reason=Waiting for installation, reboot and startup.
+
+Assign Administrator Password
+    ${Creds}    Create Dictionary    newPassword    ${Fusion_Password}
+    ...                              oldPassword    ${Fusion_Factory_Password}
+    ...                              userName       ${Fusion_Username}
+    :FOR    ${INDEX}    IN RANGE    1    ${ADMIN_PASSWORD_RETRIES}
+    \    ${Status}    ${Response}    Run Keyword and Ignore Error    Fusion Api Change Administrator Password    ${FUSION_IP}    ${Creds}
+    \    Run Keyword If    '${Status}'=='PASS'
+    ...    Log    Assigned Administrator password ${FUSION_PASSWORD}    console=True
+    \    Return From Keyword If    '${Status}'=='PASS'
+   # should be able to use status code, but that does not work, getting 500
+   # ...    Pass Execution If    ${Response['status_code']}==200
+    \    Console    \nIndex: ${INDEX}
+    \    Sleep    ${ADMIN_PASSWORD_POLL}
+    Fatal Error    msg=Error Assigning Administrator Password
+
+Appliance Login
+    ${Creds}    Create Dictionary    userName    ${Fusion_Username}    password    ${Fusion_Password}
+    ${Response}    ${SessionID}    Fusion Api Login Appliance    ${Fusion_IP}    ${Creds}
+    Run Keyword If    ${Response['status_code']}==200    Log    Successful first-time login    console=True
+    Return From Keyword If    ${Response['status_code']}==200
+    Fail         msg=Error Login Administrator first-time ${Response['message']}
+
+Set Fusion Version Metadata
+    Set Suite Metadata     Deployed URL    ${ISO_URL}    top=True
+    Set Suite Metadata     Fusion URL:       https://${Fusion_IP}    top=True
+    Login to Fusion via REST    ${FUSION_IP}    ${FUSION_USERNAME}    ${FUSION_PASSWORD}
+    ${Response}=    Fusion Api Get Appliance Version
+    Logout of Fusion Via REST
+    Log    ${Response}
+    ${softwareVersion}    Get from Dictionary    ${Response}    softwareVersion
+    Set Suite Variable    ${Fusion_Version}    ${softwareVersion}
+    Set Suite Metadata    Fusion Version    ${Fusion_Version}       top=True
+
+Write Fusion Properties
+    Run    echo \# %JOB_NAME% %DATE% %TIME% > C:\\Jenkins\\Fusion-CIM.properties
+    Run    echo FUSION_IP=${Fusion_IP} >> C:\\Jenkins\\Fusion-CIM.properties
+    Run    echo FUSION_URL=https://${Fusion_IP} >> C:\\Jenkins\\Fusion-CIM.properties
+    Run    echo FUSION_VERSION=${Fusion_Version} >> C:\\Jenkins\\Fusion-CIM.properties
+
+Generate Fusion Dump and Log After Network Initialization
+    Login to Fusion Via SSH
+    Run Keyword And Ignore Error
+    ...  SSHLibrary.Get File    /ci/logs/ciDebug.*
+    Logout of Fusion Via SSH
+    Login to Fusion Via REST
+    ${Status}  ${R}=   Run Keyword And Ignore Error
+    ...  Create And Download Support Dump    ${DUMP_FILE}
+    Run Keyword If   "${Status}" == "FAIL"
+    ...  Log    AM92: Fusion Dump Failed        level=Warn

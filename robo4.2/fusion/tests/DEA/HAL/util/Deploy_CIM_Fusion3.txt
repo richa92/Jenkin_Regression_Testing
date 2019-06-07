@@ -1,0 +1,249 @@
+** Settings ***
+Documentation    Deploy Fusion ISO onto CIM
+...    = Usage =
+...    pybot |-v ENCLOSURE:tesla |-v ISO_URL:<Fusion ISO Image> Deploy_CIM_Fusion.txt
+...    = Variables =
+...    | ENCLOSURE | (required) Name of the enclosure to Deploy upon. (values from variables.py) | 
+...    | ISO_URL | (optional) URL of Fusion ISO Image To Install (defaulted) |
+...    = Tags =
+...    | -e FTS | Deploys without performing First-Time Setup |
+...    | -i FTS | Performs First-Time Setup without re-deploying. Requires -v FUSION_IP:nn.nn.nn.nn |
+
+Library           String
+Library           Collections
+Library           OperatingSystem
+Library           robot.api.logger
+Library           RoboGalaxyLibrary
+Library           FusionLibrary
+Variables         ../resources/variables.py    ${ENCLOSURE} 
+Resource          ../resources/fusion_api.txt
+Resource          ../resources/defaults.txt
+Resource          ../resources/fusion_cli.txt
+
+*** Variables ***
+#${ISO_URL}=                    http://jenkins.rsn.hp.com:8080/userContent/fusion-install.iso
+${ISO_URL}=                   http://jenkins.rsn.hp.com:8080/userContent/latest-fusion.iso
+${Installation_Time}           45 minutes
+${STARTUP_PROGRESS_POLL}       60 seconds
+${STARTUP_PROGRESS_RETRIES}    30
+${DUMP_FILE}                   fusion_dump.sdmp
+
+*** Test Cases ***
+Collect Data
+    [Tags]    INSTALL
+    Log Variables
+    Console    \nDeploying from: ${ISO_URL} onto: ${ENCLOSURE}
+
+Insert Virtual Media image
+    [Tags]    INSTALL
+    ILO CONNECT     ${ILO_IP}    ${ILO_USERNAME}    ${ILO_PASSWORD}
+    ILO INSERT VIRTUAL MEDIA    cdrom    ${ISO_URL}
+    ILO SET VIRTUAL MEDIA STATUS
+    ${Response}=    ILO GET VIRTUAL MEDIA STATUS
+    ${Inserted}    Get From Dictionary    ${Response}    image_inserted
+    Run Keyword If    "${Inserted}" != "YES"    
+    ...    Fatal Error    msg=Virtual image not inserted properly ${Response}
+
+Boot from Virtual Media
+    [Tags]    INSTALL
+    ILO SET ONE TIME BOOT    CDROM
+    ${Status}=    ILO GET ONE TIME BOOT    
+    Run Keyword If    "${Status}" != "cdrom"   
+    ...    Fatal Error    msg=One-time boot not set properly ${Status}
+
+Reset Server
+    [Tags]    INSTALL
+    ILO RESET SERVER
+    Sleep    30
+    ${Status}=    ILO GET HOST POWER STATUS
+    Run Keyword If    "${Status}" != "ON"    
+    ...    Fatal Error    msg=Server not restarted ${Status}
+
+Wait For Fusion Install and Startup
+    [Tags]    INSTALL
+    [Documentation]    Sleep for ${Installation_Time}.
+    Sleep    ${Installation_Time}    reason=Waiting for installation, reboot and startup
+
+Wait Until Fusion Responds                       
+    [Tags]    INSTALL
+    [Documentation]    Loop here until Fusion API begins to respond to requests.
+    ...    Ignore WARN messages while waiting for Fusion to respond.
+    : FOR    ${INDEX}    IN RANGE    1    ${STARTUP_PROGRESS_RETRIES}
+    \    ${Status}    Run Keyword and Return Status    Fusion Api Get Startup Progress   ${FUSION_IP}    api=199
+    \    Pass Execution If    '${Status}'=='True'    Fusion Api has responded
+    \    Console    \nIndex: ${INDEX}
+    \    Sleep    ${STARTUP_PROGRESS_POLL}
+    Fatal Error    msg=Could not Get Fusion REST API to respond
+
+Wait Until Fusion Responds Successful
+    [Tags]    INSTALL
+    [Documentation]    With Fusion responding to REST API requests, it'll likely 
+    ...    start by responding with 503 Service Unavailable. Loop here until we start
+    ...    getting 'success' responses. 
+    : FOR    ${INDEX}    IN RANGE    1    ${STARTUP_PROGRESS_RETRIES}
+    \    ${Response}   Fusion Api Get Startup Progress   ${FUSION_IP}    api=199
+    \    ${Status}=       Get From Dictionary    ${Response}      status_code
+    \    Pass Execution If    '${Status}'!='503'    Fusion API responded available
+    \    Console    \nIndex: ${INDEX}
+    \    Sleep    ${STARTUP_PROGRESS_POLL}
+    Fatal Error    msg=Failed to get successful Fusion Api response
+
+Wait Until Fusion Startup Completes
+    [Tags]    INSTALL
+    [Documentation]    With successful responses, start polling for startup
+    ...    completion. 
+    : FOR    ${INDEX}    IN RANGE    1    ${STARTUP_PROGRESS_RETRIES}
+    \    ${Response}   Fusion Api Get Startup Progress   ${FUSION_IP}    api=199
+    \    ${total}=       Get From Dictionary    ${Response}      total
+    \    ${complete}=       Get From Dictionary    ${Response}      complete
+    \    Console    \nIndex: ${INDEX} \tCompleted ${complete} of ${total}
+    \    Pass Execution If    "${total}"=="${complete}"    Fusion Login Ready For First Time Setup
+    \    Sleep    ${STARTUP_PROGRESS_POLL}
+    Fatal Error    Could not verify Fusion startup completed.
+
+Eula Status
+    [Tags]    FTS
+    ${Response}    Fusion Api Save Eula    ${Fusion_IP}    yes
+    Pass Execution If    ${Response['status_code']}==200    Saved EULA Status
+    Fatal Error    Fatal Error Setting EULA Status
+    
+Assign Administrator Password
+    [Tags]    FTS
+    ${Creds}    Create Dictionary    newPassword    ${Fusion_Password}
+    ...                              oldPassword    ${Fusion_Factory_Password}
+    ...                              userName       ${Fusion_Username}
+    ${Response}    Fusion Api Change Administrator Password    ${FUSION_IP}    ${Creds}
+    Pass Execution If    ${Response['status_code']}==200    Assigned Administrator password ${FUSION_PASSWORD}
+    Fatal Error    Fatal Error Assigning Administrator Password
+
+Appliance Login
+    [Tags]    FTS    IPv4    IPv6
+    ${Creds}    Create Dictionary    userName    ${Fusion_Username}    password    ${Fusion_Password}
+    ${Response}    ${SessionID}    Fusion Api Login Appliance    ${Fusion_IP}    ${Creds}
+    Pass Execution If    ${Response['status_code']}==200    Successful first-time login
+    Fatal Error    Fatal Error Login Administrator first-time ${Response['message']}
+
+Assign IPv4 Networking
+    [Tags]    FTS    IPv4
+    # Get the initial copy of the Appliance Interfaces dictionary
+    ${Response}    Fusion Api Get Appliance Interfaces
+    Run Keyword If    ${Response['status_code']}!=200
+    ...    Fatal Error    Unable to fetch Appliance Interfaces Dictionary: ${Response['message']}
+
+	# Update the dictionary with the enclosure specific values
+    Remove From Dictionary    ${Response}    status_code
+    ${applianceNetworksList}    Get From Dictionary    ${Response}    applianceNetworks
+    ${applianceNetworks0}    Get From List    ${applianceNetworksList}    0    
+    Set To Dictionary    ${applianceNetworks0}    app1Ipv4Addr    ${Fusion_IP}
+    Set To Dictionary    ${applianceNetworks0}    device          eth0
+    Set To Dictionary    ${applianceNetworks0}    domainName      rsn.hp.com
+    Set To Dictionary    ${applianceNetworks0}    hostname        ${Fusion_FQDN}
+    Set To Dictionary    ${applianceNetworks0}    ipv4Gateway     ${Gateway_IP}
+    ${ipv4NameServers}    Create List    ${PRIMARY_DNS}    ${ALTERNATE_DNS}
+    Set To Dictionary    ${applianceNetworks0}    ipv4NameServers    ${ipv4NameServers}
+    Set To Dictionary    ${applianceNetworks0}    ipv4Subnet      ${Netmask_IP}
+    Set To Dictionary    ${applianceNetworks0}    ipv4Type        STATIC
+    Set To Dictionary    ${applianceNetworks0}    ipv6Type        UNCONFIGURE
+    Set To Dictionary    ${applianceNetworks0}    app1Ipv6Addr    ${null}    
+
+    # Update the Appliance Interfaces
+    ${Response2}    Fusion Api Configure Appliance Interfaces    ${Response}    
+    ${Status}       Wait for Task    ${Response2}
+
+    # Fetch again for comparison
+    #${Response3}    Fusion Api Get Appliance Interfaces
+    #Run Keyword If    ${Response3['status_code']}!=200
+    #...    Fail    Unable to fetch Appliance Interfaces ${Response3['message']}
+    #Remove From Dictionary    ${Response3}    status_code
+    #Dictionaries Should Be Equal    ${Response}    ${Response3}    Network Configuration doesn't match
+
+#Assign IPv6 Networking
+#    [Tags]    FTS    IPv6
+#    # Get the initial copy of the Appliance Interfaces dictionary
+#    ${Response}    Fusion Api Get Appliance Interfaces
+#    Run Keyword If    ${Response['status_code']}!=200
+#    ...    Fatal Error    Unable to fetch Appliance Interfaces Dictionary: ${Response['message']}
+#
+#    # Update the dictionary with the enclosure specific values
+#    Remove From Dictionary    ${Response}    status_code
+#    ${applianceNetworksList}    Get From Dictionary    ${Response}    applianceNetworks
+#    ${applianceNetworks0}    Get From List    ${applianceNetworksList}    0    
+#    Set To Dictionary    ${applianceNetworks0}    ipv6Type        DHCP
+#    Set To Dictionary    ${applianceNetworks0}    app1Ipv6Addr    ${null}    
+#
+#    # Update the Appliance Interfaces
+#    ${Response2}    Fusion Api Configure Appliance Interfaces    ${Response}    
+#    ${Status}       Wait for Task    ${Response2}
+#    Run Keyword If    ${Response['status_code']}!=200
+#    ...    Fail    Unable to update Appliance Interfaces ${Response['message']}
+#
+#    # Fetch again for comparison
+#    #${Response3}    Fusion Api Get Appliance Interfaces
+#    #Run Keyword If    ${Response3['status_code']}!=200
+#    #...    Fail    Unable to fetch Appliance Interfaces ${Response3['message']}
+#    #Remove From Dictionary    ${Response3}    status_code
+#    #Dictionaries Should Be Equal    ${Response}    ${Response3}    Network Configuration doesn't match
+
+Set Fusion Version Metadata
+    [Tags]    INSTALL    FTS
+    Set Suite Metadata     Deployed URL    ${ISO_URL}    top=True
+    Set Suite Metadata     Fusion URL:       https://${Fusion_FQDN}    top=True
+    Login to Fusion via REST    ${FUSION_IP}    ${FUSION_USERNAME}    ${FUSION_PASSWORD}
+    ${Response}=    Fusion Api Get Appliance Version
+    Logout of Fusion Via REST
+    Run Keyword If    ${Response['status_code']}!=200
+    ...    Fail    Unable to fetch Appliance Version ${Response['message']}
+    ${softwareVersion}    Get from Dictionary    ${Response}    softwareVersion
+    Set Suite Variable    ${Fusion_Version}    ${softwareVersion}
+    Set Suite Metadata    Fusion Version    ${Fusion_Version}       top=True
+
+Write Fusion Properties
+    [Tags]    INSTALL    FTS
+    Run    echo \# %JOB_NAME% %DATE% %TIME% > C:\\Jenkins\\Fusion.properties
+    Run    echo FUSION_IP=${Fusion_IP} >> C:\\Jenkins\\Fusion.properties
+    Run    echo FUSION_URL=https://${Fusion_IP} >> C:\\Jenkins\\Fusion.properties
+    Run    echo FUSION_VERSION=${Fusion_Version} >> C:\\Jenkins\\Fusion.properties
+
+PostInstall Steps
+    Prevent CIM iLo Reset From Fusion Factory Reset
+
+Generate Fusion Dump and Log After Network Initialization
+    Login to Fusion Via SSH
+    Run Keyword And Ignore Error    SSHLibrary.Get File    /ci/logs/ciDebug.*
+    Logout of Fusion Via SSH
+
+    Login to Fusion Via REST
+    Create And Download Support Dump    ${DUMP_FILE}
+    Logout of Fusion Via REST
+
+*** Keywords ***
+Wait For Task
+    [Documentation]    Waits for a task to reach an end-state
+    [Arguments]    ${Response}    ${timeout}=300 s    ${interval}=30 s
+    ${task}    Wait Until Keyword Succeeds    ${timeout}    ${interval}    Check For Task Complete    ${Response}
+
+    # Check for errors - display state and status 
+    ${taskState}    Get From Dictionary    ${task}    taskState
+    Return from Keyword If    '${taskState}'=='Completed'    ${task}
+    ${taskStatus}    Get From Dictionary    ${task}    taskStatus
+    Console          Task: ${taskState}\tStatus: ${taskStatus}
+
+    # Check for additional error messages and display
+    ${taskErrors}    Get From Dictionary    ${task}    taskErrors
+    ${Length}        Get Length             ${taskErrors}
+    Run Keyword If    ${Length}==0    Fail    No additional message
+    ${taskError0}     Get From List          ${taskErrors}    0
+    ${errorSource}    Get From Dictionary    ${taskError0}    errorSource
+    ${message}        Get From Dictionary    ${taskError0}    message
+    #Console    Source: ${errorSource}\tMessage: ${message}
+    Fail       Source: ${errorSource}\tMessage: ${message}
+
+Check for Task Complete
+    [Documentation]    Check for task completion.  Fail if incomplete.
+    [Arguments]    ${Response}
+    Should Contain    ${Response}    uri    msg=Couldnt find key uri.    values=False
+    ${uri}            Get From Dictionary    ${Response}    uri
+    ${task}           Fusion Api Get Task    uri=${uri}
+    ${taskState}      Get From Dictionary    ${task}    taskState
+    Should Match Regexp    ${taskState}    ((?i)Warning|Unknown|Terminated|Killed|Error|Completed)  
+    [Return]    ${task}

@@ -1,0 +1,95 @@
+*** Settings ***
+Documentation    Test suite to validate CI related events on OneView and FLM
+...    It covers testing of:
+...      CIManagerInserted
+...      CIManagerOk
+...      CIManagerRemoved
+
+...    = GENERIC USAGE =
+...    | pybot | -v ENC_SERIAL_NO:[enclosure serial #] | -v APPLIANCE_IP:<ipv4> | -v CIM_Linux_IP:<ipv4> |-v GIT_REPO_ROOT: | CI_event_remove_insert.txt |
+...    = Variables =
+...    | GIT_REPO_ROOT |      Required: Repo root path if NOT defined in environment variable this is mgmtfw root location|
+...    | ENC_SERIAL_NO |      Optional: If omitted, will use the 1st enclosure detected in OV |
+...    | APPLIANCE_IP |       Required: OneView IPv4 address |
+...    | CIM_Linux_IP |       Required:CI Manager ipv4 under test can be specified in tbirdvariables file |
+
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Library           RoboGalaxyLibrary
+Library           MgmtFWLibrary
+Library           json
+Suite Setup       Configure Events Test Environment
+Suite Teardown    Run Keywords  Logout of EM RIS   AND    Logout of Fusion Via REST
+
+
+*** Variables ***
+${cim_bay}     2     #Use the second CI Manager bay
+
+*** Test Case ***
+TC 01: Verify Event For CI Manager Removal And Insertion
+    [Documentation]    This test is to verify CiManager Fault events for
+    ...                CIManager_Removed
+    ...                CIManager_Inserted
+    [Tags]   CIM    Automated    FLM1.01
+     # Verify avalable CI Managers
+    ${present_list}=    Get List of Occupied CIManager Bays
+    Should Not Be Empty    ${present_list}    msg=No CIManager present in the enlcosure
+    ${CI count}=    Get Length    ${present_list}
+    Should Be Equal as Strings    ${CI count}    2    msg=2 CIs are required for this test script.
+    #Verify removing CIM from bay 2
+    Log    Removing the CIManager from the bay:${cim_bay} and verify resource updated event console=True
+    ${last_fusion_event_id}=    get last fusion event ID
+    RIS EM Efuse On CIM    ${cim_bay}
+    Sleep    60
+    #Verifying resource removed event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Resource Removed Event    ${CIM_Device}    ${CIManager_Removed_Message_ID}    ${cim_bay}    200
+    # Verify Fusion Event including event description and resolution
+    Sleep    120 
+    Verify Fusion Event Sent By EM    ${CIManager_Removed_Message_ID}    ${last_fusion_event_id}    ${Enclosure_category}
+    #Verify adding the CIM back
+    Log    message=Inserting CIM at bay:${cim_bay} and verify resource added event in diags audit log    console=True
+    RIS EM Efuse Off CIM    ${cim_bay}
+    Sleep    600
+    #Verifying resource added event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}  
+    Verify Audit Log Resource Added Event    ${CIM_Device}    ${CIManager_Inserted_Message_ID}    ${cim_bay}    900
+    Wait for Device OK    ${CIM_Device}    ${cim_bay}
+    Verify Fusion Event Sent By EM    ${CIManager_Inserted_Message_ID}    ${last_fusion_event_id}    ${Enclosure_category}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    RIS EM Efuse Off CIM    ${cim_bay}    AND    Sleep    600    AND    Wait for Device OK    ${CIM_Device}    ${cim_bay}
+
+TC 02: Verify Event For CI Manager Efuse PGood Fault Events
+    [Documentation]    Test to verify events for CI Manager Efuse PGood Fault Events
+    ...                EfusePGoodFault
+    ...                EfusePGoodFault_Cleared
+    [Tags]    CIM    Automated    FLM1.01    Disabled
+    # Verify avalable CI Managers
+    ${present_list}=    Get List of Occupied CIManager Bays
+    Should Not Be Empty    ${present_list}    msg=No CIManager present in the enlcosure
+    ${CI count}=    Get Length    ${present_list}
+    Should Be Equal as Strings    ${CI count}    2    msg=2 CIs are required for this test script.
+    #Verify Fault Injection for CIM at bay 2
+    Log    Injecting fault for CIManager at bay:${cim_bay} and verify resource updated event console=True
+    ${last_fusion_event_id}=    get last fusion event ID
+    ${cim_fault_status}=    Set EM RIS Faults   CIMFaultInjection    ${cim_bay}    EfusePGood    true/EfuseOff
+    Should Be Equal As Strings    ${cim_fault_status}    <Response [200]>
+    Sleep    60
+    # Verifying efuse PGood fault event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    # Verify Fusion Event including event description and resolution
+    Verify Fusion Event Sent By EM    ${EL_CIM_EfusePGoodFault}    ${last_fusion_event_id}    ${Enclosure_category}
+    # Clearing the fault Efuse PGood on CIM
+    Log    message=Clearing fault for CIM at bay:${cim_bay} and verify resource added event in diags audit log    console=True
+    ${cim_faultclear_status}=    Set EM RIS Faults   CIMFaultInjection    ${cim_bay}    EfusePGood    false/EfuseOff
+    Should Be Equal As Strings    ${cim_faultclear_status}    <Response [200]>
+    Sleep    30
+    # Verifying efuse PGood fault cleared event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}  
+    Verify Fusion Event Sent By EM    ${EL_CIM_EfusePGoodFault_Cleared}    ${last_fusion_event_id}    ${Enclosure_category}
+    [Teardown]    Run Keyword If Test Failed    Set EM RIS Faults   CIMFaultInjection    ${cim_bay}    EfusePGood    false/EfuseOff

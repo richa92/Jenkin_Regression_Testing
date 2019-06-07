@@ -1,0 +1,342 @@
+*** Settings ***
+Library				RoboGalaxyLibrary
+Library				FusionLibrary
+Library				MgmtFWLibrary
+Library				OperatingSystem
+Library				BuiltIn
+Library				Collections
+Library				XML
+Library		        SSHLibrary
+Library				String
+Library				Dialogs
+Library             json
+
+Resource         	../fusion_api_resource.txt
+Resource         	../../../tests/clrm/support_files/clrm_common.txt
+Library				../../../../mgmtfw/MgmtFWLibrary/api/thunderbird/ilo.py
+Variables			../../../../mgmtfw/tests/thunderbird/variables/tBird_variables.py
+
+*** Keywords ***
+Get Sdi System Profiles 
+	[Documentation]	Get Sdi System Profiles by name
+	[Arguments]		${sdisp}
+	${sdisp_details}= 	Create Dictionary
+	${resp} = 	Fusion Api Get Sdi System Profiles		param=?filter="'name'=='${sdisp}'"
+	:FOR	${m}	IN	@{resp['members']}
+	\	Log to console	${m['name']}
+	\	${sdisp_details}=	Run keyword if	'${m['name']}'=='${sdisp}'		copy dictionary		${m}
+	[Return]	${sdisp_details}
+	
+Get Sdi System Profiles Uri by Name
+	[Documentation]	Get Sdi System Profiles Uri by Name 
+	[Arguments]		${sdisp}
+	${resp}= 	Fusion Api Get Sdi System Profiles		param=?filter="'name'=='${sdisp}'"
+	run keyword if	${resp['count']}==0		FAIL	Sdi System Profiles ${sdisp} not found
+	${uri}=	Run keyword if	${resp} is not None	Get From Dictionary		${resp['members'][0]}	uri
+	...						ELSE	Log to console		Could not find cluster profile ${cpname}
+	[Return]	${uri}
+	
+Create Sdi System Profiles
+	[Documentation]	Create Sdi-System-Profiles using input passed as argument
+    [Arguments]		${sdisp}		${STATUS_CODE}=202
+	Log    Adding Sdi System Profiles    console=true
+	:FOR	${sp}	IN	@{sdisp}
+	\	${body}=	Create Sdi System Profiles payload		${sp}
+	\	${json_body}	json.dumps	${body}
+	\	Log to Console and logfile	Json body:${json_body}	
+	\	${rest_resp}=		Fusion Api Create Sdi System Profiles		${body}
+	\	${status}=      Run Keyword And Return Status	should be equal as integers  ${rest_resp['status_code']}  ${STATUS_CODE}
+	\	${task_status}	${task_resp}=	Run Keyword If		'${status}'=='True'		Clrm Wait For Task	${rest_resp}	2700s	50s	
+	\	Log    ${task_resp}	    console=true
+ 	[Return]    ${task_status}		${task_resp}
+ 	
+Delete Sdi System Profiles
+ 	[Documentation]	Delete Sdi System Profiles by name
+ 	[Arguments]		${sdisp}	${force}=False
+	${uri}= 		Get Sdi System Profiles Uri by Name		${sdisp}
+	${sdi}=		Get Sdi System Profiles		${sdisp}
+	${headers} =  fusion api get headers
+	set to dictionary  ${headers}  If-Match  ${sdi['eTag']}
+ 	${rest_resp}= 	Fusion Api Delete Sdi System Profiles	uri=${uri}?force=${force}	headers=${headers}
+ 	${status}= 	Run Keyword And Return Status	should be equal as integers  ${rest_resp['status_code']}	202
+ 	${task_status}	${task_resp}=	Run Keyword If	${status}==True		Clrm Wait For Task	${rest_resp}	900s	50s
+ 	[Return]	${task_status}		${task_resp}
+ 	
+Update Sdi System Profiles
+	[Documentation]	Update Sdi-System-Profiles using input passed as argument
+    [Arguments]		${sdisp}		${STATUS_CODE}=202
+	Log    Updating Sdi System Profiles    console=true
+	:FOR	${sp}	IN	@{sdisp}
+	\	${sdi_uri}=		Get Sdi System Profiles Uri by Name		${sp['Name']}		
+	\	${sdi} = 		Get Sdi System Profiles		${sp['Name']}
+	\   ${headers} =  fusion api get headers
+	\   set to dictionary  ${headers}  If-Match  ${sdi['eTag']}
+	\	${addSystemNode_status}		Run keyword and return status	Dictionary Should Contain Key	${sp}	AddSystemNodes
+	\	${addSystemNode_body}=	Run Keyword If	${addSystemNode_status}==True		Add Sdi System Nodes body	${sp['AddSystemNodes']}
+	\	${resp_nodes_old}=	Set Variable 	${sdi['systemNodes']}
+	\	${resp_nodes_add}=	Run keyword if	${addSystemNode_body} is not None		Combine Lists	${resp_nodes_old}		${addSystemNode_body}	
+	\	${deleteSystemNode_status}		Run keyword and return status	Dictionary Should Contain Key	${sp}	DeleteSystemNodes
+	\	${deleteSystemNode_body}=	Run Keyword If	${deleteSystemNode_status}==True and ${resp_nodes_old}!=[]		Delete Sdi System Nodes body	${sp['DeleteSystemNodes']}		${resp_nodes_old}
+	\	Run keyword if	${resp_nodes_add} is not None		Set to Dictionary	${sdi}	systemNodes		${resp_nodes_add}
+	\	Run keyword if	${deleteSystemNode_body} is not None		Set to Dictionary	${sdi}	systemNodes		${deleteSystemNode_body}
+	\	${nodes_list}=	Run keyword if	${resp_nodes_add} is not None and ${deleteSystemNode_body} is not None		Combine Lists	${deleteSystemNode_body}		${addSystemNode_body}	 		
+	\	Run keyword if	${nodes_list} is not None		Set to Dictionary	${sdi}	systemNodes		${nodes_list}
+	\	${quorum_status}		Run keyword and return status	Dictionary Should Contain Key	${sp}	quorum
+	\	${userName_status}=	run keyword and return status	Dictionary should contain key	${sp['quorum']}	userName
+	\	Run Keyword if	${quorum_status}==True	Run Keyword if	${userName_status}==True	Set to Dictionary	${sdi['softwareSpecificAttributes']['quorum']}		userName	${sp['quorum']['userName']}
+	\	${pw_status}=	run keyword and return status	Dictionary should contain key	${sp['quorum']}	password
+	\	Run Keyword if	${quorum_status}==True	Run Keyword if	${pw_status}==True	Set to Dictionary	${sdi['softwareSpecificAttributes']['quorum']}		password	${sp['quorum']['password']}
+	\	${type_status}=	run keyword and return status	Dictionary should contain key	${sp['quorum']}	type
+	\	Run Keyword if	${quorum_status}==True	Run Keyword if	${type_status}==True	Set to Dictionary	${sdi['softwareSpecificAttributes']['quorum']}		type	${sp['quorum']['type']}
+ 	\	${ipaddr_status}=	run keyword and return status	Dictionary should contain key	${sp['quorum']}	ipAddress
+ 	\	Run Keyword if	${ipaddr_status}==True	Run Keyword if	${quorum_status}==True	Set to Dictionary	${sdi['softwareSpecificAttributes']['quorum']}		ipAddress	${sp['quorum']['ipAddress']}
+	\	${ip_value}		Run Keyword if	${quorum_status}==True	Run Keyword if	${type_status}==True	Run Keyword if	'${sp['quorum']['type']}'=='None'	json.loads	${s['ipAddress']}
+ 	\	Run Keyword if	${quorum_status}==True	Run Keyword if	${type_status}==True	Run Keyword if	'${sp['quorum']['type']}'=='None'	Set to Dictionary	${sdi['softwareSpecificAttributes']['quorum']}		ipAddress	${ip_value}		
+ 	\	${path_status}=	run keyword and return status	Dictionary should contain key	${sp['quorum']}	path
+ 	\	Run Keyword if	${quorum_status}==True	Run keyword if	${path_status}==True	Run keyword if	'${sp['quorum']['path']}'!=''	Set to Dictionary	${sdi['softwareSpecificAttributes']['quorum']}		path	${sp['quorum']['path']}
+	\	${p_value}	Run Keyword if	${quorum_status}==True	Run Keyword if	${type_status}==True	Run Keyword if	'${sp['quorum']['type']}'=='None'		json.loads		${sp['quorum']['path']}
+ 	\	Run Keyword if	${quorum_status}==True	Run Keyword if	${type_status}==True	Run Keyword if	'${sp['quorum']['type']}'=='None'		Set to Dictionary	${sdi['softwareSpecificAttributes']['quorum']}		path	${p_value}
+	\	${json_sdi}	json.dumps	${sdi}
+	\	Log to Console and logfile	Json body:${json_sdi}	
+	\	${rest_resp}=		Fusion Api Update Sdi System Profiles		body=${sdi}		uri=${sdi_uri}	headers=${headers}
+	\	${status}=      Run Keyword And Return Status	should be equal as integers  ${rest_resp['status_code']}  ${STATUS_CODE}
+	\	${task_status}	${task_resp}=	Run Keyword If		'${status}'=='True'		Clrm Wait For Task	${rest_resp}	7200s	50s
+	\	Log    ${task_resp}	    console=true
+ 	[Return]    ${task_status}		${task_resp}
+	
+Add Sdi System Nodes body
+	[Documentation]	Add one or more Sdi-System-nodes to request body
+    [Arguments]		${nodes}
+    ${resp_list}	Create List
+	:FOR	${node}	in 	@{nodes}
+ 	\	${sn_body}=		Create System Nodes body	${node}
+	\	append to list		${resp_list}	${sn_body}
+	[Return]	${resp_list}
+	
+Delete Sdi System Nodes body
+	[Documentation]	Delete one or more Sdi-System-nodes to request body
+    [Arguments]		${nodes}	${sp}
+	:FOR	${node}	in 	@{nodes}
+	\	${ssnodes_list}=	Check sdi profile nodes to delete		${node}		${sp}
+	[Return]	${ssnodes_list}
+	
+Check sdi profile nodes to delete
+	[Documentation]	Filter/identify the nodes to be deleted from sdi system profile
+	[Arguments]		${get_node}		${snode_list}
+	:FOR	${snode}	IN	@{snode_list}
+	\	run keyword if	'${snode['name']}'=='${get_node}'		Remove Values from List	${snode_list}	${snode}
+	[Return]	${snode_list}
+	
+Create Sdi System Profiles payload
+  	[Documentation]	Create Sdi System Profiles payload
+ 	[Arguments]		${sp}
+ 	Log to console	* Creating Sdi System Profiles Body
+ 	${sp_body}=		Create Dictionary
+ 	${cp_status}=	run keyword and return status	Dictionary should contain key	${sp}	hostingHypervisorClusterProfileUri
+ 	${cp_uri}=	Run Keyword if	${cp_status}==True	Run Keyword if	'${sp['hostingHypervisorClusterProfileUri']}'!=''	Get Cluster Profile Uri by Name		${sp['hostingHypervisorClusterProfileUri']}
+ 	Run Keyword if	${cp_status}==True	Set to Dictionary	${sp_body}		hostingHypervisorClusterProfileUri	${cp_uri}
+ 	${cma_status}=	run keyword and return status	Dictionary should contain key	${sp}	isCpuAndMemoryAutoManaged
+ 	Run Keyword if	${cma_status}==True	Run Keyword if	'${sp['isCpuAndMemoryAutoManaged']}'!=''	Set to Dictionary	${sp_body}		isCpuAndMemoryAutoManaged	${sp['isCpuAndMemoryAutoManaged']}
+	${name_status}=	run keyword and return status	Dictionary should contain key	${sp}	Name
+ 	Run Keyword if	${name_status}==True	Run Keyword if	'${sp['Name']}'!=''	Set to Dictionary	${sp_body}		Name	${sp['Name']}
+ 	${ntp_status}=	run keyword and return status	Dictionary should contain key	${sp}	ntpServers
+ 	Run Keyword if	${ntp_status}==True		Set to Dictionary	${sp_body}		ntpServers	${sp['ntpServers']}
+	${sn_list}=		Create List
+ 	:FOR	${sys_node}	in 	@{sp['SystemNodes']}
+ 	\	${sn_body}=		Create System Nodes body	${sys_node}
+	\	append to list		${sn_list}	${sn_body}
+ 	Set to Dictionary	${sp_body}		SystemNodes		${sn_list}
+ 	${CpuCount_status}=	run keyword and return status	Dictionary should contain key	${sp}	CpuCount
+ 	Run Keyword if	${CpuCount_status}==True	Run Keyword if	'${sp['isCpuAndMemoryAutoManaged']}'!='True'	Set to Dictionary	${sp_body}		CpuCount	${sp['CpuCount']}
+ 	${MemoryAllocation_status}=	run keyword and return status	Dictionary should contain key	${sp}	MemoryAllocation
+ 	Run Keyword if	${MemoryAllocation_status}==True	Run Keyword if	'${sp['isCpuAndMemoryAutoManaged']}'!='True'	Set to Dictionary	${sp_body}		MemoryAllocation	${sp['MemoryAllocation']}
+ 	${sv_status}=	run keyword and return status	Dictionary should contain key	${sp}	SystemVersion
+ 	Run Keyword if	${sv_status}==True	Run Keyword if	'${sp['SystemVersion']}'!=''	Set to Dictionary	${sp_body}		SystemVersion	${sp['SystemVersion']}
+ 	${type_status}=	run keyword and return status	Dictionary should contain key	${sp}	SystemType
+ 	Run Keyword if	${type_status}==True	Run Keyword if	'${sp['SystemType']}'!=''	Set to Dictionary	${sp_body}		SystemType	${sp['SystemType']}
+ 	 ${Locale_status}=	run keyword and return status	Dictionary should contain key	${sp}	Locale
+ 	Run Keyword if	${Locale_status}==True	Run Keyword if	'${sp['Locale']}'!=''	Set to Dictionary	${sp_body}		Locale	${sp['Locale']}
+ 	${user_list}=		Create List
+ 	:FOR	${user}	in 	@{sp['users']}
+ 	\	${user_body}=		Create User for Sdi System Profile body		${user}
+	\	append to list		${user_list}	${user_body}
+ 	Set to Dictionary	${sp_body}		users		${user_list}
+ 	${ssa_body}=	Create SoftwareSpecificAttributes body For Sdi System Profles	${sp['SoftwareSpecificAttributes']}	 
+ 	Set to Dictionary	${sp_body}		SoftwareSpecificAttributes	${ssa_body}
+ 	[Return]	${sp_body}
+ 	
+Create User for Sdi System Profile body
+	[Documentation]	Create System Nodes body
+ 	[Arguments]		${us}
+ 	${ssp_user}	Create Dictionary
+ 	${uname_status}=	run keyword and return status	Dictionary should contain key	${us}	username
+ 	Run Keyword if	${uname_status}==True	Run Keyword if	'${us['username']}'!=''	Set to Dictionary	${us}		username	${us['username']}
+ 	${pw_status}=	run keyword and return status	Dictionary should contain key	${us}	password
+ 	Run Keyword if	${pw_status}==True	Run Keyword if	'${us['password']}'!=''	Set to Dictionary	${us}		password	${us['password']}
+ 	${ps_status}=	run keyword and return status	Dictionary should contain key	${us}	purpose
+ 	Run Keyword if	${ps_status}==True	Run Keyword if	'${us['purpose']}'!=''	Set to Dictionary	${us}		purpose	${us['purpose']}
+ 	[Return]	${us}
+ 	
+Create System Nodes body
+	[Documentation]	Create System Nodes body
+ 	[Arguments]		${sn}
+ 	${sn_dict}		Create Dictionary
+ 	${con_list}		Create List		
+ 	:FOR	${s}	in 	@{sn['connections']}
+ 	\	${con}	Create Dictionary
+ 	\	${ip_status}=	run keyword and return status	Dictionary should contain key	${s}	isIPAutoGenerated
+ 	\	Run Keyword if	${ip_status}==True	Run Keyword if	'${s['isIPAutoGenerated']}'!=''	Set to Dictionary	${con}		isIPAutoGenerated	${s['isIPAutoGenerated']}
+ 	\	${purpose_status}=	run keyword and return status	Dictionary should contain key	${s}	purpose
+ 	\	Run Keyword if	${purpose_status}==True	Run Keyword if	'${s['purpose']}'!=''	Set to Dictionary	${con}		purpose	${s['purpose']}
+ 	\	${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${s}	networkUri
+	\	${net} =  set variable if  '${status}'=='PASS'  ${return}  error
+	\	${net_uri} =  run keyword if  '${status}'=='PASS' and '${net}'!=''	Common URI Lookup by name    ${net}
+	\	run keyword if  '${status}'=='PASS' and '${net}'!=''  Set to Dictionary	${con}	networkUri	${net_uri}
+	\	append to list		${con_list}	${con}
+	Set to Dictionary	${sn_dict}	connections		${con_list}
+	
+	:FOR	${l}	in 	@{sn['logicalDisks']}
+	\	${data_status}=	run keyword and return status	Dictionary should contain key	${l}	ilo_ipAddress
+	\	${ld_list}=		Run keyword if	${data_status}==True	Construct Logical Disks body for Sdi System Profiles	@{sn['logicalDisks']}	${l['ilo_ipAddress']}
+	\	Run keyword if	${data_status}==True	Set to Dictionary	${sn_dict}	logicalDisks		${ld_list}
+	
+	:FOR	${l}	in 	@{sn['logicalDisks']}
+	\	${data_status}=	run keyword and return status	Dictionary should not contain key	${l}	ilo_ipAddress
+	\	${ld_list}=		Run keyword if	${data_status}==True	Create Logical Disks body for Sdi system profiles from input		${sn}
+	\	Run keyword if	${data_status}==True	Set to Dictionary	${sn_dict}	logicalDisks		${ld_list}
+
+	${nm_status}=	run keyword and return status	Dictionary should contain key	${sn}	name
+ 	Run Keyword if	${nm_status}==True	Run Keyword if	'${sn['name']}'!=''	Set to Dictionary	${sn_dict}		name	${sn['name']}
+ 	${hhhp_status}=		run keyword and return status	Dictionary should contain key	${sn}	hostingHypervisorHostProfileUri
+ 	${hhhpuri_status}=		Run Keyword if	${hhhp_status}==True	run keyword and return status	Should Start With	${sn['hostingHypervisorHostProfileUri']}	/rest/hypervisor-host-profiles/
+ 	Run Keyword if	${hhhp_status}==True and ${hhhpuri_status}==True		Set to Dictionary	${sn_dict}		hostingHypervisorHostProfileUri		${sn['hostingHypervisorHostProfileUri']}
+ 	${auto_status}=		Run Keyword if	${hhhp_status}==True	run keyword and return status	Should Be Equal As Strings	${sn['hostingHypervisorHostProfileUri']}	Auto
+ 	${autogen_hhhpuri}=		Run Keyword if	${hhhp_status}==True	Run Keyword if	${auto_status}==True	Auto generate hypervisor host profile uri	${sn}
+ 	Run Keyword if	${auto_status}==True		Set to Dictionary	${sn_dict}		hostingHypervisorHostProfileUri		${autogen_hhhpuri}
+ 	${hhhp_uri}=	Run Keyword if	${hhhp_status}==True and '${sn['hostingHypervisorHostProfileUri']}'!='' and ${hhhpuri_status}==False and ${auto_status}==False	Get Host Profile Uri By Name	${sn['hostingHypervisorHostProfileUri']}
+	Run Keyword if	'${hhhp_uri}'!='None'		Set to Dictionary	${sn_dict}		hostingHypervisorHostProfileUri		${hhhp_uri}
+	[Return]	${sn_dict}
+	
+Create SoftwareSpecificAttributes body For Sdi System Profles
+	[Documentation]	Create SoftwareSpecificAttributes body For Sdi System Profles
+ 	[Arguments]		${ssa}
+ 	${ssa_dict}		Create Dictionary
+ 	${image_status}=	run keyword and return status	Dictionary should contain key	${ssa}	imageUri
+ 	Run Keyword if	${image_status}==True	Run Keyword if	'${ssa['imageUri']}'!=''	Set to Dictionary	${ssa_dict}		imageUri	${ssa['imageUri']}
+ 	${svmc}		Create Dictionary
+ 	:FOR	${s}	in 	${ssa['svmc']}
+ 	\	${userName_status}=	run keyword and return status	Dictionary should contain key	${s}	userName
+ 	\	Run Keyword if	${userName_status}==True	Run Keyword if	'${s['userName']}'!=''	Set to Dictionary	${svmc}		userName	${s['userName']}
+ 	\	${p_status}=	run keyword and return status	Dictionary should contain key	${s}	password
+ 	\	Run Keyword if	${p_status}==True	Run Keyword if	'${s['password']}'!=''	Set to Dictionary	${svmc}		password	${s['password']}
+ 	\	${ipaddr_status}=	run keyword and return status	Dictionary should contain key	${s}	ipAddress
+ 	\	Run Keyword if	${ipaddr_status}==True	Run Keyword if	'${s['ipAddress']}'!=''	Set to Dictionary	${svmc}		ipAddress	${s['ipAddress']}
+ 	Set to Dictionary	${ssa_dict}		svmc		${svmc}
+ 	${quorum}		Create Dictionary
+ 	:FOR	${s}	in 	${ssa['quorum']}
+ 	\	${userName_status}=	run keyword and return status	Dictionary should contain key	${s}	userName
+ 	\	Run Keyword if	${userName_status}==True	Run Keyword if	'${s['userName']}'!=''	Set to Dictionary	${quorum}		userName	${s['userName']}
+ 	\	${p_status}=	run keyword and return status	Dictionary should contain key	${s}	password
+ 	\	Run Keyword if	${p_status}==True	Run Keyword if	'${s['password']}'!=''	Set to Dictionary	${quorum}		password	${s['password']}
+ 	\	${t_status}=	run keyword and return status	Dictionary should contain key	${s}	type
+ 	\	Run Keyword if	${t_status}==True	Run Keyword if	'${s['type']}'!=''	Set to Dictionary	${quorum}		type	${s['type']}
+ 	\	${ipaddr_status}=	run keyword and return status	Dictionary should contain key	${s}	ipAddress
+ 	\	Run Keyword if	${ipaddr_status}==True	Run Keyword if	'${s['ipAddress']}'!=''	Set to Dictionary	${quorum}		ipAddress	${s['ipAddress']}
+	\	${ip_value}		Run Keyword if	'${quorum['type']}'=='None' or '${quorum['type']}'=='Witness'		json.loads	${s['ipAddress']}
+ 	\	Run Keyword if	'${quorum['type']}'=='None' or '${quorum['type']}'=='Witness'		Set to Dictionary	${quorum}		ipAddress	${ip_value}		
+ 	\	${path_status}=	run keyword and return status	Dictionary should contain key	${s}	path
+ 	\	Run Keyword if	${path_status}==True	Run Keyword if	'${s['path']}'!=''	Set to Dictionary	${quorum}		path	${s['path']}
+	\	${p_value}	Run Keyword if	'${quorum['type']}'=='None'		json.loads		${s['path']}
+ 	\	Run Keyword if	'${quorum['type']}'=='None'		Set to Dictionary	${quorum}		path	${p_value}
+  	Set to Dictionary	${ssa_dict}		quorum		${quorum}
+ 	${vips_list}		Create List		
+ 	:FOR	${s}	in 	@{ssa['vips']}
+ 	\	${vips_dict}	Create Dictionary
+ 	\	${ipgen_status}=	run keyword and return status	Dictionary should contain key	${s}	isIPAutoGenerated
+ 	\	Run Keyword if	${ipgen_status}==True	Run Keyword if	'${s['isIPAutoGenerated']}'!=''	Set to Dictionary	${vips_dict}		isIPAutoGenerated	${s['isIPAutoGenerated']}
+ 	\	${sm_status}=	run keyword and return status	Dictionary should contain key	${s}	subnetMask
+ 	\	Run Keyword if	${sm_status}==True	Run Keyword if	'${s['subnetMask']}'!=''	Set to Dictionary	${vips_dict}		subnetMask	${s['subnetMask']}
+ 	\	${sm_value}		Run Keyword if	'${s['subnetMask']}'=='null'		json.loads	${s['subnetMask']}
+ 	\	Run Keyword if	${sm_status}==True and '${s['subnetMask']}'=='null'		Set to Dictionary	${vips_dict}		subnetMask	${sm_value}	 	
+ 	\	${ipa_status}=	run keyword and return status	Dictionary should contain key	${s}	ipAddress
+ 	\	Run Keyword if	${ipa_status}==True	Run Keyword if	'${s['subnetMask']}'!=''	Set to Dictionary	${vips_dict}		ipAddress	${s['ipAddress']}
+ 	\	${ipa_value}		Run Keyword if	'${s['ipAddress']}'=='null'		json.loads	${s['ipAddress']}
+ 	\	Run Keyword if	${ipa_status}==True and '${s['ipAddress']}'=='null'		Set to Dictionary	${vips_dict}		ipAddress	${ipa_value}	 	
+	\	${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${s}	networkUri
+	\	${net} =  set variable if  '${status}'=='PASS'  ${return}  error
+	\	${net_uri} =  run keyword if  '${status}'=='PASS' and '${net}'!=''	Common URI Lookup by name    ${net}
+	\	run keyword if  '${status}'=='PASS' and '${net}'!=''  Set to Dictionary	${vips_dict}	networkUri	${net_uri}
+	\	append to list		${vips_list}	${vips_dict}
+	Set to Dictionary	${ssa_dict}	vips		${vips_list}
+	[Return]	${ssa_dict}
+
+Create Logical Disks body for Sdi system profiles from input
+	[Documentation]    Create Logical Disks body for Sdi system profiles from input
+	[Arguments]	${sn}
+	${ld_list}=		Create List
+	:FOR	${l}	in 	@{sn['logicalDisks']}
+	\	${ld}	Create Dictionary
+ 	\	${pur_status}=	run keyword and return status	Dictionary should contain key	${l}	purpose
+ 	\	Run Keyword if	${pur_status}==True	Run Keyword if	'${l['purpose']}'!=''	Set to Dictionary	${ld}		purpose	${l['purpose']}
+ 	\	${dt_status}=	run keyword and return status	Dictionary should contain key	${l}	diskType
+ 	\	Run Keyword if	${dt_status}==True	Run Keyword if	'${l['diskType']}'!=''	Set to Dictionary	${ld}		diskType	${l['diskType']}
+ 	\	${ldI_status}=	run keyword and return status	Dictionary should contain key	${l}	logicalDiskId
+ 	\	Run Keyword if	${ldI_status}==True	Run Keyword if	'${l['logicalDiskId']}'!=''	Set to Dictionary	${ld}		logicalDiskId	${l['logicalDiskId']}
+ 	\	${dc_status}=	run keyword and return status	Dictionary should contain key	${l}	diskCapacity
+ 	\	Run Keyword if	${dc_status}==True	Run Keyword if	'${l['diskCapacity']}'!=''	Set to Dictionary	${ld}		diskCapacity	${l['diskCapacity']}
+	\	append to list		${ld_list}	${ld}
+	[Return]	${ld_list}
+ 	
+Construct Logical Disks body for Sdi System Profiles
+	[Documentation]    Get logical disk info from iLO
+	[Arguments]	${sn}	${ilo_ip}
+	${ilo_cred}=	Create Dictionary
+	${user_status}=	run keyword and return status	Dictionary should contain key	${sn}	UserName
+	Run Keyword if	${user_status}==True	Run Keyword if	'${sn['UserName']}'!=''	Set to Dictionary	${ilo_cred}		UserName	${sn['UserName']}
+	${password_status}=	run keyword and return status	Dictionary should contain key	${sn}	Password
+	Run Keyword if	${password_status}==True	Run Keyword if	'${sn['Password']}'!=''	Set to Dictionary	${ilo_cred}		Password	${sn['Password']}	
+    ${content}		Set variable		application/json
+    ${headers}=		Create Dictionary
+    set to dictionary   ${headers}  Content-Type=${content}
+    ${ilo_client}	${resp}		${sessionID}=		ilo.login_ilo_ipv4		${ilo_ip}	${ilo_cred}		${headers}
+    ${ser_obj}=		ilo.get_ris_object		${ilo_client}		/redfish/v1/Systems/1/SmartStorage/ArrayControllers/
+    ${sarray_list}		Create list
+    :FOR	${sarray}	in	@{ser_obj['Members']}
+    \	${url}	Get From Dictionary		${sarray}	@odata.id
+    \	Append To List		${sarray_list}	${url}
+    ${ldrive_list}		Create list		
+    :FOR	${ldrive}	in		@{sarray_list}		
+    \	${ldrive_obj}=		ilo.get_ris_object		${ilo_client}		${ldrive}LogicalDrives
+    \	Append To List		${ldrive_list}	${ldrive_obj}
+    ${ldrive_list_updated}	Create List
+    :FOR	${ld}	in		@{ldrive_list}
+    \	Run keyword if	${ld['Members@odata.count']}!=0		Append to List	${ldrive_list_updated}	${ld}
+	${logical_drives}	Create List
+	:FOR	${ld}	in		@{ldrive_list_updated}
+	\	${ldurls}	Get From Dictionary		${ld}	Members
+	:FOR	${u}	in	@{ldurls}
+	\	${odata}	Get From Dictionary		${u}	@odata.id
+	\	Append To List	${logical_drives}	${odata}
+	${resp_list}	Create List
+	:FOR	${addr}		in		@{logical_drives}
+	\	${ldrive_resp}=		ilo.get_ris_object		${ilo_client}		${addr}
+	\	${resp_dict}=	Create Dictionary
+	\	${Capacity}=	Evaluate	${ldrive_resp['CapacityMiB']} * 1024 * 1024
+	\	Set to Dictionary	${resp_dict}	diskCapacity	${Capacity}
+	\	${VolumeUniqueIdentifier_lower}		Convert To Lowercase		${ldrive_resp['VolumeUniqueIdentifier']}
+	\	Set to Dictionary	${resp_dict}	logicalDiskId	${VolumeUniqueIdentifier_lower}
+	\	Set to Dictionary	${resp_dict}	diskType	HDD
+	\	Run keyword if	${ldrive_resp['Id']}==1		Set to Dictionary	${resp_dict}	purpose	boot
+	\	Run keyword if	${ldrive_resp['Id']}!=1		Set to Dictionary	${resp_dict}	purpose	data					
+	\	Append to list	${resp_list}	${resp_dict}
+	[Return]	${resp_list}	
+
+Auto generate hypervisor host profile uri
+	[Documentation]    Auto generate hypervisor host profile uri for SDiRM system profile creation
+	[Arguments]		${sn}
+	${sh_uri}=		Get Server Hardware URI By ILO IP	${sn['logicalDisks'][0]['ilo_ipAddress']}
+	${sh}=		Fusion Api Get Resource		${sh_uri}
+	${resp}=		Fusion Api Get Resource		${sh['serverProfileUri']}
+	${host_profile_uri}=	Get Host Profile Uri By Name	${resp['name']}
+	[Return]	${host_profile_uri}	
+	

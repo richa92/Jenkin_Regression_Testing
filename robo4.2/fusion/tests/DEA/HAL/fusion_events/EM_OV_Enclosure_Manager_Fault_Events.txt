@@ -1,0 +1,295 @@
+*** Settings ***
+Documentation     Validate EM Enclosure Manager events on OneView
+...               = GENERIC USAGE =
+...               | pybot | -v GIT_REPO_ROOT:<repo root path> | -v APPLIANCE_IP:<ipv4> |EM_OV_Enclosure_Manager_Events.txt |
+...               = Variables =
+...               | GIT_REPO_ROOT | Required: Repo root path if NOT defined in environment variable|
+...               | APPLIANCE_IP | Required: OneView IPv4 address |
+Suite Setup       Configure Events Test Environment
+Suite Teardown    Run Keywords    Reboot FLM after the suite    AND    Logout of EM RIS    AND    Logout of Fusion Via REST
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Library           RoboGalaxyLibrary
+Library           MgmtFWLibrary
+Library           json
+
+*** Test Cases ***
+
+TC01: Verify EM LinkedNeighborsInfoExpired Events
+    [Documentation]    Verify EmLinkedNeighborsInfoExpired and EmLinkedNeighborsInfoExpiredCleared
+    [Tags]    EM    Alert    Events    FLM2.00    FLM1.01    OV3.10    Automated
+    Run Keyword and Ignore Error    Wait for Node Consistent
+    ${standby_em_bay}=    Get Diags EmClusterStatus Standby Node
+    ${active_em_bay}=    Get Diags EmClusterStatus Active Node
+    ${last_fusion_event_id}=    get last fusion event ID
+    Log To Console    Setting Fault Status
+    ${enabled_switch_port}=    Get List of Enabled Switchports
+    Set EM RIS Faults    EmSwitchPortFaultInjection    External    LLDP_RECEIVE_OFF    standby
+    Log To Console    Sleeping 2 minutes
+    Sleep    120
+    #Verifying resource removed event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EM_LinkNeighborInfoExpired}    EnclosureManagerSwitchPorts    223    240
+    # Verify Fusion Event including event description and resolution
+    Verify Fusion Event Sent By EM    ${EM_LinkNeighborInfoExpired}    ${last_fusion_event_id}
+    Log To Console    Clearing Fault Status
+    Set EM RIS Faults    EmSwitchPortFaultInjection    External    LLDP_RECEIVE_ON    standby
+    Log To Console    Sleeping 2 minutes
+    Sleep    120
+    #Verifying resource removed event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EM_LinkNeighborInfoExpiredCleared}    EnclosureManagerSwitchPorts    223    240
+    # Verify Fusion Event including event description and resolution
+    Verify Fusion Event Sent By EM    ${EM_LinkNeighborInfoExpiredCleared}    ${last_fusion_event_id}
+    # Additional time needed for the active EM to determine that the standby is operational.Confirmed with dev on the wait time
+    Log to Console    Sleeping 5 minutes
+    Sleep    ${EM_REBOOT_TIME}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Set EM RIS Faults    EmSwitchPortFaultInjection    External    LLDP_RECEIVE_ON    standby
+    ...    AND    Sleep    ${EM_REBOOT_TIME}
+
+TC02: Verify EM - Link Neighbor Owner Mismatch Event
+    [Documentation]    Verify EM - Link Neighbor Owner Mismatch Events
+    [Tags]    EM    Alert    Events    FLM2.00    FLM1.01    OV3.10    Automated
+    Run Keyword and Ignore Error    Wait for Node Consistent
+    ${standby_em_bay}=    Get Diags EmClusterStatus Standby Node
+    ${active_em_bay}=    Get Diags EmClusterStatus Active Node
+    ${last_fusion_event_id}=    get last fusion event ID
+    Log To Console    Setting Fault Status
+    Set EM RIS Faults    EmSwitchPortFaultInjection    EXTERNAL    LLDP_FAKE_OWNER    standby
+    Log To Console    Sleeping 90 seconds
+    Sleep    90
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EM_LinkNeighborOwnerMismatch}    ${EMSwitches}    223    240
+    Verify Fusion Event Sent By EM    ${EM_LinkNeighborOwnerMismatch}    ${last_fusion_event_id}
+    RIS EM Efuse On OTHER EM    ${standby_em_bay}
+    Log To Console    Sleeping 90 seconds
+    Sleep    90
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Comment    Verify Audit Log Resource Updated Event    ${EM_Device_Name}    ${EM_LinkedNeighborsUpdated}    ${standby_em_bay}    240
+    Verify Audit Log Alert Event    ${EM_LinkNeighborOwnerMismatchCleared_LinkLost}    ${EMSwitches}    223    240
+    Log To Console    Clearing Fault Status
+    Set EM RIS Faults    EmSwitchPortFaultInjection    External    LLDP_REAL_OWNER    standby
+    RIS EM Efuse Off OTHER EM Without Healthcheck    ${standby_em_bay}
+    # Additional time needed for the active EM to determine that the standby is operational.Confirmed with dev on the wait time
+    Log to Console    Sleeping 5 minutes
+    Sleep    ${EM_REBOOT_TIME}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Set EM RIS Faults    EmSwitchPortFaultInjection    External    LLDP_REAL_OWNER
+    ...    standby    AND    Sleep    20    AND    RIS EM Efuse Off OTHER EM Without Healthcheck    ${standby_em_bay}
+    ...    AND    Login to EM Via RIS
+
+TC03: Verify EM SwitchPort Updated not passed to OneView
+    [Documentation]    Verify EM SwitchPort Updated not passed to OneView
+    [Tags]    EM    Alert    Events    FLM2.00    FLM1.01    OV3.10    Automated
+    Run Keyword and Ignore Error    Wait for Node Consistent
+    Wait for Device OK    ${EM_Device}    1
+    Wait for Device OK    ${EM_Device}    2
+    ${standby_em_bay}=    Get Diags EmClusterStatus Standby Node
+    ${active_em_bay}=    Get Diags EmClusterStatus Active Node
+    ${last_fusion_event_id}=    get last fusion event ID
+    Log To Console    Removing the EM from the bay:${standby_em_bay} and verify event
+    ${enabled_switch_port}=    Get List of Enabled Switchports
+    RIS EM Efuse On OTHER EM    ${standby_em_bay}
+    Log To Console    Sleeping 30 seconds
+    Sleep    30
+    #Verifying resource removed event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Resource Removed Event    ${EM_Device_Name}    ${EM_Removed_Message_ID}    ${standby_em_bay}    240
+    Verify Audit Log Resource Updated Event    ${EMSwitchPorts}    ${EM_SwitchPortUpdated}    223    360
+    # Verify Fusion Event including event description and resolution
+    Verify Fusion Event Sent By EM    ${EM_Removed_Message_ID}    ${last_fusion_event_id}
+    ${passed}=    Run Keyword And Return Status    Verify Fusion Event Sent By EM    ${EM_SwitchPortUpdated}
+    Should Not Be True    ${passed}    msg=Found event ${EM_SwitchPortUpdated} in Oneview. ${EM_SwitchPortUpdated} is Not a OneView communicated event.
+    Sleep    8
+    Log To Console    Inserting the EM to the bay:${standby_em_bay} and verify event
+    RIS EM Efuse Off OTHER EM Without Healthcheck    ${standby_em_bay}
+    Log To Console    Sleeping 2 minutes
+    Sleep    120
+    #Verifying resource removed event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Resource Added Event    ${EM_Device_Name}    ${EM_Inserted_Message_ID}    ${standby_em_bay}    240
+    Comment    Verify Audit Log Alert Event    ${EM_LinkDisconnectedCleared_LinkDetected}    ${EMSwitchPorts}    223    360
+    Verify Audit Log Resource Updated Event    ${EM_Device_Name}    ${EM_DiscoveryComplete_MessageID}    ${standby_em_bay}    480
+    Verify Audit Log Resource Updated Event    ${EM_Device_Name}    ${EM_LinkedNeighborsUpdated}    ${standby_em_bay}    480
+    # Verify Fusion Event including event description and resolution
+    Verify Fusion Event Sent By EM    ${EM_Inserted_Message_ID}    ${last_fusion_event_id}
+    ${passed}=    Run Keyword And Return Status    Verify Fusion Event Sent By EM    ${EM_LinkedNeighborsUpdated}    ${last_fusion_event_id}
+    Should Not Be True    ${passed}    msg=Found event ${EM_LinkedNeighborsUpdated} in Oneview. ${EM_LinkedNeighborsUpdated} is Not a OneView communicated event.
+    ${passed}=    Run Keyword And Return Status    Verify Fusion Event Sent By EM    ${EM_DiscoveryComplete_MessageID}    ${last_fusion_event_id}
+    Should Not Be True    ${passed}    msg=Found event ${EM_DiscoveryComplete_MessageID} in Oneview. ${EM_DiscoveryComplete_MessageID} is Not a OneView communicated event.
+    # Additional time needed for the active EM to determine that the standby is operational.Confirmed with dev on the wait time
+    Log to Console    Sleeping 5 minutes
+    Sleep    ${EM_REBOOT_TIME}
+    Wait for Device OK    ${EM_Device}    ${standby_em_bay}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    RIS EM Efuse Off OTHER EM Without Healthcheck    ${standby_em_bay}    AND
+    ...    Wait for Device OK    ${EM_Device}    ${standby_em_bay}
+
+TC04: Verify EM Cluster Resource Fault and EM Cluster Resource Fault Cleared Events
+    [Documentation]    Verify EM Cluster Resource Fault and EM Cluster Resource Fault Cleared Events
+    [Tags]    EM    Alert    Events    FLM2.00    FLM1.01    OV3.10    Automated
+    Run Keyword and Ignore Error    Wait for Node Consistent
+    ${standby_em_bay}=    Get Diags EmClusterStatus Standby Node
+    ${active_em_bay}=    Get Diags EmClusterStatus Active Node
+    ${last_fusion_event_id}=    get last fusion event ID
+    Log To Console    Killing other EM
+    ${result_sim_dead}=    EM API Get Diags    OtherEM_SimDead
+    Log To Console    Sleeping for 12 minutes
+    Sleep    720
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EM_ClusterResourceFault}    EnclosureManager    ${standby_em_bay}    240
+    Verify Fusion Event Sent By EM    ${EM_ClusterResourceFault}    ${last_fusion_event_id}
+    Log To Console    Restoring other EM
+    ${result_em_restore}=    EM API Get Diags    OtherEM_Restore
+    Log To Console    Sleeping for 5 minutes
+    Sleep    ${EM_REBOOT_TIME}
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EM_ClusterResourceCleared}    EnclosureManager    ${standby_em_bay}    240
+    Verify Fusion Event Sent By EM    ${EM_ClusterResourceCleared}    ${last_fusion_event_id}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    EM API Get Diags    OtherEM_Restore    AND    Sleep    ${EM_REBOOT_TIME}
+
+TC05: Verify EmInsertFault and EmInsertFaultCleared events
+    [Documentation]    Verify Device States when inserting and removing Standby EM
+    [Tags]    EM    Alert    Events    FLM2.00    OV3.10    Automated
+    Run Keyword and Ignore Error    Wait for Node Consistent
+    Wait for Device OK    ${EM_Device}    1
+    Wait for Device OK    ${EM_Device}    2
+    Set Test Variable    ${device}    EnclosureManager
+    Set Test Variable    ${device_diag_response}    EM
+    ${device_list}=    Get List of Occupied EnclosureManager Bays
+    ${em_count}=    Get Length    ${device_list}
+    Run Keyword If    ${em_count}==1    Fail    msg=No Standby EM present - test cannot be run
+    ${standby_em}=    Get Diags EmClusterStatus Standby Node
+    ${last_fusion_event_id}=    get last fusion event ID
+    ${result}=    EM API Get Diags    ShowState/${device}/${standby_em}
+    Should Contain    ${result}    SM_STATE_INTEGRATED
+    ${result}=    EM API Get Diags    deviceStateTransition/${device}/${standby_em}/remove
+    Should Contain    ${result}    Successfully sent diag state transition event remove for ${device_diag_response} ${standby_em}
+    ${result}=    EM API Get Diags    ShowState/${device}/${standby_em}
+    Should Contain    ${result}    State: SM_STATE_ABSENT
+    ${result}=    EM API Get Diags    deviceStateTransition/${device}/${standby_em}/operational
+    Should Contain    ${result}    Successfully sent diag state transition event operational for ${device_diag_response} ${standby_em}
+    Sleep    30
+    ${result}=    EM API Get Diags    ShowState/${device}/${standby_em}
+    Should Contain    ${result}    State: SM_STATE_OPERATIONAL
+    ${status}    ${result}=    Wait timeout for Device State    ${device}    @{device_list}[0]    SM_STATE_INSERTED_ERR    600
+    Should Be True    ${status}    msg=expectedSM_STATE_INSERTED_ERR but got ${result}
+    Should Contain    ${result}    State: SM_STATE_INSERTED_ERR
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log All Alerts
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_Em_InsertFault}    EnclosureManager    ${standby_em}    450
+    Verify Fusion Event Sent By EM    ${EL_Em_InsertFault}    ${last_fusion_event_id}
+    ${result}=    EM API Get Diags    deviceStateTransition/${device}/${standby_em}/insert
+    Should Contain    ${result}    Successfully sent diag state transition event insert for ${device_diag_response} ${standby_em}
+    Sleep    30
+    ${result}=    EM API Get Diags    ShowState/${device}/${standby_em}
+    Should Contain    ${result}    SM_STATE_INTEGRATED
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log All Alerts
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_Em_InsertFault_Cleared}    EnclosureManager    ${standby_em}    450
+    Verify Fusion Event Sent By EM    ${EL_Em_InsertFault_Cleared}    ${last_fusion_event_id}
+    Sleep    ${EM_REBOOT_TIME}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    EM API Get Diags    deviceStateTransition/${device}/${standby_em}/insert
+    ...    AND    Sleep    ${EM_REBOOT_TIME}
+
+TC06: Verify EM Critical Event is not passed to OneView
+    [Documentation]    Verify EM Critical event
+    [Tags]    EM    Alert    Events    FLM2.00    FLM1.01    OV3.10    Automated
+    Run Keyword and Ignore Error    Wait for Node Consistent
+    ${Standby_EM_Bay}=    Get Diags EmClusterStatus Standby Node
+    Should Not Be Empty    ${Standby_EM_Bay}    msg=No standby EM found; please run this test on a redundant environment
+    ${last_fusion_event_id}=    get last fusion event ID
+    Set EM RIS FRU Faults    ${EM_Device_Name}    True
+    RIS EM Efuse On OTHER EM    ${Standby_EM_Bay}
+    Sleep    8
+    RIS EM Efuse Off OTHER Failed EM    ${Standby_EM_Bay}
+    #Validate EM Health    ${Standby_EM_Bay}    ${HEALTH_CRITICAL}
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log All Alerts
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Status Change MessageID Event    ${EM_Critical}    ${EM_Device_Name}    ${Standby_EM_Bay}    300
+    ${passed}=    Run Keyword And Return Status    Verify Fusion Event Sent By EM    ${EM_SwitchPortUpdated}    ${last_fusion_event_id}
+    Should Not Be True    ${passed}    msg=Found event ${EM_SwitchPortUpdated} in Oneview. ${EM_SwitchPortUpdated} is Not a OneView communicated event.
+    ${passed}=    Run Keyword And Return Status    Verify Fusion Event Sent By EM    ${EM_Critical}    ${last_fusion_event_id}
+    Should Not Be True    ${passed}    msg=Found event ${EM_Critical} in Oneview. ${EM_Critical} is Not a OneView communicated event.
+    Set EM RIS FRU Faults    ${EM_Device_Name}    False
+    RIS EM Efuse On OTHER EM    ${Standby_EM_Bay}
+    Sleep    8
+    RIS EM Efuse Off OTHER EM    ${Standby_EM_Bay}
+    Sleep    ${EM_REBOOT_TIME}
+    Wait for Device OK    ${EM_Device}    ${Standby_EM_Bay}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Set EM RIS FRU Faults    ${EM_Device_Name}    False    AND
+    ...    RIS EM Efuse On OTHER EM    ${Standby_EM_Bay}    AND    Sleep    8    AND    RIS EM Efuse Off OTHER EM    ${Standby_EM_Bay}
+    ...    AND    Sleep    ${EM_REBOOT_TIME}    AND    Wait for Device OK    ${EM_Device}    ${Standby_EM_Bay}
+
+TC07: Verify EM Fault and Fault Cleared Events
+    [Documentation]    Verify EM Fault and Fault Cleared Events
+    [Tags]    EM    Alert    Events    FLM1.01    OV3.10    Automated
+    Run Keyword and Ignore Error    Wait for Node Consistent
+    ${standby_em_bay}=    Get Diags EmClusterStatus Standby Node
+    ${active_em_bay}=    Get Diags EmClusterStatus Active Node
+    ${last_fusion_event_id}=    get last fusion event ID
+    Log To Console    Killing other EM
+    ${enabled_switch_port}=    Get List of Enabled Switchports
+    ${result_sim_dead}=    EM API Get Diags    OtherEM_SimDead
+    Log To Console    Sleeping 12 minutes
+    Sleep    720
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Resource Updated Event    ${EM_Device_Name}    ${EM_LinkedNeighborsUpdated}    ${active_em_bay}    90
+    Verify Audit Log Alert Event    ${EM_Fault}    ${EM_Device_Name}    ${active_em_bay}    90
+    Verify Fusion Event Sent By EM    ${EM_Fault}    ${last_fusion_event_id}
+    Log To Console    Restoring other EM
+    ${result_em_restore}=    EM API Get Diags    OtherEM_Restore
+    Log To Console    Sleeping 5 minutes
+    Sleep    300
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Resource Updated Event    ${EM_Device_Name}    ${EM_LinkedNeighborsUpdated}    ${active_em_bay}    90
+    Verify Audit Log Alert Event    ${EM_FaultCleared}    ${EM_Device_Name}    ${active_em_bay}    90
+    Verify Fusion Event Sent By EM    ${EM_FaultCleared}    ${last_fusion_event_id}
+    # Additional time needed for the active EM to determine that the standby is operational.Confirmed with dev on the wait time
+    Log to Console    Sleeping 5 minutes
+    Sleep    ${EM_REBOOT_TIME}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    EM API Get Diags    OtherEM_Restore    AND    Sleep    ${EM_REBOOT_TIME}
+
+TC08: Verify EmInternalLinkDisconnectedCleared_PeerEmRemoved Event
+    [Documentation]    Verify EmInternalLinkDisconnectedCleared_PeerEmRemoved event
+    [Tags]    EM    Alert    Events    FLM2.00    FLM1.01    OV3.10    Automated
+    Run Keyword and Ignore Error    Wait for Node Consistent
+    ${standby_em_bay}=    Get Diags EmClusterStatus Standby Node
+    ${active_em_bay}=    Get Diags EmClusterStatus Active Node
+    ${last_fusion_event_id}=    get last fusion event ID
+    Log To Console    Killing other EM
+    ${enabled_switch_port}=    Get List of Enabled Switchports
+    ${result_sim_dead}=    EM API Get Diags    OtherEM_SimDead
+    Log To Console    Sleeping 12 minutes
+    Sleep    720
+    Login to EM Via RIS
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EM_InternalLinkDisconnected}    ${EM_Device_Name}    ${standby_em_bay}    780
+    Verify Audit Log Alert Event    ${EM_LinkDisconnected}    ${EM_Device_Name}    ${standby_em_bay}    780
+    Verify Fusion Event Sent By EM    ${EM_InternalLinkDisconnected}    ${last_fusion_event_id}
+    Verify Fusion Event Sent By EM    ${EM_LinkDisconnected}    ${last_fusion_event_id}
+    Log To Console    Removing other EM
+    RIS EM Efuse On OTHER EM    ${standby_em_bay}
+    Log To Console    Sleeping 2 minutes
+    Sleep    120
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EM_InternalLinkDisconnectedClearedPeerEmRemoved}    ${EM_Device_Name}    ${standby_em_bay}    240
+    Verify Fusion Event Sent By EM    ${EM_InternalLinkDisconnectedClearedPeerEmRemoved}    ${last_fusion_event_id}
+    # Additional time needed for the active EM to determine that the standby is operational.Confirmed with dev on the wait time
+    Log To Console    Restoring other EM
+    ${result_em_restore}=    EM API Get Diags    OtherEM_Restore
+    Log to Console    Sleeping 5 minutes
+    Sleep    ${EM_REBOOT_TIME}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    EM API Get Diags    OtherEM_Restore    AND    Sleep    ${EM_REBOOT_TIME}

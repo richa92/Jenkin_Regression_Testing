@@ -1,0 +1,305 @@
+*** Settings ***
+Documentation    OVF243 FC DirectAttach on Potash User Story
+...              - Keywords file
+
+Resource         ../../../../../Resources/api/fusion_api_resource.txt
+Resource         ../FVT/fvt-keywords.txt
+Resource         ../FVT/Resources/fvt_resource.txt
+
+Library          FusionLibrary
+Library          ../FVT/fvt_api.py
+
+
+*** Keywords ***
+Verify ErrorCode in taskError
+    [Documentation]    Verify taskErrors contain specified errorCode
+    [Arguments]    ${taskErrors}    ${expected_errorcode}
+
+    :FOR    ${taskerror}    IN    @{taskErrors}
+    \    ${errorCode} =    Get From Dictionary    ${taskError}    errorCode
+    \    Exit For Loop If    '${errorCode}' == '${expected_errorcode}'
+
+    Should Be Equal As Strings    ${errorCode}    ${expected_errorcode}
+
+Verify Task Error
+    [Documentation]    Verify input task taskState to be Error and erroCode match expected one
+    [Arguments]    ${task}    ${expected_errorcode}
+
+    Should Be Equal As Strings    ${task['taskState']}    Error
+    Verify ErrorCode in taskError    ${task['taskErrors']}    ${expected_errorcode}
+
+Verify Port
+    [Documentation]    Verify the named port of named interconnect has the expected attribute values
+    ...                through the kwargs attribute-value pair
+    ...                Use ${True} or ${False} for boolean value
+    ...                Example: Verify Port    CN7545061V, interconnect 3    d3    portStatus=Linked   enabled=${True}
+    [Arguments]    ${icm_name}    ${port_name}    &{kwargs}
+
+    ${resp} =    Fvt Api Get Interconnect Port By Name    ${icm_name}    ${port_name}
+    Should Not Be Empty    ${resp}
+
+    :FOR    ${key}    IN    @{kwargs.keys()}
+    \    Should be Equal    ${resp['${key}']}    ${kwargs['${key}']}
+
+
+Verify Uplink lagStates
+    [Documentation]   Verify named uplink ative LagStates
+    [Arguments]    ${icm_name}    ${port_name}    ${expected_lagStates}
+
+    Log to Console     ${\n}Verify lagStates of Uplink ${icm_name} ${port_name}
+    Verify Port     ${icm_name}    ${port_name}    portType=Uplink
+    ...    portStatus=Linked    portStatusReason=Active    lagStates=${expected_lagStates}
+
+
+# DF The unused subport 1 not return to initial state after enable.
+# It is not relvenat for our test validation.
+Verify Downlink Subports Status
+    [Documentation]    Compares subports of given downlink against expected subports
+    ...                Note - This routine is a temporary workaround to skip comparing unused subport 1
+    ...                in this API testing context, the first subport is not used for end2end testing
+    [Arguments]     ${icm_name}    ${port_name}    ${expected_subports}
+    ${dlink} =    Fvt Api Get Interconnect Port By Name    ${icm_name}    ${port_name}
+    ${dl_subports} =    Set Variable    ${dlink['subports']}
+    ${new_dl_subports} =    Get Slice From List    ${dl_subports}    1
+    ${new_expected_subports} =    Get Slice From List    ${expected_subports}    1
+    Lists Should Be Equal    ${new_dl_subports}    ${new_expected_subports}
+
+Verify Named Interconnect
+    [Documentation]    Verify the named interconenct properties based on the kwargs key value pairs
+    [Arguments]    ${icm_name}    &{kwargs}
+
+    ${resp} =    Fvt Api Get Interconnect By Name    ${icm_name}
+    Should Not Be Empty    ${resp}
+
+    :FOR    ${key}    IN    @{kwargs.keys()}
+    \    Should be Equal    ${resp['${key}']}    ${kwargs['${key}']}
+
+
+Verify Logical Interconnect
+    [Documentation]    Verify the named logical interconenct properties based on the kwargs key value pairs
+    [Arguments]    ${li_name}    &{kwargs}
+
+    ${resp} =    Fvt Api Get Logical Interconnect By Name    ${li_name}
+    Should Not Be Empty    ${resp}
+
+    :FOR    ${key}    IN    @{kwargs.keys()}
+    \    Should be Equal    ${resp['${key}']}    ${kwargs['${key}']}
+
+Verify Named Logical Enclosure
+    [Documentation]    Verify the named logical enclosure properties based on the kwargs key value pairs
+    [Arguments]    ${le_name}    &{kwargs}
+
+    ${resp} =    Fvt Api Get Logical Enclosure By Name    ${le_name}
+    Should Not Be Empty    ${resp}
+
+    :FOR    ${key}    IN    @{kwargs.keys()}
+    \    Should be Equal    ${resp['${key}']}    ${kwargs['${key}']}
+
+
+Verify Uplinkset Status
+    [Documentation]    Verify the named uplinkset has the expected status
+    [Arguments]    ${li_name}    ${us_name}    ${status}
+
+    ${resp} =    fvt-keywords.Get Uplink Set By Name    ${li_name}    ${us_name}
+    Should be Equal As Strings    ${resp['status']}    ${status}
+
+
+Efuse IC and Wait
+    [Documentation]    Remove/Insert named interconnect based on input action EFuseOn/EFuseOff
+    ...                Wait for the IC to reach the expected state based on the action
+    [Arguments]     ${ic_name}    ${action}
+
+    Set Log Level    TRACE
+    ${enc} =    Fetch from left    ${ic_name}    ,
+    ${bay} =    Fetch from right    ${ic_name}    ${SPACE}
+    ${ic_uri} =    Get IC URI    ${ic_name}
+    ${expected_state} =    Set Variable if    '${action}' == 'EFuseOn'    Absent    Configured
+
+    Log to Console    ${\n}[Efuse ${ic_name} with ${action}]
+
+    Get EM IP       ${enc}
+    Get EM Token    ${enc}
+    Efuse ICM    ${action}    ${bay}
+
+    Log to Console    ${\n}Waiting for ${ic_name} to reach state: ${expected_state}
+    ${interval} =    Set Variable If    '${expected_state}' == 'Configured'    1m    30s
+    ${timeout} =    Set Variable If    '${expected_state}' == 'Configured'    30m    5m
+    Wait Until Keyword Succeeds    ${timeout}    ${interval}    IC reached state    ${ic_uri}    ${expected_state}
+
+
+Power IC and Wait
+    [Documentation]    Power off/on of the interconnect based on the input interconnect uri and action
+    ...                Wait for the interconnect to reach the expected state based on the action
+    [Arguments]     ${ic_name}    ${action}
+
+    ${ic_uri} =    Get IC URI    ${ic_name}
+
+    ${data} =    Create Dictionary    op=replace
+    ...                               path=/powerState
+    ...                               value=${action}
+    ${body} =    Create List     ${data}
+    ${expected_state} =    Set Variable if    '${action}' == 'Off'   Maintenance    Configured
+
+    Log to Console    ${\n}Powering ${action}: ${ic_uri}
+
+    # sometime took more than 2min to invoke add and more than 3min to finish adding
+    # PB102 took 2min to invoke and 9min to add
+    ${resp} =    fusion api patch interconnect    body=${body}    uri=${ic_uri}
+    ${task} =    Wait for Task    ${resp}    10m    10s
+    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+    Log to Console    ${\n}Waiting for ${ic_uri} to reach ${expected_state}
+    ${interval} =    Set Variable If    '${expected_state}' == 'Configured'    1m    30s
+    ${timeout} =    Set Variable If    '${expected_state}' == 'Configured'    20m    5m
+    Wait Until Keyword Succeeds    ${timeout}    ${interval}    IC reached state    ${ic_uri}    ${expected_state}
+
+Verify Server Profile Status
+    [Documentation]    Verify the named profile has the expected status
+    [Arguments]    ${sp}    ${expected_status}
+
+    ${sp_resp} =    Fvt Api Get Server Profile By Name    ${sp}
+    Should Be Equal As Strings    ${sp_resp['status']}    ${expected_status}
+
+Verify Server Profiles Status
+    [Documentation]    Verify the named profiles have the expected status
+    [Arguments]    ${sp_names}    ${expected_status}
+
+    :FOR    ${sp}    IN    @{sp_names}
+    \    Verify Server Profile Status    ${sp}    ${expected_status}
+
+Verify Server Profile Template Status
+    [Documentation]    Verify the named profile template has the expected status
+    [Arguments]    ${spt}    ${expected_status}
+
+    ${resp} =    Fvt Api Get Server Profile Template By Name    ${spt}
+    Should Be Equal As Strings    ${resp['status']}    ${expected_status}
+
+Delete Profile
+    [Documentation]    delete the specified profile if exist
+    [Arguments]        ${sp_name}    ${timeout}=10min    ${interval}=30s
+
+    Log to Console    ${\n}Delete Server Profile ${sp_name}
+    ${resp} =    Fvt Api Get Server Profile By Name    ${sp_name}
+    Return From Keyword If     ${resp} == ${None}
+    ${resp} =    Fusion Api Delete Server Profile    uri=${resp['uri']}
+    ${task} =    Wait For Task   ${resp}    ${timeout}    ${interval}
+    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+    # DF Let the downlink configuration quiet down
+    sleep    ${data_common.DEL_SP_QUIESCE}
+
+Delete SPT
+    [Documentation]    delete the specified profile template if exists
+    [Arguments]        ${spt_name}    ${timeout}=5min    ${interval}=10s
+
+    ${resp} =    Fvt Api Get Server Profile Template By Name    ${spt_name}
+    Return From Keyword If     ${resp} == ${None}
+    ${resp} =    Fusion Api Delete Server Profile Template   uri=${resp['uri']}
+    ${task} =    Wait For Task   ${resp}    ${timeout}    ${interval}
+    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+Disable Enable Ports
+    [Documentation]    Disable or Enable the port in the portname list of the specified interconnect name
+    ...                action values - 'enable' or 'disable'
+    ...                It waits until expected portStatus and enabled values are reached or time out
+    [Arguments]    ${ic_name}    ${portnames}    ${timeout}    ${action}
+
+    ${body} =    Create List
+    ${enabled_value} =    Set Variable If    '${action}' == 'enable'    ${true}    ${false}
+    ${expected_portStatus} =    Set Variable If    '${action}' == 'enable'    Linked    Unlinked
+
+    :FOR    ${portname}    IN    @{portnames}
+    \    ${resp} =     Fvt Api Get Interconnect Port By Name    ${ic_name}    ${portname}
+    \    Set to Dictionary   ${resp}   enabled    ${enabled_value}
+    \    Append to list    ${body}    ${resp}
+
+    ${ic_uri} =    Get IC URI    ${ic_name}
+    ${resp} =    fusion api edit interconnect ports    uri=${ic_uri}   body=${body}
+    ${task} =    Wait For Task    ${resp}    5 min    20s
+    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+    Log to Console    ${\n}Wait for ports to reach expected portStatus and enabled values
+    :FOR    ${portname}    IN    @{portnames}
+    \    Wait Until Keyword Succeeds    ${timeout}    20s
+    \    ...     Verify Port    ${ic_name}    ${portname}    portStatus=${expected_portStatus}
+    \    ...                     enabled=${enabled_value}
+
+Disable Ports
+    [Documentation]    Disable the ports in the portname list of the specified interconnect uri
+    [Arguments]    ${ic_name}    ${portnames}    ${timeout}
+
+    Run Keyword And Continue On Failure    Disable Enable Ports    ${ic_name}    ${portnames}    ${timeout}
+    ...                                    disable
+
+Enable Ports
+    [Documentation]    Enable the ports in the portname list of the specified interconnect uri
+    [Arguments]    ${ic_name}    ${portnames}    ${timeout}
+
+    Run Keyword And Continue On Failure    Disable Enable Ports    ${ic_name}    ${portnames}    ${timeout}
+    ...                                    enable
+
+
+Start Ping Process
+    [Documentation]    Start Ping process to the specified target ip, and direct stdout to specified output file
+    ...                Return process handle
+    [Arguments]    ${ip}    ${output}
+
+    ${handle} =    Run keyword if    os.name == "nt"    Start Process    ping   -t   ${ip}    stdout=${output}
+    ...    ELSE    Start Process    ping    ${ip}    stdout=${output}    shell=True
+
+    OperatingSystem.File Should Exist    ${output}
+    [Return]    ${handle}
+
+Stop Ping Process
+    [Documentation]    Stop Ping Process for the provided handle
+    [Arguments]    ${handle}
+
+    # on Linux testhead, use SIGINT for stopping ping session (similar to ctrl + c)
+    Return From Keyword If    ${handle} == ${None}
+
+    Run keyword If    os.name == "nt"    Terminate Process    ${handle}
+    ...    ELSE    Send Signal To Process    SIGINT    ${handle}    shell=True
+    Wait For Process    ${handle}    timeout=1m
+
+    Process Should Be Stopped    ${handle}
+
+Verify Traffic
+    [Documentation]    Verify from Ping process output file that lost packet count is
+    ...                no more than the specified max allowed count.
+    ...                Note that 0% percent loss is not used. If overall transmitted packets
+    ...                are small, even 1 packet loss may be over 0%, and if transmitted packets
+    ...                is large, even unaccepted packet loss may still show as 0% loss
+    ...                When the traffic verification passes, the output file is removed
+    [Arguments]    ${outfile}    ${max_allowed_lost_packet}
+
+    Log To Console    ${\n}Verify traffic in ${outfile} with max allowed lost packet as ${max_allowed_lost_packet}
+
+    # ${pattern} =    Set Variable If   os.name == "nt"    ${data_common.NT_ZERO_PERCENT_LOSS}
+    # ...    ${data_common.LINUX_ZERO_PERCENT_LOSS}
+
+    ${line} =    Grep File    ${outfile}    [pP]ackets
+    Should Not Be Empty    ${line}
+
+    # For Linux, no Lost packet count, % packet loss does not gurantee no packet drops,
+    # need furthur check
+    # e.g. 10000 packets transmitted, 9999 received, 0% packet loss, time 8999ms
+    # Windows has lost packed count, but use the same routine to check count
+    # Packets: Sent = 1000, Received = 999, Lost = 1 (0% loss)
+
+    ${pattern} =     Set Variable If
+    ...    os.name == "nt"    \\s*Packets:\\s+Sent\\s+=\\s+(\\d+),\\s+Received\\s+=\\s+(\\d+),\\.*
+    ...                       \\s*(\\d+)\\s+packets transmitted,\\s+(\\d+)\\s+received,\\s+\\.*
+    ${match}    ${transmitted}    ${received}    Should Match Regexp    ${line}    ${pattern}
+
+    Should Not Be Empty    ${match}
+
+    ${packet_loss} =    Evaluate    ${transmitted} - ${received}
+    Should Be True    ${packet_loss} <= ${max_allowed_lost_packet}
+    ...     ${\n}${outfile}: Lost ${packet_loss} packets which exceeds max allowed ${max_allowed_lost_packet} packets
+
+
+    Log To Console    \tLost ${packet_loss} packets within max allowed
+
+    # DF save file if want to to double check. Each run setup will clean up files anyway
+    # Remove File    ${outfile}
+

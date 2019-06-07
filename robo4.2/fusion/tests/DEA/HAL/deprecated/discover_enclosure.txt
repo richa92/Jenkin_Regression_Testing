@@ -1,0 +1,146 @@
+*** Settings ***
+Documentation     Discover an enclosure belonging to an EM through the Fusion Webapp.
+...    = USAGE =
+...    | pybot | -v ENCLOSURE:dcs | discover_enclosure.txt |
+...    | pybot | -v FUSION_IP:Stephen-HPOneView.rsn.hp.com | -v DISCOVER_TRUTH_FILE:discover_sov.js | discover_enclosure.txt |
+...    = Variables =
+...    | FUSION_IP | Required only if using DCS. IP address or hostname of the Fusion 2.0 appliance. |
+...    | ENCLOSURE | Optional. Dictionary key from variables.py representing the desired enclosure.  Default value is dcs. |
+...    | DISCOVER_TRUTH_FILE | Required only if using a custom configuration. Path to file containing JSON dictionary to be compared with live results. |
+
+Library           RoboGalaxyLibrary              # DVTs Robot Framework extensions
+Library           FusionLibrary                  # DVTs Robot Framework extensions
+Library           json                           # Easily parse JSON
+Library           OperatingSystem                # Parse files
+Resource          ../resources/defaults.txt      # Comet-DVT default variables
+Resource          ../resources/hal_webapp.txt    # Comet-DVT HAL Webapp extensions
+Resource          ../resources/compare_json.txt  # Compare two large JSON objects
+Resource          ../resources/fusion_api.txt    # Fusion API interaction keywords
+Variables         ../resources/variables.py    ${ENCLOSURE}  # Variables file
+Force Tags        DCS  HW  HAL
+
+Suite Setup       Login to Fusion via REST
+Suite Teardown    Logout of Fusion Via REST
+
+*** Variables ***
+${ENCLOSURE}    dcs
+${Retries}      5
+
+*** Test Cases ***
+Enclosure Is Properly Claimed
+    [Documentation]    Run Fusion API "enclosures" call to get enclosure status
+    # Ask for enclosures in general from Fusion
+    ${Response}    Fusion Api Get Enclosures    /rest/enclosures?filter="serialNumber='${ENC_SERIAL_NUMBER}'"
+    # Make sure there's exactly one enclosure present
+    ${Enclosure List}    Get From Dictionary    ${Response}    members
+    ${Enclosure Count}    Get Length    ${Enclosure List}
+    Should Be Equal    ${Enclosure Count}    ${1}    msg=Failed to find exactly one enclosure in the response from Fusion API "enclosures" filtered by serial number ${ENC_SERIAL_NUMBER}
+    # If we're here, then save the UUID for this enclosure as reported by Fusion API so we can compare it with HAL later
+    ${Enclosure}    Get From List    ${Enclosure List}    0
+    ${Fusion UUID}    Get From Dictionary    ${Enclosure}    uuid
+    Set Suite Variable    ${Fusion UUID}
+
+Discover Tbird EM Using HAPI Webapp
+    [Documentation]    Run HAPI Discover for the Tbird enclosure & make sure all data is displayed as expected
+    # Load the expected enclosure discovery dictionary
+    Set Library Search Order    OperatingSystem
+    ${File}    Get File    ../data/${DISCOVER_TRUTH_FILE}
+    ${ExpectedSchema}    loads    ${File}
+    ${ExpectedSchema}    Get From List    ${ExpectedSchema}    0
+    # Do the discovery
+    ${Retries}    Convert To Integer    ${Retries}
+    ${Response}    HAL API Perform Discover    ${FUSION_IP}    ${Retries}
+    ${EmptyDict}    Create Dictionary
+    ${CallStatus}    Find Errors In HAPI Response    Enclosure (Discover)    ${Response}    discover    ${Empty}    ${EmptyDict}
+    Run Keyword And Continue On Failure    Fail On Any Errors In HAPI Response    ${CallStatus}
+    Log    ${Response}
+    # Remove HTTP headers from the dictionary
+    ${Enclosure HAPI}    Remove REST Headers    ${Response}
+    # Now check that the dictionaries are equal
+    ${IgnoreKeys}    Create List    enclosureUri    uri    uuid
+    ${Enclosure HAPI}    Get From Dictionary    ${Enclosure HAPI}    OperationResult
+    ${Enclosure HAPI}    Get From Dictionary    ${Enclosure HAPI}    Enclosure
+    Set Suite Variable    ${Enclosure HAPI}
+    Check Large JSON Structure    ${ExpectedSchema}    ${Enclosure HAPI}    ${IgnoreKeys}
+
+    # Now load the expected error file and see what's the same; warn on these items
+    # All expected errors are kept in data/errs_discover.js
+    ${Expected Error File}    Get File    ../data/errs_discover.js
+    ${Expected Errors}    loads    ${Expected Error File}
+    ${Expected Errors}    Get From Dictionary    ${Expected Errors}    ${ENCLOSURE}
+    # The Expected Error File for Discover (errs_discover_<enc name>.js) contains two lists:
+    # this first list details expected errors between the current & expected HAPI Discover output.
+    ${First Errors}    Get From List    ${Expected Errors}    0
+    Set Suite Variable    ${Expected Errors}
+    ${Warnings}    ${Errors}    Parse Dictionary Diffs    ${Diff List}    ${First Errors}
+    Log Mismatch Warning    enclosure FRU data    ${Warnings}
+    Log Mismatch Failure    enclosure FRU data    ${Errors}
+
+Match Discover Output With Fusion API Output
+    [Documentation]    Fetch the Fusion API GET /rest/enclosures/{UUID} response and compare it with HAPI Discover output
+    # Make sure the UUID discovered by HAPI matches the one returned by FAPI
+    ${UUID}    Get From Dictionary    ${Enclosure HAPI}    uuid
+    # If ${Fusion UUID} is not defined, then "Enclosure Is Properly Claimed" failed before that suite variable could get written
+    Should Be Equal    ${Fusion UUID}    ${UUID}    msg=The enclosure UUID was reported differently between HAL & Fusion: HAL reported ${UUID} but Fusion reported ${Fusion UUID}.
+    # Get details on the Enclosure we discovered from FAPI
+    ${Enclosure FAPI}    Fusion Api Get Enclosures    /rest/enclosures/${UUID}
+    # status_code is present in FAPI enclosure info, but not in HAPI enclosure info
+    Remove From Dictionary    ${Enclosure FAPI}    status_code
+    Set Suite Variable    ${Enclosure FAPI}
+    Dictionary Should Not Contain Key    ${Enclosure FAPI}    errorCode    msg=Fusion API had a problem getting enclosure details; check the log for more information.
+    # PERM adds some data to the Discover Enclosure data; add these keys to the Ignore List
+    ${IgnoreKeys}    Create List    created    eTag    enclosureTypeUri    modified    coveredByDevice    deviceUri    interconnectUri    licensingIntent
+    ${Diff List}    Create List
+    Check Large JSON Structure    ${Enclosure FAPI}    ${Enclosure HAPI}    ${IgnoreKeys}
+    # The Expected Error File for Discover (errs_discover_<enc name>.js) contains two lists:
+    # this second list details expected differences between HAPI Discover & Fusion API /rest/enclosures output.
+    ${Second Errors}    Get From List    ${Expected Errors}    1
+    ${Warnings}    ${Errors}    Parse Dictionary Diffs    ${Diff List}    ${Second Errors}
+    Log Mismatch Warning    enclosure FRU data    ${Warnings}
+    Log Mismatch Failure    enclosure FRU data    ${Errors}
+
+
+Check For Unexpected XInfo Fields From Discover
+    [Documentation]    Analyze the HAPI Discover response for the xinfo fields
+    Run Keyword And Continue On Failure
+    ...    Dictionary Should Not Contain Key    ${Enclosure HAPI}    activeEmIP    msg=The active EM IP should not be exposed to the customer.
+    Run Keyword And Continue On Failure
+    ...    Dictionary Should Not Contain Key    ${Enclosure HAPI}    standbyEmIP    msg=The standby EM IP should not be exposed to the customer.
+    Run Keyword And Continue On Failure
+    ...    Dictionary Should Not Contain Key    ${Enclosure HAPI}    assetTag    msg=The assetTag should not be exposed until that feature is ready.
+
+Check For XInfo Fields From Fusion API
+    [Documentation]    Analyze the Fusion API GET /rest/enclosures/{UUID} response for the xinfo fields
+    Dictionary Should Not Contain Key    ${Enclosure FAPI}    errorCode    msg=Fusion API had a problem getting enclosure details; check the log for more information.
+    Run Keyword And Continue On Failure
+    ...    Dictionary Should Contain Key    ${Enclosure FAPI}    emBays    msg=The count of EM bays (emBays) should be provided by Fusion API.
+    Run Keyword And Continue On Failure
+    ...    Dictionary Should Contain Key    ${Enclosure FAPI}    ciManagerBayCount    msg=The field ciManagerBayCount should be provided by Fusion API.
+    Run Keyword And Continue On Failure
+    ...    Dictionary Should Contain Key    ${Enclosure FAPI}    ciManagerBays    msg=The list of CIM bays (ciManagerBays) should be provided by Fusion API.
+    Run Keyword And Continue On Failure
+    ...    Dictionary Should Not Contain Key    ${Enclosure FAPI}    activeEmIP    msg=The field activeEmIP should not be exposed to the customer by Fusion API.
+    Run Keyword And Continue On Failure
+    ...    Dictionary Should Not Contain Key    ${Enclosure FAPI}    standbyEmIP    msg=The field standbyEmIP should not be exposed to the customer by Fusion API.
+    Run Keyword And Continue On Failure
+    ...    Dictionary Should Not Contain Key    ${Enclosure FAPI}    assetTag    msg=The field assetTag should not be exposed by Fusion API until that feature is ready.
+
+Check For CI Manager XInfo Fields From Fusion API
+    ${CIM}    Get From Dictionary    ${Enclosure FAPI}    managers
+    # Note: if the CIM has failed over, we might not necessarily want the 1st element...
+    ${CIM}    Get From List    ${CIM}    0
+
+    Run Keyword And Continue On Failure
+    ...    Dictionary Should Contain Key    ${CIM}    mgmtPortMode    msg=The MGMT port mode should be provided by Fusion API.
+    Run Keyword And Continue On Failure
+    ...    Dictionary Should Contain Key    ${CIM}    mgmtPortIsolated    msg=The MGMT port isolation status (mgmtPortIsolated) should be provided by Fusion API.
+    Run Keyword And Continue On Failure
+    ...    Dictionary Should Contain Key    ${CIM}    mgmtPortSpeedGbs    msg=mgmtPortSpeedGbs should be provided by Fusion API.
+    Run Keyword And Continue On Failure
+    ...    Dictionary Should Contain Key    ${CIM}    negotiatedMgmtPortSpeedGbs    msg=negotiatedMgmtPortSpeedGbs should be provided by Fusion API.
+    Run Keyword And Continue On Failure
+    ...    Dictionary Should Contain Key    ${CIM}    linkPortIsolated    msg=The LINK port isolation status (linkPortIsolated) should be provided by Fusion API.
+    Run Keyword And Continue On Failure
+    ...    Dictionary Should Contain Key    ${CIM}    linkPortSpeedGbs    msg=linkPortSpeedGbs should be provided by Fusion API.
+    Run Keyword And Continue On Failure
+    ...    Dictionary Should Contain Key    ${CIM}    negotiatedLinkPortSpeedGbs    msg=negotiatedLinkPortSpeedGbs should be provided by Fusion API.

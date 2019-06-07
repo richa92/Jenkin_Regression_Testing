@@ -1,0 +1,182 @@
+*** Settings ***
+Documentation    fan_alert_event.txt - Validate Fan Alert events on OneView
+...    = GENERIC USAGE =
+...    | pybot | -v GIT_REPO_ROOT:<repo root path> | -v APPLIANCE_IP:<ipv4> | fan_alert_event_2.txt |
+...    = Variables =
+...    | GIT_REPO_ROOT |      Required: Repo root path if NOT defined in environment variable|
+...    | APPLIANCE_IP |       Required: OneView IPv4 address |
+
+Library           MgmtFWLibrary
+Library           json
+Library           robot.api.logger
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Suite Setup       Configure Events Test Environment
+Suite Teardown    Run Keywords    Logout of Fusion Via REST    AND    Logout of EM RIS
+
+
+*** Test Case ***
+TC 01: Fan FanElectronicFuseBlown Events show up in OV UI
+    [Documentation]    This test is to verify events for Fan status change using FanFaultInjection
+    ...                FanElectronicFuseBlown
+    [Tags]    Fan     Automated    FLM2.00
+    ${fan_list}    ${fan_count}=    Get Current Fan List
+    #${AvailableFan}=   Get List of Occupied Fan Bays
+    Should Not Be Empty    ${fan_list}    msg=No Fans present in the enlcosure
+    :FOR    ${bay}   IN   @{fan_list}
+    \    Log    message=Failing the Fan for bay:${bay} and verify failed status/alert event in diags audit log    console=True
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${Fan_Fault_Status}=    Set EM RIS Faults    FanFaultInjection    ${bay}    EFuse
+    \    Should Be Equal As Strings    ${Fan_Fault_Status}    <Response [200]>
+    \    Sleep    8
+    \    Wait for Device Critical    ${Fan_Device}    ${bay}
+    \    #Verifying alert event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_Fan_Electronic_Fuse_Blown}    ${Fan_Device}    ${bay}    650
+    \    Verify Fusion Event Sent By EM    ${EL_Fan_Electronic_Fuse_Blown}    ${last_fusion_event_id}    ${Enclosure_category}
+    \    RIS EM Efuse On Fan    ${bay}
+    \    Sleep    8
+    \    RIS EM Efuse Off Fan    ${bay}
+    \    Sleep    8
+    \    Wait for Device OK    ${Fan_Device}    ${bay}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    RIS EM Efuse On Fan    ${bay}   AND    Sleep    8    AND     RIS EM Efuse Off Fan    ${bay}
+    ...    AND    Wait for Device OK    ${Fan_Device}    ${bay}
+
+TC 02: Fan FanInsertFault and FanInsertFaultCleared Events show up in OV UI
+    [Documentation]    This test is to verify events for Fan Insert fault
+    ...                FanInsertFault
+    ...                FanInsertFaultCleared
+    [Tags]    Fan     Automated    FLM2.00
+    Set Test Variable    ${device}    Fan
+    Set Test Variable    ${device_diag_response}    FAN
+    ${device_list}    ${fan_count}=    Get Current Fan List
+    #${AvailableFan}=   Get List of Occupied Fan Bays
+    Should Not Be Empty    ${device_list}    msg=No Fans present in the enlcosure
+    Log To Console    \rRemoving and Inserting the ${device} in bay: @{device_list}[0]
+    ${result}=    RIS EM Efuse On Fan    @{device_list}[0]
+    Should be True    ${result}
+    ${result}=    RIS EM Efuse Off Fan    @{device_list}[0]
+    Should be True    ${result}
+    Sleep    10
+    ${result}=    EM API Get Diags    ShowState/${device}/@{device_list}[0]
+    Should Contain    ${result}    State: SM_STATE_INTEGRATED
+    ${result}=    EM API Get Diags    deviceStateTransition/${device}/@{device_list}[0]/remove
+    Should Contain    ${result}    Successfully sent diag state transition event remove for ${device_diag_response} @{device_list}[0]
+    ${result}=    EM API Get Diags    ShowState/${device}/@{device_list}[0]
+#    Should Contain    ${result}    State: SM_STATE_ABSENT
+    ${result}=    EM API Get Diags    deviceStateTransition/${device}/@{device_list}[0]/operational
+#    Should Contain    ${result}    Successfully sent diag state transition event operational for ${device_diag_response} @{Device_list}[0]
+    ${result}=    EM API Get Diags    ShowState/${device}/@{device_list}[0]    
+#    Should Contain    ${result}    State: SM_STATE_OPERATIONAL
+    ${last_fusion_event_id}=    get last fusion event ID
+    ${status}    ${result}=    Wait timeout for Device State    ${device}    @{device_list}[0]    SM_STATE_INSERTED_ERR    600
+#    Should Be True    ${status}    msg=expectedSM_STATE_INSERTED_ERR but got ${result}
+    ${result}=    EM API Get Diags    deviceStateTransition/${device}/@{device_list}[0]/operational
+    Should Contain    ${result}    Successfully sent diag state transition event operational for ${device_diag_response} @{Device_list}[0]
+    ${result}=    EM API Get Diags    ShowState/${device}/@{device_list}[0]
+#    Should Contain    ${result}    State: SM_STATE_INSERTED_ERR
+    Sleep    20
+    #Verifying alert event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_FanInsertFault}    ${Fan_Device}    @{device_list}[0]    750
+    Verify Fusion Event Sent By EM    ${EL_FanInsertFault}    ${last_fusion_event_id}    ${Enclosure_category}
+    ${result}=    EM API Get Diags    deviceStateTransition/${device}/@{device_list}[0]/insert
+    Should Contain    ${result}    Successfully sent diag state transition event insert for ${device_diag_response} @{device_list}[0]
+    Wait for Device OK    ${Fan_Device}    @{device_list}[0]
+    Sleep    8
+    #Verifying alert event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_FanInsertFault_Cleared}    ${Fan_Device}    @{device_list}[0]    750
+    Verify Fusion Event Sent By EM    ${EL_FanInsertFault_Cleared}    ${last_fusion_event_id}    ${Enclosure_category}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    EM API Get Diags    deviceStateTransition/${device}/@{device_list}[0]/insert
+    ...    AND    EM API Get Diags    deviceStateTransition/${device}/@{device_list}[0]/operational
+
+TC 03: Fan Events - Validate Fan Fault Failures and Cleared Alerts
+    [Documentation]    Validate OneView Fan Event EXIST AFTER FanFaultInjection occurred
+    ...   For EM firmware version v1.01, the test will inject the following fan failures:
+    ...      1. Fan1 -- simulate fan #1 motor died
+    ...      2. Fan2 -- simulate fan #2 motor died
+    ...   OneView Events covered:
+    ...      - FanFault
+    ...      - FanFaultCleared
+    [Tags]    Fan    FLM1.01ONLY    Automated    Disabled 
+    ${fan_list}    ${fan_count}=    Get Current Fan List
+    #${AvailableFan}=   Get List of Occupied Fan Bays
+    Should Not Be Empty    ${fan_list}    msg=No Fans present in the enlcosure
+    :FOR    ${bay}   IN   @{fan_list}
+    \    Log    message=Failing the Fan for bay:${bay} and verify FanFault & FanFaultCleared alert events    console=True
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${Fan_Fault_Status}=    Set EM RIS Faults    FanFaultInjection    ${bay}    Fan1    true
+    \    Should Be Equal As Strings    ${Fan_Fault_Status}    <Response [200]>
+    \    Sleep    8
+    \    Wait for Device Critical    ${Fan_Device}    ${bay}
+    \    #Verifying alert event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_FAN_CRITICAL}    ${Fan_Device}    ${bay}    250
+    \    Verify Audit Log Alert Event    ${EL_Fan_Fault}    ${Fan_Device}    ${bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Fan_Fault}    ${last_fusion_event_id}
+    \    Log    message=Clearing Fan1 fault for bay:${bay} and verify ok status/alert event in diags audit log    console=True
+    \    ${Fan_Fault_Status}=    Set EM RIS Faults    FanFaultInjection    ${bay}    Fan1    false
+    \    Should Be Equal As Strings    ${Fan_Fault_Status}    <Response [200]>
+    \    Sleep    5
+    \    Wait for Device OK    ${Fan_Device}    ${bay}
+    \    #Verifying alert event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_Fan_OK}    ${Fan_Device}    ${bay}    250
+    \    Verify Audit Log Alert Event    ${EL_Fan_Fault_cleared}    ${Fan_Device}    ${bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Fan_Fault_cleared}    ${last_fusion_event_id}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Set EM RIS Faults    FanFaultInjection    ${bay}    Fan1    false    AND
+    ...    Wait for Device OK    ${Fan_Device}    ${bay}
+
+TC 04: Fan Events - Validate FanEfusePGoodFault
+    [Documentation]    This test is to verify event for
+    ...                FanEfusePGoodFault
+    [Tags]    Fan    Automated    FLM1.01
+    ${present_fan_list}=    Get List of Occupied Fan Bays
+    Should Not Be Empty    ${present_fan_list}    msg=No fans present in the enlcosure
+    : FOR    ${fan_bay}    IN    @{present_fan_list}
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    #Injecting the FanEfusePGoodFault into fan
+    \    ${fan_fault_status}=    Set EM RIS Faults    FanFaultInjection    ${fan_bay}    EFuse
+    \    Wait for Device Critical    ${Fan_Device}    ${fan_bay}
+    \    Sleep    10
+    \    ${Fan_Fault_Status}=    Get Fan Fault Status    ${fan_bay}    EFuse
+    \    Should Be Equal As Strings    ${Fan_Fault_Status}    ${STATUS_CRITICAL}
+    \    #Verifying the event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_Fan_Electronic_Fuse_Blown}    ${Fan_Device}    ${fan_bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Fan_Electronic_Fuse_Blown}    ${last_fusion_event_id}    ${Enclosure_category}
+    \    #Clearing the critical state using Efuse Fan
+    \    RIS EM Efuse Fan    ${fan_bay}    ${EM_EFUSE_Duration}
+    \    Sleep    ${EM_EFUSE_Duration}
+    \    ${ok_status}=    Wait for Device OK    ${Fan_Device}    ${fan_bay}
+    \    Should Be True      ${ok_status}   Fan Ok Status not detected
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    RIS EM Efuse Fan    ${fan_bay}    ${EM_EFUSE_Duration}    AND
+    ...    Wait for Device OK    ${Fan_Device}    ${fan_bay}
+    
+TC 05: Validate FanRedundantCommFault And FanRedundantCommFaultCleared
+    [Documentation]    Verify FanRedundantCommFault And FanRedundantCommFaultCleared  with Dual EM
+    [Tags]    Fan    FLM2.02    Automated    QXCR1001609113
+    ${last_fusion_event_id}=    Get Last Fusion Event Id
+    ${present_list}    ${absent_list}=    Get Device Bay Present And Absent List    ${FanDevice_EM}
+    Should Not Be Empty    ${present_list}     msg=No fan's present in the enclosure
+    Injecting Un-terminated Fault To FLM For Specific Device    Fan    @{present_list}[0]    B    B    FanRedundantCommFault
+    Injecting Un-terminated Fault To FLM For Specific Device    Fan    @{present_list}[0]    A    A    FanRedundantCommFault
+    Run Keywords    Login to Fusion via SSH    AND    Login to EM And Create Session
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${Fan_Redundant_CommFault}    Fan    @{present_list}[0]    480 
+    Verify Fusion Event Sent By EM    ${Fan_Redundant_CommFault}    ${last_fusion_event_id}
+    Verify Audit Log Alert Event    ${Fan_Redundant_CommFault_Cleared}    Fan    @{present_list}[0]    480 
+    Verify Fusion Event Sent By EM    ${Fan_Redundant_CommFault_Cleared}    ${last_fusion_event_id}
+    [Teardown]    Run Keyword if Test Failed    Run Keywords
+    ...   Set Diags CanRedFake Value    ALL    NORMAL    NORMAL
+    ...   AND   Get Diags CanRedMon

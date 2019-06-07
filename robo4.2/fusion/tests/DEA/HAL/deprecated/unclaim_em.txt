@@ -1,0 +1,165 @@
+*** Settings ***
+Documentation    Test HAL unclaim EM - US35712 / US25533
+...    = Usage =
+...    | pybot | -v FUSION_IP:<FUSION_IP> | -V ..\resources\variables.py:<ENCLOSURE=tesla or dcs> | -L DEBUG | unclaim_em.txt |
+
+
+Library           RoboGalaxyLibrary
+Library           FusionLibrary
+Library           SSHLibrary    # SSH Library
+Library           OperatingSystem
+Library           Collections
+Variables         ../resources/variables.py	    ${ENCLOSURE}
+Resource          ../resources/defaults.txt    # DVT default variables
+Resource          ../resources/perm_api.txt    # DVT fusion API extensions
+Resource          ../resources/fusion_api.txt  # DVT fusion API extensions
+Resource          ../resources/em_api.txt
+Suite Setup       Login to Fusion Via SSH
+#Suite Teardown    Logout of Fusion Via SSH
+Force Tags        DCS  HW 
+
+*** Variables ***
+${Fusion_Url}	https://${FUSION_IP}
+${noAlert}	True
+${CLAIM}	False
+
+*** Test Cases ***
+
+Claim Enclosure If CLAIM:True
+    Run Keyword If	${CLAIM}
+    ...		PERM Api Claim EM
+    Run Keyword Unless	${CLAIM}
+    ...		Log	Not running claim... 	console=yes
+	
+Add TBird Enclosure
+    Login to Fusion Via REST
+    ${Response}=    Fusion Api TBird Add Enclosure    ""
+    # Wait for Fusion to Add Enclosure
+    Sleep      	    60
+    
+Get a Trusted Token
+    Login to Fusion Via SSH
+    ${response}    Execute Command    curl -ik '${Fusion_Url}/test-helper/rest/resources/sessionID?appString=alerts&authString=alerts-auth'
+    Log    ${response}
+    ${alertAUTH}    Fetch From Right    ${response}    alerts-auth:
+    ${alertAUTH}    Fetch From Left    ${alertAUTH}    "
+    Set Suite Variable    ${alertAUTH}    ${alertAUTH}  
+    Log    ${alertAUTH}
+    
+Verify EM are monitored
+    [Documentation]    Verify that enclosure and its rack are monitored
+    ${response}    Fusion API Get TBird Enclosures
+    ${enclosures}= 	  Get From Dictionary	${response}	_content
+    Should Not Be Empty	      ${enclosures}		     msg=No enclosures are monitored
+    ${uri}=   	  Get From Dictionary   @{enclosures}[0]   uri
+    Set Suite Variable 	   ${uri}
+    
+List alerts
+    ${response}         Execute Command      curl -ks -H 'auth:${alertAUTH}' '${Fusion_Url}/rest/index/resources?category=alerts&query=NOT%20(state:"cleared")%20AND%20associatedResourceUri:"${uri}"' | python -m json.tool
+    Log                 ${response}
+    ${alertDATA}        Evaluate             json.loads('''${response}''')    json
+    ${count}            Get From Dictionary  ${alertDATA}     count
+    Pass Execution If   "${count}"=="0"      There are no alerts
+    Set Suite Variable  ${noAlert}           False
+    @{members}          Get From Dictionary  ${alertDATA}     members
+    :For   ${member}   In    @{members}
+    \    ${attributes}     Get From Dictionary  ${member}       attributes
+    \    ${type}           Get From Dictionary  ${attributes}   physicalResourceType
+    \    Continue For Loop If                   "${type}"!="enclosures"
+    \    ${uri}            Get From Dictionary  ${member}    uri
+    \    Log		   ${uri}
+    
+UNHAPPY: Unclaim with wrong enclosure ID
+    Login to Fusion Via REST
+    ${response}=	Fusion Api TBird Remove Enclosure	uri=/rest/enclosures/abcdefghijklmnopqrstuvwxyz
+    ${status}=		Get From Dictionary	${response}	status_code
+    ${status}=		Convert to String	${status}
+    Should Be Equal	${status}		400
+
+UNHAPPY: Unclaim with no Authorization
+    ${headers}=	        Create Dictionary	Auth	XYZ
+    ${response}=	Fusion Api TBird Remove Enclosure	headers=${headers}
+    ${status}=		Get From Dictionary	${response}	status_code
+    ${status}=		Convert to String	${status}
+    Should Be Equal	${status}		401
+	
+Unclaim Enclosure
+    Login to Fusion Via REST
+    ${Response}=	Fusion Api TBird Remove Enclosure
+    ${status}=		Get From Dictionary	${response}	status_code
+    ${status}=		Convert to String	${status}
+    Should Be Equal	${status}		202
+    Logout of Fusion Via REST
+    # Wait for Fusion to Unclaim Enclosure
+    Sleep	   120
+    
+Verify EM is Reset If >1 EMs
+    Run Keyword If  ${DCS}==False and ${EM2_IP} != 0
+    ...		Verify EM Not Reachable
+
+Verify from EM Account Service
+    ${response}=        HAL API Get Resource   ${FUSION_IP}     ${EM_IP}    /rest/v1/AccountService
+    ${content}=		Get From Dictionary    ${response}	_content
+    @{content}=		Evaluate               json.loads('''${content}''')    json
+    ${resources}=	Get From Dictionary    @{content}[0]	risResources
+    ${account}=		Get From Dictionary    ${resources}	/rest/v1/AccountService
+    ${Oem}=		Get From Dictionary    ${account}	Oem
+    ${HP}=		Get From Dictionary    ${oem}		Hp
+    ${values}=		Get Dictionary Values  ${HP}
+    Should Not Contain  ${values}              ${EM_IP}
+
+Verify EM is not monitored
+    # After deleting the Em, verify that enclosure is not monitored
+    ${response}    Fusion API Get TBird Enclosures
+    ${enclosures}= 	  Get From Dictionary	${response}	_content
+    Should Be Empty	      ${enclosures}		     msg=An enclosure was found monitored
+
+Verify that there are 0 alerts for the enclosure
+    [Documentation]    Observe that there are 0 alerts for this enclosure that are not cleared
+    Login to Fusion Via SSH
+    ${response}    Execute Command    curl -ks -H 'auth:${alertAUTH}' '${Fusion_Url}/rest/index/resources?category=alerts&query=NOT%20(state:"cleared")%20AND%20associatedResourceUri:"${uri}"' | python -m json.tool
+    Log    ${response}
+    ${alertDATA}    Evaluate    json.loads('''${response}''')    json
+    ${count}    Get From Dictionary    ${alertDATA}    count
+    Should Be Equal As Integers    ${count}    0
+
+Confirm the state of the alert is now cleared
+    [Documentation]    Verify alert, if any, are cleared after EM is unclaimed
+    Pass Execution If    ${noAlert}==True    msg=There is no alert to be verified
+    :For    ${alertID}   In    @{alertIDs}
+    \    ${response}    Execute Command    curl -ks -H 'auth:${alertAUTH}' '${Fusion_Url}/rest/alerts/${alertID}' | python -m json.tool
+    \    Log    ${response}
+    \    ${alertDATA}    Evaluate    json.loads('''${response}''')    json
+    \    ${alertstate}    Get From Dictionary    ${alertDATA}    alertState
+    \    Should Be Equal As Strings    ${alertstate}    Cleared
+
+Unclaim EM Again
+    Login to Fusion Via REST
+    ${response}=   Fusion Api TBird Remove Enclosure
+    ${response}=   Convert to String  	   ${response}
+    Should Be Equal	  ${response}	   None
+    Logout of Fusion Via REST
+    Logout of Fusion Via SSH
+
+Reset EM If Only 1 EM
+    Run Keyword If  ${EM2_IP} == 0
+    ...	    Unclaim EM
+
+*** Keywords ***
+Verify EM Not Reachable
+    Login to Fusion Via SSH
+    Write     ping6 -c 1000 ${EM_IP}%{$FUSION_NIC}
+    ${response}     Read Until        Unreachable
+    Should Contain    ${response}     Unreachable        msg=EM failed to reset
+
+    # Wait until EM completes reset
+    Log        Sometimes unclaiming EM will lost SSH connection with - error: [Errno 10053] An established connection was 
+    Log        aborted by the software in your host machine. Also,
+    Log        sometimes, Fusion IP will be lost too - issue AM36    level=WARN
+    :For    ${i}   In Range    0    120
+    \    ${response}    Execute command    ${PING} -c 3
+    \    ${lines}       Get Lines Containing String    ${response}    64 bytes from
+    \    ${number}      Get Line Count    ${lines}
+    \    Exit For Loop If    ${number}>0    
+    \    Sleep    5
+    Should Not Be Equal As Integers    ${number}    0    msg=Em failed to reboot in 10 minutes

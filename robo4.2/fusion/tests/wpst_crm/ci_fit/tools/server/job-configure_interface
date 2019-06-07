@@ -1,0 +1,113 @@
+#!/bin/bash
+LOG=./$0.log
+SERVER_CONF="../conf/server.conf"
+INTERFACE_SCRIPT="configure_interface"
+CLEAN_SCRIPT="clean_interface"
+IPADDR="../conf/ipaddr.conf"
+
+#==================================================================================
+# get_server_ipaddrs
+#==================================================================================
+get_server_ipaddrs()
+{
+	if [ -f $SERVER_CONF ]; then
+		IPADDRS=(`cat $SERVER_CONF | awk 'BEGIN{FS="="} {print $NF}'`)
+	else
+        	echo "`date`: Warning - Missing server.conf file so exiting..."  
+		exit
+	fi
+}
+
+#==================================================================================
+# check_log 
+#==================================================================================
+check_log()
+{
+	if [ -f $LOG ]; then
+		TMP_FILE=$(mktemp $LOG.XXXXXXXXXX)
+		mv $LOG $TMP_FILE
+	fi
+}
+
+#==================================================================================
+# verify_files 
+#==================================================================================
+verify_files()
+{
+	if [ ! -f $CLEAN_SCRIPT ]; then
+        	echo "`date`: Warning - Missing $CLEAN_SCRIPT so exiting..."  
+		exit
+	fi
+
+	if [ ! -f $INTERFACE_SCRIPT ]; then
+        	echo "`date`: Warning - Missing $INTERFACE_SCRIPT so exiting..."  
+		exit
+	fi
+
+	if [ ! -f $IPADDR ]; then
+        	echo "`date`: Warning - Missing $IPADDR so exiting..."  
+		exit
+	fi
+}
+
+#==================================================================================
+# get_server_sn 
+#==================================================================================
+get_server_sn()
+{
+	local ip=$1
+	local profile
+	local sn
+	
+	profile=`cat $SERVER_CONF | grep "$ip" | awk 'BEGIN{FS="="} {print $NR}'`
+	sn=`cat $IPADDR | grep -m 1 $profile | awk 'END{FS=" "} {print $NF}'`
+	echo "$sn"
+
+}
+
+#==================================================================================
+# run_job 
+#==================================================================================
+run_job()
+{
+	local ipaddr
+	local sn
+
+	for ipaddr in ${IPADDRS[@]}
+	do 
+		ping $ipaddr -c 1 >/dev/null 2>&1 
+		if [ $? -eq 0 ] ; then
+       			echo "`date`: IP address $ipaddr is reachable" 2>&1 | tee -a $LOG 
+       			echo "`date`: Copying $CLEAN_SCRIPT to $ipaddr" 2>&1 | tee -a $LOG 
+			scp $CLEAN_SCRIPT root@$ipaddr:/root
+       			echo "`date`: Executing $CLEAN_SCRIPT on $ipaddr" 2>&1 | tee -a $LOG 
+			ssh root@$ipaddr /root/$CLEAN_SCRIPT -ip $ipaddr 
+			if [ $? -ne 0 ]; then
+        			echo "`date`: WARNING $CLEAN_SCRIPT failed.  Check log on server at $ipaddr for more details." 2>&1 | tee -a $LOG 
+				continue
+			fi
+			sn=$(get_server_sn $ipaddr)
+       			echo "`date`: Copying $IPADDR to $ipaddr" 2>&1 | tee -a $LOG 
+			scp $IPADDR root@$ipaddr:/root
+       			echo "`date`: Copying $INTERFACE_SCRIPT to $ipaddr" 2>&1 | tee -a $LOG 
+			scp $INTERFACE_SCRIPT root@$ipaddr:/root
+       			echo "`date`: Executing $INTERFACE_SCRIPT on $ipaddr" 2>&1 | tee -a $LOG 
+			ssh root@$ipaddr /root/$INTERFACE_SCRIPT -ip $ipaddr -sn $sn
+			if [ $? -ne 0 ]; then
+        			echo "`date`: WARNING $INTERFACE_SCRIPT failed.  Check log on server at $ipaddr for more details." 2>&1 | tee -a $LOG 
+				continue
+			fi
+
+		else
+			SERVER=(`cat server.conf | grep $ipaddr | awk 'BEGIN{FS="="} {print $NR}'`)
+        		echo "`date`: IP address $ipaddr is NOT reachable for $SERVER" 2>&1 | tee -a $LOG 
+		fi
+	done
+
+}
+
+
+  check_log
+  get_server_ipaddrs
+  verify_files
+  run_job

@@ -1,0 +1,152 @@
+*** Settings ***
+Documentation    Deploy Fusion ISO onto CIM using Atlas USB Key
+...    = Usage =
+...    pybot |-v ENCLOSURE:tesla |-v ISO_URL:<Fusion ISO Image> Deploy_CIM_Fusion.txt
+...    = Variables =
+...    | ENCLOSURE | (required) Name of the enclosure to Deploy upon. (values from variables.py) | 
+...    | ISO_URL | (optional) URL of Fusion ISO Image To Install (defaulted) |
+
+Library           String
+Library           Collections
+Library           SSHLibrary
+Library           robot.api.logger
+Library           RoboGalaxyLibrary
+Library           FusionLibrary
+Variables         ../resources/variables.py    ${ENCLOSURE} 
+Resource          ../resources/em_api.txt
+Resource          ../resources/fusion_api.txt
+Resource          ../resources/fusion_cli.txt
+Resource          ../resources/defaults.txt
+
+*** Variables ***
+${ISO_URL}=                    http://jenkins.rsn.hp.com:8080/userContent/fusion-install.iso
+${Installation_Time}           20 minutes
+${STARTUP_PROGRESS_POLL}       60 seconds
+${STARTUP_PROGRESS_RETRIES}    70
+${STARTUP_SSH_RETRIES}         60
+${DUMP_FILE}                   fusion_dump.sdmp
+
+
+*** Test Cases ***
+Collect Data
+    Log Variables
+    Console    \nDeploying from: ${ISO_URL} onto: ${ENCLOSURE}
+
+EM Factory Reset
+   # Fail if no EM Reset
+   EM Factory Reset
+
+Insert Virtual Media image
+    ILO CONNECT     ${ILO_IP}    ${ILO_USERNAME}    ${ILO_PASSWORD}
+    ILO INSERT VIRTUAL MEDIA    cdrom    ${ISO_URL}
+    ILO SET VIRTUAL MEDIA STATUS
+    ${Response}=    ILO GET VIRTUAL MEDIA STATUS
+    ${Inserted}    Get From Dictionary    ${Response}    image_inserted
+    Run Keyword If    "${Inserted}" != "YES"    
+    ...    Fatal Error    msg=Virtual image not inserted properly ${Response}
+
+Boot from Virtual Media
+    ILO SET ONE TIME BOOT    CDROM
+    ${Status}=    ILO GET ONE TIME BOOT    
+    Run Keyword If    "${Status}" != "cdrom"   
+    ...    Fatal Error    msg=One-time boot not set properly ${Status}
+
+Reset Server
+    ILO RESET SERVER
+    Sleep    20
+    ${Status}=    ILO GET HOST POWER STATUS
+    Run Keyword If    "${Status}" != "ON"    
+    ...    Fatal Error    msg=Server not restarted ${Status}
+
+Wait For Fusion Install and Startup
+    [Documentation]    Sleep for ${Installation_Time}.
+    Console    \nSleep for ${Installation_Time}.
+    Sleep    ${Installation_Time}    reason=Waiting for installation, reboot and startup
+
+Wait Until Fusion Responds
+    [Documentation]    Loop here until Fusion API begins to respond to requests.
+    ...    Ignore WARN messages while waiting for Fusion to respond.
+    : FOR    ${INDEX}    IN RANGE    1    ${STARTUP_PROGRESS_RETRIES}
+    \    ${Status}    Run Keyword and Return Status    Fusion Api Get Startup Progress   [${FUSION_IPV6}]    api=200
+    \    Pass Execution If    '${Status}'=='True'    Fusion Api has responded
+    \    Console    \nIndex: ${INDEX}
+    \    Sleep    ${STARTUP_PROGRESS_POLL}
+    Fatal Error    msg=Could not Get Fusion REST API to respond
+
+Wait Until Fusion Responds Successful
+    [Documentation]    With Fusion responding to REST API requests, it'll likely 
+    ...    start by responding with 404 or 503 Service Unavailable. Loop here until we start
+    ...    getting 'success' responses. 
+    : FOR    ${INDEX}    IN RANGE    1    ${STARTUP_PROGRESS_RETRIES}
+    \    ${Response}   Fusion Api Get Startup Progress   [${FUSION_IPV6}]    api=200
+    \    ${Status}=       Get From Dictionary    ${Response}      status_code
+    \    Pass Execution If    '${Status}'=='200'    Fusion API responded available
+    \    Console    \nIndex: ${INDEX}
+    \    Sleep    ${STARTUP_PROGRESS_POLL}
+    Fatal Error    msg=Failed to get successful Fusion Api response
+
+Wait Until Fusion Startup Completes
+    [Documentation]    With successful responses, start polling for startup
+    ...    completion. 
+    : FOR    ${INDEX}    IN RANGE    1    ${STARTUP_PROGRESS_RETRIES}
+    \    Sleep    ${STARTUP_PROGRESS_POLL}
+    \    ${Response}   Fusion Api Get Startup Progress   [${FUSION_IPV6}]    api=200
+    \    ${Status}=       Get From Dictionary    ${Response}      status_code
+    \    Continue For Loop If 	   "${Status}"=="404"
+    \    ${total}=       Get From Dictionary    ${Response}      total
+    \    ${complete}=       Get From Dictionary    ${Response}      complete
+    \    Console    \nIndex: ${INDEX} \tCompleted ${complete} of ${total}
+    \    Pass Execution If    "${total}"=="${complete}"    Fusion Login Ready For First Time Setup
+    Fail    msg=Could not verify Fusion web services completed startup
+
+Assign Administrator Password
+    ${Creds}    Create Dictionary    newPassword    ${Fusion_Password}
+    ...                              oldPassword    ${Fusion_Factory_Password}
+    ...                              userName       ${Fusion_Username}
+    :FOR    ${INDEX}    IN RANGE    1    20
+    \    ${Status}    ${Response}    Run Keyword and Ignore Error    Fusion Api Change Administrator Password    ${FUSION_IP}    ${Creds}
+    \    Pass Execution if    '${Status}'=='PASS'
+    ...       Assigned Administrator password ${FUSION_PASSWORD}
+#    should be able to use status code, but that does not work, getting 500
+#    ...    Pass Execution If    ${Response['status_code']}==200
+    \    Console    \nIndex: ${INDEX}
+    \    Sleep    ${STARTUP_PROGRESS_POLL}
+    Fail    msg=Error Assigning Administrator Password
+
+Appliance Login
+    ${Creds}    Create Dictionary    userName    ${Fusion_Username}    password    ${Fusion_Password}
+    ${Response}    ${SessionID}    Fusion Api Login Appliance    ${Fusion_IP}    ${Creds}
+    Pass Execution If    ${Response['status_code']}==200    Successful first-time login
+    Fail         msg=Error Login Administrator first-time ${Response['message']}
+
+Set Fusion Version Metadata
+    Set Suite Metadata     Deployed URL    ${ISO_URL}    top=True
+    Set Suite Metadata     Fusion URL:       https://${Fusion_IP}    top=True
+    Login to Fusion via REST    ${FUSION_IP}    ${FUSION_USERNAME}    ${FUSION_PASSWORD}
+    ${Response}=    Fusion Api Get Appliance Version
+    Logout of Fusion Via REST
+    Log    ${Response}
+    ${softwareVersion}    Get from Dictionary    ${Response}    softwareVersion
+    Set Suite Variable    ${Fusion_Version}    ${softwareVersion}
+    Set Suite Metadata    Fusion Version    ${Fusion_Version}       top=True
+
+Write Fusion Properties
+    Run    echo \# %JOB_NAME% %DATE% %TIME% > C:\\Jenkins\\Fusion-CIM.properties
+    Run    echo FUSION_IP=${Fusion_IP} >> C:\\Jenkins\\Fusion-CIM.properties
+    Run    echo FUSION_URL=https://${Fusion_IP} >> C:\\Jenkins\\Fusion-CIM.properties
+    Run    echo FUSION_VERSION=${Fusion_Version} >> C:\\Jenkins\\Fusion-CIM.properties
+    Log to Console    \nOneView version: ${Fusion_Version}
+
+PostInstall Steps
+    Prevent CIM iLo Reset From Fusion Factory Reset
+
+Generate Fusion Dump and Log After Network Initialization
+    Login to Fusion Via SSH
+    Run Keyword And Ignore Error
+    ...  SSHLibrary.Get File    /ci/logs/ciDebug.*
+    Logout of Fusion Via SSH
+    Login to Fusion Via REST
+    ${Status}  ${R}=   Run Keyword And Ignore Error
+    ...  Create And Download Support Dump    ${DUMP_FILE}
+    Run Keyword If   "${Status}" == "FAIL"
+    ...  Log    AM92: Fusion Dump Failed	    level=Warn

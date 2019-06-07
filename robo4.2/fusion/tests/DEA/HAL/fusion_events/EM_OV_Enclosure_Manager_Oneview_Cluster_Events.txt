@@ -1,0 +1,327 @@
+*** Settings ***
+Documentation     Validate EM Enclosure Manager events on OneView
+...               = GENERIC USAGE =
+...               | pybot | -v GIT_REPO_ROOT:<repo root path> | -v APPLIANCE_IP:<ipv4> |EM_OV_Enclosure_Manager_Events.txt |
+...               = Variables =
+...               | GIT_REPO_ROOT | Required: Repo root path if NOT defined in environment variable|
+...               | APPLIANCE_IP | Required: OneView IPv4 address |
+Suite Setup       Configure Events Test Environment
+Suite Teardown    Run Keywords    Run Keywords    Reboot FLM after the suite    AND    Logout of EM RIS    AND    Logout of Fusion Via REST
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Library           RoboGalaxyLibrary
+Library           MgmtFWLibrary
+Library           json
+
+*** Test Cases ***
+
+TC 01: Verify the events EmOneViewLinkValidationPingFailed and EmOneViewLinkValidationPingFailedCleared_PingDisabled
+    [Documentation]    Verify EmOneViewLinkValidationPingFailed and EmOneViewLinkValidationPingFailedCleared_PingDisabled in OV and EM  #require dual FLM, both mgmt uplinks connected
+    [Tags]    EM    Alert    Events    FLM2.00    OV3.10    Automated
+    #make sure active em and active mgmt port is same
+    ${active_em_bay} =   Get Active EM Bay Number
+    ${first_floating_ip}=    Get Diags Floating IP Address
+    ${floating_ip_dict}=    Get All The Floating IPs In The Network Loop via RIS    ${first_floating_ip}
+    ${active_mgmt_port_ip}    ${active_mgmt_bay_num}=    Get The Mgmt Port In The Network Via RIS   ${floating_ip_dict}
+    Run Keyword If   ${active_mgmt_bay_num} != ${active_em_bay}   Run Keywords   RIS EM Force Failover   ${active_em_bay}
+    ...   AND   Sleep   ${EM_REBOOT_TIME}   AND   Login To EM via RIS
+    ${active_em_bay} =   Get Active EM Bay Number
+    ${standby_em_bay} =   Run Keyword If     ${active_em_bay} == 1    Set Variable    2
+    ...   ELSE    Set Variable    1
+    ${active_mgmt_bay_num}=    Evaluate    ${active_mgmt_bay_num}*100 + 22
+    ${last_fusion_event_id}=    get last fusion event ID
+    #Disable one mgmt port
+    Set EM RIS Faults    EmSwitchPortFaultInjection    Management    DOWN    ${standby_em_bay}
+    sleep    60    # timeout of 100 sec
+    #set to invalid ping address to cause fault
+    Set Management Port Validation Infomation   ${active_mgmt_bay_num}   ${Invalid_IPV6_Address}   ${Ipv6LinkLocal_Address_Type}   true   ${RetryCount}   ${RetryIntervalInSec}
+    ${status} =   Get MgmtPortPingValidation Enabled Status   ${active_mgmt_bay_num}
+    Should be True   ${status}   True
+    Sleep    180
+    #receive event
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event        ${EM_EmOneViewLinkValidationPingFailed}    ${EMSwitchPorts}    ${active_mgmt_bay_num}    250
+    Verify Fusion Event Sent By EM    ${EM_EmOneViewLinkValidationPingFailed}    ${last_fusion_event_id}
+    #clean fault
+    Set Management Port Validation Infomation   ${active_mgmt_bay_num}   ${Invalid_IPV6_Address}   ${Ipv6LinkLocal_Address_Type}   false   ${RetryCount}   ${RetryIntervalInSec}
+    ${status} =   Get MgmtPortPingValidation Enabled Status   ${active_mgmt_bay_num}
+    Should be Equal   ${status}   False
+    Sleep    180
+    #receive clear fault
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event        ${EM_EmOneViewLinkValidationPingFailedCleared_PingDisabled}    ${EMSwitchPorts}    ${active_mgmt_bay_num}    250
+    Verify Fusion Event Sent By EM    ${EM_EmOneViewLinkValidationPingFailedCleared_PingDisabled}    ${last_fusion_event_id}
+    #Clean up
+    Set Management Port Validation Infomation   ${active_mgmt_bay_num}   ${CIM_Linux_IPv6}   ${Ipv6LinkLocal_Address_Type}   true   ${RetryCount}   ${RetryIntervalInSec}
+    ${status} =   Get MgmtPortPingValidation Enabled Status   ${active_mgmt_bay_num}
+    Should be True   ${status}   True
+    Set EM RIS Faults    EmSwitchPortFaultInjection    Management    UP    ${standby_em_bay}
+    sleep    20
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Set EM RIS Faults    EmSwitchPortFaultInjection    Management    UP    ${standby_em_bay}
+    ...    AND    Set Management Port Validation Infomation   ${active_mgmt_bay_num}   ${CIM_Linux_IPv6}   ${Ipv6LinkLocal_Address_Type}   true   ${RetryCount}   ${RetryIntervalInSec}
+
+TC 02: Verify EM OneViewLinkValidationPingAddressMismatch and EM OneViewLinkValidationPingAddressMismatch_Cleared Events
+    [Documentation]    Verify EmOneViewLinkValidationPingAddressMismatch and EmOneViewLinkValidationPingAddressMismatch_Cleared  #require dual EM, both mgmt uplinks connected
+    [Tags]    EM    Alert    Events    FLM2.00    OV3.10    Automated
+    ${last_fusion_event_id}=    get last fusion event ID
+    #make sure active em and active mgmt port is same
+    ${active_em_bay} =   Get Active EM Bay Number
+    
+    ${first_floating_ip}=    Get Diags Floating IP Address
+    ${floating_ip_dict}=    Get All The Floating IPs In The Network Loop via RIS    ${first_floating_ip}
+    ${active_mgmt_port_ip}    ${active_mgmt_bay_num}=    Get The Mgmt Port In The Network Via RIS   ${floating_ip_dict}
+    
+    Run Keyword If   ${active_mgmt_bay_num} != ${active_em_bay}   Run Keywords   RIS EM Force Failover   ${active_em_bay}
+    ...   AND   Sleep   ${EM_REBOOT_TIME}   AND   Login To EM via RIS
+    ${active_em_bay} =   Get Active EM Bay Number
+    ${standby_em_bay} =   Run Keyword If     ${active_em_bay} == 1    Set Variable    2
+    ...   ELSE    Set Variable    1
+    ${active_mgmt_bay_num}=    Evaluate    ${active_mgmt_bay_num}*100 + 22
+    
+    #Disable one mgmt port
+    ${occupied cim_list}=    Get List of Occupied CIManager Bays
+    Should Not Be Empty    ${occupied cim_list}
+    ${bay_id}=    Get From List    ${occupied cim_list}    0
+    ${bay_id}=    Convert To String    ${bay_id}
+    Set EM RIS Faults    EmSwitchPortFaultInjection    Management    DOWN    ${standby_em_bay}
+    sleep    100    # timeout of 100 sec
+    
+    #set to ipv4 without configuring eth0 interface will cause mismatch fault
+    Set Management Port Validation Infomation   ${active_mgmt_bay_num}   ${NTP_IPV4}   ${Ipv4_Address_Type}   true   ${RetryCount}   ${RetryIntervalInSec}
+    
+    ${status} =   Get MgmtPortPingValidation Enabled Status   ${active_mgmt_bay_num}
+    Should be True   ${status}   True
+    
+    Sleep    60    #ping timeout of 32 seconds, hence waiting
+    
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log All Alerts
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EM_OneViewLinkValidationPingAddressMismatch}    ${EMSwitchPorts}    ${active_mgmt_bay_num}    120
+    Verify Fusion Event Sent By EM    ${EM_OneViewLinkValidationPingAddressMismatch}    ${last_fusion_event_id}
+    
+    #clean fault
+    Set Management Port Validation Infomation   ${active_mgmt_bay_num}   ${CIM_Linux_IPv6}   ${Ipv6LinkLocal_Address_Type}   true   ${RetryCount}   ${RetryIntervalInSec}
+    
+    ${status} =   Get MgmtPortPingValidation Enabled Status   ${active_mgmt_bay_num}
+    Should be True   ${status}   True
+    
+    Sleep    60    #ping timeout of 32 seconds, hence waiting
+    
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log All Alerts
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EM_OneViewLinkValidationPingAddressMismatch_Cleared}    ${EMSwitchPorts}    ${active_mgmt_bay_num}    120
+    Verify Fusion Event Sent By EM    ${EM_OneViewLinkValidationPingAddressMismatch_Cleared}    ${last_fusion_event_id}
+    
+    #Clean up
+    Set EM RIS Faults    EmSwitchPortFaultInjection    ${standby_em_bay}    Management    UP
+    Sleep    20
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Set EM RIS Faults    EmSwitchPortFaultInjection    Management    UP    ${standby_em_bay}
+    ...    AND    Set Management Port Validation Infomation   ${active_mgmt_bay_num}   ${CIM_Linux_IPv6}   ${Ipv6LinkLocal_Address_Type}   true   ${RetryCount}   ${RetryIntervalInSec}
+    
+TC 03: Verify the events EmOneViewLinkValidationPingFailed and EmOneViewLinkValidationPingFailed_Cleared
+    [Documentation]    Verify EmOneViewLinkValidationPingFailed and EmOneViewLinkValidationPingFailed_Cleared in OV and EM  #require dual FLM, both mgmt uplinks connected
+    [Tags]    FLM    Events    FLM2.00    OV3.10    Automated
+    Run Keyword and Ignore Error    Wait for Node Consistent
+    #make sure active em and active mgmt port is same
+    ${active_em_bay} =   Get Active EM Bay Number
+    ${first_floating_ip}=    Get Diags Floating IP Address
+    ${floating_ip_dict}=    Get All The Floating IPs In The Network Loop via RIS    ${first_floating_ip}
+    ${active_mgmt_port_ip}    ${active_mgmt_bay_num}=    Get The Mgmt Port In The Network Via RIS   ${floating_ip_dict}
+    Run Keyword If   ${active_mgmt_bay_num} != ${active_em_bay}   Run Keywords   RIS EM Force Failover   ${active_em_bay}
+    ...   AND   Sleep   ${EM_REBOOT_TIME}   AND   Login To EM via RIS
+    ${active_em_bay} =   Get Active EM Bay Number
+    ${standby_em_bay} =   Run Keyword If     ${active_em_bay} == 1    Set Variable    2
+    ...   ELSE    Set Variable    1
+    ${present_blade_list}=    Get List of Occupied iLO Blade Bays
+    Should Not Be Empty    ${present_blade_list}    msg=No Ilo Blades present in the enlcosure
+    : FOR    ${blade_bay}    IN    @{present_blade_list}
+    \    ${blade_ilo_ip}=    Get iLO IPv6 LL Address from EM RIS    ${blade_bay}
+    \    Exit For Loop If  '${blade_ilo_ip}' != '${null}'
+    ${active_mgmt_bay_num}=    Evaluate    ${active_mgmt_bay_num}*100 + 22
+    ${last_fusion_event_id}=    get last fusion event ID
+    Set Management Port Validation Infomation   ${active_mgmt_bay_num}   ${blade_ilo_ip}   ${Ipv6LinkLocal_Address_Type}   true   ${RetryCount}   ${RetryIntervalInSec}
+    ${status} =   Get MgmtPortPingValidation Enabled Status   ${active_mgmt_bay_num}
+    Should be Equal   ${status}   True
+    Sleep    60
+    #Disable one mgmt port
+    Set EM RIS Faults    EmSwitchPortFaultInjection    Management    DOWN    ${standby_em_bay}
+    sleep    100    # timeout of 100 sec
+    RIS EM Efuse On Blade    ${blade_bay}
+    Sleep    60
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event        ${EM_EmOneViewLinkValidationPingFailed}    ${EMSwitchPorts}    ${active_mgmt_bay_num}    250
+    Verify Fusion Event Sent By EM    ${EM_EmOneViewLinkValidationPingFailed}    ${last_fusion_event_id}
+    RIS EM Efuse Off Blade    ${blade_bay}
+    Sleep    60
+    Wait for Device OK    ${Blade_Device}    ${blade_bay}
+    #receive clear fault
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Verify Audit Log Alert Event        ${EM_EmOneViewLinkValidationPingFailed_Cleared}    ${EMSwitchPorts}    ${active_mgmt_bay_num}    250
+    Verify Fusion Event Sent By EM    ${EM_EmOneViewLinkValidationPingFailed_Cleared}    ${last_fusion_event_id}
+    #Clean up
+    Set Management Port Validation Infomation   ${active_mgmt_bay_num}   ${CIM_Linux_IPv6}   ${Ipv6LinkLocal_Address_Type}   true   ${RetryCount}   ${RetryIntervalInSec}
+    ${status} =   Get MgmtPortPingValidation Enabled Status   ${active_mgmt_bay_num}
+    Should be True   ${status}   True
+    Set EM RIS Faults    EmSwitchPortFaultInjection    Management    UP    ${standby_em_bay}
+    sleep    20
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Set EM RIS Faults    EmSwitchPortFaultInjection    Management    UP    ${standby_em_bay}
+    ...   AND   Set Management Port Validation Infomation   ${active_mgmt_bay_num}   ${CIM_Linux_IPv6}   ${Ipv6LinkLocal_Address_Type}   true   ${RetryCount}   ${RetryIntervalInSec}
+    ...   AND   RIS EM Efuse Off Blade    ${blade_bay}    AND    Wait for Device OK    ${Blade_Device}    ${blade_bay}
+
+TC 04: Verify EM Link Disconnected and connected events
+    [Documentation]    Verify EM Switch EmLinkDisconnected, EmLinkDisconnectedCleared_LinkDetected and EM_EmLinkDisconnectedCleared_PeerEmRemoved events
+    [Tags]    EM    Alert    Events    FLM2.00    OV3.10    Automated
+    ${last_fusion_event_id}=    get last fusion event ID
+    ${standby_em_bay}=    Get Diags EmClusterStatus Standby Node
+    Set EM RIS Faults    EmSwitchPortFaultInjection   External    Down    standby
+    sleep    180   
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EM_LinkDisconnected}    ${EM_Device_Name}    ${standby_em_bay}    450
+    Verify Fusion Event Sent By EM    ${EM_LinkDisconnected}    ${last_fusion_event_id}
+    Set EM RIS Faults    EmSwitchPortFaultInjection    External    UP    standby
+    Sleep    180
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EM_LinkDisconnectedCleared_LinkDetected}    ${EM_Device_Name}    ${standby_em_bay}    250
+    Verify Fusion Event Sent By EM    ${EM_LinkDisconnectedCleared_LinkDetected}    ${last_fusion_event_id}
+    Set EM RIS Faults    EmSwitchPortFaultInjection   External    Down    standby
+    sleep   180 
+    ${standby_bay}=    Get Diags EmClusterStatus Standby Node
+    RIS EM Efuse On OTHER EM    ${standby_bay}
+    Sleep    60
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EM_EmLinkDisconnectedCleared_PeerEmRemoved}    ${EM_Device_Name}    ${standby_em_bay}    450
+    Verify Fusion Event Sent By EM    ${EM_EmLinkDisconnectedCleared_PeerEmRemoved}    ${last_fusion_event_id}
+    RIS EM Efuse Off OTHER EM    ${standby_bay}
+    Sleep    60
+    Set EM RIS Faults    EmSwitchPortFaultInjection    External    UP    standby
+    Wait for Device OK    ${EM_Device}  ${standby_em_bay}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Set EM RIS Faults    EmSwitchPortFaultInjection    External    Up    standby
+    ...    AND    Sleep    60    AND    RIS EM Efuse Off OTHER EM    ${standby_em_bay}    AND    Sleep    60    AND    Wait for Device OK    ${EM_Device}  ${standby_em_bay}
+
+TC 05: Verify EM Link Connected Incorrectly events
+    [Documentation]    This test is to verify EM Link Connected Incorrectly events
+    ...                EmLinkConnectedIncorrectly
+    ...                EmLinkConnectedIncorrectlyCleared_OwnersOk
+    ...                EmLinkConnectedIncorrectlyCleared_LinkLost
+    [Tags]    EM    Alert    Events    FLM2.00    FLM1.01    OV3.10    Automated
+    ${last_fusion_event_id}=    get last fusion event ID
+    ${standby_em_bay}=    Get Diags EmClusterStatus Standby Node
+    ${active_em_bay} =    Get Diags EmClusterStatus Active Node
+    Set EM RIS Faults    EmSwitchPortFaultInjection    External    Down    ${standby_em_bay}
+    Set EM RIS Faults    EmSwitchPortFaultInjection    External    LLDP_FAKE_TYPE    ${standby_em_bay}
+    Set EM RIS Faults    EmSwitchPortFaultInjection    External    Up    ${standby_em_bay}
+    Sleep    200
+    # To reach the ConnectedIncorrectly state there is a timeout of 200 sec
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_EM_Link_Connected_Incorrectly}    ${EM_Device_Name}    ${active_em_bay}    600
+    Verify Fusion Event Sent By EM    ${EL_EM_Link_Connected_Incorrectly}    ${last_fusion_event_id}
+
+    Set EM RIS Faults    EmSwitchPortFaultInjection    External    LLDP_REAL_TYPE    ${standby_em_bay}
+    Sleep    60
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_EM_Link_Connected_IncorrectlyCleared_OwnersOk}    ${EM_Device_Name}    ${active_em_bay}    600
+    Verify Fusion Event Sent By EM    ${EL_EM_Link_Connected_IncorrectlyCleared_OwnersOk}    ${last_fusion_event_id}
+
+    Set EM RIS Faults    EmSwitchPortFaultInjection    External    Down    ${standby_em_bay}
+    Set EM RIS Faults    EmSwitchPortFaultInjection    External    LLDP_FAKE_TYPE    ${standby_em_bay}
+    Set EM RIS Faults    EmSwitchPortFaultInjection    External    Up    ${standby_em_bay}
+    Sleep    200
+    # To reach the ConnectedIncorrectly state there is a timeout of 200 sec
+    ${standby_em_bay}=    Get Diags EmClusterStatus Standby Node
+    RIS EM Efuse On OTHER EM    ${standby_em_bay}
+    Sleep    60
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_EM_Link_Connected_IncorrectlyCleared_LinkLost}    ${EM_Device_Name}    ${active_em_bay}    600
+    Verify Fusion Event Sent By EM    ${EL_EM_Link_Connected_IncorrectlyCleared_LinkLost}    ${last_fusion_event_id}
+
+    RIS EM Efuse Off OTHER EM    ${standby_em_bay}
+    Sleep    60
+    Set EM RIS Faults    EmSwitchPortFaultInjection    External    LLDP_SEND_ON    ${standby_em_bay}
+    Wait for Device OK    ${EM_Device}    ${standby_em_bay}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Set EM RIS Faults    EmSwitchPortFaultInjection    External    Up    ${standby_em_bay}
+    ...    AND    Set EM RIS Faults    EmSwitchPortFaultInjection    External    LLDP_REAL_TYPE    ${standby_em_bay}    AND    RIS EM Efuse Off OTHER EM    ${standby_em_bay}
+    ...    AND    Wait for Device OK    ${EM_Device}    ${standby_em_bay}
+
+TC 06: Verify EmOneViewLinkValidationPingFailedCleared_PingAddressChanged event
+    [Documentation]    This test is to verify if EmOneViewLinkValidationPingFailedCleared_PingAddressChanged event is generated
+    [Tags]    EM    Alert    Events    FLM2.00    FLM1.01    OV3.10    Automated
+    ${last_fusion_event_id}=    get last fusion event ID
+    #Get Blade Ilo_ipv6 and patch it to switch port
+    ${present_list}=    Get List of Occupied iLO Blade Bays
+    Should Not Be Empty    ${present_list}    msg=No Blades present in the enlcosure
+    ${blade_bay} =   Set Variable   @{present_list}[0]
+    ${ilo_ip_presence}=    Is ILO Ip In Blade Manager    ${blade_bay}
+    Should Be True    ${ilo_ip_presence}      msg=ILO IP is not available in EM blademanager RIS resource for bay ${blade_bay}
+    ${ilo_ipv6}=    Get iLO IPv6 LL Address from EM RIS      ${blade_bay}
+    #make sure active em and active mgmt port is same
+    ${active_em_bay} =   Get Active EM Bay Number
+    ${first_floating_ip}=    Get Diags Floating IP Address
+    ${floating_ip_dict}=    Get All The Floating IPs In The Network Loop    ${first_floating_ip}
+    ${active_mgmt_port_ip}    ${active_mgmt_bay_num}=    Get The Mgmt Port In The Network Via RIS    ${floating_ip_dict}
+
+    Run Keyword If   ${active_mgmt_bay_num} != ${active_em_bay}   Run Keywords   RIS EM Force Failover   ${active_em_bay}
+    ...   AND   Sleep   ${EM_REBOOT_TIME}   AND   Login To EM RIS
+    ${active_em_bay} =   Get Active EM Bay Number
+    ${standby_em_bay} =   Run Keyword If     ${active_em_bay} == 1    Set Variable    2
+    ...   ELSE    Set Variable    1
+    ${active_mgmt_bay_num}=    Evaluate    ${active_mgmt_bay_num}*100 + 22
+
+    #patch blade ipv6 to switch port for successful ping
+    Set Management Port Validation Infomation   ${active_mgmt_bay_num}   ${ilo_ipv6}   ${Ipv6LinkLocal_Address_Type}   true   ${RetryCount}   ${RetryIntervalInSec}
+
+    #Disable one mgmt port
+    Set EM RIS Faults    EmSwitchPortFaultInjection    Management    DOWN    ${standby_em_bay}
+    Sleep    100    # timeout of 100 sec
+
+    #set to invalid ping address to cause fault
+    Set Management Port Validation Infomation   ${active_mgmt_bay_num}   ${Invalid_IPV6_Address}   ${Ipv6LinkLocal_Address_Type}   true   ${RetryCount}   ${RetryIntervalInSec}
+    ${status} =   Get MgmtPortPingValidation Enabled Status   ${active_mgmt_bay_num}
+    Should be True   ${status}   True
+    Sleep    100
+
+    #receive event
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event        ${EM_EmOneViewLinkValidationPingFailed}    ${EMSwitchPorts}    ${active_mgmt_bay_num}    250
+    Verify Fusion Event Sent By EM    ${EM_EmOneViewLinkValidationPingFailed}    ${last_fusion_event_id}
+
+    #clean fault
+    Set Management Port Validation Infomation   ${active_mgmt_bay_num}   ${ilo_ipv6}   ${Ipv6LinkLocal_Address_Type}   true   ${RetryCount}   ${RetryIntervalInSec}
+    ${status} =   Get MgmtPortPingValidation Enabled Status   ${active_mgmt_bay_num}
+    Should be True   ${status}   True
+    Sleep    200
+
+    #receive clear fault
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    
+    ${switch_event_list1} =   Create List
+    ${switch_event_list2} =   Create List
+    ${Switch_Event1_1}  ${Switch_Event1_2}=    Runkeyword and Ignore Error    Verify Audit Log Alert Event    ${EM_EmOneViewLinkValidationPingFailed_Cleared}    ${EMSwitchPorts}    ${active_mgmt_bay_num}    600
+    Append To List   ${switch_event_list1}   ${Switch_Event1_1}
+    ${Switch_Event2_1}  ${Switch_Event2_2}=    Runkeyword and Ignore Error    Verify Fusion Event Sent By EM    ${EM_EmOneViewLinkValidationPingFailed_Cleared}    ${last_fusion_event_id}
+    Append To List   ${switch_event_list2}   ${Switch_Event2_1} 
+    ${Switch_Event3_1}  ${Switch_Event3_2}=    Runkeyword and Ignore Error    Verify Audit Log Alert Event    ${EM_EmOneViewLinkValidationPingFailedCleared_PingAddressChanged}    ${EMSwitchPorts}    ${active_mgmt_bay_num}    600
+    Append To List   ${switch_event_list1}   ${Switch_Event3_1}
+    ${Switch_Event4_1}  ${Switch_Event4_2}=    Runkeyword and Ignore Error    Verify Fusion Event Sent By EM    ${EM_EmOneViewLinkValidationPingFailedCleared_PingAddressChanged}    ${last_fusion_event_id}
+    Append To List   ${switch_event_list2}   ${Switch_Event4_1}
+    List Should Contain Value   ${switch_event_list1}   PASS
+    List Should Contain Value   ${switch_event_list2}   PASS
+
+    #Clean up
+    Set EM RIS Faults    EmSwitchPortFaultInjection    Management    UP    ${standby_em_bay}
+    Wait for Device OK    ${EM_Device}    ${standby_em_bay}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Set EM RIS Faults    EmSwitchPortFaultInjection    Management    UP    ${standby_em_bay}
+    ...    AND    Wait for Device OK    ${EM_Device}    ${standby_em_bay}    AND    Set Management Port Validation Infomation   ${active_mgmt_bay_num}   ${CIM_Linux_IPv6}   ${Ipv6LinkLocal_Address_Type}   true   ${RetryCount}   ${RetryIntervalInSec}
+    ...    AND    RIS EM Efuse Off Blade    ${blade_bay}

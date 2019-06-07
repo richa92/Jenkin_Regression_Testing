@@ -1,0 +1,198 @@
+*** Settings ***
+*** Settings ***
+
+Documentation      F1022 UI Integration Tests for RoboGalaxy dev Branch
+Resource           F1022_Config.txt
+Force Tags         Buildup
+Test Setup         Load Test Data and Open Browser
+Test Teardown      Logout And Close All Browsers
+#Test Setup         KC Load Test Data and Open Browser
+#Test Teardown      KC Logout And Close All Browsers
+Library             SSHLibrary
+Library            String
+Library            Collections
+
+
+*** Variables ***
+${User}     Administrator
+${User1}    Backup
+${User2}    Network
+${SSH_PASS}                 hpvse1
+${APPLIANCE_IP}     15.212.160.153
+${SeleniumSpeed}      0.1
+${POTASSIUM}        Synergy 40Gb F8 Switch Module
+${POTASH}           Virtual Connect SE 40Gb F8 Module for Synergy
+${POTASH1}          Virtual Connect SE 40Gb F8 Module for Synergy
+${CHLORIDE20}       Synergy 20Gb Interconnect Link Module
+${inval_license}    Invalid license key.Resolution: Ensure there are no copy or paste issues if you are manually adding a license key.Contact your authorized service representative if the issue persists
+${dup_license}      License key already exists.Resolution: Add a different license key
+${expired_key}      License key expired.Resolution: Provide a valid license key and try again.Contact your authorized service representative if the issue persists
+${li_license_reqd}   Synergy 8Gb FC Upgrade licenses required
+${alert1}           Synergy 8Gb FC Upgrade.
+${alert_li}         The logical interconnect is not licensed for 'Synergy 8Gb FC Upgrade'. Fibre Channel uplink sets will be non-operational until a license has been applied to all Fibre Channel capable interconnects
+${alert_potassium}   EnclFVTVP30001, interconnect2 is not licensed for 'Synergy 8Gb FC Upgrade', all Fibre Channel capabilities will be disabled until a license has been applied.
+${EM_SN1}    EM1FFFF500
+${EM_SN2}    EM1FFFF600
+${li_name}   LE_1Enc_HA-LIG-bay3-1enc
+ ${li_name_A}  LE_1Enc_HA-LIG-bay3-1enc_A
+ ${li_name_B}  LE_1Enc_HA-LIG-bay3-1enc_B
+
+
+*** Keywords ***
+
+Open Connection And Log In
+    [Documentation]     Opens an SSH session to an appliance and logs in
+    [Arguments]         ${SSH_HOST}=localhost   ${SSH_USER}=root
+    Open Connection     ${SSH_HOST}     timeout=180s
+    Run Keyword If	    '${SSH_PASS}' is ${null}      Set Suite variable  ${SSH_PASS}     hpvse1
+    Login               ${SSH_USER}     ${SSH_PASS}
+
+Get CANMIC
+  [Arguments]     ${EM_SN}   ${Bay}    ${canmic_value}
+  Open Connection And Log In      ${APPLIANCE_IP}
+  ${EM}=  Execute Command   /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${EM_SN}
+  ${EM}=  catenate   SEPARATOR=   ${EM}  %bond0
+  ${XAUTH1}=  Execute Command  /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${EM_SN} -o t
+  Log to console   Fetching Canmic Block 161 byte 1 Values of Interconnect ${Bay}Potash
+  ${canmic1}=   Execute Command   curl --globoff -ki -x "" --request POST --header "x-auth-token:${XAUTH1}" https://${EM}/rest/v1/InterconnectManager/${Bay} -H 'Content-Type: application/json' -d '{ "Action": "ReadCanmicBlocks","List": [161]}' | grep } | python -m json.tool | grep Data | cut -d "\\"" -f 4
+  ${canmic}=   Get substring   ${canmic1}   0  4
+  Close All Connections
+  run keyword if  '${canmic}' == '${canmic_value}'    Log to COnsole   Base64 Canmic value of Interconnect ${Bay} is ${canmic} as expected.
+    ...   ELSE   log to console  Base64 value of Licensed Potashes are ${canmic} while expected for both was ${canmic_value}    WARN
+
+
+
+*** Test Cases ***
+
+F1022_TC_1: Add valid FCUpgrade Licenses via UI
+  [Documentation]   Adds FC Licenses to the oneview
+  Set Log Level  TRACE
+  Log into Fusion appliance as Administrator
+  Log to Console    " Adding valid licenses"
+  fusion_ui_add_license  @{TestData.licenses1}
+  ${resp1}=  fusion_ui_verify_available_fcupgrade_licenses   ${1}
+  fusion_ui_add_license  @{TestData.licenses2}
+  ${resp2}=  fusion_ui_verify_available_fcupgrade_licenses   ${2}
+
+F1022_TC_2: Add Expired and Invalid licenses
+  [Documentation]  verifies that invalid licenses should not get added
+  Log into Fusion appliance as Administrator
+  fusion_ui_add_license  @{TestData.licenses_expired}
+  fusion_ui_add_license  @{TestData.licenses_invalid}
+  fusion_ui_verify_available_fcupgrade_licenses   ${2}
+  fusion_ui_verify_licensed_fcupgrade_interconnects   ${0}
+
+F1022_TC_3: Create FC,FCOE and Ethernet networks
+  [Documentation]   verifies that License is not applied, when LIG and EG is created,
+  Set Log Level   TRACE
+  Log into Fusion appliance as Administrator
+  Fusion UI Create Ethernet Network   @{TestData.networks}
+  Fusion UI Create fc Network   @{TestData.fcnetworks}
+  Fusion UI Create fcoe Network   @{TestData.fcoenetworks}
+
+F1022_TC_3.1: Create MultiLIG and verify this will not apply License to Interconnects
+  [Documentation]  verifies the creating LIG will not alter licensing.
+  Set Log Level   TRACE
+  Log into Fusion appliance as Administrator
+  ${Status}=    fusion_ui_create_tbird_logical_interconnect_group    @{TestData.ligs_A}
+  Run Keyword And Continue On Failure   Should Be Equal   '${Status}'   'True'   ${Status}
+  Log To Console    ******CREATE LIGA operations completed**********
+  ${Status}=    fusion_ui_create_tbird_logical_interconnect_group    @{TestData.ligs_B}
+  Run Keyword And Continue On Failure   Should Be Equal   '${Status}'   'True'   ${Status}
+  Log To Console    ******CREATE LIGB operations completed**********
+  fusion_ui_verify_available_fcupgrade_licenses   ${2}
+  Get CANMIC     ${EM_SN1}   3    AAAA
+  Get CANMIC     ${EM_SN1}   6    AAAA
+
+
+F1022_TC_4: Create Enclosure GROUP and LE with sufficient Licenses.
+  [Documentation]  covers F1022_UI_4 create Logical enclosure with license already available
+  Log into Fusion appliance as Administrator
+  ${status}=  fusion_ui_create_tbird_enclosure_group    @{TestData.encgroups_multi}
+  Run Keyword And Continue On Failure   Should Be Equal   '${Status}'   'True'   ${Status}
+  ${status}=   fusion_ui_create_tbird_logical_enclosure   @{TestData.les_multi}
+
+
+F1022_TC_5: Verify Licensing Page to verify available and licensed count
+  [Documentation]  Verify Licensing of LI_A,Get the license count and canmic
+  Log into Fusion appliance as Administrator
+  fusion_ui_verify_licensed_fcupgrade_interconnects   ${2}
+  fusion_ui_verify_available_fcupgrade_licenses   ${0}
+
+F1022_TC_6: Multi LI licensing status of LI_Aside and its interconnect after LE is created with sufficient licenses
+  [Documentation]  Covers Licening of F1022_17.1,Get the license count and canmic
+  Log into Fusion appliance as Administrator
+  Get CANMIC     ${EM_SN1}   3    AAMA
+  Log to console   verify that Licenses are consumed and interconnects licensed
+  ${licinfo}=  fusion_ui_get_li_license_info   ${li_name_A}
+  ${licensecount}=  get from dictionary  ${licinfo}  license_count
+  ${licensestate}=  get from dictionary  ${licinfo}  license_state
+  Run Keyword if  '${licensecount}' == '${1}' and '${licensestate}' == 'Synergy 8Gb FC Upgrade licenses'   log to console   As expected License state is ${licinfo}
+  ...   ELSE   FAIL   the actual LI license state ${licinfo} is not as expected.
+
+F1022_TC_7: Multi LI licensing status of LI_Bside and its interconnect after LE is created with sufficient licenses
+  [Documentation]  covers Testcase F1022_17 Verify Licensing of LI_Bside,Get the license count and canmic
+  Log into Fusion appliance as Administrator
+  Get CANMIC     ${EM_SN1}   6    AAMA
+  Log to console   verify that Licenses are consumed and interconnects licensed
+  ${licinfo}=  fusion_ui_get_li_license_info   ${li_name_B}
+  ${licensecount}=  get from dictionary  ${licinfo}  license_count
+  ${licensestate}=  get from dictionary  ${licinfo}  license_state
+  Run Keyword if  '${licensecount}' == '${1}' and '${licensestate}' == 'Synergy 8Gb FC Upgrade licenses'   log to console   As expected License state is ${licinfo}
+  ...   ELSE   FAIL   the actual LI license state ${licinfo} is not as expected.
+  fusion_ui_verify_licensed_fcupgrade_interconnects   ${2}
+
+F1022_TC_8: Single LI verify Interconnect Bay Licensing state in LE
+  [Documentation]  covers scenarios TC38 to TC54 under IBL
+  Log into Fusion appliance as Administrator
+  fusion_ui_verify_le_interconnect_bay_licensing   @{TestData.license_intents_multi}
+
+F1022_TC_9: verify Interconnect Bay Licensing State in IBL Edit Panel
+  [Documentation]  Covers Testcases 38 to 54 under IBL
+  Log into Fusion appliance as Administrator
+  ${resp1}=  fusion_ui_verify_available_fcupgrade_licenses   ${0}
+  fusion_ui_verify_le_interconnect_bay_licensing_editpanel    @{TestData.license_intents_multi}
+
+F1022_TC_10:Verify Delicensing of LI
+  [Documentation]  Delicense Potash LI_Aside removing the FCUplink
+  Log into Fusion appliance as Administrator
+  ${resp}=  fusion_ui_edit_logical_interconnects   @{Testdata.editli_A}
+  ${resp1}=  fusion_ui_verify_available_fcupgrade_licenses   ${1}
+  fusion_ui_verify_licensed_fcupgrade_interconnects   ${1}
+  Get CANMIC     ${EM_SN1}   3    AAMA
+  Get CANMIC     ${EM_SN1}   6    AAMA
+  fusion_ui_verify_le_interconnect_bay_licensing   @{TestData.A_delicense_intents}
+
+
+F1022_TC_11:verify Interconnect bay Licensing edit panel when LI is delicensed
+  [Documentation]  verifies the IBL status when license is disabled
+  Log into Fusion appliance as Administrator
+  fusion_ui_verify_le_interconnect_bay_licensing_editpanel    @{TestData.A_delicense_intents}
+
+F1022_12: Perform Update from group to create FCuplinks
+  [Documentation]  Perform update from Group. LI gets licensed automatically
+  Log into Fusion appliance as Administrator
+  Log to Console  "Perform LI Update from Group to enable FC Uplinks"
+  Get CANMIC     ${EM_SN1}   3    AAMA
+  fusion_ui_update_logical_interconnect_from_group    @{TestData.editli_A}
+  Get CANMIC     ${EM_SN1}   3    AAMA
+  ${resp1}=  fusion_ui_verify_available_fcupgrade_licenses   ${0}
+  fusion_ui_verify_licensed_fcupgrade_interconnects   ${2}
+  fusion_ui_verify_le_interconnect_bay_licensing   @{TestData.license_intents_multi}
+
+
+F1022_TC_13:Verify Delicensing of LI
+  [Documentation]  Delicense Potash LI_Bside removing the FCUplink
+  Log into Fusion appliance as Administrator
+  ${resp}=  fusion_ui_edit_logical_interconnects   @{Testdata.editli_B}
+  ${resp1}=  fusion_ui_verify_available_fcupgrade_licenses   ${1}
+  fusion_ui_verify_licensed_fcupgrade_interconnects   ${1}
+  Get CANMIC     ${EM_SN1}   3    AAMA
+  Get CANMIC     ${EM_SN1}   6    AAMA
+  fusion_ui_verify_le_interconnect_bay_licensing   @{TestData.B_delicense_intents}
+
+F1022_TC_14:verify Interconnect bay Licensing edit panel when LI is delicensed
+  [Documentation]  verifies the IBL status when license is disabled
+  Log into Fusion appliance as Administrator
+  fusion_ui_verify_le_interconnect_bay_licensing_editpanel    @{TestData.B_delicense_intents}
+

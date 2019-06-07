@@ -1,0 +1,154 @@
+*** Settings ***
+Documentation       This module for testing Secuirty Feature - Legacy, FIPS and CNSA Modes in Potash ICM
+Resource           ../../../Resources/api/fusion_api_resource.txt
+Library            RoboGalaxyLibrary
+Library            FusionLibrary
+
+Library             BuiltIn
+Library             Collections
+Library             XML
+Library             String
+Library             Dialogs
+Library             InternalFunctions
+
+*** Variables ***
+
+*** keywords ***
+
+#############################################################################
+#   Change ICM Security Mode
+#   Keyword to change security mode for Potash ICM
+#   LEGACY, FIPS or CNSA are the supported security modes.
+#############################################################################
+Change ICM Security Mode
+    [Documentation]    Keyword to change security mode for Potash ICM
+    [Arguments]        ${Security_mode}
+
+    ${resp} =  Change Cryptography Mode   ${Security_mode}     ${APPLIANCE_IP}
+    Sleep   30 minutes
+    ${curr_mode} =  Get Current Cryptography Mode
+    Should Be Equal   ${curr_mode}   ${Security_mode}
+
+
+#############################################################################
+#   Verify functionality in security mode
+#   After changing the security mode for ICM, use this keyword
+#   To verify the functionality in specific security mode:
+#############################################################################
+Verify functionality in security mode
+    [Documentation]    Keyword to verify functionality in specific security mode
+    [Arguments]        ${Security_mode}
+
+    # Check whether SSH key  is present in LEGACY/FIPS mode
+    Open Connection And Log In      ${APPLIANCE_IP}    ${OV_root_usr}    ${OV_root_pwd}
+    ${curr_mode} =  Get Current Cryptography Mode
+    Run Keyword if    '${curr_mode}' == '${Security_mode}'   Log to Console    secuirty mode in ${curr_mode}
+
+    Open Connection And Log In      ${PotashIP1}    ${OV_root_usr}    ${Potash_root_pwd}
+    Sleep    5secs
+    Write    '/n'
+    Read Until     ${Prompt1}
+    Write    ${ssh_data_path}
+    Sleep    10secs
+    ${ssh_data_path}=  Read
+    ${split_ssh_path1}=    Split String    ${ssh_data_path}    ->
+    ${get_path1}=    Get From List    ${split_ssh_path1}    1
+    ${split_ssh_path2}=    Split String    ${get_path1}    #
+    ${get_path2}=    Get From List    ${split_ssh_path2}    0
+    Log to Console    ${get_path2}
+    Write    ls -ltr ${get_path2}
+    Sleep    10secs
+    ${read_value}=  Read
+    ${module_status}=    Run Keyword And Return Status    Should Match Regexp    ${read_value}     \\s*[\\w\\W]*?ssh_host_rsa_key.pub\\s*[\\w\\W]*?
+    Run Keyword If    '${module_status}'=='True'    Log to Console    Found the ssh key
+    ...    ELSE    Log to Console    ssh key NOT FOUND
+
+    # Check whether iss config file is present in LEGACY/FIPS mode
+    Open Connection And Log In      ${APPLIANCE_IP}    ${OV_root_usr}    ${OV_root_pwd}
+    ${curr_mode} =  Get Current Cryptography Mode
+    Log to Console    ${curr_mode}
+    Open Connection And Log In      ${PotashIP1}    ${OV_root_usr}    ${Potash_root_pwd}
+    Sleep    5secs
+    Write    '/n'
+    Read Until     ${Prompt1}
+    Write    ${enter_directory}
+    Write    ls
+    Sleep    10secs
+    ${read_value}=  Read
+    ${module_status}=    Run Keyword And Return Status    Should Match Regexp    ${read_value}     \\s*[\\w\\W]*?iss.conf\\s*[\\w\\W]*?
+    Run Keyword If    '${module_status}'=='True'    Log to Console    Found the iss.conf
+    ...    ELSE    Log to Console    iss.conf NOT FOUND
+
+
+    #Reset ICM and verify security mode remains intact.
+    Open Connection And Log In      ${APPLIANCE_IP}    ${OV_root_usr}    ${OV_root_pwd}
+    ${output}=    ISS Reset with SNMP Command    OneView    ${Random_Password}    ${PotashIP1}
+    Log to Console    ${output}
+
+    Open Connection And Log In      ${APPLIANCE_IP}    ${OV_root_usr}    ${OV_root_pwd}
+    ${curr_mode} =  Get Current Cryptography Mode
+    Log to Console    ${curr_mode}
+
+
+    #Verify ICM logs the failure of self tests and the CANMIC block 172 should be updated accordingly
+    Open Connection And Log In      ${APPLIANCE_IP}    ${OV_root_usr}    ${OV_root_pwd}
+    Read Until    ${Prompt4}
+
+    ${AuthKey}=    Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${Enclosure1} -o t
+    Sleep    5min
+    ${Enclosure_EMIP}=    Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${Enclosure1} -o i
+    Sleep    10sec
+    ${cmd}=    set variable    curl -g -x "" -k -i -H "x-auth-token:${AuthKey}" https://[${Enclosure_EMIP}%bond0]/rest/v1/InterconnectManager/${Enc1_Potash_Module_Bay_No} -d '{"Action":"ReadCanmicBlocks","List":[172]}' | grep } | python -m json.tool | grep Data | cut -d '"' -f 4 | base64 -d | hexdump -C
+    ${canmic}=     Execute Command    ${cmd}
+    Sleep    10sec
+    log    ${canmic}
+    ${l1}=    Get Line    ${canmic}    0
+    ${list1}=    Convert To List    ${l1}
+    log    ${list1}
+    ${l2}=    Get From List    ${list1}    10
+    ${l3}=    Get From List    ${list1}    11
+    ${strng}=    catenate    ${l2}    ${l3}
+    ${Integer}=    convert to integer    ${strng}
+    log    ${Integer}
+    run keyword if    ${Integer} == 0    log    "POST SUCESS"
+    run keyword if    ${Integer} == 1    log    "POST FAILED"
+    close connection
+
+
+    #Verify the ICM comes up with default snmpv3 and SSH mode once starting ISS and is updated in CANMIC block 19
+    Open Connection And Log In      ${APPLIANCE_IP}    ${OV_root_usr}    ${OV_root_pwd}
+    Read Until    ${Prompt4}
+
+    ${AuthKey}=    Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${Enclosure1} -o t
+    Sleep    5min
+    ${Enclosure_EMIP}=    Execute Command    /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${Enclosure1} -o i
+    Sleep    10sec
+    ${cmd}=    set variable    curl -g -x "" -k -i -H "x-auth-token:${AuthKey}" https://[${Enclosure_EMIP}%bond0]/rest/v1/InterconnectManager/${Enc1_Potash_Module_Bay_No} -d '{"Action":"ReadCanmicBlocks","List":[19]}' | grep } | python -m json.tool | grep Data | cut -d '"' -f 4 | base64 -d | hexdump -C
+    ${canmic}=     Execute Command    ${cmd}
+    log    ${canmic}
+    ${l1}=    Get Line    ${canmic}    0
+    ${list1}=    Convert To List    ${l1}
+    ${l2}=    Get From List    ${list1}    10
+    ${l3}=    Get From List    ${list1}    17
+    #${l3}=    Get From List    ${list1}    11
+    ${byte1}=    convert to binary    ${l2}
+    ${byte2}=    convert to binary    ${l3}
+    #${byte2}=    convert to binary    ${l3}
+    #${strng}=    catenate    ${byte1}    ${byte2}
+    log   ${byte1}
+    log   ${byte2}
+    ${list2}=    Convert To List    ${byte1}
+    ${list3}=    Convert To List    ${byte2}
+    ${l4}=    Get From List    ${list2}    0
+    ${l5}=    Get From List    ${list3}    0
+    log    ${l4}
+    run keyword if    ${l4} == 1    log    "SNMPv3 is enabled by default"
+    run keyword if    ${l4} == 0    log    "SNMPv3 is disabled by default"
+    run keyword if    ${l5} == 1    log    "SSH is enabled by default"
+    run keyword if    ${l5} == 0    log    "SSH is disabled by default"
+    close connection
+
+    #Reset ICM to default bays
+    ${output}=    ISS Reset with SNMP Command    OneView    ${Random_Password}    ${PotashIP2}
+    Log to Console    ${output}
+

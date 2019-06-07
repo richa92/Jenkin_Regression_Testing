@@ -1,0 +1,1083 @@
+*** Settings ***
+Documentation    F118 - FC FabricAttach on Potash User Story
+...              The test can test different test enclosures with configuration specified in data file.
+...
+...              The following is AZ51 config
+...
+...              - LE - 2 frame, HA or A+B, IBS3, CL20
+...
+...              - 1 Enet uplinkset on Aside: IC3:Q2:1 (4x8Gb FC/4x10Gb Enet Universal)
+...              - 1 FA uplinksets on Aside
+...                   - US-FA1: FA1. 1 uplinks, IC3:Q4:2 (4x8Gb FC/4x10Gb Enet, Universal) and
+...                     IC3:Q3:1 (1x8Gb)
+...              - 1 FA uplinkset on Bside
+...                   - US-FA2: FA2, 2 uplinkport, IC6:Q3:1 and IC6:Q5:1 (1x8Gb)
+...                     FA2 is with Manual LoginRedistribution, treated as Auto on Potash
+...
+...              - All FA uplinkports are connected to 16Gb SAN swtich which is then connected
+...                to a pricicapl SAN switch with switchwwn 10:00:50:eb:1a:ed:00:b0
+...
+...              - 4 servers: 1 Enet Connection, 2 FC FA connections
+...                   - enc1, server1:  Linux,    FA1 and FA2 connections
+...                   - enc2, server7:  Windows,  FA1 and FA2 connections
+...                   - enc1, server10: Linux,    FA1 and FA2 connections
+...                   - enc2, server4:  Windows,  FA1 and FA2 connections
+...
+...              - Minimum 4 servers going through each uplinkset locally or through CL20 port for storage access
+...
+...              - Test with Happy path, disable/enable uplinks/downlinks
+...              - uplink speed change, directly update LI uplinkset or UFG
+...              - Power off/on enc1 potash 3 (Aside)
+...              - make sure FC uplinkset modification works after power back on potash
+...                   - Edit uplinkset defined on Aside removing uplinkport
+...                   - LI UFG adding back uplinkport
+...              - Power off/on enc2 potash 6 (Bside)
+...              - make sure FC uplinkset modification works after power back on potash
+...                   - Edit uplinkset defined on Bside adding uplinkport
+...                   - LI UFG remove added uplinkport
+...              - Remove/insert potashes (Aside and Bside)
+...
+...              - servers login redistribution were verified when adding uplinkport, enable back uplinkport
+...              - With 4 servers and uplinkset with 2 uplinkports, expect servers logins evenly distributed
+...                between the uplinkports
+...
+...              - Server storage path verification are through FC uplinkport loginsCount
+...
+
+#Variables        ./data_common.py
+#Variables        ./data_F118_ha.py
+
+Resource         ../../../../resource/fusion_api_all_resource_files.txt
+Resource         ../FVT/fvt-keywords.txt
+Resource         ../FVT/Resources/fvt_resource.txt
+Resource         ./F117_keywords.txt
+
+Library          FusionLibrary
+Library          ../FVT/fvt_api.py
+
+# Setup for each test case
+Test Setup       Common Test Setup
+Test Teardown    Common Test Teardown
+
+*** Variables ***
+${LE_URI}    None
+${POTASH3_URI}    None
+${POTASH6_URI}    None
+
+*** Test Cases ***
+F118 Set up Login User
+    [Documentation]    Set up Login User
+    [Tags]  Login    setup
+
+    PASS EXECUTION    Login in test setup, no longer need this
+
+    Set Log Level    TRACE
+    Fusion Api Login Appliance    ${appliance_ip}    ${data_common.admin_credentials}
+
+    # get the OV version
+    ${resp} =    Fusion Api Get Appliance Version
+    Set Suite Metadata     OneView Version      ${resp['softwareVersion']}    top=True
+
+
+F118 Set up Create Ethernet Networks
+    [Documentation]    Set up Create Ethernet Networks
+    [Tags]  Enet     setup
+    Create Ethernet Networks    ${data_common.ethernet_networks}
+
+
+F118 Set up Create FabricAttach and FabricAttach Networks
+    [Documentation]    Set up Create FabricAttach and FabricAttach Networks
+    [Tags]  FC    setup
+    Create FC Networks    ${data_common.fc_networks}
+
+
+F118 Negative LIG FC FA Uplinkset
+    [Tags]  LigUSNegative
+    [Documentation]    The following are tested: limitations for FC FA uplinkset defined on LIG
+    ...                CRM_INVALID_UPLINK_SET_PORT
+    ...                    case - IRF split port
+    ...                    case - IRF unsplit port
+    ...                CRM_LOGICAL_UPLINK_TEMPLATE_FIBRE_CHANNEL_PORTS_DO_NOT_ALL_BELONG_TO_SAME_SWITCH
+    ...                CRM_LOGICAL_UPLINK_CAN_ONLY_CONTAIN_MAX_ONE_FC_NETWORK
+    ...   Note: for unsplit, errorCode changed from CRM_INVALID_UPLINK_SET_PORT_FC
+    ...         to CRM_FC_LOGICAL_UPLINK_TEMPLATE_HAS_UNUSABLE_PORT
+    ...         and status changed from 202 to 400
+    ...                CRM_FC_LOGICAL_UPLINK_TEMPLATE_HAS_UNUSABLE_PORT
+    ...                    case - Q1 to Q6 Unsplit port not allowed
+
+    PASS EXECUTION IF    '${REDUNDANCY}' == 'AB'    Skip Negative Test If Redundancy is A plus B
+
+    Log to console and logfile    ${\n}FC FA uplinkset on LIG negative test
+    :FOR    ${ligtest}    IN    @{err_ligs}
+    \    ${task} =    Add LIG from variable    ${ligtest['ligBody']}    120s    2s
+    \    Verify ErrorCode in taskError    ${task['taskErrors']}    ${ligtest['errorCode']}
+
+    # Note that Unsplit port errorCode changed and return status 400
+    ${body} =    Build LIG body    ${err_lig_400['ligBody']}
+    ${resp} =    Fusion Api Create LIG    ${body}
+    Should Be Equal As Integers    ${resp['status_code']}    ${400}
+    Should Be Equal As Strings    ${resp['errorCode']}    ${err_lig_400['errorCode']}
+
+
+F118 Set up Create Logical Interconnect Groups
+    [Documentation]    Set up Create Logical Interconnect Groups
+    [Tags]  Lig    setup
+
+    # Create the LIGs based on data file definition
+    :FOR    ${lig}    IN    @{ligs}
+    \    ${task} =    Add LIG from variable    ${lig}    3min    10s
+    \    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+
+F118 Set up Create Enclosure Group
+    [Documentation]    Set up Create Enclosure Group
+    [Tags]  EG     setup
+    ${resp} =    Add Enclosure Group from variable    ${enc_group['${EG}']}
+    ${resp}    Fvt Api Get Enclosure Group By Name    ${EG}
+    Should Be Equal As Strings    ${resp['status']}    OK
+    Should Be Equal As Strings    ${resp['name']}    ${EG}
+
+
+F118 Create Logical Enclosure and Verify LI LE and uplinks status, speed and connectedTo
+    [Documentation]   Create 2 FRAME ME HA IBS3 LE with FA Uplinksets defined on each side
+    [Tags]  LE    setup
+
+    Run Keyword and Ignore Error    Write To ciDebug Log
+    Add Logical Enclosure from variable    ${les['${LE}']}
+
+    Log to Console     ${\n}Wait for all uplinks to reach final status
+    Sleep    ${data_common.UPLINK_STATUS_WAIT}
+
+    Log to Console     ${\n}Verify LE and LI status OK and Consistent
+    ${resp} =    Fvt Api Get Logical Enclosure By Name    ${LE}
+    Run Keyword If    ${resp} != None    Set Suite Variable    ${LE_URI}    ${resp['uri']}
+    Should Be Equal As Strings    ${resp['name']}    ${LE}
+    Should Be Equal As Strings    ${resp['status']}    OK
+    Should Be Equal As Strings    ${resp['state']}    Consistent
+
+    :FOR    ${li}    IN    @{LIs}
+    \    ${resp} =    Fvt Api Get Logical Interconnect By Name    ${li}
+    \    Should Be Equal As Strings    ${resp['consistencyStatus']}    CONSISTENT
+    \    Should Be Equal As Strings    ${resp['status']}    OK
+
+    Log to Console     ${\n}Verify All uplinksets status OK
+    :FOR    ${us}    IN    @{ASIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[0]}    ${us}    OK
+    :FOR    ${us}    IN    @{BSIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[1]}    ${us}    OK
+
+    # Get the Potash information: name, uri,
+    Log to Console     ${\n}Verify Both Potashes in Configured state
+    ${resp} =    Fvt Api Get Interconnect By Name    ${POTASH3}
+    Run Keyword If    ${resp} != None    Set Suite Variable    ${POTASH3_URI}    ${resp['uri']}
+    Should Be Equal As Strings    ${resp['state']}    Configured
+
+    ${resp} =    Fvt Api Get Interconnect By Name    ${POTASH6}
+    Run Keyword If    ${resp} != None    Set Suite Variable    ${POTASH6_URI}    ${resp['uri']}
+    Should Be Equal As Strings    ${resp['state']}    Configured
+
+    Log to Console     ${\n}Verify Aside and Bside FA Uplinks portStatus, operationalSpeed and connectedTo
+    :FOR    ${uplink}    IN    @{US_FA1_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${uplink}    status=OK    portStatus=Linked
+    \    ...            opSpeed=${data_common.OPSPEED8}    connectedTo=${CONNECTED_TO_WWN}
+
+    :FOR    ${uplink}    IN    @{US_FA2_UPLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${uplink}    status=OK    portStatus=Linked
+    \    ...            opSpeed=${data_common.OPSPEED8}    connectedTo=${CONNECTED_TO_WWN}
+
+F118 LI FA Uplinksets Negative Tests
+    [Tags]  LiUSNegative
+    [Documentation]    The following are tested: limitations for FC FA uplinkset on LI
+    ...                CRM_PORT_CONFIG_INFO_LOCATION_IS_NOT_FC_UPLINK_CAPABLE
+    ...                    case - Q1 to Q6 Unsplit port not allowed
+    ...                    case - IRF split port
+    ...                    case - IRF unsplit port
+    ...                CRM_PORTS_IN_DIFFERENT_SWITCH
+    ...                CRM_LOGICAL_UPLINK_CAN_ONLY_CONTAIN_MAX_ONE_FC_NETWORK
+    ...                CRM_PORT_ALREADY_ASSIGNED
+    ...                CRM_PORT_NUMBER_UNKNOWN_FORMAT
+    ...                    case - Invalid port
+
+    PASS EXECUTION IF    '${REDUNDANCY}' == 'AB'    Skip Negative Test If Redundancy is A plus B
+
+    ${resp} =    Fvt Api Get Logical Interconnect By Name    ${LIs[0]}
+    ${li_uri} =    Get From Dictionary    ${resp}    uri
+
+    :FOR    ${li_us}    IN    @{err_li_us_list}
+    \    ${us} =     Copy Dictionary    ${li_us['usBody']}
+    \    ${body} =    Build US body    ${us}    ${li_uri}
+    \    ${resp} =    Fusion Api Create Uplink Set    body=${body}
+    \    Should Be Equal As Integers    ${resp['status_code']}    ${400}
+    \    Should Be Equal As Strings    ${resp['errorCode']}    ${li_us['errorCode']}
+
+F118 Create 4 Server Profiles Each With 2 FabricAttach Connections, Verify Profile status
+    [Documentation]    Create 4 Server Profiles Each With 2 FabricAttach Connections, Verify Profile status
+    [Tags]  SP    Happy
+
+    Power off all servers
+    Add Server Profiles from variable    ${server_profiles}    10m   20s
+
+    # Verify Server Profile status is OK
+    Run Keyword And Continue On Failure    Verify Server Profiles Status    ${server_profile_names}    OK
+
+F118 Power On Servers, Verify Servers Connections through uplink port loginsCount
+    [Documentation]    Power On Servers, Verify Servers Connections through uplink port loginsCount
+    [Tags]  ServerEnd2End    Happy
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+    # power on servers
+    Run Keyword for List    ${servers}    Power on Server
+    Log to Console    ${\n}Waiting ${data_common.SERVER_BOOT_WAIT} minutes for servers to boot and come up
+    Sleep    ${data_common.SERVER_BOOT_WAIT}
+
+    Verify Happy Servers FA Connections
+
+F118 Change FA uplink speed Case 1, Update LI uplinkset uplink speed from Auto to 4Gb, Verifications
+    [Documentation]    Change FA uplink speed Case 1, Update LI uplinkset uplink speed from Auto to 4Gb, Verifications
+    [Tags]  UplinkSpeedChange1    speedChange
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+    ${resp} =    Fvt Api Get Logical Interconnect By Name    ${LIs[0]}
+    ${li_uri} =    Get From Dictionary    ${resp}    uri
+
+    Log to Console    ${\n}Edit LI uplinkset US-FA1 uplinks from Auto to 4Gb
+    ${us} =    Copy Dictionary    ${li_uplinksets['US_FA1_4Gb']}
+    ${body} =    Build US body    ${us}    ${li_uri}
+    ${us_resp} =    fvt-keywords.Get Uplink Set By Name    ${LIs[0]}   ${li_uplinksets['US_FA1_4Gb']['name']}
+    ${us_uri} =    Get From Dictionary    ${us_resp}    uri
+
+    ${resp} =    Fusion Api Edit Uplink Set    body=${body}    uri=${us_uri}
+    ${task} =    Wait For Task    ${resp}    5min    15s
+    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+    Log to Console    ${\n}Wait ${data_common.UPLINK_SPEED_WAIT} for speed change reflected in OV
+    Sleep    ${data_common.UPLINK_SPEED_WAIT}
+
+    Log to Console     ${\n}Verify uplink updated operational speed, ensure not affecting status and servers logins
+    :FOR    ${uplink}    IN    @{US_FA1_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${uplink}    status=OK    portStatus=Linked
+    \    ...            opSpeed=${data_common.OPSPEED4}    loginsCount=2
+
+    # In the past, in HA environment, changing Aside uplink spped affect Bside uplink speed
+    Log to Console     ${\n}Verify Bside uplink speed not affected.
+    :FOR    ${uplink}    IN    @{US_FA2_UPLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${uplink}    status=OK    portStatus=Linked
+    \    ...            opSpeed=${data_common.OPSPEED8}    loginsCount=2
+
+    Log to Console    ${\n}Verify server profiles status going through US-FA1 are not affected
+    Run Keyword And Continue On Failure    Verify Server Profiles Status    ${server_profile_names}    OK
+
+
+F118 Change FA uplink speed Case 2, Update LI uplink speed from 4Gb to 8Gb, Servers FA connection verification
+    [Documentation]    Change FA uplink speed Case 2, Update LI uplink speed from 4Gb to 8Gb, Servers FA connection verification
+    [Tags]  UplinkSpeedChange2    speedChange
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+    Log to Console    ${\n}Edit LI uplinkset US-FA1 uplinks from 4Gb to 8Gb
+    ${resp} =    Fvt Api Get Logical Interconnect By Name    ${LIs[0]}
+    ${li_uri} =    Get From Dictionary    ${resp}    uri
+
+    ${us} =    Copy Dictionary    ${li_uplinksets['US_FA1_8Gb']}
+    ${body} =    Build US body    ${us}    ${li_uri}
+    ${us_resp} =    fvt-keywords.Get Uplink Set By Name    ${LIs[0]}    ${li_uplinksets['US_FA1_8Gb']['name']}
+    ${us_uri} =    Get From Dictionary    ${us_resp}    uri
+
+    ${resp} =    Fusion Api Edit Uplink Set    body=${body}    uri=${us_uri}
+    ${task} =    Wait For Task    ${resp}    5min    15s
+    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+    Log to Console    ${\n}Wait ${data_common.UPLINK_SPEED_WAIT} for speed change reflected in OV
+    Sleep    ${data_common.UPLINK_SPEED_WAIT}
+
+    Log to Console     ${\n}Verify uplink updated operational speed, ensure not affecting status and servers logins
+    :FOR    ${uplink}    IN    @{US_FA1_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${uplink}    status=OK    portStatus=Linked
+    \    ...            opSpeed=${data_common.OPSPEED8}    loginsCount=2
+
+    Log to Console    ${\n}Verify server profiles status going through US-FA1 are not affected
+    Run Keyword And Continue On Failure    Verify Server Profiles Status    ${server_profile_names}    OK
+
+F118 Change uplink speed Case 3, LI UFG change uplink speed back to Auto, Servers FA connection verification
+    [Documentation]    Change uplink speed Case 3, LI UFG change uplink speed back to Auto, Servers FA connection verification
+    [Tags]  LIUFGSpeedChange    speedChange
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+    Log to Console    ${\n}Perform LI update from group to change uplink speed back to Auto
+    ${resp} =    Fvt Api Get Logical Interconnect By Name    ${LIs[0]}
+    ${li_uri} =    Get From Dictionary    ${resp}    uri
+
+    ${resp} =    Fusion Api Update from group    ${li_uri}
+    Should Be Equal As Integers    ${resp['status_code']}    ${202}
+    #took more than 10 minutes
+    ${task} =    Wait For Task    ${resp}    15m    30s
+    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+    Log to Console    ${\n}Wait ${data_common.UPLINK_SPEED_WAIT} for speed change reflected in OV
+    Sleep    ${data_common.UPLINK_SPEED_WAIT}
+
+    Log to Console     ${\n}Verify uplink updated operational speed, ensure not affecting status and servers logins
+    :FOR    ${uplink}    IN    @{US_FA1_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${uplink}    status=OK    portStatus=Linked
+    \    ...            opSpeed=${data_common.OPSPEED8}    loginsCount=2
+
+    Log to Console     ${\n}Verify server profiles status going through US-FA1 are not affected
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    OK
+
+
+F118 Disable Uplinks Case 1, Affect Servers Aside Connection
+    [Tags]  DisableAUplink
+    [Documentation]    Disable Aside US-FA1 uplinkport Q4:2 and Q3:1
+    ...                US-FA1 has 2 uplinkports Q4:2 and Q3:1, disabling 1 port at a time.
+    ...                Disable 1 out of 2, expect uplinkset in Warning status, no profile connection error
+    ...                Disable both uplinks, expect uplinkset in Critical status, and cause profile connection error.
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+
+    Log to Console    ${\n}Disable US-FA1 first uplink ${US_FA1_UPLINKS[0]}
+    ${disabled_ports} =    Create List    ${US_FA1_UPLINKS[0]}
+
+    Disable Ports    ${POTASH3_URI}    ${disabled_ports}    ${data_common.SUBPORT_STATUS_WAIT}
+
+    Log to Console    ${\n}Verify affected uplinkset status
+    Verify Uplinkset Status    ${LIs[0]}    US-FA1    Warning
+
+    Log to Console    ${\n}Verify server profiles status going through US-FA1 still OK
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    OK
+
+    Log to Console    ${\n}Verify servers logins through remaining uplinkport ${US_FA1_UPLINKS[1]}
+    Verify Port    ${POTASH3_URI}    ${US_FA1_UPLINKS[1]}    loginsCount=4
+
+    Log to Console    ${\n}Disable US-FA1 second uplink ${US_FA1_UPLINKS[1]}
+    ${disabled_ports} =    Create List    ${US_FA1_UPLINKS[1]}
+
+    Disable Ports    ${POTASH3_URI}    ${disabled_ports}    ${data_common.SUBPORT_STATUS_WAIT}
+
+    Log to Console    ${\n}Verify affected uplinkset status
+    Verify Uplinkset Status    ${LIs[0]}    US-FA1    Critical
+
+    Log to Console    ${\n}Verify server profiles status going through US-FA1 become Critical
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    Critical
+
+    Log to Console    ${\n}Verify no server logins to these 2 uplinkports
+    :FOR    ${ul}    IN    @{US_FA1_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${ul}    loginsCount=0
+
+    Log to Console    ${\n}Verify servers logins on Bside not impacted
+    Verify Happy Servers Bside FA Connections
+
+
+F118 Enable back Uplinks Case 1, Aside Connection Restoration, Verify Server Connections and login redistribution
+    [Tags]  EnableAUplink
+    [Documentation]    Enable Aside US-FA1 uplinkports one at a time
+    ...                When one uplinkport is enabled back, all servers can login through this uplinkport
+    ...                Profiles connection should be OK.
+    ...                After second uplinkport is enabled back, server logins should be evenly redistributed
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+
+    Log to Console    ${\n}Enable back Aside US-FA1 uplinkports one at a time, enable ${US_FA1_UPLINKS[0]}
+    ${ports} =    Create List    ${US_FA1_UPLINKS[0]}
+    Enable Ports     ${POTASH3_URI}    ${ports}    ${data_common.SUBPORT_STATUS_WAIT}
+
+    Log to Console    ${\n}Verify affected uplinkset in Warning status
+    Verify Uplinkset Status    ${LIs[0]}    US-FA1    Warning
+
+    Log to Console      ${\n}Verify Server Profiles status back to OK
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    OK
+
+    Log to Console    ${\n}Verify servers logins through enabled uplinkport ${US_FA1_UPLINKS[0]}
+    Verify Port    ${POTASH3_URI}    ${US_FA1_UPLINKS[0]}    loginsCount=4
+
+    Log to Console    ${\n}Enable back Aside US-FA1 second uplinkport ${US_FA1_UPLINKS[1]}
+    ${ports} =    Create List    ${US_FA1_UPLINKS[1]}
+    Enable Ports     ${POTASH3_URI}    ${ports}    ${data_common.SUBPORT_STATUS_WAIT}
+
+    Log to Console    ${\n}Verify affected uplinksets back to OK
+    Verify Uplinkset Status    ${LIs[0]}    US-FA1    OK
+
+    Log to Console    ${\n}Verify servers logins evenly redistribute between the uplinkports
+    Verify Happy Servers Aside FA Connections
+
+
+F118 Disable Uplinks Case 2, Affect Server Bside Connection, Verify servers connection thru loginsCount
+    [Tags]  DisableBUplink
+    [Documentation]    Disable Bside US-FA2 both uplinkports in one update port REST call
+    ...                Expect Uplinkset Critical, profile connection error
+    ...                uplinkports loginsCount 0
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+
+    Disable Ports    ${POTASH6_URI}    ${US_FA2_UPLINKS}    ${data_common.SUBPORT_STATUS_WAIT}
+
+    Log to Console    ${\n}Verify affected uplinkset Critical
+    Verify Uplinkset Status    ${LIs[1]}    US-FA2    Critical
+
+    Log to Console    ${\n}Verify no server logins through these 2 disabled uplinkports
+    :FOR    ${ul}    IN    @{US_FA2_UPLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${ul}    loginsCount=0
+
+    Log to Console      ${\n}Verify servers logins on Aside not impacted
+    Verify Happy Servers Aside FA Connections
+
+    Log to Console      ${\n}Verify Server Profiles status Critical
+    Verify Server Profiles status    ${server_profile_names}    Critical
+
+
+F118 Enable back Uplinks Case 2, Bside Connection Restoration, Verify servers connection through loginsCount
+    [Tags]  EnableBUplink
+    [Documentation]    Enable Bside US-FA2 both uplinkports through the same update port REST call
+    ...                Expect uplinkset back to OK and profiles connection should be OK.
+    ...                server logins should be evenly distributed bteween the 2 uplinks
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+    Enable Ports    ${POTASH6_URI}    ${US_FA2_UPLINKS}    ${data_common.SUBPORT_STATUS_WAIT}
+
+    Log to Console    ${\n}Verify affected uplinkset back to OK
+    Verify Uplinkset Status    ${LIs[1]}    US-FA2    OK
+
+    Log to Console      ${\n}Verify Server Profiles status back to OK
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    OK
+
+    Log to Console      ${\n}Verify servers logins evenly distributed between the Bside uplinkports
+    Verify Happy Servers FA Connections
+
+F118 Disable Downlinks Case 1, Affect Servers Aside Connection, Verify servers connection thru loginsCount
+    [Documentation]    Disable Downlinks Case 1, Affect Servers Aside Connection, Verify servers connection thru loginsCount
+    [Tags]  DisableDownlink
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+    Log to Console      ${\n}Disable Aside downlink of one of enc1 and enc2 server
+    ${dl_list} =    Create List     ${ENC1_SERVERS[1]['enc1_downlink']}    ${ENC2_SERVERS[0]['enc1_downlink']}
+    Disable Ports    ${POTASH3_URI}    ${dl_list}    ${data_common.SUBPORT_STATUS_WAIT}
+
+    Log to Console    ${\n}Verify downlink status, portStatus and disabled
+    :FOR    ${dl}    IN    @{dl_list}
+    \    Verify Port    ${POTASH3_URI}    ${dl}    status=Critical    portStatus=Unlinked    enabled=False
+
+    @{sp_set1} =    Create List    ${ENC1_SERVERS[1]['sp_name']}    ${ENC2_SERVERS[0]['sp_name']}
+    Log to Console      ${\n}Verify Server Profiles with disabled downlink status Critical
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${sp_set1}    Critical
+
+    Log to Console      ${\n}Verify Server Profiles without disabled downlink status OK
+    @{sp_set2} =    Create List    ${ENC1_SERVERS[0]['sp_name']}    ${ENC2_SERVERS[1]['sp_name']}
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${sp_set2}    OK
+
+    Log to Console    ${\n}Verify affected servers not login to Aside uplinks, remaining servers logins redistributed
+    # Assume the rest of the servers logins will be redistributed
+    :FOR    ${ul}    IN    @{US_FA1_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${ul}    loginsCount=1
+
+    Log to Console    ${\n}Verify affected Aside downlink servers Bside connection not impacted
+    Verify Happy Servers Bside FA Connections
+
+F118 Enable Back Downlinks Case 1, Aside Connection Restoration, Verify servers connection thru loginsCount
+    [Documentation]    Enable Back Downlinks Case 1, Aside Connection Restoration, Verify servers connection thru loginsCount
+    [Tags]  EnableDownlink
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+    ${dl_list} =    Create List     ${ENC1_SERVERS[1]['enc1_downlink']}    ${ENC2_SERVERS[0]['enc1_downlink']}
+    Enable Ports    ${POTASH3_URI}    ${dl_list}    ${data_common.SUBPORT_STATUS_WAIT}
+
+    Log to Console    ${\n}Verify affected servers now login thru Aside uplinks
+    Verify Happy Servers Aside FA Connections
+
+    #Verify server profiles status back to OK
+    Log to Console      ${\n}Verify Server Profiles status back to OK
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    OK
+
+
+F118 Efuse Remove Aside Potash Affecting Aside connections, Verify servers Bside connection thru loginsCount
+    [Tags]  RemoveAsidePotash    efuse    efuseA
+    [Documentation]    Remove Aside Potash affecting servers connection through US-FA1
+    ...                Expect uplinkset defined on Aside Critical status, and profiles connection error
+    ...                server logins on Bside should not be affected
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+
+    Log to Console    ${\n}Remove Aside potash and wait for Absent state
+    Efuse IC and Wait    ${POTASH3}    EFuseOn
+
+    Log to Console    ${\n}Wait for HA sync
+    sleep    ${data_common.REMOVE_IC_WAIT}
+
+    Log to Console     ${\n}Verify Aside uplinksets Critical
+    :FOR    ${us}    IN    @{ASIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[0]}    ${us}    Critical
+
+    Log to Console      ${\n}Verify Profile status Critical
+    Verify Server Profiles status    ${server_profile_names}    Critical
+
+    Log to Console     ${\n}Verify Bside Interconnect remains Configured
+    Verify Interconnect    ${POTASH6}    state=Configured
+
+    Log to Console     ${\n}Verify FA Bside Uplinks status and portStatus not impacted
+    :FOR    ${uplink}    IN    @{IC6_FA_UPLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${uplink}    status=OK    portStatus=Linked
+
+    Log to Console     ${\n}Verify Bside uplinksets OK, not impacted
+    :FOR    ${us}    IN    @{BSIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[1]}    ${us}    OK
+
+    Log to Console     ${\n}Verify servers FA connection on Bside not impacted
+    Verify Happy Servers Bside FA Connections
+
+
+F118 Efuse Insert Aside Potash Restoring Aside connections, Verify servers connection thru loginsCount
+    [Tags]  InsertAsidePotash    efuse    efuseA
+    [Documentation]    Insert back Aside Potash affecting servers connection through US-FA1
+    ...                Expect uplinkset defined on Aside back to OK, and profiles connection OK
+    ...                servers connection path through Aside is restored
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+
+    Log to Console    ${\n}Insert back Aside potash and wait for Configured state
+    Efuse IC and Wait    ${POTASH3}    EFuseOff
+
+    Log to Console     ${\n}Wait for connection deployment before checking profile status
+    sleep    ${data_common.CONN_DEPLOY_WAIT}
+
+    Log to Console     ${\n}Verify Bside Interconnect remains Configured
+    Verify Interconnect    ${POTASH6}    state=Configured
+
+    Log to Console     ${\n}Verify both sides FA Uplinks status and portStatus
+    :FOR    ${uplink}    IN    @{IC3_FA_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${uplink}    status=OK    portStatus=Linked
+
+    :FOR    ${uplink}    IN    @{IC6_FA_UPLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${uplink}    status=OK    portStatus=Linked
+
+    Log to Console     ${\n}Verify Aside downlinks Linked OK
+    :FOR    ${dl}    IN    @{ASIDE_SERVER_DOWNLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${dl}    status=OK    portStatus=Linked
+
+    Log to Console     ${\n}Verify Aside and Bside uplinksets OK
+    :FOR    ${us}    IN    @{ASIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[0]}    ${us}    OK
+
+    :FOR    ${us}    IN    @{BSIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[1]}    ${us}    OK
+
+    Log to Console     ${\n}Verify Servers Profile status OK
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    OK
+
+    Log to Console     ${\n}Verify servers storage path on both Aside Bside are OK
+    Verify Happy Servers FA Connections
+
+F118 Efuse Remove Bside Potash Affecting Bside connections, Verify servers Aside connection thru loginsCount
+    [Tags]  RemoveBsidePotash    efuse    efuseB
+    [Documentation]    Remove Bside Potash affecting servers connection through US-FA2
+    ...                Expect uplinkset defined on Bside Critical status, and profiles connection error
+    ...                server logins on Aside should not be affected
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+
+    Log to Console    ${\n}Remove Bside potash and wait for Absent state
+    Efuse IC and Wait    ${POTASH6}    EFuseOn
+
+    Log to Console    ${\n}Wait for HA sync and nameServers info stabilization for Efuse case
+    sleep    ${data_common.REMOVE_IC_WAIT}
+
+    Log to Console     ${\n}Verify Bside uplinksets Critical
+    :FOR    ${us}    IN    @{BSIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[1]}    ${us}    Critical
+
+    Log to Console      ${\n}Verify Profile status Critical
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    Critical
+
+    Log to Console     ${\n}Verify Aside Interconnect remains Configured
+    Verify Interconnect    ${POTASH3}    state=Configured
+
+    Log to Console     ${\n}Verify Aside FA Uplinks status and portStatus not impacted
+    :FOR    ${uplink}    IN    @{IC3_FA_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${uplink}    status=OK    portStatus=Linked
+
+    Log to Console     ${\n}Verify Aside downlinks Linked OK not impacted
+    :FOR    ${dl}    IN    @{ASIDE_SERVER_DOWNLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${dl}    status=OK    portStatus=Linked
+
+    Log to Console     ${\n}Verify Aside uplinksets OK, not impacted
+    :FOR    ${us}    IN    @{ASIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[0]}    ${us}    OK
+
+    Log to Console     ${\n}Verify servers FA connection on Aside not impacted
+    Verify Happy Servers Aside FA Connections
+
+F118 Efuse Insert Bside Potash Restoring Bside connections, Verify servers connection thru loginsCount
+    [Tags]  InsertBsidePotash    efuse    efuseB
+    [Documentation]    Insert back Bside Potash affecting servers connection through US_FA2
+    ...                Expect uplinkset defined on Bside back to OK, and profiles connection OK
+    ...                servers connection path through Bside is restored
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+
+    Log to Console    ${\n}Insert back Bside potash and wait for Configured state
+    Efuse IC and Wait    ${POTASH6}    EFuseOff
+
+    Log to Console     ${\n}Wait for connection deployment before checking profile status
+    sleep    ${data_common.CONN_DEPLOY_WAIT}
+
+    Log to Console     ${\n}Verify Aside Interconnect remains Configured
+    Verify Interconnect    ${POTASH3}    state=Configured
+
+    Log to Console     ${\n}Verify FA Uplinks portStatus and operationalSpeed
+    :FOR    ${uplink}    IN    @{IC3_FA_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${uplink}    status=OK    portStatus=Linked
+    :FOR    ${uplink}    IN    @{IC6_FA_UPLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${uplink}    status=OK    portStatus=Linked
+
+    Log to Console     ${\n}Verify Bside downlinks Linked OK
+    :FOR    ${dl}    IN    @{BSIDE_SERVER_DOWNLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${dl}    status=OK    portStatus=Linked
+
+    Log to Console     ${\n}Verify Aside and Bside uplinksets OK
+    :FOR    ${us}    IN    @{ASIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[0]}    ${us}    OK
+
+    :FOR    ${us}    IN    @{BSIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[1]}    ${us}    OK
+
+    Log to Console      ${\n}Verify Profile status OK
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    OK
+
+    Log to Console     ${\n}Verify servers storage path on both Aside Bside are OK
+    Verify Happy Servers FA Connections
+
+F118 Power Off Aside Potash Affecting Aside connections, Verify servers Bside connection thru loginsCount
+    [Tags]  PowerOffAside    PowerAside    Power
+    [Documentation]    Power off Aside Potash affecting servers connection through US-FA1
+    ...                Expect uplinkset defined on Aside Critical status, and profiles connection error
+    ...                server logins on Bside should not be affected
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+
+    Log to Console    ${\n}Power off Aside Potash and wait for Maintenance state
+    Power IC and Wait    ${POTASH3_URI}    Off
+
+    Log to Console    ${\n}Wait for downlink status change before checking profile status
+    sleep    ${data_common.POWEROFF_IC_WAIT}
+
+    Log to Console     ${\n}Verify Aside FA Uplinks Unlinked Critical
+    :FOR    ${uplink}    IN    @{IC3_FA_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${uplink}    status=Critical    portStatus=Unlinked
+
+    Log to Console     ${\n}Verify Aside downlinks Unlinked Critical
+    :FOR    ${dl}    IN    @{ASIDE_SERVER_DOWNLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${dl}    status=Critical    portStatus=Unlinked
+
+    # In recenet build, profiles, LI and uplinksets are no longer guranteed to be Critical
+    # Engineer - after ICM is maintenance, the SDS is not polle hence port status is not updated
+    # remove verification
+    # Log to Console     ${\n}Verify Aside uplinksets Critical
+    # :FOR    ${us}    IN    @{ASIDE_UPLINK_SETS}
+    # \    Verify Uplinkset Status    ${LIs[0]}    ${us}    Critical
+    # Log to Console      ${\n}Verify Profile status Critical
+    # Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    Critical
+
+    Log to Console     ${\n}Verify Bside Interconnect is Configured
+    Verify Interconnect    ${POTASH6}    state=Configured
+
+    Log to Console     ${\n}Verify Bside FA Uplinks portStatus not impacted
+    :FOR    ${uplink}    IN    @{IC6_FA_UPLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${uplink}    status=OK    portStatus=Linked
+
+    Log to Console     ${\n}Verify Bside uplinksets OK, not impacted
+    :FOR    ${us}    IN    @{BSIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[1]}    ${us}    OK
+
+    Log to Console     ${\n}Verify servers Bside FA connection not impacted
+    Verify Happy Servers Bside FA Connections
+
+
+F118 Power On Aside Potash Restoring Aside connections, Verify servers connection thru loginsCount
+    [Tags]  PowerOnAside    PowerAside    Power
+    [Documentation]    Power back on Aside Potash affecting servers connection through US-FA1
+    ...                Expect uplinkset defined on Aside back to OK, and profiles connection OK
+    ...                servers connection path through Aside is restored
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+
+    Log to Console     ${\n}Power back on Aside Potash and wait for Configured state
+    Power IC and Wait    ${POTASH3_URI}    On
+
+    Log to Console     ${\n}Wait for connection deployment before checking profile status
+    sleep    ${data_common.CONN_DEPLOY_WAIT}
+
+    Log to Console     ${\n}Verify Bside Interconnect remain Configured
+    Verify Interconnect    ${POTASH6}    state=Configured
+
+    Log to Console     ${\n}Verify FA Uplinks status and portStatus
+    :FOR    ${uplink}    IN    @{IC3_FA_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${uplink}    status=OK    portStatus=Linked
+    :FOR    ${uplink}    IN    @{IC6_FA_UPLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${uplink}    status=OK    portStatus=Linked
+
+    Log to Console     ${\n}Verify Aside downlinks back to Linked  OK
+    :FOR    ${dl}    IN    @{ASIDE_SERVER_DOWNLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${dl}    status=OK    portStatus=Linked
+
+    Log to Console     ${\n}Verify Aside and Bside uplinksets OK
+    :FOR    ${us}    IN    @{ASIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[0]}    ${us}    OK
+
+    :FOR    ${us}    IN    @{BSIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[1]}    ${us}    OK
+
+    Log to Console     ${\n}Verify servers Profile status OK
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    OK
+
+    # Verify Servers both Aside and Bside connections are OK
+    Verify Happy Servers FA Connections
+
+F118 Remove FA uplinkset uplinkport after Power On Enc1 Potash3
+    [Tags]  RemoveUplinkAfterPowerOnA    UpdatePowerAside    PowerAside
+    [Documentation]    Edit uplinkset defined on Aside after powering back on Aside Potash
+    ...                Remove uplinkport, expect servers login to remaining uplinkport
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+    ${resp} =    Fvt Api Get Logical Interconnect By Name    ${LIs[0]}
+    ${li_uri} =    Get From Dictionary    ${resp}    uri
+
+    Log to Console    ${\n}Edit LI uplinkset US-FA1 remove ${US_FA1_UPLINKS[0]}
+    ${us} =    Copy Dictionary    ${li_uplinksets['US_FA1_Remove_Port']}
+    ${body} =    Build US body    ${us}    ${li_uri}
+    ${us_resp} =    fvt-keywords.Get Uplink Set By Name    ${LIs[0]}    ${li_uplinksets['US_FA1_Remove_Port']['name']}
+    ${us_uri} =    Get From Dictionary    ${us_resp}    uri
+
+    ${resp} =    Fusion Api Edit Uplink Set    body=${body}    uri=${us_uri}
+    ${task} =    Wait For Task    ${resp}    15min    15s
+    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+    Log to Console    ${\n}Wait ${data_common.SUBPORT_STATUS_WAIT} for change reflected in OV
+    Sleep    ${data_common.SUBPORT_STATUS_WAIT}
+
+    Log to Console     ${\n}Verify all servers logins to ${US_FA1_UPLINKS[1]}
+    Verify Port    ${POTASH3_URI}    ${US_FA1_UPLINKS[1]}    status=OK    portStatus=Linked   loginsCount=4
+
+    Log to Console    ${\n}Verify server profiles status going through US-FA1 are not affected
+    Run Keyword And Continue On Failure    Verify Server Profiles Status    ${server_profile_names}    OK
+
+F118 LI UFG Adding Back uplinkport after Power On Enc1 Potash3, Servers FA connection verification
+    [Tags]  LIUFGAddPortAfterPowerOnA    UpdatePowerAside    PowerAside
+    [Documentation]    UFG adding back removed uplinkport after powering back on Aside potash
+    ...                Expect servers login evenly redistributed
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+    ${resp} =    Fvt Api Get Logical Interconnect By Name    ${LIs[0]}
+    ${li_uri} =    Get From Dictionary    ${resp}    uri
+
+    Log to Console    ${\n}Perform LI update from group to add back uplinkport
+    ${resp} =    Fusion Api Update from group    ${li_uri}
+    Should Be Equal As Integers    ${resp['status_code']}    ${202}
+    #took more than 10 minutes
+    ${task} =    Wait For Task    ${resp}    25m    30s
+    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+    Log to Console    ${\n}Wait ${data_common.SUBPORT_STATUS_WAIT} for change reflected in OV
+    Sleep    ${data_common.SUBPORT_STATUS_WAIT}
+
+    Log to Console    ${\n}Verify uplinkset and profiles back to OK
+    Verify Uplinkset Status    ${LIs[0]}    US-FA1    OK
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    OK
+
+    Log to Console     ${\n}Verify servers logins evenly redistributed
+    Verify Happy Servers Aside FA Connections
+
+
+F118 Power Off Bside Potash Affecting Bside connections, Verify servers Aside connection thru loginsCount
+    [Tags]  PowerOffBside    PowerBside    Power
+    [Documentation]    Power off Bside Potash affecting servers connection through US-FA2
+    ...                Expect uplinkset defined on Bside Critical, and profiles connection error
+    ...                server logins on Aside should not be affected
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+
+    Log to Console    ${\n}Power off Bside Potash and wait for Maintenance state
+    Power IC and Wait    ${POTASH6_URI}    Off
+
+    Log to Console    ${\n}Wait for downlink status change before checking profile status
+    sleep    ${data_common.POWEROFF_IC_WAIT}
+
+    Log to Console     ${\n}Verify Bside FA Uplinks Unlinked Critical
+    :FOR    ${uplink}    IN    @{IC6_FA_UPLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${uplink}    status=Critical    portStatus=Unlinked
+
+    Log to Console     ${\n}Verify Bside downlinks Unlinked Critical
+    :FOR    ${dl}    IN    @{BSIDE_SERVER_DOWNLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${dl}    status=Critical    portStatus=Unlinked
+
+    # In recenet build, profiles, LI and uplinksets are no longer guranteed to be Critical
+    # Engineer - after ICM is maintenance, the SDS is not polle hence port status is not updated
+    # remove verification
+    # Log to Console     ${\n}Verify Bside uplinksets Critical
+    # :FOR    ${us}    IN    @{BSIDE_UPLINK_SETS}
+    # \    Verify Uplinkset Status    ${LIs[1]}    ${us}    Critical
+    # Log to Console      ${\n}Verify Profile status Critical
+    # Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    Critical
+
+    Log to Console     ${\n}Verify Aside Interconnect remains Configured
+    Verify Interconnect    ${POTASH3}    state=Configured
+
+    Log to Console     ${\n}Verify Aside FA Uplinks status and portStatus not impacted
+    :FOR    ${uplink}    IN    @{IC3_FA_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${uplink}    status=OK    portStatus=Linked
+
+    Log to Console     ${\n}Verify Aside uplinksets OK, not impacted
+    :FOR    ${us}    IN    @{ASIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[0]}    ${us}    OK
+
+    Log to Console     ${\n}Verify servers Aside FA connection not impacted
+    Verify Happy Servers Aside FA Connections
+
+
+F118 Power On Bside Potash Restoring Bside connections, Verify servers connection thru loginsCount
+    [Tags]  PowerOnBside    PowerBside    Power
+    [Documentation]    Power back on Bside Potash affecting servers connection through US-FA2
+    ...                Expect uplinkset defined on Bside back to OK, and profiles connection OK
+    ...                servers connection path through Bside is restored
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+    Log to Console     ${\n}Power back on Bside Potash and wait for Configured state
+    Power IC and Wait    ${POTASH6_URI}    On
+
+    Log to Console     ${\n}Wait for connection deployment before checking profile status
+    sleep    ${data_common.CONN_DEPLOY_WAIT}
+
+    Log to Console     ${\n}Verify Aside and Bside FA Uplinks status and portStatus
+    :FOR    ${uplink}    IN    @{IC3_FA_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${uplink}    status=OK    portStatus=Linked
+    :FOR    ${uplink}    IN    @{IC6_FA_UPLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${uplink}    status=OK    portStatus=Linked
+
+    Log to Console     ${\n}Verify Aside Interconnect remains Configured
+    Verify Interconnect    ${POTASH3}    state=Configured
+
+    Log to Console     ${\n}Verify Bside downlinks Linked  OK
+    :FOR    ${dl}    IN    @{BSIDE_SERVER_DOWNLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${dl}    status=OK    portStatus=Linked
+
+    Log to Console     ${\n}Verify Aside and Bside uplinksets OK
+    :FOR    ${us}    IN    @{ASIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[0]}    ${us}    OK
+
+    :FOR    ${us}    IN    @{BSIDE_UPLINK_SETS}
+    \    Verify Uplinkset Status    ${LIs[1]}    ${us}    OK
+
+    Log to Console     ${\n}Verify servers Profile status back to OK
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    OK
+
+    # Verify Servers FA connections on both Aside and Bside
+    Verify Happy Servers FA Connections
+
+F118 Add FA Uplinkset Uplinkport and Change Uplinkport Speed after Power on Enc2 Potash6
+    [Tags]    AddUplinkAfterPowerOnB    UpdatePowerBside    PowerBside
+    [Documentation]    Edit uplinkset defined on Bside after powering back on Bside Potash
+    ...                Add uplinkport and changing port speed, expect servers login redistribute to added uplink
+    ...                Verify expected port speed
+    ...                NOTE: Test enclosure BA51 does not have IC6:Q4:2 as FA port, so skip the test
+
+    PASS EXECUTION IF    '${RACK}' != 'AZ51'    Skip Test If not AZ51 Test Enclosure, not enough FA port
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+    ${resp} =    Fvt Api Get Logical Interconnect By Name    ${LIs[1]}
+    ${li_uri} =    Get From Dictionary    ${resp}    uri
+
+    Log to Console    ${\n}Edit LI uplinkset US-FA2 adding uplinkport and change existing uplinkport speed
+    ${us} =    Copy Dictionary    ${li_uplinksets['US_FA2_Add_Port_Speed_Change']}
+    ${body} =    Build US body    ${us}    ${li_uri}
+    ${us_resp} =    fvt-keywords.Get Uplink Set By Name    ${LIs[1]}
+    ...                   ${li_uplinksets['US_FA2_Add_Port_Speed_Change']['name']}
+    ${us_uri} =    Get From Dictionary    ${us_resp}    uri
+
+    ${resp} =    Fusion Api Edit Uplink Set    body=${body}    uri=${us_uri}
+    ${task} =    Wait For Task    ${resp}    15min    15s
+    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+    Log to Console    ${\n}Wait ${data_common.SUBPORT_STATUS_WAIT} for uplinkport reflected in OV
+    Sleep    ${data_common.SUBPORT_STATUS_WAIT}
+    Sleep    5min
+    Verify Uplinkset Status    ${LIs[1]}    ${li_uplinksets['US_FA2_Add_Port_Speed_Change']['name']}    OK
+
+    Log to Console     ${\n}Verify server login distributed to the added uplinkport ${IC6_ADDED_UPLINK_PORT}
+    Verify Port    ${POTASH6_URI}    ${IC6_ADDED_UPLINK_PORT}    status=OK    portStatus=Linked
+    ...            opSpeed=${data_common.OPSPEED4}    loginsCount=1
+    Log to Console     ${\n}Verify desired speed for updated uplinkport ${IC6_SPEED_CHANGE_PORT}
+    Verify Port    ${POTASH6_URI}    ${IC6_SPEED_CHANGE_PORT}    status=OK    portStatus=Linked
+    ...            opSpeed=${data_common.OPSPEED4}
+
+    Log to Console    ${\n}Verify server profiles status going through US-FA1 are not affected
+    Run Keyword And Continue On Failure    Verify Server Profiles Status    ${server_profile_names}    OK
+
+F118 LI UFG Remove Added uplinkport after Power on Enc2 Potash6, Servers FA connection verification
+    [Tags]  LIUFGRemovePortAfterPowerOnB    UpdatePowerBside    PowerBside
+    [Documentation]    LI UFG remove added uplink for uplinkset defined on Bside, after powering back on Bside Potash
+    ...                Verify servers logins through the uplink ports
+    ...                NOTE: Test enclosure BA51 does not have IC6:Q4:2 as FA port, so skip the test
+
+    PASS EXECUTION IF    '${RACK}' != 'AZ51'    Skip Test If not AZ51 Test Enclosure
+
+    # for Tag include without going through LE creation that was created already
+    Setup Suite Variables
+
+    ${resp} =    Fvt Api Get Logical Interconnect By Name    ${LIs[1]}
+    ${li_uri} =    Get From Dictionary    ${resp}    uri
+
+    Log to Console    ${\n}Perform LI update from group to remove added uplinkport
+    ${resp} =    Fusion Api Update from group    ${li_uri}
+    Should Be Equal As Integers    ${resp['status_code']}    ${202}
+    #took more than 10 minutes
+    ${task} =    Wait For Task    ${resp}    25m    30s
+    Should Be Equal As Strings    ${task['taskState']}    Completed
+
+    Log to Console    ${\n}Wait ${data_common.SUBPORT_STATUS_WAIT} for change reflected in OV
+    Sleep    ${data_common.SUBPORT_STATUS_WAIT}
+
+    Verify Uplinkset Status    ${LIs[1]}    US-FA2    OK
+
+    Log to Console     ${\n}Verify servers logins evenly redistributed
+    Verify Happy Servers FA Connections
+
+    Run Keyword And Continue On Failure    Verify Server Profiles status    ${server_profile_names}    OK
+
+F118 BFS
+    [Tags]    BFS
+    [Documentation]    BFS
+    # for Tag include without going through LE creation that was created already
+
+    PASS EXECUTION IF    '${RACK}' != 'BA51'    Skip Test If Not BA51 enclosure since no BFS set up yet
+
+    Setup Suite Variables
+
+    # In some enclosure the servers have dual boot with local OS and BFS, some have separate BFS servers
+    # Delete the server profiles that are tested in above test cases with local OS and to be used for BFS
+    ${sp_names} =    Create List
+    :For    ${sp}    IN     @{bfs_server_profiles}
+    \    Power off Server    ${sp['serverHardwareUri']}
+    \    ${sp_resp} =    Fvt Api Get Server Profile By Name    ${sp['name']}
+    \    Run Keyword if     ${sp_resp} != None    Delete a Profile     ${sp_resp['uri']}
+    \    Append to list    ${sp_names}    ${sp['name']}
+
+    # create server profile with BFS specification
+    # This routine will check task finished with Warning or Completed
+    Add Server Profiles from variable    ${bfs_server_profiles}
+    Verify Server Profiles Status    ${sp_names}    OK
+
+    :For    ${sp}    IN     @{bfs_server_profiles}
+    \    Power on Server    ${sp['serverHardwareUri']}
+
+    Log to Console    ${\n}Waiting ${data_common.BFS_SERVER_BOOT_WAIT} minutes for servers to boot and come up
+    Sleep    ${data_common.BFS_SERVER_BOOT_WAIT}
+
+    # In case BFS server is not up, Esx server may take longer to come up
+    Run Keyword for List    ${BFS_PING_LIST}   Wait For Appliance To Become Pingable
+
+#F118 temp BFS verify
+#   [Tags]    verifyBFS
+
+    # ssh Linux BFS server and ping other servers
+    ${ping_targets} =    Get slice from list   ${BFS_PING_LIST}    1
+    SSH to host and ping others    ${BFS_PING_LIST[0]}    ${ping_targets}
+    ...    ${LINUX_BFS_USER}    ${LINUX_BFS_PWD}    ${LINUX_BFS_PROMPT}
+
+    # ensure all Linux BFS servers are up and can ping gateway
+    @{gw_ip} =    Create List    ${GW_IP_A}
+    :For    ${bfs_server}    IN     @{BFS_ENC1_SERVERS}
+    \    Run Keyword If    "${bfs_server['os']}" == "Linux"    SSH to host and ping others
+    \    ...    ${bfs_server['ip']}   ${gw_ip}    ${LINUX_BFS_USER}    ${LINUX_BFS_PWD}    ${LINUX_BFS_PROMPT}
+
+    :For    ${bfs_server}    IN     @{BFS_ENC2_SERVERS}
+    \    Run Keyword If    "${bfs_server['os']}" == "Linux"    SSH to host and ping others
+    \    ...    ${bfs_server['ip']}   ${gw_ip}    ${LINUX_BFS_USER}    ${LINUX_BFS_PWD}    ${LINUX_BFS_PROMPT}
+
+
+*** Keywords ***
+Login OV
+    [Documentation]    Login to OneView
+    Set Log Level    TRACE
+    Run Keyword and Ignore Error    Write To ciDebug Log
+    Fusion Api Login Appliance    ${appliance_ip}    ${data_common.admin_credentials}
+
+Common Test Setup
+    [Documentation]    Pre-condition keyword run before each test case
+    # Run Keyword and Ignore Error    Write To ciDebug Log
+    Login OV
+
+Common Test Teardown
+    [Documentation]    Post-conditions for ALL test cases
+    # Pass Execution
+    fusion api logout appliance
+
+Verify Happy Servers Aside FA Connections
+    [Documentation]    Verify Servers Aside FA connections through uplinkport loginsCount
+    ...                Ensure servers logins evenly distributed among uplinkset uplink ports
+
+    Log to Console    ${\n}Verify servers Aside FA connections evenly distributed between the uplink ports
+    :FOR    ${uplink}    IN    @{US_FA1_UPLINKS}
+    \    Verify Port    ${POTASH3_URI}    ${uplink}    status=OK    portStatus=Linked    loginsCount=2
+
+Verify Happy Servers Bside FA Connections
+    [Documentation]    Verify Servers Bside FA connections through uplinkport loginsCount
+    ...                Ensure servers logins evenly distributed among uplinkset uplink ports
+
+    Log to Console    ${\n}Verify servers Bside FA connections evenly distributed between the uplink ports
+    :FOR    ${uplink}    IN    @{US_FA2_UPLINKS}
+    \    Verify Port    ${POTASH6_URI}    ${uplink}    status=OK    portStatus=Linked    loginsCount=2
+
+Verify Happy Servers FA Connections
+    [Documentation]    Verify servers both Aside and Bside FA connections through uplinkport loginsCount
+    ...                Ensure servers logins evenly distributed among uplinkset uplink ports
+
+    Log to Console    ${\n}Verify servers both Aside and Bside FA connections through uplink loginsCount
+
+    Verify Happy Servers Aside FA Connections
+    Verify Happy Servers Bside FA Connections
+
+Setup Suite Variables
+    [Documentation]    Set the suite variables if not set up, for tagged test cases
+
+    ${resp} =    Run Keyword If    '${POTASH3_URI}' == 'None'     Fvt Api Get Interconnect By Name    ${POTASH3}
+    Run Keyword If    ${resp} != None    Set Suite Variable    ${POTASH3_URI}    ${resp['uri']}
+    ${resp} =    Run Keyword If    '${POTASH6_URI}' == 'None'     Fvt Api Get Interconnect By Name    ${POTASH6}
+    Run Keyword If    ${resp} != None    Set Suite Variable    ${POTASH6_URI}    ${resp['uri']}
+

@@ -1,0 +1,313 @@
+*** Settings ***
+
+Documentation     Feature Test: US23397 Active-Active 
+...               Steps 1 to 7
+
+Resource            ../../../../resource/fusion_api_all_resource_files.txt
+
+Library                   FusionLibrary
+Library                   RoboGalaxyLibrary
+Library                   Collections
+Library                   OperatingSystem
+Library                   Process
+Variables                 data_variables.py	
+
+Suite Setup       Cleanup For Suite
+Suite Teardown    Suite Teardown
+
+*** Variables ***
+${APPLIANCE_IP}            15.199.234.35
+
+*** Test Cases ***
+
+US23397 Active-Active
+
+####  Step-1-Creating Networks  ####
+     Set Log Level      TRACE
+     Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+     Log to console and logfile     \n Creating Ethernet networks
+     ${eth_nw} =    Get Variable Value    ${ethernet_networks}
+     Run Keyword If    ${eth_nw} is not ${null}    Add Ethernet Networks from variable     ${eth_nw}
+     Log to console and logfile    \nAttempting to create a new network with existing name
+     ${resp}=      Fusion Api Create Ethernet Network    body=${ethernet_networks[0]}
+     Validate Response  ${resp}    ${valDict_1}
+     Log to console and logfile     \n Trying to edit a network name with the already existing one
+     ${resp}=    Set Ethernet Network   net_101-A   name=net_101-B
+     Validate Response  ${resp}    ${valDict_1}
+
+####  Step-2-Adding the Enclosure  ####
+    Log to console and logfile   \n Creating LIG with US , US-1A
+    ${body} =   Build LIG body      ${ligs['lig1']}
+    ${resp} =   Fusion Api Create LIG   ${body}
+    Run keyword unless   ${resp['status_code']}== 202    Fail    ${resp['message']}
+    ${task} =   Wait For Task   ${resp}    60s	2s
+    Log to console and logfile    LIG created successfully
+
+    Log to console and logfile    \nCreating EG and importing the Enclosure
+    ${enc_groups} =  Get Variable Value   ${eg_body1['EG_1']}
+	Run Keyword If   ${enc_groups} is not ${null}   Add Enclosure Group from variable   ${enc_groups}
+    ${EG_uri}=    Get Enclosure Group URI    ${EG1}
+    Log to console and logfile    EG created successfully
+   
+    Set To Dictionary    ${enc_body1}    enclosureGroupUri    ${EG_uri}
+    ${resp_enc}=    Fusion Api Add Enclosure    ${enc_body1}
+    Run keyword unless	${resp_enc['status_code']}== 202    Fail    ${resp_lig['message']}
+    ${task} =   Wait For Task    ${resp_enc}    500s   30s
+    Log to console and logfile    Enclosure imported successfully
+
+    Log to console and logfile   \nVerifying the error message for more than 3 duplicate networks
+    ${lig} =     Get LIG Member     ${LIG1}
+    ${body} =   Build LIG body      ${ligs['lig103']}
+    ${ethernetSettings} =   Get From Dictionary   ${lig}  ethernetSettings
+    Set to dictionary    ${body}     ethernetSettings    ${ethernetSettings}
+    ${lig_uri} =    Get LIG Uri     ${LIG1}
+    ${resp} = 	Fusion Api Edit LIG     body=${body}	uri=${lig_uri}
+    Run keyword unless   ${resp['status_code']}== 202    Fail    ${resp['message']}
+    ${task} =	Wait For Task   ${resp}   120s   2s
+    Validate Response Regex    ${task['taskErrors'][0]}    ${valDict_2}
+    Log to console and logfile    \n\nSuccessfully verified the error message
+
+####  Step-3-Editing LIG and verifying the error message for dup networks  ####
+    Log to console and logfile   \nVerifying the error message for duplicate networks
+    ${body} =   Build LIG body      ${ligs['lig102']}
+    ${ethernetSettings} =   Get From Dictionary   ${lig}  ethernetSettings
+    Set to dictionary    ${body}     ethernetSettings    ${ethernetSettings}
+    ${resp} =    Fusion Api Edit LIG     body=${body}    uri=${lig_uri}
+    Run keyword unless   ${resp['status_code']}== 202    Fail    ${resp['message']}
+    ${task} =    Wait For Task   ${resp}   120s   2s
+    Validate Response Regex    ${task['taskErrors'][0]}    ${valDict_2}
+    Log to console and logfile    \n\nSuccessfully verified the error message
+
+    Log to console and logfile    \n Creating a new LIG with duplicate nw in US
+    ${body} =   Build LIG body      ${ligs['lig102']}
+    Log to console and logfile    \n-Creating LIG 
+    ${resp} =   Fusion Api Create LIG   ${body}
+    Run keyword unless   ${resp['status_code']}== 202    Fail    ${resp['message']}
+    ${task} =   Wait For Task   ${resp}    60s	2s
+	Validate Response Regex    ${task['taskErrors'][0]}    ${valDict_2}
+	Log to console and logfile    \n\nSuccessfully verified the error message
+	
+####  Step-4 - Editing LIG and verifying the error message for dup networks and Checking for Active - Standby  ####
+    Log to console and logfile    \n Trying to add duplicate network from LI
+    ${li_uri} =     Get LI URI          ${ENC1}-${LIG1}
+    ${uplinksets} =    Fusion Api Get Uplink Set     param=?filter="'name'=='${US1}'"
+    ${us_uri} =    Get From Dictionary   ${uplinksets['members'][0]}    uri
+    ${us_name} =   Get From Dictionary   ${uplinksets['members'][0]}    name
+    ${body} =     Build US body   ${li_uplink_sets['US-1A']}   ${li_uri}
+    ${resp} =     Fusion Api Edit Uplink Set	body=${body}	uri=${us_uri}
+    Validate Response     ${resp}    ${valDict_3}
+
+    Log to console and logfile    \n Editing to add duplicate network from LI
+    ${us} =      Copy Dictionary    ${li_uplink_sets['US-2']}
+    ${body} =     Build US body    ${us}    ${li_uri}
+    ${resp} =     Fusion Api Create Uplink Set  body=${body}
+    Validate Response	${resp}   ${valDict_4}
+    ${us} =     Copy Dictionary	${li_uplink_sets['US-3']}
+    ${body} =     Build US body 	${us}    ${li_uri}
+    ${resp} =     Fusion Api Create Uplink Set  body=${body}
+    Validate Response	${resp}   ${valDict_3}
+
+    ${status}=     Create List
+    ${ic} =     Get IC          ${INTERCONNECTS[0]}
+    ${uri} =     Get From IC    ${ic}   uri
+    ${interconnect} =           Fusion Api Get Interconnect Ports            uri=${uri}
+    ${ports} =  Get From Dictionary     ${interconnect}     members
+    ${l} =    Get Length     ${ports}
+       Log     ${l}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${port_list} =   Get From List   ${ports}    ${x}
+    \   Log         ${port_list}
+    \   Exit For Loop If      '${port_list['portType']}' == 'Uplink' and '${port_list['portName']}' == 'X5'
+     ${mode1}=        Get From Dictionary     ${port_list}    portStatusReason
+     Append To List    ${status}    ${mode1}
+
+    ${ic} =     Get IC          ${INTERCONNECTS[1]}
+    ${uri} =     Get From IC    ${ic}   uri
+    ${interconnect} =           Fusion Api Get Interconnect Ports           uri=${uri}
+    ${ports} =  Get From Dictionary     ${interconnect}     members
+    ${l} =    Get Length     ${ports}
+       Log     ${l}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${port_list} =   Get From List   ${ports}    ${x}
+    \   Log         ${port_list}
+    \   Exit For Loop If      '${port_list['portType']}' == 'Uplink' and '${port_list['portName']}' == 'X5'
+     ${mode2}=        Get From Dictionary     ${port_list}    portStatusReason
+     Append To List    ${status}    ${mode2}
+     List Should Contain Sublist     ${status}     ${modes}
+     Log to console and logfile    \n The interconnects are correclt showing the Active-Standby states
+
+	
+####  Step-5-Verifying the dup network creation for Network Sets  ####
+     ${network_sets} =  Get Variable Value   ${network_sets}
+     ${resp}=    Add Network Sets from variable		${network_sets}
+    Validate Response   ${resp}   ${valDict_5}
+
+     ${net} =     Fusion Api Get Network Set   param=?filter="'name'=='NWset-A'"
+    ${body} =    Get From Dictionary   ${net}   members
+    ${networkUris} =   Get Ethernet URIs    ${enets}
+    Set to Dictionary   ${body[0]}   networkUris    ${networkUris}
+    ${resp} =    Fusion Api Edit Network Set   body=${body[0]}   uri=${body[0]['uri']}
+    Validate Response     ${resp}    ${valDict_5}
+
+####  Step-6  ####
+     ${ethernet_networks} =    Get Variable Value    ${ethernet_101}
+     Run Keyword If    ${ethernet_101} is not ${null}    Add Ethernet Networks from variable     ${ethernet_101}
+    ${body} =   Build LIG body      ${ligs['lige']}
+    Log to console and logfile    \n-Creating LIG 
+    ${resp} =   Fusion Api Create LIG   ${body}
+    Run keyword unless   ${resp['status_code']}== 202    Fail    ${resp['message']}
+    ${task} =   Wait For Task   ${resp}    60s    2s
+     ${network_sets} =  Get Variable Value   ${network_2}
+     ${resp}=    Add Network Sets from variable    ${network_2}
+
+####  Step-7-Checking for the Active-Active in LI  ####
+    ${lig} =     Get LIG Member     ${LIG1}
+    ${li_uri} = 	Get LI URI   ${LE1}-${LIG1}
+    ${body} =   Build LIG body      ${ligs['lig105']}
+    ${ethernetSettings} =   Get From Dictionary   ${lig}  ethernetSettings
+    Set to dictionary    ${body}     ethernetSettings    ${ethernetSettings}
+    ${lig_uri} =    Get LIG Uri     ${LIG1}
+    ${resp} =   Fusion Api Edit LIG     body=${body}	uri=${lig_uri}
+    Run keyword unless   ${resp['status_code']}== 202    Fail    ${resp['message']}
+	${task} =   Wait For Task   ${resp}   120s   2s
+    Perform an Update From Group LI    ${li_uri}   15min    15s
+
+    Log to console and logfile   \n Checking if the status is Active -Active in the interconnects.
+    :FOR   ${IC}   IN   @{INTERCONNECTS}
+    \    ${ic} =     Get IC          ${IC}
+    \    ${uri} =     Get From IC    ${ic}   uri
+    \     Log             ${uri}
+    \    ${interconnect} =           Fusion Api Get Interconnect Ports           uri=${uri}
+    \    ${ports} =  Get From Dictionary     ${interconnect}     members
+    \    Log         ${ports}
+    \   ${l} =    Get Length     ${ports}
+    \    Log     ${l}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${port_list} =   Get From List   ${ports}    ${x}
+    \   Log         ${port_list}
+    \   Exit For Loop If      '${port_list['portType']}' == 'Uplink' and '${port_list['portName']}' == 'X5'
+    Sleep   1min
+     Run Keyword If      '${port_list['portStatusReason']}' != 'Active'    fail     msg="The connected uplink port has not become active"
+     Log to console and logfile    \n Both the interconnect uplink port has become active
+
+
+*** Keywords ***
+
+Perform an Update From Group LI
+	[Arguments]		${liuri}	${timeout}=5 min 	${interval}=15s
+	${resp} = 	    Fusion Api Update From Group   uri=${li_uri}
+	Run Keyword If  ${resp['status_code']} !=202    fail    Update from group
+	${task} =	    Wait For Task 	${resp} 	${timeout}		${interval}
+
+Get IC
+    [Arguments]     ${ICM_NAME}
+    ${resp} =   fusion api get interconnect
+    Log     ${resp}
+    ${ics} =     Get From Dictionary     ${resp}    members
+    ${l} =  Get Length  ${ics}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${ic} =     Get From List   ${ics}    ${x}
+    \   Exit For Loop If    '${ic['name']}' == '${ICM_NAME}'
+    [Return]    ${ic}
+    Log     ${ic}
+
+Get LE URI
+    [Arguments]          ${le}
+    ${resp} =     Fusion Api Get Logical Enclosure
+    ${l} =        Get Length    ${resp['members']}
+    :FOR   ${x}   IN RANGE      0      ${l}
+    \      Run Keyword If       '${resp['members'][${x}]['name']}' != '${le}'          Continue For Loop
+    \      ${uri} =      Get From Dictionary        ${resp['members'][${x}]}   uri
+    [Return]      ${uri}
+    
+Perform an Update From Group
+	[Arguments]		${leuri}	${timeout}=5 min 	${interval}=15s
+	${resp} = 	    Fusion Api Update Logical Enclosure from Group   uri=${le_uri}
+	${task} =	    Wait For Task 	${resp} 	${timeout}		${interval}
+	Validate Response	${task}	${valDict}
+    
+Add Network Sets from variable
+	[Documentation]   Adds Network sets to an appliance from a variable which contains a list of dicts with the entire payload
+	[Arguments]		${networks}
+	Log to console and logfile  	Adding NETWORK SETS	
+	:FOR	${net}	IN	@{networks}
+	\		${networkUris} = 	Get Ethernet URIs	${net['networkUris']}
+	\		Set to dictionary	${net}	networkUris	${networkUris}		
+	\		${nativeNetworkUri} = 	Run Keyword If 	'${net['nativeNetworkUri']}' != 'None'		Get Ethernet URI	${net['nativeNetworkUri']}
+	\		Set To Dictionary 	${net}	nativeNetworkUri	${nativeNetworkUri}		
+	\		${resp} = 	Fusion Api Create Network Set		body=${net}
+	[Return]	${resp}
+
+
+Get Enclosure Group URI
+	[Arguments]		${eg}
+	${resp} = 	Fusion Api Get Enclosure Groups
+	${l} = 	Get Length	${resp['members']}
+	:FOR	${x}	IN RANGE	0	${l}
+	\ 	Run Keyword If 	'${resp['members'][${x}]['name']}' != '${eg}'		Continue For Loop
+	\	${uri} = 	Get From Dictionary		${resp['members'][${x}]}	uri
+	[Return]	${uri}
+	
+Set Ethernet Network
+    [Arguments]   ${lookupName}    @{args}
+    Log to console and logfile    \t Set Ethernet Networks ${args}
+    ${resp}  ${uri}=    Get Ethernet Network By Name    ${lookupName}
+    :FOR   ${arg}   IN   @{args}
+    \   ${key}=  Fetch From Left  ${arg}  =
+    \   ${value}=  Fetch From Right  ${arg}  =
+    \   Set To Dictionary   ${resp}   ${key}    ${value}
+    ${Response}=     Fusion API Edit Ethernet Network    ${resp}   ${uri}
+    [Return]    ${Response}
+
+Get Ethernet Network By Name
+    [Documentation]    Returns a Network given a network Name
+    [Arguments]    ${Name}
+    ${Network}    Fusion Api Get Ethernet Networks    param=?filter="'name'='${Name}'"
+    ${Count}    Get from Dictionary    ${Network}    count
+    Should Be Equal As Numbers    ${Count}    1    msg=Cant find ethernet-network named ${Name}
+    ${member0Resp}=   Get Variable Value     ${Network['members'][0]}
+    ${member0Uri}=   Get From Dictionary     ${member0Resp}   uri
+    [Return]   ${member0Resp}  ${member0Uri}
+    
+Build US body
+	[Arguments]		${us}	${li_uri}
+	Set to dictionary	${us}	logicalInterconnectUri	${li_uri}
+	${l} = 	Get Length	${us['portConfigInfos']}
+	:FOR	${x}	IN RANGE	0	${l}
+	\   ${enc_uri} =            Get From Dictionary     ${us['portConfigInfos'][${x}]}	enclosure
+	\   ${enc_uri_1} =        Get Enclosure Uri   ${enc_uri}
+	\	Set To Dictionary		${us['portConfigInfos'][${x}]}	enclosure	${enc_uri_1}
+
+	# process eth
+	${networks} = 		Get From Dictionary		${us}	networkUris
+	${networkUris} = 	Get Ethernet Uris	${networks}
+	Set to dictionary	${us}	networkUris	${networkUris}
+	# process fc
+	${networks} = 		Get From Dictionary		${us}	fcNetworkUris
+	${networkUris} = 	Get FC Uris	${networks}
+	Set to dictionary	${us}	fcNetworkUris	${networkUris}
+	# process fcoe
+	${networks} = 		Get From Dictionary		${us}	fcoeNetworkUris
+	${networkUris} = 	Get FCoE Uris	${networks}
+	Set to dictionary	${us}	fcoeNetworkUris	${networkUris}
+
+	${body} = 		Fusion Api Create Uplink Set Payload	${us}
+	[Return]	${body}
+
+Login to OneView via REST	
+	[Documentation]		Login to the appliance with the cred
+	[Tags]  add   POSITIVE
+	Set Log Level    TRACE
+	${resp}     Fusion Api Login Appliance    ${appliance_IP}        ${admin_credentials}
+
+Cleanup For Suite	
+	[Documentation]	Returns appliance to a 'clean' state by removing all resources\enclosures
+	Log to console and logfile	[Cleanup]
+	Login to OneView via REST
+	Power off ALL Servers
+	Remove All Server Profiles
+	Remove ALL Enclosures
+	Remove ALL Enclosure Groups
+	Remove ALL LIGs
+	Remove ALL Ethernet Networks
+	Remove ALL FC Networks    

@@ -1,0 +1,384 @@
+*** Settings ***
+Documentation       Restrict Hill FW update to disallow pre-3.08(vc 4.65) to FOS 5.x
+Variables                 data_variables.py
+Library                   FusionLibrary
+Library                   RoboGalaxyLibrary
+Library                   Collections
+Library                   BuiltIn
+Library                   OperatingSystem
+Library                   Process
+Library                   ServerOperations
+Library                   Dialogs
+Resource                  ../../../../../Resources/api/fusion_api_resource.txt
+Suite Setup               Suite Setup Tasks
+
+
+***Variables***
+${APPLIANCE_IP}      15.186.23.127
+
+***Test Cases***
+Login
+    [Documentation]    Login to Appliance
+    Set Log Level    TRACE
+    ${Login_response} =    Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+    Run keyword unless    ${Login_response[0]['status_code']}== 200  Fail   "Unable to Login Appliance"
+
+########################################Pre-condition#########################################
+Create FC and Ethernet networks
+    [Documentation]    Create FC and Ethernet networks
+    Set Log Level    TRACE
+    ${resp}    Add FC Networks from variable    ${FC_Hill}
+    Run Keyword If  '${resp[0]['status_code']}' != '202'  Fail    ELSE  log  ${resp[0]}    console=True
+
+Create LIG
+    [Documentation]    create LIG
+    Add LIG from variable    ${ligs['LIG_Hill']}
+    Log  LIG created   console=True
+
+Creating Enclosure Group
+    [Documentation]    create EG
+    ${resp}    Add Enclosure Group from variable    ${enc_group['EG']}
+    Run Keyword If  '${resp['status_code']}' == '201'    Wait For Task2    ${resp}    ELSE    Fail    Log    failed    console=True
+
+Importing Enclosure
+    [Documentation]    Import Enclosure
+    ${resp}    Add Enclosures from variable    ${encs}
+    Run Keyword If  '${resp[0]['status_code']}' == '203'    Wait For Task2    ${resp[0]}    ELSE    Fail    Log    failed    console=True
+
+######################################Verify FW downgrade not allowed from 5_x to piror 3_08########################################
+1_1 Uploading the FW bundle of Hill module version of 3_01
+    [Documentation]    Uploading the FW bundle
+    ${resp} =     Fusion Api Upload Firmware Bundle      localfile=${CURDIR}/SPP/${SPP_bundle_301}
+    Log   ${SPP_bundle_301}SPP bundle is successfully uploaded    console=True
+
+1_2 Downgrading the firmware through LI page to piror 3_08 by the Administrator
+    [Documentation]    Downgrading the firmware to piror 3_08 through LI page
+    ${li_uri} =    Get LI URI   ${LI}
+    Set to dictionary     ${liupdate_body}     sppUri    ${fw_uri_301}
+    ${response}=    Fusion Api Li Upgrade Firmware    ${liupdate_body}    ${li_uri}
+    ${task} =     Wait For Task        ${response}   10min    30s
+    ${ValDict}=      create Dictionary     taskStatus=Staging failed for the LI ${LI}
+    ...                                    taskState=Warning
+    Validate Response     ${task}   ${ValDict}
+    Validate Response Regex    ${task['taskErrors'][0]}     ${ValDict_1}
+    Log  Verified that FW downgrade not allowed from 5.x to piror 3.08    console=True
+
+1_3 Validate Hill interconnect firmware version is 5_x
+    [Documentation]    Validating the Hill version for the interconnect
+    :FOR    ${IC}    IN    @{INTERCONNECTS_HILL}
+    \   ${resp} =    Fusion Api Get Interconnect    param=?filter="'name' = '${IC}'"
+    \   ${firmwareVersion} =  Get From Dictionary  ${resp['members'][0]}    firmwareVersion
+    \   Log    ${firmwareVersion}    console=True
+    \   Run keyword If    ${firmwareVersion} != ${fc_firmwareVersion_500}   Fail    "Firmware version mismatch"
+    \   ...    ELSE     Log    Firmware Version is validated as ${fc_firmwareVersion_500} for ${IC}    console=True
+
+######################################Verify the LI and LE upgrade only for privileged user#########################################
+2_1 Uploading the FW bundle of Hill module version of 3_08
+    [Documentation]    Uploading the FW bundle
+    ${resp} =     Fusion Api Upload Firmware Bundle      localfile=${CURDIR}/SPP/${SPP_bundle_308}
+    Log   ${SPP_bundle_308}SPP bundle is successfully uploaded    console=True
+
+2_2 Creating the network user and logging in to do the downgrade
+    [Documentation]    Creating the users and verify That downgrade can happen
+    ${resp}    Add Users from variable    ${users}
+    ${l}    Get Length    ${resp}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Run Keyword If  '${resp[${x}]['status_code']}' == '200'    Wait For Task2    ${resp[${x}]}    2m    1m    ELSE    Fail    Log    '${resp[${x}]['errorCode']}'    Console = True
+
+2_3 Logging into different user
+    [Documentation]    Logging into different user
+    ${l} =  Get Length  ${usercred}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${usercred[${x}]}
+    \    ${li_uri} =    Get LI URI   ${LI}
+    \    Set to dictionary     ${liupdate_body}     sppUri    ${fw_uri_308}
+    \    ${response}=    Fusion Api Li Upgrade Firmware    ${liupdate_body}    ${li_uri}
+    \    Log   ${response}   console=True
+    \    Validate Response      ${response}      ${valDict_user}
+    \    Log    Verified that the FW update is not possible by the otheruser   console=True
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+
+2_4 Logging into network user and downgrade
+    [Documentation]    Logging into network user and downgrade
+    Set Log Level    TRACE
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${network_user[0]}
+    Log   Loged into network user    console=True
+    ${li_uri} =    Get LI URI   ${LI}
+    Set to dictionary     ${liupdate_body}     sppUri    ${fw_uri_308}
+    ${response}=    Fusion Api Li Upgrade Firmware    ${liupdate_body}    ${li_uri}
+    ${task} =     Wait For Task        ${response}   60min    2min
+    Run Keyword If  '${task['taskState']}' !='Completed'  or  ${task['status_code']} !=200   fail    msg=\nLI Firmware update Failed for network User. \n ErrorCode:${task['taskErrors'][0][errorCode]}\n :Message ${task['taskErrors'][0][errorCode]}
+    ...         ELSE    Log   LI FW Upgrade completed successfully by the Network User    console=True
+
+2_5 Validate Hill interconnect firmware version is 3_08
+    [Documentation]    Validate Hill interconnect firmware version
+    :FOR    ${IC}    IN    @{INTERCONNECTS_HILL}
+    \   ${resp} =    Fusion Api Get Interconnect    param=?filter="'name' = '${IC}'"
+    \   ${firmwareVersion} =  Get From Dictionary  ${resp['members'][0]}    firmwareVersion
+    \   Log    ${firmwareVersion}    console=True
+    \   Run keyword If    ${firmwareVersion} != ${fc_firmwareVersion_308}   Fail    "Firmware version mismatch"
+    \   ...    ELSE     Log    Firmware Version is validated as ${fc_firmwareVersion_308} for ${IC}    console=True
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+
+###################################Verify Three step upgrade from 3.08 to 4.0 to 4.10 to 5.x#######################################
+3_1 Uploading the FW bundle of Hill module version of 4_0
+    [Documentation]    Uploading the FW bundle
+    ${resp} =     Fusion Api Upload Firmware Bundle      localfile=${CURDIR}/SPP/${SPP_bundle_400}
+    Log   ${SPP_bundle_400}SPP bundle is successfully uploaded    console=True
+
+    ${resp} =     Fusion Api Upload Firmware Bundle      localfile=${CURDIR}/SPP/${SPP_bundle_410}
+    Log   ${SPP_bundle_410}SPP bundle is successfully uploaded    console=True
+
+    ${resp} =     Fusion Api Upload Firmware Bundle      localfile=${CURDIR}/SPP/${SPP_bundle_500}
+    Log   ${SPP_bundle_500}SPP bundle is successfully uploaded    console=True
+
+3_2 Three step upgrade FW from 3_08 to 4_00 to 4_10 to 5_x
+    [Documentation]    Three step upgrade from 3_08
+    Set to dictionary     ${liupdate_body}     sppUri    ${fw_uri_400}
+    ${li_uri} =    Get LI URI   ${LI}
+    ${response}=    Fusion Api Li Upgrade Firmware    ${liupdate_body}    ${li_uri}
+    ${task} =     Wait For Task        ${response}   60min    2min
+    Run Keyword If  '${task['taskState']}' !='Completed'  or  ${task['status_code']} !=200   fail    msg=\nLI Firmware update Failed for network User. \n ErrorCode:${task['taskErrors'][0][errorCode]}\n :Message ${task['taskErrors'][0][errorCode]}
+    ...         ELSE    Log   LI FW Upgrade completed successfully   console=True
+
+3_3 Validate Hill interconnect firmware version is 4_00
+    [Documentation]    Validate Hill interconnect firmware version
+    :FOR    ${IC}    IN    @{INTERCONNECTS_HILL}
+    \   ${resp} =    Fusion Api Get Interconnect    param=?filter="'name' = '${IC}'"
+    \   ${firmwareVersion} =  Get From Dictionary  ${resp['members'][0]}    firmwareVersion
+    \   Log    ${firmwareVersion}    console=True
+    \   Run keyword If    ${firmwareVersion} != ${fc_firmwareVersion_400}   Fail    "Firmware version mismatch"
+    \   ...    ELSE     Log    Firmware Version is validated as ${fc_firmwareVersion_400} for ${IC}    console=True
+
+3_4 Upgrade the FW to 4_10
+    [Documentation]    Upgrade the FW to 4_10
+    Set to dictionary     ${liupdate_body}     sppUri    ${fw_uri_410}
+    ${li_uri} =    Get LI URI   ${LI}
+    ${response}=    Fusion Api Li Upgrade Firmware    ${liupdate_body}    ${li_uri}
+    ${task} =     Wait For Task        ${response}   60min    2min
+    Run Keyword If  '${task['taskState']}' !='Completed'  or   ${task['status_code']} !=200   fail    msg=\nLI Firmware update Failed for network User. \n ErrorCode:${task['taskErrors'][0][errorCode]}\n :Message ${task['taskErrors'][0][errorCode]}
+    ...         ELSE    Log   LI FW Upgrade completed successfully   console=True
+
+3_5 Validate Hill interconnect firmware version is 4_10
+    [Documentation]    Validate Hill interconnect firmware version
+    :FOR    ${IC}    IN    @{INTERCONNECTS_HILL}
+    \   ${resp} =    Fusion Api Get Interconnect    param=?filter="'name' = '${IC}'"
+    \   ${firmwareVersion} =  Get From Dictionary  ${resp['members'][0]}    firmwareVersion
+    \   Log    ${firmwareVersion}    console=True
+    \   Run keyword If    ${firmwareVersion} != ${fc_firmwareVersion_410}   Fail    "Firmware version mismatch"
+    \   ...    ELSE     Log    Firmware Version is validated as ${fc_firmwareVersion_410} for ${IC}    console=True
+
+3_6 Upgrade the FW to 5_x
+    [Documentation]    Upgrade the FW to 5_x
+    Set to dictionary     ${liupdate_body}     sppUri    ${fw_uri_500}
+    ${li_uri} =    Get LI URI   ${LI}
+    ${response}=    Fusion Api Li Upgrade Firmware    ${liupdate_body}    ${li_uri}
+    ${task} =     Wait For Task        ${response}   60min    2min
+    Run Keyword If  '${task['taskState']}' !='Completed'  or   ${task['status_code']} !=200   fail    msg=\nLI Firmware update Failed for network User. \n ErrorCode:${task['taskErrors'][0][errorCode]}\n :Message ${task['taskErrors'][0][errorCode]}
+    ...         ELSE    Log   LI FW Upgrade completed successfully   console=True
+
+3_7 Validate Hill interconnect firmware version is 5_x
+    [Documentation]    Validate Hill interconnect firmware version
+    :FOR    ${IC}    IN    @{INTERCONNECTS_HILL}
+    \   ${resp} =    Fusion Api Get Interconnect    param=?filter="'name' = '${IC}'"
+    \   ${firmwareVersion} =  Get From Dictionary  ${resp['members'][0]}    firmwareVersion
+    \   Log    ${firmwareVersion}    console=True
+    \   Run keyword If    ${firmwareVersion} != ${fc_firmwareVersion_500}   Fail    "Firmware version mismatch"
+    \   ...    ELSE     Log    Firmware Version is validated as ${fc_firmwareVersion_500} for ${IC}    console=True
+
+######################################Verify Three step downgrade from 5_x to 4_10 to 4_0 to 3_08########################################
+4_1 Three step downgrade FW from 5_x to 4_10 to 4_00 to 5_x
+    [Documentation]    Three step downgrade from 5_x to 4_10
+    Set to dictionary     ${liupdate_body}     sppUri    ${fw_uri_410}
+    ${li_uri} =    Get LI URI   ${LI}
+    ${response}=    Fusion Api Li Upgrade Firmware    ${liupdate_body}    ${li_uri}
+    ${task} =     Wait For Task        ${response}   60min    2min
+    Run Keyword If  '${task['taskState']}' !='Completed'  or   ${task['status_code']} !=200   fail    msg=\nLI Firmware update Failed for network User. \n ErrorCode:${task['taskErrors'][0][errorCode]}\n :Message ${task['taskErrors'][0][errorCode]}
+    ...         ELSE    Log   LI FW Upgrade completed successfully   console=True
+
+4_2 Validate Hill interconnect firmware version is 4_10
+    [Documentation]    Validate Hill interconnect firmware version
+    :FOR    ${IC}    IN    @{INTERCONNECTS_HILL}
+    \   ${resp} =    Fusion Api Get Interconnect    param=?filter="'name' = '${IC}'"
+    \   ${firmwareVersion} =  Get From Dictionary  ${resp['members'][0]}    firmwareVersion
+    \   Log    ${firmwareVersion}    console=True
+    \   Run keyword If    ${firmwareVersion} != ${fc_firmwareVersion_410}   Fail    "Firmware version mismatch"
+    \   ...    ELSE     Log    Firmware Version is validated as ${fc_firmwareVersion_410} for ${IC}    console=True
+
+4_3 Downgrade the FW to 4_00
+    [Documentation]    Downgrade the FW to 4_00
+    Set to dictionary     ${liupdate_body}     sppUri    ${fw_uri_400}
+    ${li_uri} =    Get LI URI   ${LI}
+    ${response}=    Fusion Api Li Upgrade Firmware    ${liupdate_body}    ${li_uri}
+    ${task} =     Wait For Task        ${response}   60min    2min
+    Run Keyword If  '${task['taskState']}' !='Completed'  or   ${task['status_code']} !=200   fail    msg=\nLI Firmware update Failed for network User. \n ErrorCode:${task['taskErrors'][0][errorCode]}\n :Message ${task['taskErrors'][0][errorCode]}
+    ...         ELSE    Log   LI FW Upgrade completed successfully   console=True
+
+4_4 Validate Hill interconnect firmware version is 4_00
+    [Documentation]    Validate Hill interconnect firmware version
+    :FOR    ${IC}    IN    @{INTERCONNECTS_HILL}
+    \   ${resp} =    Fusion Api Get Interconnect    param=?filter="'name' = '${IC}'"
+    \   ${firmwareVersion} =  Get From Dictionary  ${resp['members'][0]}    firmwareVersion
+    \   Log    ${firmwareVersion}    console=True
+    \   Run keyword If    ${firmwareVersion} != ${fc_firmwareVersion_400}   Fail    "Firmware version mismatch"
+    \   ...    ELSE     Log    Firmware Version is validated as ${fc_firmwareVersion_400} for ${IC}    console=True
+
+4_5 Downgrade the FW to 3_08
+    [Documentation]    Downgrade the FW to 3_08
+    Set to dictionary     ${liupdate_body}     sppUri    ${fw_uri_308}
+    ${li_uri} =    Get LI URI   ${LI}
+    ${response}=    Fusion Api Li Upgrade Firmware    ${liupdate_body}    ${li_uri}
+    ${task} =     Wait For Task        ${response}   60min    2min
+    Run Keyword If  '${task['taskState']}' !='Completed'  or   ${task['status_code']} !=200   fail    msg=\nLI Firmware update Failed for network User. \n ErrorCode:${task['taskErrors'][0][errorCode]}\n :Message ${task['taskErrors'][0][errorCode]}
+    ...         ELSE    Log   LI FW Upgrade completed successfully   console=True
+
+4_6 Validate Hill interconnect firmware version is 3_08
+    [Documentation]    Validate Hill interconnect firmware version
+    :FOR    ${IC}    IN    @{INTERCONNECTS_HILL}
+    \   ${resp} =    Fusion Api Get Interconnect    param=?filter="'name' = '${IC}'"
+    \   ${firmwareVersion} =  Get From Dictionary  ${resp['members'][0]}    firmwareVersion
+    \   Log    ${firmwareVersion}    console=True
+    \   Run keyword If    ${firmwareVersion} != ${fc_firmwareVersion_308}   Fail    "Firmware version mismatch"
+    \   ...    ELSE     Log    Firmware Version is validated as ${fc_firmwareVersion_308} for ${IC}    console=True
+
+#############################Downgrade hill firmware from 3_08 to 3_01################################
+4_7 Downgrade hill firmware from 3_08 to 3_01
+    [Documentation]    Downgrade hill firmware from 3_08 to 3_01
+    ${li_uri} =    Get LI URI   ${LI}
+    Set to dictionary     ${liupdate_body}     sppUri    ${fw_uri_301}
+    ${response}=    Fusion Api Li Upgrade Firmware    ${liupdate_body}    ${li_uri}
+    ${task} =     Wait For Task        ${response}   10min    30s
+    ${ValDict}=      create Dictionary     taskStatus=Staging failed for the LI ${LI}
+    ...                                    taskState=Warning
+    Validate Response     ${task}   ${ValDict}
+    Validate Response Regex    ${task['taskErrors'][0]}     ${ValDict_1}
+    Log  Verified that FW downgrade not allowed 3.01    console=True
+
+4_8 Validate Hill interconnect firmware version is 3_08
+    [Documentation]    Validate Hill interconnect firmware version
+    :FOR    ${IC}    IN    @{INTERCONNECTS_HILL}
+    \   ${resp} =    Fusion Api Get Interconnect    param=?filter="'name' = '${IC}'"
+    \   ${firmwareVersion} =  Get From Dictionary  ${resp['members'][0]}    firmwareVersion
+    \   Log    ${firmwareVersion}    console=True
+    \   Run keyword If    ${firmwareVersion} != ${fc_firmwareVersion_308}   Fail    "Firmware version mismatch"
+    \   ...    ELSE     Log    Firmware Version is validated as ${fc_firmwareVersion_308} for ${IC}    console=True
+
+#################################NEED UPDATE TO 3_05####################################
+4_9 Downgrading Fw from 3_08 to 3_05 from LI page
+    [Documentation]    Downgrading Fw from 3_08 to 3_05 from LI page
+    Set to dictionary     ${liupdate_body}     sppUri    ${fw_uri_305}
+    ${li_uri} =    Get LI URI   ${LI}
+    ${response}=    Fusion Api Li Upgrade Firmware    ${liupdate_body}    ${li_uri}
+    ${task} =     Wait For Task        ${response}   60min    2min
+    Run Keyword If  '${task['taskState']}' !='Completed'  or   ${task['status_code']} !=200   fail    msg=\nLI Firmware update Failed for network User. \n ErrorCode:${task['taskErrors'][0][errorCode]}\n :Message ${task['taskErrors'][0][errorCode]}
+    ...         ELSE    Log   LI FW Upgrade completed successfully   console=True
+
+4_10 Validate Hill interconnect firmware version is 3_05
+    [Documentation]    Validate Hill interconnect firmware version
+    :FOR    ${IC}    IN    @{INTERCONNECTS_HILL}
+    \   ${resp} =    Fusion Api Get Interconnect    param=?filter="'name' = '${IC}'"
+    \   ${firmwareVersion} =  Get From Dictionary  ${resp['members'][0]}    firmwareVersion
+    \   Log    ${firmwareVersion}    console=True
+    \   Run keyword If    ${firmwareVersion} != ${fc_firmwareVersion_305}   Fail    "Firmware version mismatch"
+    \   ...    ELSE     Log    Firmware Version is validated as ${fc_firmwareVersion_305} for ${IC}    console=True
+
+#####################Upgrade Hill firmware from 3_05 to 5_x##############################
+5_1 Upgrade Hill firmware from 3_05 to 5_x
+    [Documentation]    Upgrade Hill firmware from 3_05 to 5_x should fail
+    ${li_uri} =    Get LI URI   ${LI}
+    Set to dictionary     ${liupdate_body}     sppUri    ${fw_uri_500}
+    ${response}=    Fusion Api Li Upgrade Firmware    ${liupdate_body}    ${li_uri}
+    ${task} =     Wait For Task        ${response}   10min    30s
+    ${ValDict}=      create Dictionary     taskStatus=Staging failed for the LI ${LI}
+    ...                                    taskState=Warning
+    Validate Response     ${task}   ${ValDict}
+    Validate Response Regex    ${task['taskErrors'][0]}     ${ValDict_1}
+    Log  Verified that FW downgrade not allowed 5.x    console=True
+
+5_2 Validate Hill interconnect firmware version is 3_05
+    [Documentation]    Validate Hill interconnect firmware version
+    :FOR    ${IC}    IN    @{INTERCONNECTS_HILL}
+    \   ${resp} =    Fusion Api Get Interconnect    param=?filter="'name' = '${IC}'"
+    \   ${firmwareVersion} =  Get From Dictionary  ${resp['members'][0]}    firmwareVersion
+    \   Log    ${firmwareVersion}    console=True
+    \   Run keyword If    ${firmwareVersion} != ${fc_firmwareVersion_305}   Fail    "Firmware version mismatch"
+    \   ...    ELSE     Log    Firmware Version is validated as ${fc_firmwareVersion_305} for ${IC}    console=True
+
+###############################NEED TO UPGARDE TO 3_08##########################################
+5_3 Upgrade from 3_05 to 3_08 in LE Page
+    [Documentation]     Upgrade from 3_05 to 3_08 in LE Page
+    ${resp} =    Fusion Api Get Logical Enclosure
+    ${uri} =    Get From Dictionary    ${resp['members'][0]}    uri
+    ${etag}=    Get From Dictionary    ${resp['members'][0]}    eTag
+    ${headers} =   Get From Dictionary     ${resp}  headers
+    Set To Dictionary    ${headers}    If-Match    ${etag}
+    Set to dictionary     ${leupdate_body[0]['value']}    firmwareBaselineUri    ${fw_uri_308}
+    ${response}=    Fusion Api Le Firmware Update    ${leupdate_body}    ${uri}    headers=${headers}
+    ${task} =     Wait For Task        ${response}   60min    1min
+    Run Keyword If  '${task['taskState']}' !='Completed' or ${task['status_code']} !=200   fail    msg=\nLE Firmware update Failed. \n ErrorCode:${task['taskErrors'][0][errorCode]}\n :Message ${task['taskErrors'][0][errorCode]}
+    ...         ELSE    Log to console and logfile  \n\nLE FW Upgrade completed successfully !!
+
+5_4 Validate Hill interconnect firmware version is 3_08
+    [Documentation]    Validate Hill interconnect firmware version
+    :FOR    ${IC}    IN    @{INTERCONNECTS_HILL}
+    \   ${resp} =    Fusion Api Get Interconnect    param=?filter="'name' = '${IC}'"
+    \   ${firmwareVersion} =  Get From Dictionary  ${resp['members'][0]}    firmwareVersion
+    \   Log    ${firmwareVersion}    console=True
+    \   Run keyword If    ${firmwareVersion} != ${fc_firmwareVersion_308}   Fail    "Firmware version mismatch"
+    \   ...    ELSE     Log    Firmware Version is validated as ${fc_firmwareVersion_308} for ${IC}    console=True
+
+***Keyword***
+Remove All User
+    [Documentation]    Querys the appliance for all Users and then removes them
+    ${users}    Fusion Api Get User
+    :FOR    ${user} IN  @{users['members']}
+    \       Continue For Loop If    '${user['userName']}'=='Administrator'
+    \       Continue For Loop If    '${user['userName']}'=='administrator'
+    \       Continue For Loop If    '${user['userName']}'=='HardwareSetup'
+    \       ${resp}    Fusion Api Remove User    uri=${user['uri']}
+    \       Log {resp}   console=True
+
+Suite Setup Tasks
+    [Documentation]    Cleans the appliance
+    ${Login_response} =    Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+    Run keyword unless    ${Login_response[0]['status_code']}== 200  Fail   "Unable to Login Appliance"
+
+    Power off ALL Servers    PressAndHold
+    Remove All Server Profiles
+    Remove All Enclosures
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove All Ethernet Networks
+    Remove All FC Networks
+    Remove All FCoE Networks
+    Remove ALL Network Sets
+    Remove ALL Users
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

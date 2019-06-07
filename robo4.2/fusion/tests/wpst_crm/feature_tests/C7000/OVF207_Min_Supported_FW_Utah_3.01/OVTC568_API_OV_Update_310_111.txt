@@ -1,0 +1,95 @@
+*** Settings ***
+
+Documentation     Feature Test: OVF207: C7000: Minimum Supported Version of Utah FW 3.01
+...               OVTC568--OVF207_API_TC_Verify the OV upgrade to 3.10 with utah FW version as 1.11 is not allowed
+
+Resource            ../../../../resource/fusion_api_all_resource_files.txt
+
+Library                   FusionLibrary
+Library                   RoboGalaxyLibrary
+Library                   Collections
+Library                   OperatingSystem
+Library                   Process
+Variables                 data_variables.py	
+
+
+*** Variables ***
+${APPLIANCE_IP}            15.186.13.44
+${PB_Path}       ${CURDIR}/OV/${bin_310}
+
+*** Test Cases ***
+
+1.Login to Appliance  
+    Set Log Level    TRACE
+    ${Login_response} =   Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+    Run keyword unless    ${Login_response[0]['status_code']}== 200   Fail    "Unable to Login"
+    Log to console and logfile    Logged in to the appliance
+
+2.Initial Set Up 
+    Power OFF ALL Servers
+    Remove ALL Server Profiles
+    Remove ALL Enclosures
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove ALL Ethernet Networks
+    Remove ALL FC Networks
+    Remove ALL Users
+
+3.Create LIG, EG and import enclosure 
+    ${fc_networks} =    Get Variable Value    ${fcNet_utah}
+    Run Keyword If   ${fc_networks} is not ${null}    Add FC Networks from variable    ${fc_networks}
+     ${body} =   Build LIG body      ${lig_utah}
+     ${resp_lig} =    Fusion Api Create LIG    ${body}
+     ${task} =    Wait For Task    ${resp_lig}    120s    2s
+     Log to console and logfile    LIG created successfully
+     ${uri} =    Get From Dictionary    ${task['associatedResource']}    resourceUri
+     Log to console and logfile    ${uri}
+
+
+    ${enc_groups} =  Get Variable Value   ${enc_group_utah}
+    Run Keyword If   ${enc_groups} is not ${null}   Add Enclosure Group from variable    ${enc_groups}
+    Log to console and logfile    EG created succesfully
+    ${EG_uri}=    Get Enclosure Group URI    ${EG1}
+    Set To Dictionary    ${enc_body1}    enclosureGroupUri    ${EG_uri}
+    ${resp_enc}=    Fusion Api Add Enclosure    ${enc_body1}
+    Run keyword unless    ${resp_enc['status_code']}== 202    Fail    ${resp_enc['message']}
+    ${task} =   Wait For Task    ${resp_enc}    15min   1min
+    Log to console and logfile  \n\nImported the enc Successfully !!
+    
+4.Validate UTAH interconnect firmware version is 1.11
+    :FOR    ${IC}    IN    @{INTERCONNECTS_UTAH}
+    \   ${resp} =    Fusion Api Get Interconnect    param=?filter="'name' = '${IC}'"
+    \   ${firmwareVersion} =  Get From Dictionary  ${resp['members'][0]}    firmwareVersion 
+    \   Log to console and logfile    ${firmwareVersion}
+    \   Run keyword If    ${firmwareVersion} != ${fc_firmwareVersion_old}   Fail    "Firmware version mismatch"
+	\   ...    ELSE     Log to console and logfile    \nFirmware Version is validated as ${fc_firmwareVersion_old} for ${IC}
+
+5.Uploading the BIN File
+    Remove Environment Variable     https_proxy    http_proxy
+    ${upload_resp} =    Fusion Api Upload Appliance Firmware    ${PB_Path}
+    Run keyword unless   ${upload_resp['status_code']}== 200    Fail    "Unable to Upload Bin File"
+
+6.Upgrade Appliance
+	${upgrade_resp} =    Fusion Api Upgrade Appliance Firmware    ${bin_310}
+	Run keyword If    ${upgrade_resp['status_code']} != 202    Fail    "Unable to Upgrade Appliance"
+	Sleep   ${Upload_Sleep_Time1}
+
+7. Validate upgrade
+	${upgrade_resp_1} =    Fusion Api Get Appliance Firmware Upgrade Status
+	Log to console and logfile    \n\nupgrade_resp_1..${upgrade_resp_1}
+	${status} =    Get From Dictionary    ${upgrade_resp_1}    success
+	${version_dict} =    Get From Dictionary    ${upgrade_resp_1}    version
+	Run Keyword If    '${status}' != 'False'     Fail     msg="Appliance got upgraded to the 3.10 version even if the Utah fw version is less than 3.01" 
+    ...         ELSE     Log to console and logfile    \n\nAppliance is not upgraded to 3.10 OV version as Utah fw is less than 3.01
+	${string} =    Fetch From Left    ${version_dict}    ,
+	Log to console and logfile    \n\nstring...${string}
+	Run keyword If    '${string}' != '${version_300}'    Fail    msg=Version is not showing the same after upgrade failure
+	...     ELSE      Log to console and logfile    \n\nVersion is showing the same after upgrade failure
+
+8.Clean Up 
+    Remove ALL Enclosures
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove ALL Ethernet Networks
+    Remove ALL FC Networks
+    Remove ALL Users

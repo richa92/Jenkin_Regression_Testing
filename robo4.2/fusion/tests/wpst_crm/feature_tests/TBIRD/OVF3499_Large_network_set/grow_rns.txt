@@ -1,0 +1,312 @@
+*** Settings ***
+Documentation		Large Network Set For Grow Features Tests - SuiteName: LNS For Grow
+Resource            ../../../../../resources/api/fusion_api_resource.txt
+Resource            ../FVT/fvt-keywords.txt
+Resource			../FVT/Resources/fvt_resource.txt	
+
+Library				FusionLibrary
+Library				../FVT/fvt_api.py
+
+Suite Setup			Login User And Set Up
+
+*** Variables ***
+${LE}	${les['name']}
+${minVlan}	400
+${maxVlan}	2500
+${LNS}	1001
+${LNS2}	2002
+${start}	1
+${max_frame}	5
+
+*** Keywords ***
+Login User And Set Up
+	[Documentation]	Login Administrator and set variables based on input configuration
+	Fusion Api Login Appliance	${appliance_ip}	${admin_credentials}
+	Set Suite Variable	@{netlist}	@{EMPTY}
+	:For	${i}	IN RANGE	${minVlan}	${maxVlan}+1
+	\	Append To List	${netlist}	net_${i}
+	[Return]
+	
+Create Bulk Ethernet Networks
+	[Documentation]	Create All Networks To Be used
+	Set To Dictionary	${networks}	vlanIdRange	${minVlan}-${maxVlan}
+	${task} =	Fusion Api Create Ethernet Bulk Networks	${networks}
+	Should Be Equal As Integers	${task['status_code']}	202
+	${task} =	Wait For Task	${task}	timeout=120m	interval=5s	
+	Log To Console	\n Finished Create Bulk Ethernet Networks
+	[Return]
+	
+Create Network Sets
+	[Documentation]	Create Large And Regular Network Set
+	Set To Dictionary	${ns_dto}	networkSetType	Large
+	${list} =	Get Slice From List	${netlist}	0	${LNS}
+	Set To Dictionary	${ns_dto}	name	LNS
+	Set To Dictionary	${ns_dto}	networkUris	${list}
+	Create Network Set	${ns_dto}	timeout=10m	interval=1s
+	${resp} =	Fvt Api Get Network Set By Name	LNS
+	Should Be Equal As Strings	${resp['name']}	LNS	
+	${list} =	Get Slice From List	${netlist}	${LNS}	${LNS2}
+	Set To Dictionary	${ns_dto}	name	LNS2
+	Set To Dictionary	${ns_dto}	networkUris	${list}
+	Create Network Set	${ns_dto}	timeout=10m	interval=1s
+	${resp} =	Fvt Api Get Network Set By Name	LNS2
+	Should Be Equal As Strings	${resp['name']}	LNS2
+	:For	${item}	in	@{valid_rns}
+	\	Set To Dictionary	${ns_dto}	networkSetType	Regular
+	\	${list} =	Get Slice From List	${netlist}	0	${item}
+	\	Set To Dictionary	${ns_dto}	name	RNS_${item}
+	\	Set To Dictionary	${ns_dto}	networkUris	${list}
+	\	Create Network Set	${ns_dto}	timeout=5m	interval=1s
+	\	${resp} =	Fvt Api Get Network Set By Name	RNS_${item}
+	\	Should Be Equal As Strings	${resp['name']}	RNS_${item}
+	${inv_list} =	Get Slice From List	${invalid_rns}	1
+	:For	${item}	in	@{inv_list}
+	\	Set To Dictionary	${ns_dto}	networkSetType	Regular
+	\	${list} =	Get Slice From List	${netlist}	0	${item}
+	\	Set To Dictionary	${ns_dto}	name	RNS_${item}
+	\	Set To Dictionary	${ns_dto}	networkUris	${list}
+	\	Create Network Set	${ns_dto}	timeout=5m	interval=1s
+	\	${resp} =	Fvt Api Get Network Set By Name	RNS_${item}
+	\	Should Be Equal As Strings	${resp['name']}	RNS_${item}
+	Log To Console	\n Finished Create Network Sets
+	[Return]
+	
+Create Logical Enclosure Dictionary
+	[Documentation]	Create Dictionary To Be used In Payload for Creating Logical Enclosure
+	[Arguments]		${start}	${end}
+	${encs} =	Create List
+	:FOR    ${index}	IN RANGE	1	${end}+1
+	\  	Append to List	${encs}	${Enc_${index}}
+	Set To Dictionary	${les}	enclosureUris	${encs}
+	[Return]
+	
+Create Logical Enclosure Grow Dictionary
+	[Documentation]	Create Dictionary To Be used In Payload for Updating Logical Enclosure
+	[Arguments]		${start}	${end}
+	${dict} =	Create Dictionary
+	${encs} =	Create List
+	:FOR    ${index}	IN RANGE	${start}+1	${end}+1
+	\  	Append to List	${encs}	${Enc_${index}}
+	Set To Dictionary	${dict}	enclosureUris	${encs}
+	[Return]	${dict}
+
+Wait For Server To Be Pingable
+	[Documentation]	Poll Server To Be Pingable For Maximum 10 minutes 
+	[Arguments]		${ip}
+	Log To Console	\n Waiting For Server, IP = ${ip}, To Be Pingable
+	:FOR	${x}   IN RANGE	0	10
+	\	${result} =	Run Process	ping	${ip}
+	\	Exit For Loop If	${result.rc} == 0
+	\	Sleep	1m
+	[Return]
+	
+Get Server Ip Address
+    [Documentation]    Gets the valid IP addresses of the server.
+	[Arguments]	${ilo}
+    SSHLibrary.Open Connection     ${ilo}	prompt=>     timeout=20s
+    SSHLibrary.Login    Administrator     hpvse123
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    SSHLibrary.Read Until    SAC>
+    SSHLibrary.Write    i
+    Sleep    2sec
+    ${stdout}    SSHLibrary.Read	
+    ${ip_str}=    Get Regexp Matches    ${stdout}    Ip=10\\.\\d+\\.\\d+\\.\\d+
+    SSHLibrary.Close All Connections
+	${ip} =	Get Substring	${ip_str[0]}	3
+    [Return]    ${ip}
+	
+Create Server Profiles With Ping
+	[Documentation]	Create Server Profile And Ping Process For Ethernet Traffic
+	[Arguments]		${EG}	${start}	${end}
+	Log To Console	\n Creating Server Profiles With Ping
+	:FOR	${x}	IN RANGE	${start}	${end}
+	\	Set to Dictionary	${profiles['Profile${x}']['payload']}	type	ServerProfileV10
+	\	Set to Dictionary	${profiles['Profile${x}']['payload']}	enclosureGroupUri	${EG}
+	\	FVT Add Server Profile	${profiles['Profile${x}']['payload']}	timeout=20m	interval=1s  
+	Sleep	3 mins		# Wait for server to boot up
+	:FOR    ${x}	IN RANGE	${start}	${end}
+	\	${ip} =	Get Server Ip Address	${profiles['Profile${x}']['ILO']}
+	\	Wait For Server To Be Pingable	${ip}
+	\	${handle} =	Start Process	ping	-t	${ip}	stdout=Profile${x}.out
+	\	Set To Dictionary	${profiles['Profile${x}']}	handle	${handle}
+	Log To Console	\n Finished Creating Server Profiles With Ping
+	[Return]
+
+Delete Profile With Ping
+	[Documentation]	Delete Ping Process and Profile
+	[Arguments]		${profile}
+	Log To Console	\n Deleting Profile ${profile} And Ping Process
+	Terminate Process	${profiles['${profile}']['handle']}
+	Process Should Be Stopped	${profiles['${profile}']['handle']}
+ 	${task}	Fusion Api Delete Server Profile	name=${profile}	param=?force=true
+	Should Be Equal As Integers	${task['status_code']}	202
+	${task} =	Wait For Task	${task}	timeout=10m	interval=2s	
+	${ret} =	Grep File	${profile}.out	Lost = * (0% loss)
+	Run Keyword And Continue On Failure	Should Not Be Empty	${ret}
+	[Return]
+	
+Reduce Networks In Profile Connection
+	[Documentation]	Reduce networks in profile connection so it will not exceed limit
+	[Arguments]		${networkset}
+	${resp} =	Fvt Api Get Server Profile By Name	Profile0
+	${ns} =	Fvt Api Get Network Set By Name	${networkset}
+	Set to Dictionary	${resp['connectionSettings']['connections'][0]}	networkUri	${ns['uri']}	
+	${task} =	Fusion Api Edit Server Profile	body=${resp}	uri=${resp['uri']}
+	Should Be Equal As Integers	${task['status_code']}	202
+	${task} =	Wait For Task	${task}	10m	1s
+	Should Be Equal As Strings	${task['taskState']}	Completed
+	Log To Console	\n Reduce networks in profile connection to ${networkset}
+	[Return]
+	
+Create Server Profile Over Networks Limit
+	[Documentation]	Negative Case: Create server profile that uses networks over limit 
+	[Arguments]		${EG}	${networkset}
+	Log To Console	\n Create Server Profiles Over Networks Limit
+	Set to Dictionary	${profile_Negative}	type	ServerProfileV10
+	Set to Dictionary	${profile_Negative}	enclosureGroupUri	${EG}
+	Set to Dictionary	${profile_Negative['connectionSettings']['connections'][0]}	networkUri	${networkset}
+	${task} =	fvt-keywords.Add Server Profile	${profile_Negative} 
+	${task} =	Wait For Task	${task}	10m	1s
+	Should Be Equal As Strings	${task['taskState']}	Error
+	${errorcode} =	Get From Dictionary	${task['taskErrors'][0]}	errorCode
+	Should Be Equal As Strings	${errorcode}	MaximumNetworksError
+	Log To Console	\n Create profile failed due to network set, ${networkset}, execeed maximum networks allowed
+	[Return]
+	
+*** Test Cases ***
+Create Networks And Network Sets
+	#Pass Execution	Skip Create Networks And Network Sets
+	Create Bulk Ethernet Networks
+	Create Network Sets	
+	Pass Execution	Create Networks And Network Sets
+
+Negative: Create Regular Network Set Containing 1001 Networks
+	#Pass Execution	Skip Negative: Create Regular Network Set Containing 1001 Networks
+	Set To Dictionary	${ns_dto}	networkSetType	Regular
+	${list} =	Get Slice From List	${netlist}	0	${invalid_rns[0]}
+	Set To Dictionary	${ns_dto}	name	RNS_${invalid_rns[0]}
+	Set To Dictionary	${ns_dto}	networkUris	${list}
+	${task} =	Create Network Set	${ns_dto}
+	Should Be Equal As Integers	${task['status_code']}	400
+	Should Be Equal As Strings	${task['errorCode']}	CRM_DOMAIN_NETWORK_SET_LIMIT_EXCEEDED
+	Pass Execution	Finished Negative: Create Regular Network Set Containing 1001 Networks
+	
+Create Logical Inteconnect Group And Enclosure Group
+	#Pass Execution	Skip Create Logical Inteconnect Group And Enclosure Group	
+	${list} =	Get Slice From List	${netlist}	0	${LNS2}
+	Set To Dictionary	${uplink_set_1}	networkUris	${list}
+	Add Logical Interconnect Group	${ligs['Enc${start}-LIG']}	timeout=10m	interval=1s
+	FVT Add Enclosure Group		${enc_group['Enc${start}-EG']}
+	Pass Execution	Finished Create Logical Inteconnect Group And Enclosure Group
+	
+Create Logical Enclosure
+	#Pass Execution	Skip Create Logical Enclosure
+	Create Logical Enclosure Dictionary	${start}	${start}
+	Set To Dictionary	${les}	enclosureGroupUri	Enc${start}-EG
+	Add Logical Enclosure	${les}	timeout=90m	interval=1m
+	${resp}	Fvt Api Get Logical Enclosure By Name	${LE}
+	Should Be Equal As Strings	${resp['status']}	OK
+	Should Be Equal As Strings	${resp['state']}	Consistent
+	${resp}	Fvt Api Get Logical Interconnect BY Name	${LE}-Enc${start}-LIG
+	Should Be Equal As Strings	${resp['consistencyStatus']}	CONSISTENT
+	FVT Verify Interconnects	Enc${start}Map
+	Pass Execution	Finished Create Logical Enclosure
+
+Create Profile And Start Ping Process
+	#Pass Execution	Skip Create Profile And Start Ping Process
+	${resp}	Fvt Api Get Logical Enclosure By Name	${LE}
+	Should Not Be Equal As Strings	${resp}	None	
+	Create Server Profiles With Ping	Enc${start}-EG	0	${start}+1
+	Pass Execution	Finished Create Profile And Start Ping Process
+	
+Grow Logical Enclosure
+	#Pass Execution	Skip Grow Ligical Enclosure
+	:For	${index}	IN RANGE	${start}+1	${max_frame}+1	1
+	\	${new_start} =	Evaluate	${start} + 1
+	\	Log	\n Grow From ${start} Enclosure To ${new_start} Enclosure	console=True
+	\	${LIG} =	Set Variable	Enc${new_start}-LIG
+	\	${EG} =	Set Variable	Enc${new_start}-EG
+	\	${list} =	Get Slice From List	${netlist}	0	${LNS2}
+	\	Set To Dictionary	${uplink_set_1}	networkUris	${list}
+	\	Add Logical Interconnect Group	${ligs['${LIG}']}	timeout=10m	interval=1s
+	\	FVT Add Enclosure Group		${enc_group['${EG}']}
+	\	Create Logical Enclosure Dictionary	1	${start}
+	\	Set To Dictionary	${les}	enclosureGroupUri	${EG}
+	\	${resp}	Fvt Api Get Logical Enclosure By Name	${LE}
+	\	Set To Dictionary	${les}	deploymentManagerSettings	${resp['deploymentManagerSettings']}
+	\	${task} =	fvt-keywords.Edit Logical Enclosure	${les}	10min	1sec
+	\	Should Be Equal As Strings	${task['taskState']}	Error
+	\	${errorcode} =	Get From Dictionary	${task['taskErrors'][0]}	errorCode
+	\	Should Be Equal As Strings	${errorcode}	VALIDATE_LE_REPARENT_FAIL
+	\	Log To Console	\n Grow failed due to networks in profile connection execced maximum allowed
+	\	Reduce Networks In Profile Connection	RNS_${valid_rns[${start}]}
+	\	fvt-keywords.Edit Logical Enclosure	${les}	10min	1sec
+	\	Sleep	15s
+	\	${resp}	Fvt Api Get Logical Enclosure By Name	${LE}
+	\	Should Be Equal As Strings	${resp['state']}	Inconsistent
+	\	Pause Execution		### Waiting for cabling
+	\	${dict} =	Create Logical Enclosure Grow Dictionary	${start}	${new_start}
+	\	${resp}=	Update From Group On Logical Enclosure	${resp['uri']}	${dict}	timeout=60 m	interval=5 s
+	\	Sleep	10s
+	\	${resp}	Fvt Api Get Logical Enclosure By Name	${LE}
+	\	Should Be Equal As Strings	${resp['state']}	Consistent
+	\	${LI} =	Set Variable	${LE}-${LIG}	
+	\	${resp}	Fvt Api Get Logical Interconnect BY Name	${LI}
+	\	Should Be Equal As Strings	${resp['consistencyStatus']}	CONSISTENT
+	\	FVT Verify Interconnects	Enc${new_start}Map
+	\	Create Server Profile Over Networks Limit	${EG}	RNS_${invalid_rns[${start}]}
+	\	Pause Execution		### Check Server Status
+	\	Create Server Profiles With Ping	${EG}	${start}+1	${new_start}+1
+	\	${resp}	Fvt Api Get Logical Interconnect BY Name	${LE}-Enc${start}-LIG
+	\	Should Be Equal As Strings	${resp}	None	### Ensure Old LI Deleted
+	\	FVT Delete Enclosure Group	Enc${start}-EG
+	\	${resp}	Fvt Api Get Enclosure Group BY Name	Enc${start}-EG
+	\	Should Be Equal As Strings	${resp}	None	### Ensure Old EG Deleted
+	\	FVT Delete Logical Interconnect Group	Enc${start}-LIG
+	\	${resp}	Fvt Api Get Logical Interconnect Group BY Name	Enc${start}-LIG
+	\	Should Be Equal As Strings	${resp}	None	### Ensure Old LIG Deleted
+	\	${start} =	Set Variable	${new_start}
+	Sleep	3 mins
+    :FOR    ${x}   IN RANGE	0	${start}+1
+	\	${resp}	Fvt Api Get Server Profile By Name	Profile${x}
+	\	Run Keyword If	${resp} != None	Delete Profile With Ping	Profile${x}
+    :FOR    ${x}   IN RANGE	0	${start}+1
+	\	Log To Console	\n Remove Output File Profile${x}.out	
+	\	Remove File	Profile${x}.out	
+	Fvt Delete Logical Enclosure	${LE}
+	${resp}	FVT Api Get Logical Enclosure By Name	${LE}
+	Should Be Equal As Strings	${resp}	None
+	${resp}	Fvt Api Get Logical Interconnect BY Name	${LI}
+	Should Be Equal As Strings	${resp}	None
+	FVT Delete Enclosure Group	${EG}
+	${resp}	Fvt Api Get Enclosure Group BY Name	${EG}
+	Should Be Equal As Strings	${resp}	None	### Ensure Old EG Deleted
+	FVT Delete Logical Interconnect Group	${LIG}
+	${resp}	Fvt Api Get Logical Interconnect Group BY Name	${LIG}
+	Should Be Equal As Strings	${resp}	None	### Ensure Old LIG Deleted
+	Pass Execution	Finished Grow Logical Enclosure
+
+Delete Network Sets
+	Pass Execution	Skip Delete Network Sets
+	Remove All Network Sets
+	${resp} =	Fusion Api Get Network Set
+	Should Be Equal As Integers	${resp['count']}	0
+	Pass Execution	Finished Delete Network Sets
+	
+Delete Bulk Ethernet Networks
+	Pass Execution	Skip Create Ethernet Networks
+	${resp}	Fusion Api Get Network Set
+	Should Be Equal As Integers	${resp['count']}	0	
+	${networks} = 	Fusion Api Get Ethernet Networks
+	:FOR	${net}	IN	@{networks['members']}
+	\		${resp} = 	Fusion Api Delete Ethernet Network		uri=${net['uri']}
+	:For	${i}	IN RANGE	0	100
+	\	${resp} =	Fusion Api Get Ethernet Networks
+	\	Exit For Loop If	${resp['count']} == 0
+	\	Sleep	1m
+	Should Be Equal As Integers	${resp['count']}	0
+	Pass Execution	Finished Delete Ethernet Networks
+

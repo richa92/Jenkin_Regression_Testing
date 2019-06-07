@@ -1,0 +1,221 @@
+*** Settings ***
+Documentation       Restrict Hill FW update to disallow pre-3.08(vc 4.65) to FOS 5.x
+Variables                 data_variables.py
+Library                   FusionLibrary
+Library                   RoboGalaxyLibrary
+Library                   Collections
+Library                   BuiltIn
+Library                   SSHLibrary
+Library                   String
+Library                   OperatingSystem
+Library                   Process
+Library                   Dialogs
+Library                   validate.py
+Resource                  ../../../../../Resources/api/fusion_api_resource.txt
+Suite Setup               Suite Setup Tasks
+
+
+***Variables***
+${APPLIANCE_IP}      15.186.23.127
+
+***Test Cases***
+Login
+    [Documentation]    Login to Appliance
+    Set Log Level    TRACE
+    ${Login_response} =    Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+    Run keyword unless    ${Login_response[0]['status_code']}== 200  Fail   "Unable to Login Appliance"
+
+Create FC and Ethernet networks
+    [Documentation]    Create FC and Ethernet networks
+    Set Log Level    TRACE
+    Add FC Networks from variable    ${FC_Hill}
+    ${resp}    Fusion Api Create Ethernet Network    body=${Enet_Hill}
+    Run Keyword If  '${resp['status_code']}' != '202'  Fail    ELSE  log to console  \Ethernet created successfully
+
+Create LIG
+    [Documentation]    create LIG
+    Add LIG from variable    ${ligs['LIG_Hill']}
+    Log  LIG created   console=True
+
+Creating Enclosure Group
+    [Documentation]    create EG
+    ${resp}    Add Enclosure Group from variable    ${enc_group['EG']}
+    Run Keyword If  '${resp['status_code']}' == '201'    Wait For Task2    ${resp}    ELSE    Fail    Log    failed    console=True
+
+########################################While Importing Enclosure upgrade Hill FW form 3.08 to 5.x#####################################
+Importing Enclosure
+    [Documentation]    Importing Enclosure
+    ${resp_import} =    Add Enclosures from variable     ${encs_fwupdate}
+    Run keyword unless  ${resp_import['status_code']}== 202  Fail   "Unable to import enclosure"
+    Log to console and logfile    Enclosure imported succesfully with firmware update
+
+Creating server profile
+    [Documentation]    Create server profile
+    Add Server Profiles from variable     ${server_profiles}
+    Power on server    ${server_profiles[0]['serverHardwareUri']}
+    sleep   600s
+
+    Set Log Level    TRACE
+    ${serverIp}    Get Server Ip Windows    ${ilo_details}
+    ${output}    execute_windows_commands    ${serverIp[0]}    ${windows_server_cred['userName']}    ${windows_server_cred['password']}    ${diskspd_cmd[0]}
+    Run Keyword If  ${output} == 0    Log    \n Successfully passed the traffic    console=True    ELSE    Fail    Log    Unable to pass traffic    console=True
+
+#########################LI upgrade with activation order as “Orchestrated” verify there is no traffic disruption during the upgrade########################
+1_1 Downgrade the FW from 5_x to 4_00 with activation order as “Orchestrated”
+    [Documentation]    Downgrade the FW from 5_x to 4_00 with activation order as Orchestrated
+    Set to dictionary     ${liupdate_body1}     sppUri    ${fw_uri_400}
+    ${li_uri} =    Get LI URI   ${LI}
+    ${response}=    Fusion Api Li Upgrade Firmware    ${liupdate_body1}    ${li_uri}
+    Log   ${response}    console=True
+    Run Keyword If  ${response['status_code']} !=202    fail    msg=\nLI Firmware update Failed. \n ErrorCode:${response['errorCode']}\nMessage:${response['message']}
+    ${task} =     Wait For Task        ${response}   65min    2min
+    Run Keyword If  '${task['taskState']}' !='Completed'  or  ${task['status_code']} !=200   fail    msg=\nLI Firmware update Failed for network User. \n ErrorCode:${task['taskErrors'][0][errorCode]}\n :Message ${task['taskErrors'][0][errorCode]}
+    ...         ELSE    Log   LI FW Upgrade completed successfully   console=True
+
+    Set Log Level    TRACE
+    ${serverIp}    Get Server Ip Windows    ${ilo_details}
+    ${output}    execute_windows_commands    ${serverIp[0]}    ${windows_server_cred['userName']}    ${windows_server_cred['password']}    ${diskspd_cmd[0]}
+    Run Keyword If  ${output} == 0    Log    \n Successfully passed the traffic    console=True    ELSE    Fail    Log    Unable to pass traffic    console=True
+
+1_2 Validate Hill interconnect firmware version is 4_00
+    [Documentation]     Validate Hill interconnect firmware version is 4_x
+    :FOR    ${IC}    IN    @{INTERCONNECTS_HILL}
+    \   ${resp} =    Fusion Api Get Interconnect    param=?filter="'name' = '${IC}'"
+    \   ${firmwareVersion} =  Get From Dictionary  ${resp['members'][0]}    firmwareVersion
+    \   ${state}=    Get From Dictionary   ${resp['members'][0]}   state
+    \   Log to console and logfile    ${firmwareVersion}
+    \   Run keyword If    ${firmwareVersion} != ${fc_firmwareVersion_400}   Fail    "Firmware version mismatch"
+    \   ...    ELSE     Log to console and logfile    \nFirmware Version is validated as ${fc_firmwareVersion_400} for ${IC}
+    \   Run Keyword If    '${state}'!='Configured'    Fail    msg=\nThe IC ${IC} is not in configured state after upgrade
+    \   ...      ELSE      Log to console and logfile    \nThe IC ${IC} is in configured state after upgrade
+
+#########################LI upgrade with activation order as “Parallel” verify there is no traffic disruption during the upgrade########################
+2_1 Upgrade the FW from 4_00 to 3_08 with activation order as "Parallel"
+    [Documentation]    upgrade the FW from 4_00 to 3_08 with activation order as Parallel
+    Set to dictionary     ${liupdate_body}     sppUri    ${fw_uri_308}
+    ${li_uri} =    Get LI URI   ${LI}
+    ${response}=    Fusion Api Li Upgrade Firmware    ${liupdate_body}    ${li_uri}
+    Log   ${response}    console=True
+    Run Keyword If  ${response['status_code']} !=202    fail    msg=\nLI Firmware update Failed. \n ErrorCode:${response['errorCode']}\nMessage:${response['message']}
+    ${task} =     Wait For Task        ${response}   60min    2min
+    Run Keyword If  '${task['taskState']}' !='Completed'  or  ${task['status_code']} !=200   fail    msg=\nLI Firmware update Failed for network User. \n ErrorCode:${task['taskErrors'][0][errorCode]}\n :Message ${task['taskErrors'][0][errorCode]}
+    ...         ELSE    Log   LI FW Upgrade completed successfully   console=True
+
+    Set Log Level    TRACE
+    ${serverIp}    Get Server Ip Windows    ${ilo_details}
+    ${output}    execute_windows_commands    ${serverIp[0]}    ${windows_server_cred['userName']}    ${windows_server_cred['password']}    ${diskspd_cmd[0]}
+    Run Keyword If  ${output} == 0    Log    \n Successfully passed the traffic    console=True    ELSE    Fail    Log    Unable to pass traffic    console=True
+
+2_2 Validate Hill interconnect firmware version is 3_08
+    [Documentation]     Validate Hill interconnect firmware version is 3_08
+    :FOR    ${IC}    IN    @{INTERCONNECTS_HILL}
+    \   ${resp} =    Fusion Api Get Interconnect    param=?filter="'name' = '${IC}'"
+    \   ${firmwareVersion} =  Get From Dictionary  ${resp['members'][0]}    firmwareVersion
+    \   ${state}=    Get From Dictionary   ${resp['members'][0]}   state
+    \   Log to console and logfile    ${firmwareVersion}
+    \   Run keyword If    ${firmwareVersion} != ${fc_firmwareVersion_308}   Fail    "Firmware version mismatch"
+    \   ...    ELSE     Log to console and logfile    \nFirmware Version is validated as ${fc_firmwareVersion_308} for ${IC}
+    \   Run Keyword If    '${state}'!='Configured'    Fail    msg=\nThe IC ${IC} is not in configured state after upgrade
+    \   ...      ELSE      Log to console and logfile    \nThe IC ${IC} is in configured state after upgrade
+
+#########################LI upgrade with activation order as “Odd/even” verify there is no traffic disruption during the upgrade########################
+3_1 Upgrade the FW from 3_08 to 5_x with activation order as "Odd/even"
+    [Documentation]    Upgrade the FW from 3_08 to 5_x with activation order as Odd/even
+    Set to dictionary     ${liupdate_body2}     sppUri    ${fw_uri_500}
+    ${li_uri} =    Get LI URI   ${LI}
+    ${response}=    Fusion Api Li Upgrade Firmware    ${liupdate_body2}    ${li_uri}
+    Log   ${response}    console=True
+    Run Keyword If  ${response['status_code']} !=202    fail    msg=\nLI Firmware update Failed. \n ErrorCode:${response['errorCode']}\nMessage:${response['message']}
+    ${task} =     Wait For Task        ${response}   80min    2min
+    Run Keyword If  '${task['taskState']}' !='Completed'  or  ${task['status_code']} !=200   fail    msg=\nLI Firmware update Failed for network User. \n ErrorCode:${task['taskErrors'][0][errorCode]}\n :Message ${task['taskErrors'][0][errorCode]}
+    ...         ELSE    Log   LI FW Upgrade completed successfully   console=True
+
+    Set Log Level    TRACE
+    ${serverIp}    Get Server Ip Windows    ${ilo_details}
+    ${output}    execute_windows_commands    ${serverIp[0]}    ${windows_server_cred['userName']}    ${windows_server_cred['password']}    ${diskspd_cmd[0]}
+    Run Keyword If  ${output} == 0    Log    \n Successfully passed the traffic    console=True    ELSE    Fail    Log    Unable to pass traffic    console=True
+
+3_2 Validate Hill interconnect firmware version is 5_x
+    [Documentation]     Validate Hill interconnect firmware version is 5_x
+    :FOR    ${IC}    IN    @{INTERCONNECTS_HILL}
+    \   ${resp} =    Fusion Api Get Interconnect    param=?filter="'name' = '${IC}'"
+    \   ${firmwareVersion} =  Get From Dictionary  ${resp['members'][0]}    firmwareVersion
+    \   ${state}=    Get From Dictionary   ${resp['members'][0]}   state
+    \   Log to console and logfile    ${firmwareVersion}
+    \   Run keyword If    ${firmwareVersion} != ${fc_firmwareVersion_500}   Fail    "Firmware version mismatch"
+    \   ...    ELSE     Log to console and logfile    \nFirmware Version is validated as ${fc_firmwareVersion_500} for ${IC}
+    \   Run Keyword If    '${state}'!='Configured'    Fail    msg=\nThe IC ${IC} is not in configured state after upgrade
+    \   ...      ELSE      Log to console and logfile    \nThe IC ${IC} is in configured state after upgrade
+
+***Keyword***
+Remove All User
+    [Documentation]    Querys the appliance for all Users and then removes them
+    ${users}    Fusion Api Get User
+    :FOR    ${user} IN  @{users['members']}
+    \       Continue For Loop If    '${user['userName']}'=='Administrator'
+    \       Continue For Loop If    '${user['userName']}'=='administrator'
+    \       Continue For Loop If    '${user['userName']}'=='HardwareSetup'
+    \       ${resp}    Fusion Api Remove User    uri=${user['uri']}
+    \       Log {resp}   console=True
+
+Add Enclosures from variable
+    [Documentation]    Adds Enclosures to an appliance from a variable which contains a list of dicts with the entire payload
+    [Arguments]     ${encs_m}
+    Log to console and logfile      Adding ENCLOSURES
+    Log to console and logfile      ${encs_m}
+    :FOR    ${enc}  IN  @{encs_m}
+    \   ${encuri} =     Get From Dictionary ${enc}  enclosureGroupUri
+    \   ${encuri} =     Common URI Lookup by name    ${encuri}
+    \   Set to dictionary   ${enc}  enclosureGroupUri       ${encuri}
+    \   ${resp} =   Fusion Api Add Enclosure    ${enc}
+    \   ${task} =   Wait For Task    ${resp}    60min    20s
+    [Return]    ${resp}
+
+Get Server Ip Windows
+    [Documentation]    Gets the valid ip of the server
+    [Arguments]         ${ilo_details}
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=20s
+    ${login}    SSHLibrary.Login               ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Read Until    SAC>
+    Sleep    5sec
+    SSHLibrary.Write    i
+    Sleep    5sec
+    ${stdout}    SSHLibrary.Read
+    ${cmd_output}=    Get Regexp Matches    ${stdout}    Ip=192\\.\\d+\\.\\d+\\.\\d+
+    ${ip_list_new}    Create List
+    ${len}    Get Length    ${cmd_output}
+    :FOR    ${x}    IN RANGE    ${len}
+    \    ${ip_lists}    Remove String    ${cmd_output[${x}]}    Ip=
+    \    Append To List   ${ip_list_new}    ${ip_lists}
+    Log    \n IP's are is ${ip_list_new}    console=True
+    SSHLibrary.Close All Connections
+    [Return]    ${ip_list_new}
+
+Suite Setup Tasks
+    [Documentation]    Cleans the appliance
+    ${Login_response} =    Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+    Run keyword unless    ${Login_response[0]['status_code']}== 200  Fail   "Unable to Login Appliance"
+
+    Power off ALL Servers    PressAndHold
+    Remove All Server Profiles
+    Remove All Enclosures
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove All Ethernet Networks
+    Remove All FC Networks
+    Remove All FCoE Networks
+    Remove ALL Network Sets
+    Remove ALL Users
+
+
+
+
+
+
+
+

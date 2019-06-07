@@ -1,0 +1,119 @@
+*** Settings ** *
+Library        RoboGalaxyLibrary
+Library             FusionLibrary
+Library             SSHLibrary
+Library             OperatingSystem
+Library             XML
+Library             String
+Resource            ../../../resource/fusion_api_all_resource_files.txt
+*** Variables ** *
+${DataFile}    OVF629-DATA.xml
+${ApplianceUrl}    https://15.115.13.63
+${Browser}    FireFox
+#${Browser}    Chrome
+#${Browser}    IE
+${SeleniumSpeed}    0.1
+#${HOST}             15.115.13.84
+${SSH_PASS}         hpvse1
+${OA_HOST}          15.212.162.71
+${OA_USER}          Administrator
+${OA_PASS}          password
+${DEVICE}           IOM
+${BAY1_IP}          15.212.162.83
+${VC_USER}          root
+${BAY1}             1
+${BAY2}             2
+${DL_PORT_NAME}                        2
+${UL_PORT_NAME}                        22
+${UL_PORT_NAME_SUPERSHAW}              38
+${DL_PF_OPTION}                         1
+${UL_PF_OPTION}                         2
+${UL_CPF_OPTION}                        0
+
+
+*** Keywords ***
+
+Load Test Data and Open Browser
+    Set Log Level    TRACE
+    Load Test Data  ${DataFile}
+    Log Variables
+    Open Browser  ${ApplianceUrl}  ${Browser}
+    Maximize Browser Window
+    Set Selenium Speed  ${SeleniumSpeed}
+
+Logout and Close All Browsers
+    Fusion UI Logout of Appliance
+    Close All Browsers
+
+OA ICM Token
+    [Documentation]    Reads block 16 of ISIMIC block and reads IOM's root password
+    ...   {DEVICE} = <BLADE|IOM|NETTRAY|SWM|FAN|OA|EM>
+    ...   {BAY} = desired bay for given device
+    [Arguments]          ${OA_HOST}    ${OA_USER}           ${OA_PASS}    ${DEVICE}    ${BAY}
+    Open Connection      ${OA_HOST}     prompt=Titan-OA1    timeout=10s
+    Login                ${OA_USER}     ${OA_PASS}
+    Write    ++diag--
+    Read Until    diag>
+    ${OUTPUT}=          Write    ${DEVICE} ${BAY} rdblock 16
+    ${OUTPUT1}=         Read Until    diag>
+    Log to console and logfile            ${OUTPUT1}
+    ${Lines}=   Split To Lines   ${OUTPUT1}
+    ${Lines1}=      Convert To List         ${Lines}
+    ${Line}=    Get from List        ${Lines1}        3
+    ${Line1}=    Get from List        ${Lines1}        5
+    #Log to console and logfile            ${Line}
+    #Log to console and logfile            ${Line1}
+    ${matches}=         Split String       ${Line}        |
+    ${match}=    Get from List        ${matches}        1
+    ${match}=    Strip String    ${match}    characters=*.*
+    ${matches1}=         Split String       ${Line1}        |
+    ${match1}=    Get from List        ${matches1}        1
+    ${stripped}=    Strip String    ${match1}    characters=*.*
+    ${Token}=  catenate   SEPARATOR=   ${match}  ${stripped}
+    Log to console and logfile            ${Token}
+    [Return]          ${Token}
+    Close All Connections
+
+Verify pause flood protect value
+   ${cliCmd}   Set Variable  show switch_config/sw_port_protect
+   ${cliOutput}  Run VC CLI CMD  ${OA_HOST}  ${OA_USER}  ${OA_PASS}  ${DEVICE}  ${BAY}  ${cliCmd}
+   Log to console and logfile    \nCLI Output ${cliOutput}
+   Should Contain  ${cliOutput}  config_pause_protect=enabled
+
+Inject Pause flood to Uplink port
+    ${medCmd}  Set Variable  /images/archives/med_config 5 17 2
+    ${medConfigResponse} =  SSH to host and run med_config  ${BAY1_IP}  ${medCmd}
+    Should Not Contain   ${medConfigResponse}  Invalid value specified for op_pause_flood_status
+
+Run VC CLI CMD
+    [Documentation]    SSH's to a given VC ICM and run the VC CLI command
+    [Arguments]  ${OA_HOST}  ${OA_USER}  ${OA_PASS}  ${DEVICE}  ${BAY}  ${cliCmd}
+    ${rootPwd} = OA ICM Token  ${OA_HOST}  ${OA_USER}  ${OA_PASS}  ${DEVICE}  ${BAY}
+
+    #${resp} =  VC ICM CLI CMD    ${BAY1_IP}  ${VC_USER}    ${rootPwd}
+
+    Open Connection    ${BAY1_IP}     timeout=180s
+    Run Keyword If    '${SSH_PASS}' is ${null}      Set Suite variable  ${SSH_PASS}     ${rootPwd}
+    Login              ${VC_USER}     ${rootPwd}
+    Write    cli
+    Read Until    CLI->
+    ${OUTPUT}=          Write    ${cliCmd}
+    ${OUTPUT1}=         Read Until    CLI->
+    #Log to console and logfile       \n${OUTPUT1}
+    [Return]          ${OUTPUT1}
+    Close All Connections
+
+SSH to host and run med_config
+    [Documentation]    SSH's to a given host exectute script /images/archives/med_config
+    [Arguments]        ${HOST}   ${PORT_NAME}    ${PF_OPTION}
+    ${rootPwd} =        OA ICM Token        ${OA_HOST}    ${OA_USER}        ${OA_PASS}    ${DEVICE}    ${BAY1}
+    Open Connection     ${BAY1_IP}     timeout=180s
+    Run Keyword If      '${SSH_PASS}' is ${null}      Set Suite variable  ${SSH_PASS}     ${rootPwd}
+    Login               ${VC_USER}     ${rootPwd}
+
+    #Open Connection And Log In      ${HOST}
+    ${medCmd}       Set Variable     /images/archives/med_config 5 ${PORT_NAME} ${PF_OPTION}
+    ${Output}=    Execute Command    ${medCmd}    return_stdout=True    return_rc=False
+    Log to console and logfile    ${Output}
+    [Return]    ${Output}
+    Close All Connections

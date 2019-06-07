@@ -1,0 +1,438 @@
+*** Settings ***
+Library				FusionLibrary
+
+*** Variables ***
+@{ILO_IPS}
+
+*** Keywords ***
+Speedmode Suite Setup with Networks
+    [Documentation]    Common login and setting variables keyword for test suite
+	Set Log Level	TRACE
+	Fusion Api Login Appliance	${appliance_ip}	${admin_credentials}
+
+#	${max_in} =	Get Variable Value	${max}	None
+#	${max_in} =	Set Variable If
+#	...	${max_in} != None	${max_in}
+#	...	'${CXP}' == 'CL10'	5	3
+#	Set Suite Variable	${numFrames}	${max_in}
+
+    # Test Specific Setup creates users, networks, network sets
+    Test Specific Setup
+
+	[Return]
+
+Common Test Setup
+    [Documentation]    Pre-conditions for ALL test cases
+    Set Log Level    TRACE
+    Run Keyword and Ignore Error    Write To ciDebug Log
+    Fusion Api Login Appliance         ${APPLIANCE_IP}        ${admin_credentials}
+    Set Suite Variable	${LIG}	Enc${numFrames}-LIG
+#    Set Suite Variable	${EG}	Enc${numFrames}-EG
+#    Set Suite Variable	${LE}	${les['SPEED-LE${numFrames}']}
+#    Set Suite Variable	${LE}	${les['SPEED-LE${numFrames}']['name']}
+#    Set Suite Variable	${LE}	${les['SPEED-LE${numFrames}']}
+    Set Suite Variable	${LE}	${les['name']}
+    Set Suite Variable	${LI_REDUNDANT_10G}	${LE}-Enc${numFrames}-10G-LIG
+    Set Suite Variable	${LI_REDUNDANT_25G}	${LE}-Enc${numFrames}-25G-LIG
+    Set Suite Variable	${LI_REDUNDANT_50G}	${LE}-Enc${numFrames}-50G-LIG
+    Set Suite Variable	${LI_REDUNDANT_25_50G}	${LE}-Enc${numFrames}-25G-LIG
+    Set Suite Variable	${LI_A_50G}	${LE}-Enc${numFrames}-50G-Aside-LIG
+    Set Suite Variable	${LI_A_25G}	${LE}-Enc${numFrames}-25G-Aside-LIG
+    Set Suite Variable	${LI_B_50G}	${LE}-Enc${numFrames}-50G-Bside-LIG
+    Set Suite Variable	${LI_B_25G}	${LE}-Enc${numFrames}-25G-Bside-LIG
+
+Common Test Teardown
+    [Documentation]    Post-conditions for ALL test cases
+    fusion api logout appliance
+#    Run Keyword If    ${CLIPAUSE}==${TRUE}    Pause Execution    CLI Check - Creating LE with 50Gb SPEED Mode
+#    Run Keyword If    '${TEST_STATUS}' == 'FAIL'   Get Errors
+
+Test Specific Setup
+    [Documentation]    Test specififc setup users, networks and network sets etc.
+	Set Log Level	TRACE
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	Log to console	[TEST-SPECIFIC SETUP]
+	${users} =	Get Variable Value	${users}
+	Run Keyword If	${users} is not ${null}	Add Users from variable				${users}
+	${ethernet_networks} =	Get Variable Value	${ethernet_networks}
+	Run Keyword If	${ethernet_networks} is not ${null}	Add Ethernet Networks from variable	${ethernet_networks}
+	${fcoe_networks} =	Get Variable Value	${fcoe_networks}
+	Run Keyword If	${fcoe_networks} is not ${null}	        Add FCoE Networks from variable		${fcoe_networks}
+
+	${network_sets} =	Get Variable Value	${network_sets}
+	Run Keyword If	${network_sets} is not ${null}	Add Network Sets from variable		${network_sets}
+	Run Keyword If	${network_sets} is not ${null}	FVTLocal Edit Network Set Bandwidth		${network_sets_bw}
+
+	[Return]
+
+#Edit Profile
+FVT Edit Server Profile FlexFrames
+    [Documentation]    Edit a Server Profile
+	[Arguments]	${profile}	${encGroup}    ${timeout}=30m    ${interval}=10s   ${endstate}=((?i)Warning|Completed)
+
+	Set To Dictionary	${profile['payload']}	enclosureGroupUri	EG:${encGroup}
+
+    # Edit Profiles
+	${resp}	Fvt Api Get Server Hardware By Name	${profile['payload']['serverHardwareUri']}
+	${uri} =	Set Variable	${resp['uri']}
+	${payload} =	Create Dictionary	powerState=Off	powerControl=PressAndHold
+	${resp}	Fusion Api Edit Server Hardware Power State	uri=${uri}	body=${payload}
+	Should Be Equal As Integers	${resp['status_code']}	202
+	${task} =	Wait For Task	${resp} 	${timeout}	${interval}
+	${resp}	Fvt Api Get Server Hardware By Name	${profile['payload']['serverHardwareUri']}
+	Should Be Equal As Strings	${resp['powerState']}	Off
+
+    ${resp} =   server_profile.Edit Server Profile    ${profile['payload']}
+	${task} =   Wait For Task	${resp}		timeout=${timeout}		interval=${interval}
+	${task_state} = 	Get From dictionary 	${task}     taskState
+	Should Match Regexp	${task_state}	 ${endstate}
+
+	${resp}	Fvt Api Get Server Profile By Name	${profile['payload']['name']}
+#	Should Be Equal As Strings	${resp['status']}	OK
+	[Return]
+
+LCLKW Check Interconnect State
+    [Documentation]    Verify Interconnect state
+    ...              ${enc1_bay3_icm}    Absent
+    ...              LCLKW Check Interconnect State    ${enc1_bay3_icm}    Absent
+	[Arguments]	${enc_bay_icm}	${icm_state}
+
+    ${resp}=    Fusion Api Get Interconnect   param=?filter="'name'=='${enc_bay_icm}'"
+    Should Be Equal As Strings    ${resp['members'][0]['state']}    ${icm_state}
+
+Power request
+    [Documentation]     ...
+    [Arguments]     ${uri}    ${power}
+    ${data} =   Create Dictionary   op=replace
+    ...                             path=/powerState
+    ...                             value=${power}
+    ${body} =   Create List     ${data}
+    Run Keyword and Ignore Error    Write To ciDebug Log    \nPowering ${power}: ${uri}
+    ${resp} =   fusion api patch interconnect   body=${body}    uri=${uri}
+    ${task} =   Wait for Task   ${resp}  5m   10s
+    ${valDict} =    Create Dictionary       status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response       ${task}   ${valDict}
+	Log    \t Waiting for ${uri} to reach powerState:${power}    console=True
+    Wait Until Keyword Succeeds     10 min   20s      IC reached powerState    ${uri}    ${power}
+
+IC reached powerState
+    [Documentation]     ...
+	[Arguments]	    ${uri}  ${state}
+	Set Log Level	TRACE
+    ${resp} =   fusion api get resource     ${uri}
+	Log    \t ${uri}: ${resp['powerState']}    console=True
+	Should Match Regexp 	${resp['powerState']}    ${state}
+	[Return]	${resp}
+
+Suite Teardown
+    [Documentation]     Teardown at end of test run
+    Set Log Level    TRACE
+    Return from keyword if   ${SKIPTEARDOWN} is ${True}
+    Log    \n[TEARDOWN]   console=True
+    Fusion Api Login Appliance         ${APPLIANCE_IP}        ${admin_credentials}
+    Power off all servers    PressAndHold
+    Remove All Server Profiles
+    Remove ALL LS
+    Remove ALL LSGs
+    Remove All LEs
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove All SAS LIGs
+    Remove ALL Ethernet Networks
+    Remove ALL FC Networks
+    Remove ALL FCoE Networks
+    Remove ALL Network Sets
+    Remove ALL Users
+
+FVT Reapply LI Configuration
+	[Documentation]	Reapply LI Configuration
+	[Arguments]		${LI}
+
+	Log	\n Reapply LI Configuration for ${LI}	console=True
+	${resp}	Fvt Api Get Logical Interconnect By Name	${LI}
+	${LI_URI} =	Set Variable if	${resp} != None	${resp['uri']}	'/${LI} does not exist'
+	${LI_ConsistencyStatus} =	Set Variable if	${resp} != None	${resp['consistencyStatus']}	'/${LI} does not exist'
+
+	${resp}	Fusion Api Reapply LI Configuration		${LI_URI}
+	Should Be Equal As Integers	${resp['status_code']}	202
+	Wait For Task	${resp}	timeout=30 m	interval=2 s
+
+    # verify LI consistency status
+	Sleep	${ufg_statusdelay}
+	${resp}	Fvt Api Get Logical Interconnect BY Name	${LI}
+	Should Be Equal As Strings	${resp['consistencyStatus']}	CONSISTENT
+
+	[Return]
+
+FVTLocal Edit Network Set Bandwidth
+	[Documentation]	Edit network sets
+	[Arguments]		${networksets}	${timeout}=0	${interval}=0
+	Log to console	\n Editing Bandwidth of Network Sets
+
+	:FOR	${networkset}	IN	@{networksets}
+	\     ${resp} =	Fvt Api Get Network Set By Name	${networkset['name']}
+	\     ${dct} =     Get Variable Value	${conn_template}
+	\     Set to Dictionary	${dct}		bandwidth=${networkset['bandwidth']}
+	\     Set to Dictionary	${dct}		name=${networkset['name']}
+	\     ${resp} = 	Fusion Api Update Connection Template	${dct}    ${resp['connectionTemplateUri']}
+	\     Should Be Equal As Integers	${resp['status_code']}	200
+	[Return]
+
+Restore From Backup
+    [Documentation]    Restore from OV backup
+    ...             Example:
+    ...             Restore From Backup
+    [Arguments]
+    ${status}=    Set Variable    ${EMPTY}
+	${Response}=    Fusion Api Get Backup
+	Run keyword If    ${Response['status_code']} != 200    Fail     msg="Failed to Get the latest backup"
+	${restore_body}=   Create Dictionary    type=RESTORE
+	...                                     uriOfBackupToRestore=${Response['members'][0]['uri']}
+	${output}=    Fusion Api Restore Backup    ${restore_body}
+	Run keyword If    ${output['status_code']} != 202    Fail      msg="Failed to perform the restore from backup operation"
+	Sleep    20min
+	${restore_resp}=     Fusion Api Get Restore Status
+	Run keyword If    ${restore_resp['status_code']} != 200    fail    msg="Failed to get the restore details"
+	:FOR   ${index}   IN RANGE   ${restore_resp['count']}
+	\   Run Keyword If    '${restore_resp['members'][${index}]['backupIdToRestore']}' != '${Response['members'][0]['id']}'   Continue For Loop
+	\   ${restore_id} =    Set Variable    ${restore_resp['members'][${index}]['id']}
+	:FOR   ${index}   IN RANGE   50
+	\	sleep	30sec
+	\	Log to console		"Restoring is in Progress..."
+	\	${resp}=    Fusion Api Get Restore Status    param=?filter="'id'=='${restore_id}'"
+	\	Run keyword If     ${resp['status_code']}!= 200     Fail      msg="Unable to get the restore id details"
+	\	Run Keyword If     '${resp['members'][0]['progressStep']}' != 'COMPLETED'    Continue For Loop
+	\	${status} =    Set Variable    ${resp['members'][0]['status']}
+	\	Run Keyword If   '${resp['members'][0]['progressStep']}' == 'COMPLETED'    Exit For Loop
+	Should Be Equal    ${status}    SUCCEEDED
+	Log to console     \nRestore process got succeeded
+
+Create Enclosure List for LE Dictionary
+    [Documentation]    Create  Enclosure List for LE requests
+	[Arguments]		${start}	${end}
+	${encs} =	Create List
+	:FOR    ${index}	IN RANGE	1	${end}+1
+	\  	Append to List	${encs}	ENC:${Enc_${index}}
+	Set To Dictionary	${les}	enclosureUris	${encs}
+	[Return]
+
+FVT Create Server Profile FlexFrames
+    [Documentation]    Create Server Profile for given # of Frames
+	[Arguments]		${profile}	${encGroup}
+
+	Log To Console	\n Started FVT Create Server Profile FlexFrames
+
+	Set To Dictionary	${profile['payload']}	enclosureGroupUri	EG:${encGroup}
+
+	${resp} =   server_profile.Add Server Profile    ${profile['payload']}
+	${task} =   Wait For Task	${resp}		timeout=20m		interval=5s
+	${task_state} = 	Get From dictionary 	${task}     taskState
+	Should Match Regexp	${task_state}	 ((?i)Warning|Completed)
+	${resp}	Fvt Api Get Server Profile By Name	${profile['payload']['name']}
+#	Should Be Equal As Strings	${resp['status']}	OK
+
+	Log To Console	\n Finished FVT Create Server Profile FlexFrames
+
+Get Server iLO IP
+    [Documentation]   Keyword to retrieve iLO IP for server bay
+    [Arguments]    ${bay}
+    ${server_info}=    Get Server Info    ${bay}
+    ${ilo_ip}=    Get Server iLO Address    ${server_info}
+    [Return]    ${ilo_ip}
+
+Get Server iLO Address
+    [Documentation]   Keyword to retrieve iLO IP for server bay
+    [Arguments]    ${server_bay_info}
+    ${mpHostInfo}=    Get From Dictionary    ${server_bay_info}    mpHostInfo
+    ${mpIpAddresses} =    Get From Dictionary    ${mpHostInfo}    mpIpAddresses
+    ${l} =  Get Length  ${mpIpAddresses}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${enc} =    Get From List    ${mpIpAddresses}    ${x}
+    \    ${type}=    Get From Dictionary    ${enc}    type
+    \    Run Keyword If    '${type}'!='DHCP'    Continue For Loop
+    \    ${address}=    Get From Dictionary     ${enc}    address
+    [Return]    ${address}
+
+Verify ErrorMessage in taskError
+    [Documentation]    Verify taskErrors contain specified errorMessage
+    [Arguments]    ${taskErrors}    ${expected_errormessage}
+
+    :FOR    ${taskerror}    IN    @{taskErrors}
+    \    ${message} =    Get From Dictionary    ${taskError}    message
+    \    Exit For Loop If    '${message}' == '${expected_errormessage}'
+
+    Should Be Equal As Strings    ${message}    ${expected_errormessage}
+
+FVT Check Interconnect Downlink Speed
+    [Documentation]    Verify Interconnect Downlink Speed
+    ...              ${enc1_bay3_icm}    d1    Speed25G
+    ...              FVT Check Interconnect Downlink Speed    ${enc1_bay3_icm}    d1    Speed25G
+	[Arguments]	${enc_bay_icm}	${dl}   ${dlPortStatus}    ${dlSpeed}
+
+#   Linked    Speed25G
+#                         'portStatus': 'Unlinked',
+#                          'operationalSpeed': 'Speed25G',
+    ${resp}=    Fusion Api Get Interconnect   param=?filter="'name'=='${enc_bay_icm}'"
+    Should Be Equal As Strings    ${resp['members'][0]['ports'][${dl}]['portStatus']}    ${dlPortStatus}
+    Should Be Equal As Strings    ${resp['members'][0]['ports'][${dl}]['operationalSpeed']}    ${dlSpeed}
+    [Return]
+
+Verify Traffic
+    [Documentation]    Verify from Ping process output file that lost packet count is
+    ...                no more than the specified max allowed count.
+    ...                Note that 0% percent loss is not used. If overall transmitted packets
+    ...                are small, even 1 packet loss may be over 0%, and if transmitted packets
+    ...                is large, even unaccepted packet loss may still show as 0% loss
+    ...                When the traffic verification passes, the output file is removed
+    [Arguments]    ${outfile}    ${max_allowed_lost_packet}
+
+    Log To Console    ${\n}Verify traffic in ${outfile} with max allowed lost packet as ${max_allowed_lost_packet}
+
+    # ${pattern} =    Set Variable If   os.name == "nt"    ${data_common.NT_ZERO_PERCENT_LOSS}
+    # ...    ${data_common.LINUX_ZERO_PERCENT_LOSS}
+
+    ${line} =    Grep File    ${outfile}    [pP]ackets
+    Should Not Be Empty    ${line}
+
+    # For Linux, no Lost packet count, % packet loss does not gurantee no packet drops,
+    # need furthur check
+    # e.g. 10000 packets transmitted, 9999 received, 0% packet loss, time 8999ms
+    # Windows has lost packed count, but use the same routine to check count
+    # Packets: Sent = 1000, Received = 999, Lost = 1 (0% loss)
+
+    ${pattern} =     Set Variable If
+    ...    os.name == "nt"    \\s*Packets:\\s+Sent\\s+=\\s+(\\d+),\\s+Received\\s+=\\s+(\\d+),\\.*
+    ...                       \\s*(\\d+)\\s+packets transmitted,\\s+(\\d+)\\s+received,\\s+\\.*
+    ${match}    ${transmitted}    ${received}    Should Match Regexp    ${line}    ${pattern}
+
+    Should Not Be Empty    ${match}
+
+    ${packet_loss} =    Evaluate    ${transmitted} - ${received}
+    Should Be True    ${packet_loss} <= ${max_allowed_lost_packet}
+    ...     ${\n}${outfile}: Lost ${packet_loss} packets which exceeds max allowed ${max_allowed_lost_packet} packets
+
+
+    Log To Console    \tLost ${packet_loss} packets within max allowed
+
+    # DF save file if want to to double check. Each run setup will clean up files anyway
+    # Remove File    ${outfile}
+
+Wait For Server To Be Pingable
+    [Documentation]    Wait for Server Ping access
+	[Arguments]		${ip}
+	Log To Console	\n Waiting For Server, IP = ${ip}, To Be Pingable
+    :FOR	${x}   IN RANGE	0	10
+	\    ${result} =	Run keyword if    os.name == "nt"	Run Process    ping	${ip}
+	\    ...	ELSE	Run Process    ping -c 4 ${ip}     shell=yes
+	\	Exit For Loop If	${result.rc} == 0
+	\
+	\	Sleep	1m
+	[Return]
+
+Server Profile Connectivity With Ping
+    [Documentation]    Ping Connectivity for a Server Profile
+	[Arguments]		${profile}    ${timeout}=15m	${interval}=5s
+
+# profile status verification is moved down after Server Power is turned ON
+# (Intermettent issue that profile status is Critical and connections are in error if serer is not Powered ON
+
+	Log To Console	\n verifying Server Profile Connectivity With Ping
+
+	# Power ON server
+	Log To Console	\n .... Power ON server ${profile['payload']['name']}
+	${payload} =	Create Dictionary	powerState=On	powerControl=MomentaryPress
+	${resp}	Fvt Api Get Server Hardware By Name	${profile['payload']['serverHardwareUri']}
+	${uri} =	Set Variable	${resp['uri']}
+	${task}	Fusion Api Edit Server Hardware Power State	uri=${uri}	body=${payload}
+	Should Be Equal As Integers	${task['status_code']}	202
+	Return From Keyword If	'${timeout}' == '0'	${task}
+	${task} =	Wait For Task	${task}	${timeout}	${interval}
+	Sleep	8 mins		# Wait for 8 mins server to boot up
+	${resp}	Fvt Api Get Server Profile By Name	${profile['payload']['name']}
+	Should Be Equal As Strings	${resp['status']}	OK
+
+    # Find Server IP addresses with its iLO interface
+    # ${profile['payload']['name']}
+    @{server_num} =    Split String From Right    ${profile['payload']['serverHardwareUri']}
+    ${iloip} =     Get Server Hardware iLO IP    ${profile['payload']['serverHardwareUri']}
+#    Log to Console      ${iloip}
+    Append to List    ${ILO_IPS}    ${iloip}
+
+	Log To Console	\n .... ${profile['payload']['name']} iLO address ${ILO_IPS}
+
+    Set To Dictionary    ${Ilo_details}    ilo_ip    ${ilo_ip}
+#    Log to Console      ${Ilo_details}
+    ${index}=   Get Index From List    ${ILO_IPS}    ${ilo_ip}
+
+    # Get Windows OS IP addresses of the server
+    ${Server_network_ips}    Get Server Ip Windows    ${Ilo_details}
+
+    # Store IP addresses for other test cases
+    Set Suite Variable	${${profile['payload']['name']}_IPaddresses}	${Server_network_ips}
+
+	Log To Console	\n .... ${profile['payload']['name']} Server OS IP addresses:
+    Log to Console      ${${profile['payload']['name']}_IPaddresses}
+    ${temp_handleList}    Create List
+
+    ${len}    Get Length    ${Server_network_ips}
+    Set Suite Variable	${${profile['payload']['name']}_ip_count}	${len}
+    :FOR    ${x}    IN RANGE    ${len}
+	\   ${ip} =	Set Variable	${Server_network_ips[${x}]}
+#	\   Log to Console      ${Server_network_ips[${x}]}
+	\   Log to Console      ${ip}
+	\   Wait For Server To Be Pingable	${ip}
+	\   ${handle} =	Run keyword if    os.name == "nt"	Start Process	ping    ${ip}    stdout=${profile['payload']['name']}_${ip}.out
+	\   ...	ELSE	Start Process	ping    ${ip}    stdout=${profile['payload']['name']}_${ip}.out   shell=yes
+	\   Sleep	1m
+	# old code stores process handle in dictionary. However its not persistent as we read
+	# profile data store it in a suite variable and read it while deleting profile
+#	\   append to list  ${temp_handleList}  ${handle}
+#	\   Set To Dictionary	${profile}	handle	${handle}
+#    \   Set List Value    ${temp_handleList}    ${x}    ${handle}
+    \   Set Suite Variable	${${profile['payload']['name']}_${x}_${ip}_handle}	${handle}
+    \   Set Suite Variable	${${profile['payload']['name']}_${x}_ip}	${ip}
+    \   Log To Console	\n handle ${${profile['payload']['name']}_${x}_${ip}_handle}
+    \   Log To Console	\n ip ${${profile['payload']['name']}_${x}_ip}
+	\   OperatingSystem.File Should Exist    ${profile['payload']['name']}_${ip}.out
+#	\   Log To Console	\n Profile ${profile['payload']['name']} ping to ${ip} process Handle ${${profile['payload']['name']}_${x}_${ip}_handle}
+
+#    Set To Dictionary	${profile}	handle	${temp_handleList}
+#	Set Suite Variable	${${profile['payload']['name']}_handleList}	${temp_handleList}
+#    \    ${temp_list}=    Copy List    ${original_ps_sparepn_list}
+
+	[Return]
+
+Delete Profile With Multiple Ping Sessions
+    [Documentation]    Delete Server Profile that is created with Ping test
+	[Arguments]		${profile}
+
+#	${Server_network_ips} =	Set Variable	${${profile['payload']['name']}_IPaddresses}
+#    ${len}    Get Length    ${Server_network_ips}
+
+    ${len} =     Set Variable	${${profile['payload']['name']}_ip_count}
+    Log to Console      DeleteProfile Number of IP addresses ${${profile['payload']['name']}_ip_count}
+
+    :FOR    ${x}    IN RANGE    ${len}
+    \   Log To Console	\n ip from set ${${profile['payload']['name']}_${x}_ip}
+	\   ${ip} =     Get Variable Value	${${profile['payload']['name']}_${x}_ip}
+#	\   Log to Console	\n ip after read  ${ip}
+    \   Log To Console	\n handle from set ${${profile['payload']['name']}_${x}_${ip}_handle}
+    \   ${curr_handle} =    Get Variable Value    ${${profile['payload']['name']}_${x}_${ip}_handle}
+#	\   Log to Console	\n handle after read  ${curr_handle}
+	\   # Ping process handle stored in a suite variable. Read it for stopping the process
+	\   Log To Console	\n Profile ${profile['payload']['name']} ping process Handle ${curr_handle}
+	\   # on Linux testhead, use SIGINT for stopping ping session (similar to ctrl + c)
+	\   Run keyword if    os.name == "nt"	Terminate Process	${curr_handle}
+	\   ...	ELSE	Send Signal To Process   	2     ${curr_handle}    shell=yes
+	\   Sleep	1m
+	\   Process Should Be Stopped	${curr_handle}
+#	\   ${task}	Fusion Api Delete Server Profile	name=${profile['payload']['name']}	param=?force=true
+#	\   Should Be Equal As Integers	${task['status_code']}	202
+#	\   ${task} =	Wait For Task	${task}	timeout=10m	interval=2s
+	\   Run Keyword And Continue On Failure    Verify Traffic    ${profile['payload']['name']}_${ip}.out    ${ALLOWED_PACKET_LOSS_SCHANNEL_LAG}
+
+    ${time} =	Get Time
+    Move File	${profile['payload']['name']}_${ip}.out   ${profile['payload']['name']}_${ip}_${time}.out
+#	Remove File	${profile['payload']['name']}_${ip}.out
+	[Return]

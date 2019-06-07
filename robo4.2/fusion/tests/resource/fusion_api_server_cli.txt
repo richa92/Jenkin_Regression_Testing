@@ -1,0 +1,105 @@
+*** Settings ***
+Library			BuiltIn
+Library		        SSHLibrary
+
+*** Keywords ***
+# -----------------------------------------------------------------------------
+#   SERVER BLADE BASH SHELL INTERFACE KEYWORDS (Unix-based system)
+# -----------------------------------------------------------------------------
+Check MeatGrinder Logs And Fail On Error
+    [Documentation]   Grep the latest MeatGrinder log for error in the specified server IPs.
+    ...               CHECK_MEATGRINDER variable must be set to any none NoneType value.
+    ...               In single enclosure CI-FIT Robustness, we are passing -vCHECK_MEATGRINDER:"IP1 IP2 IP3 IPn" to pybot command and split the string to convert it to list of IPs.
+    ...               Required arguments are the following:
+    ...                   serverIps - list of server IPs to check.
+    ...                   serverUser - server user login.
+    ...                   serverPassword - server user login password.
+    ...                   meatGrinderDir - MeatGrinder directory location in the server.
+    [Arguments]   ${serverIps}   ${serverUser}   ${serverPassword}   ${meatGrinderDir}
+    Return From Keyword If   "${CHECK_MEATGRINDER}" == "${null}"
+    ${successStr} =   Set Variable   MeatGrinder log did NOT contain any error.
+    ${errorStr} =   Set Variable   Error found in MeatGrinder log.
+    Log   \n Checking ${serverIps} MeatGrinder latest log for error...   console=${True}
+    ${cmd} =   Set Variable   cat `ls -t ${meatGrinderDir}/logs/mgerror* | awk '{print($0);exit}'` | grep 'Error [0-9]* '
+    Login To Servers And Execute Command   ${serverIps}   ${serverUser}   ${serverPassword}   ${cmd}   ${successStr}   ${errorStr}
+    Log   [OK]   console=${True}
+
+Check Multipath And Fail On Issue
+    [Documentation]   Get the multipath from the server and check that it has the expected numbers (nothing was lost).
+    ...               CHECK_MULTIPATH variable must be set to any none NoneType value.
+    ...               It can be done in any of the following: 1. pybot -vCHECK_MULTIPATH:True, 2. data_variables.py file, or 3. inside your script variables section.
+    ...               Required arguments are the following:
+    ...                   serverIp - string of server IP to check.
+    ...                   numberOfPaths - integer value on the number of expected paths for server.
+    ...                   serverUser - server user login.
+    ...                   serverPassword - server user login password.
+    ...               Optional argument:
+    ...                   script - server script that get and parses multipath.
+    [Arguments]   ${serverIp}   ${numberOfPaths}   ${serverUser}   ${serverPassword}   ${script}=${MULTIPATH_SCRIPT}
+    Return From Keyword If   "${CHECK_MULTIPATH}" == "${null}"
+    ${serverIp} =   Create List  ${serverIp}
+    ${successStr} =   Set Variable   Multipath is intact.
+    ${errorStr} =   Set Variable   Missing something in multipath.
+    Log   \n Checking server ${serverIp} multipath...   console=${True}
+    ${cmd} =   Set Variable   ${script} ${numberOfPaths}
+    Login To Servers And Execute Command   ${serverIp}   ${serverUser}   ${serverPassword}   ${cmd}   ${successStr}   ${errorStr}
+    Log   [OK]   console=${True}
+
+Check Server Read Only And Fail On Error
+    [Documentation]   Check servers for read-only filesystem.
+    ...               CHECK_READONLY variable must be set to any none NoneType value.
+    ...               In single enclosure CI-FIT Robustness, we are passing -vCHECK_READONLY:"IP1 IP2 IP3 IPn" to pybot command and split the string to convert it to list of IPs to check.
+    ...               Required arguments are the following:
+    ...                   serverIps - list of server IPs to check.
+    ...                   serverUser - server user login.
+    ...                   serverPassword - server user login password.
+    [Arguments]   ${serverIps}   ${serverUser}   ${serverPassword}
+    Return From Keyword If   "${CHECK_READONLY}" == "${null}"
+    ${successStr} =   Set Variable   Filesystem is NOT in read-only mode.
+    ${errorStr} =   Set Variable   Filesystem IS in read-only mode.
+    Log   \n Checking ${serverIps} for read-only FS...   console=${True}
+    ${cmd} =   Set Variable   mount | grep 'mount: warning: /etc/mtab is not writable (e.g. read-only filesystem)'
+    Login To Servers And Execute Command   ${serverIps}   ${serverUser}   ${serverPassword}   ${cmd}   ${successStr}   ${errorStr}
+    Log   [OK]   console=${True}
+
+Run Sequential Ping
+    [Documentation]   Run sequential ping from TCS to blades.
+    ...               PING_HAFILE variable must be set to the path of your HA file.
+    ...               Optional argument:
+    ...                   script - path to your sequential ping script.
+    [Arguments]   ${script}=${SEQUENTIAL_PING_SCRIPT}
+    ${PING_HAFILE} =   Get Variable Value   ${PING_HAFILE}
+    Return From Keyword If   "${PING_HAFILE}" == "${null}"
+    Log   \n Running sequential ping (ping logs are in /tmp, use tail to monitor the test)...   console=${True}
+    ${rc} =   Run And Return RC  ${script} ${PING_HAFILE} >/dev/null
+    Run Keyword If   ${rc} == 1  Log   [OK]   console=${True}
+    ...       ELSE  Fail  msg=Check the sequential ping log for info.
+
+Login To Servers And Execute Command
+    [Documentation]   Sequentially login to multiple servers and run a command.
+    ...               Required arguments are the following:
+    ...                   serverIps - list of server IPs to check.
+    ...                   serverUser - server user login.
+    ...                   serverPassword - server user login password.
+    ...                   command - command to run/execute.
+    ...                   successMsg - a successful command message.
+    ...                   errorMsg - a failed command error message.
+    [Arguments]   ${serverIps}   ${serverUser}   ${serverPassword}   ${command}   ${successMsg}   ${errorMsg}   ${iface}=eth0
+    ${rc}=   Set Variable   ${1}
+    ${failedServers} =   Create List
+    ${passedServers} =   Create List
+    :FOR   ${serverIp}   IN   @{serverIps}
+    \   ${sanitizedIP} =   Get Variable Value   ${serverIp}
+    \   ${sanitizedIP} =   Remove String Using Regexp   ${sanitizedIP}   (\\[|\\])
+    \   ${llAddr} =   Get Lines Matching Regexp   ${sanitizedIP}   ^fe80:   partial_match=true
+    \   ${Id} =   Run Keyword If   '${llAddr}' == '${EMPTY}'   Open Connection  ${sanitizedIP}
+    \   ...       ELSE   Open Connection  ${sanitizedIP}%${iface}
+    \   ${Output}=    Login    ${serverUser}   ${serverPassword}
+    \   ${stdout}    ${stderr}    ${rc} =    Execute Command   ${command}   return_stderr=True   return_rc=True
+    \   Run Keyword If   ${rc} == 1   Append To List   ${passedServers}   ${serverIp}
+    \   ...       ELSE   Append To List   ${failedServers}   ${serverIp}
+    Log   Servers passed: ${passedServers}
+    Log   Servers failed: ${failedServers}
+    ${e} =   Get Length   ${failedServers}
+    Run Keyword If   ${e} != 0    Fail   msg=${errorMsg}. Servers failed: ${failedServers}
+    Close SSH Connection

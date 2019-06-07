@@ -1,0 +1,662 @@
+*** Settings ***
+Documentation		Feature Test: F748-49 Monitor & Basic Configuration Support for Cisco Nexus 5K/6K ToR Switches when directly connected to B22 FEX Interconnects
+Variables 		    data_variables.py
+Suite Setup   		Run FTS and test-specific setup
+Suite Teardown		Suite Teardown
+
+Resource            ../../../../resource/fusion_api_all_resource_files.txt
+
+Library				Collections
+Library             json
+Library             Dialogs
+
+*** Variables ***
+${SSH_PASS}                     hpvse1
+${VM}
+
+*** Test Cases ***
+Create FEX LIG, EG, import Enc, create LSG and LS
+    [Tags]  1    THINSLICE
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+	Fusion Api Login Appliance 		${APPLIANCE_IP}		${admin_credentials}
+
+    ${body} =   Build LIG body      ${ligs['FEX-LIG1']}
+	${resp} = 	Fusion Api Create LIG	${body}
+	${task} =	Wait For Task	${resp} 	60s	2s
+
+    ${body} =   Build LIG body      ${ligs['VC-LIG1']}
+	${resp} = 	Fusion Api Create LIG	${body}
+	${task} =	Wait For Task	${resp} 	60s	2s
+
+	Add Enclosure Group from variable		${enc_group}
+	Add Enclosures from variable     ${encs}
+
+    #pause execution    message=Enclosure is now imported, but no LSG or LS created yet (Added with Errors)
+	#Fusion Api Login Appliance 		${APPLIANCE_IP}		${admin_credentials}
+
+
+	${lsgs} =	Get Variable Value	${lsgs}
+	Run Keyword If	${lsgs} is not ${null}	                Run Keyword for List    ${lsgs}    Add Logical Switch Group from variable
+    ${lss} =     Get Variable Value   ${lss}
+	Run Keyword If	${lss} is not ${null}	                Run Keyword for List    ${lss}    Add Logical Switch from variable
+
+    Wait for ILS to exist    count=4
+    Wait for Switch to be configured
+
+Create Profiles, power on and Boot From SAN, ping blades
+    [Tags]  2    THINSLICE
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	Power off ALL servers
+	Add Server Profiles from variable   ${server_profiles}
+    Log    Bug - ls going from configured to configuring
+    sleep   2 min
+
+    Wait for Switch to be configured
+
+    Run Keyword for List    ${servers}    Power on server
+	Log to console and logfile  	Waiting 15 minutes for servers to boot...
+    Sleep   15min
+    Wait For Appliance To Become Pingable   ${BAY1_IP}
+    Wait For Appliance To Become Pingable   ${BAY2_IP}
+    SSH to host and ping x    ${BAY2_IP}    ${BAY1_IP}
+    SSH to host and ping x    ${BAY2_IP}    ${GW_IP}
+
+    #pause execution    message=See that BFS has worked on FEX, Show that there are MAC addresses available in the FEX LI FIB page
+
+Retrieve FIB results without a filter on FEX LI
+    [Tags]  3    mactable
+    #GET /rest/logical-interconnects/{id}/forwarding-information-base
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	Fusion Api Login Appliance 		${APPLIANCE_IP}		${admin_credentials}
+	${li_uri} = 	Get LI URI   ${LE}-${LIG1}
+	${resp} =       fusion api get li forwarding information base    uri=${li_uri}
+	should not be empty     ${resp['members']}
+
+Retrieve FIB results with a filter on FEX LI
+    [Tags]  4    mactable
+    #GET /rest/logical-interconnects/{id}/forwarding-information-base?filter=”externalVlan=’303’
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	Fusion Api Login Appliance 		${APPLIANCE_IP}		${admin_credentials}
+	${li_uri} = 	Get LI URI   ${LE}-${LIG1}
+	${resp} =       fusion api get li forwarding information base    uri=${li_uri}    param=?filter="externalVlan='102'"
+	should not be empty     ${resp['members']}
+
+#Generate a FIB dump file on FEX LI
+#    [Tags]  5
+#    #POST /rest/logical-interconnects/{id}/forwarding-information-base
+#Retreive a FIB dump file for FEX LI
+#    [Tags]  6
+#    #GET /rest/logical-interconnects/{id}/forwarding-information-base/{filename}
+#NEGATIVE
+#Retreive a FIB dump file that has already been retrieved for FEX LI
+#    [Tags]  7
+#    #GET /rest/logical-interconnects/{id}/forwarding-information-base/{filename}
+#4.1.3 Support Dump on LS
+#POSITIVE
+#Generate an encrypted standalone support dump
+#GET /rest/logical-switches/{id}/support-dumps   {“errorCode”: “CI1234”, “encrypt”: true}
+#Generate un-encrypted standalone support dump
+#GET /rest/logical-switches/{id}/support-dumps   {“errorCode”: “CI1234”, “encrypt”: false}
+
+#4.1.4 Internal Link Sets
+Retrieve all ILS
+    [Tags]    5    ILS    THINSLICE
+    #GET /rest/internal-link-sets
+    ${resp} =    Fusion Api Get Internal Link Sets
+
+Retrieve a specific ILS
+    [Tags]    6    ILS    THINSLICE
+    #GET /rest/internal-link-sets/{id}
+    ${ils} =     Fusion Api Get Internal Link Sets
+    ${ils} =     Get From Dictionary  ${ils['members'][0]}    uri
+    ${resp} =    fusion api get internal link sets    uri=${ils}
+
+#TODO: Validate ILS contents
+
+Create an LIG with an FEX US with a network set that has a network marked as Untagged (native)
+    [Tags]    7    POS
+    # TODO: figure out how to really test this
+    # network-a is in a netset1, and is marked as Untagged. Need to use netset1 in a SP...
+	Run Keyword and Ignore Error    Write To ciDebug Log
+    ${body} =   Build LIG body      ${ligs['FEX-LIG-w-untagged-NS']}
+	${resp} = 	Fusion Api Create LIG	${body}
+	${task} =	Wait For Task	${resp} 	3m	10s
+	${valDict} = 	Create Dictionary	status_code=${200}
+	...									taskState=Completed
+	Validate Response	${task}	${valDict}
+
+Try to create an LIG with an Untagged Uplink Set
+    [Tags]    8    NEG
+	Run Keyword and Ignore Error    Write To ciDebug Log
+    ${body} =   Build LIG body      ${ligs['FEX-LIG-w-untagged-US']}
+	${resp} = 	Fusion Api Create LIG	${body}
+	${task} =	Wait For Task	${resp} 	60s	2s
+	${valDict} = 	Create Dictionary	status_code=${200}
+	...									taskState=Error
+	...									taskStatus=Untagged ethernet network type is not valid for Cisco Fabric Extender logical uplink.
+	Validate Response	${task}	${valDict}
+
+Try to create an LIG with an untagged network in an FEX uplink set
+    [Tags]     9    NEG
+	Run Keyword and Ignore Error    Write To ciDebug Log
+    ${body} =   Build LIG body      ${ligs['FEX-LIG-w-untagged-net']}
+	${resp} = 	Fusion Api Create LIG	${body}
+	${task} =	Wait For Task	${resp} 	60s	2s
+	${valDict} = 	Create Dictionary	status_code=${200}
+	...									taskState=Error
+	...									taskStatus=Untagged ethernet network Untagged cannot be assigned to Tagged uplink set.
+	Validate Response	${task}	${valDict}
+
+Edit an LIG that contains FEX modules
+    [Tags]    10    POS    THINSLICE
+	Run Keyword and Ignore Error    Write To ciDebug Log
+    #1. Edit an FEX LIG, changing the ports in an uplink set
+    ${body} =               Build LIG body      ${ligs['FEX-LIG-edit']}
+    # Get info from the current LIG to apply edits to
+    ${lig} = 	            Get LIG Member     FEX-LIG-w-untagged-NS
+    ${ethernetSettings} =   Get From Dictionary   ${lig}  ethernetSettings
+	Set to dictionary	${body}     ethernetSettings    ${ethernetSettings}
+	${lig_uri} =            Get LIG Uri     FEX-LIG-w-untagged-NS
+	${resp} = 	            Fusion Api Edit LIG	    body=${body}	uri=${lig_uri}
+	${task} =	            Wait For Task 	${resp} 	120s	2s
+	${valDict} = 	        Create Dictionary	taskState=Completed
+	Validate Response	${task}	${valDict}
+
+Try to create an LIG with an Tunnel Uplink Set
+    [Tags]    11    NEG
+	Run Keyword and Ignore Error    Write To ciDebug Log
+    ${body} =   Build LIG body      ${ligs['FEX-LIG-w-tunnel-US']}
+	${resp} = 	Fusion Api Create LIG	${body}
+	${task} =	Wait For Task	${resp} 	60s	2s
+	${valDict} = 	Create Dictionary	status_code=${200}
+	...									taskState=Error
+	...									taskStatus=Tunnel ethernet network type is not valid for Cisco Fabric Extender logical uplink.
+	Validate Response	${task}	${valDict}
+
+Try to create an LIG that uses a tunnel network in an FEX uplink set
+    [Tags]    12    NEG
+	Run Keyword and Ignore Error    Write To ciDebug Log
+    ${body} =   Build LIG body      ${ligs['FEX-LIG-w-tunnel-net']}
+	${resp} = 	Fusion Api Create LIG	${body}
+	${task} =	Wait For Task	${resp} 	60s	2s
+	${valDict} = 	Create Dictionary	status_code=${200}
+	...									taskState=Error
+	...									taskStatus=Tunnel ethernet network Tunnel cannot be assigned to Tagged uplink set.
+	Validate Response	${task}	${valDict}
+
+Try to create an LIG with FEX module and VC modules
+    [Tags]     13    NEG
+	Run Keyword and Ignore Error    Write To ciDebug Log
+    ${body} =   Build LIG body      ${ligs['FEX-and-VC-LIG']}
+	${resp} = 	Fusion Api Create LIG	${body}
+	${valDict} = 	Create Dictionary	status_code=${400}
+	...									errorCode=CRM_FEX_NOT_ALLOWED_WITH_OTHER_INTERCONNECT_TYPES
+	...									message=The Cisco Fabric Extender interconnect type is not allowed in a logical interconnect group with other interconnect types.
+	Validate Response	${resp}	${valDict}
+
+Try to create an LIG with an US that spans multiple FEX modules
+    [Tags]      14    NEG
+	Run Keyword and Ignore Error    Write To ciDebug Log
+    ${body} =   Build LIG body      ${ligs['FEX-US-cannot-span-ICMs']}
+	${resp} = 	Fusion Api Create LIG	${body}
+	${task} =	Wait For Task	${resp} 	60s	2s
+	${valDict} = 	Create Dictionary	status_code=${200}
+	...									taskState=Error
+	...                                 taskStatus=Fabric Extender uplink set template ports are spanning multiple interconnects.
+	Validate Response	${task}	${valDict}
+
+#Uplink Sets cannot contain FC networks
+
+Try to create an LIG with an US that contains an FC network
+    [Tags]     15    NEG
+	Run Keyword and Ignore Error    Write To ciDebug Log
+    ${body} =   Build LIG body      ${ligs['FEX-with-FC-US']}
+	${resp} = 	Fusion Api Create LIG	${body}
+	${task} =	Wait For Task	${resp} 	60s	2s
+	${valDict} = 	Create Dictionary	status_code=${200}
+	...									taskState=Error
+	...                                 taskStatus=Invalid uplink set: Port: \\d+ for interconnect-type: .* is not capable for FIBRE_CHANNEL.
+	Validate Response Regex   	${task}	${valDict}
+
+#Some VLAN ids are reserved on Cisco (ex. 3950-3999)
+#http://www.cisco.com/c/en/us/td/docs/switches/datacenter/nexus5000/sw/configuration/guide/cli/CLIConfigurationGuide/VLANs.html
+#VLANs 3968 to 4047 and 4094 are reserved for internal use; these VLANs cannot be changed or used.
+#The default VLAN (VLAN 1) uses only default values, and you cannot create, delete, or suspend activity in the default VLAN.
+
+Try to create an LIG that uses an Ethernet and FCoE network in the “reserved range” in an FEX uplink set
+    [Tags]     16    NEG
+	Run Keyword and Ignore Error    Write To ciDebug Log
+    ${body} =   Build LIG body      ${ligs['FEX-US-reserved-vlans']}
+	${resp} = 	Fusion Api Create LIG	${body}
+	${task} =	Wait For Task	${resp} 	60s	2s
+	${valDict} = 	Create Dictionary	status_code=${200}
+	...									taskState=Error
+	...                                 taskStatus=The uplink set contains a network using a VLAN ID reserved by the top of rack switch.
+	Validate Response Regex   	${task}	${valDict}
+
+Try to create an LIG with an FEX US that exceeds the maximum ethernet networks per LIG (1000)
+    [Tags]     17    NEG
+	Run Keyword and Ignore Error    Write To ciDebug Log
+    ${body} =   Build LIG body      ${ligs['FEX-exceeds-max-vlans-per-LI']}
+	${resp} = 	Fusion Api Create LIG	${body}
+	#${task} =	Wait For Task	${resp} 	60s	2s
+	${valDict} = 	Create Dictionary	status_code=${400}
+	...									errorCode=CRM_MAX_ETHERNET_NETWORKS_EXCEEDED_ON_VC_LIG
+	...									message=Logical interconnect groups can support a maximum of 1000 Ethernet networks. The requested configuration will result in 1001 networks.
+	#...                                 taskState=Error
+	Validate Response	${resp}	${valDict}
+
+Try to create an LIG with an FEX US that exceeds the maximum FCoE networks per LI (32)
+    [Tags]     18    NEG
+	Run Keyword and Ignore Error    Write To ciDebug Log
+    ${body} =   Build LIG body      ${ligs['FEX-exceeds-max-fcoe-per-LI']}
+	${resp} = 	Fusion Api Create LIG	${body}
+	${task} =	Wait For Task	${resp} 	60s	2s
+	${valDict} = 	Create Dictionary	status_code=${200}
+	...									taskState=Error
+	...                                 taskStatus=Too many FCoE networks have been specified for the uplink set.
+	Validate Response	${task}	${valDict}
+
+Create an LIG with an FEX US that uses the maximum ethernet networks per LIG (1000) and max FCoE (32)
+    [Tags]     19    POS
+	Run Keyword and Ignore Error    Write To ciDebug Log
+    ${body} =   Build LIG body      ${ligs['FEX-max-vlans-per-LI']}
+	${resp} = 	Fusion Api Create LIG	${body}
+	${task} =	Wait For Task	${resp} 	60s	2s
+	${valDict} = 	Create Dictionary	status_code=${200}
+	...									taskState=Completed
+	Validate Response	${task}   ${valDict}
+
+Create an ETH, FCOE, and ETH + FCOE Uplink Set that contains FEX modules
+    [Tags]    20    POS    THINSLICE
+
+    Power off ALL servers
+
+    ${resp} =       Remove all uplinksets
+    #Wait for Switch to be configured
+
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	${li_uri} = 	Get LI URI   ${LE}-${LIG1}
+	${us} = 		Copy Dictionary	${li_uplink_sets['FEX-US-ETH']}
+	${body} = 		Build US body 	${us}	${li_uri}
+	${resp} = 		Fusion Api Create Uplink Set	body=${body}
+	${task} =       Wait For Task 	${resp} 	20 min	15s
+	${valDict} = 	Create Dictionary	status_code=${200}
+	...									taskState=Completed
+	Validate Response	${task}	${valDict}
+
+    ${resp} =       Remove all uplinksets
+    #Wait for Switch to be configured
+
+	${us} = 		Copy Dictionary	${li_uplink_sets['FEX-US-FCOE']}
+	${body} = 		Build US body 	${us}	${li_uri}
+	${resp} = 		Fusion Api Create Uplink Set	body=${body}
+	${task} =       Wait For Task 	${resp} 	20 min	15s
+	${valDict} = 	Create Dictionary	status_code=${200}
+	...									taskState=Completed
+	Validate Response	${task}	${valDict}
+
+    ${resp} =       Remove all uplinksets
+    #Wait for Switch to be configured
+
+	${us} = 		Copy Dictionary	${li_uplink_sets['FEX-US-ETH-AND-FCOE']}
+	${body} = 		Build US body 	${us}	${li_uri}
+	${resp} = 		Fusion Api Create Uplink Set	body=${body}
+	${task} =       Wait For Task 	${resp} 	20 min	15s
+	${valDict} = 	Create Dictionary	status_code=${200}
+	...									taskState=Completed
+	Validate Response	${task}	${valDict}
+
+Edit an FEX LI US and change the uplink ports
+    [Tags]    21    POS    THINSLICE
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	${li_uri} = 	Get LI URI   ${LE}-${LIG1}
+	${enc_uri} =    Get Enclosure URI   ${ENC1}
+	${us} = 		Copy Dictionary	${li_uplink_sets['FEX-US-ETH-EDITED']}
+	${body} = 		Build US body 	${us}	${li_uri}
+
+	${uplinksets} =			Fusion Api Get Uplink Set	param=?filter="'name'=='FEX-US-ETH-AND-FCOE'"
+	${us} = 				Get From List	${uplinksets['members']}	0
+	${us_uri} = 			Get From Dictionary	${us}	uri
+	${resp} = 				Fusion Api Edit Uplink Set	body=${body}	uri=${us_uri}
+	${task} =               Wait For Task 	${resp} 	5 min	15s
+	${valDict} = 			Create Dictionary	status_code=${200}
+	...									taskState=Completed
+	Validate Response	${task}	${valDict}
+
+Edit FEX LI US by removing some networks
+    [Tags]    22    POS    THINSLICE
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	${li_uri} = 	Get LI URI   ${LE}-${LIG1}
+	${enc_uri} =    Get Enclosure URI   ${ENC1}
+	${us} = 		Copy Dictionary	${li_uplink_sets['FEX-US-ETH-EDITED2']}
+	${body} = 		Build US body 	${us}	${li_uri}
+
+	${uplinksets} =			Fusion Api Get Uplink Set	param=?filter="'name'=='FEX-US-ETH'"
+	${us} = 				Get From List	${uplinksets['members']}	0
+	${us_uri} = 			Get From Dictionary	${us}	uri
+	${resp} = 				Fusion Api Edit Uplink Set	body=${body}	uri=${us_uri}
+	${task} =               Wait For Task 	${resp} 	5 min	15s
+	${valDict} = 			Create Dictionary	status_code=${200}
+	...									taskState=Completed
+	Validate Response	${task}	${valDict}
+
+Add FCoE networks to an existing FEX ETH US - allowed for single switch LS only
+    [Tags]    23    NEG    THINSLICE
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	${li_uri} = 	Get LI URI   ${LE}-${LIG1}
+	${enc_uri} =    Get Enclosure URI   ${ENC1}
+	${us} = 		Copy Dictionary	${li_uplink_sets['FEX-US-ETH-EDITED3']}
+	${body} = 		Build US body 	${us}	${li_uri}
+
+	${uplinksets} =			Fusion Api Get Uplink Set	param=?filter="'name'=='FEX-US-ETH'"
+	${us} = 				Get From List	${uplinksets['members']}	0
+	${us_uri} = 			Get From Dictionary	${us}	uri
+	${resp} = 				Fusion Api Edit Uplink Set	body=${body}	uri=${us_uri}
+	${task} =               Wait For Task 	${resp} 	5 min	15s
+
+	${valDict} = 	Create Dictionary	status_code=${200}
+	...                                 taskState=Completed
+    Validate Response   ${task}    ${valDict}
+
+Create an Uplink Set in a FEX LI that uses a network set that has one Untagged network in it
+    [Tags]    24    POS    THINSLICE
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+    ${resp} =       Remove all uplinksets
+
+	${li_uri} = 	Get LI URI   ${LE}-${LIG1}
+	${us} = 		Copy Dictionary	${li_uplink_sets['FEX-US-w-untagged-NS']}
+	${body} = 		Build US body 	${us}	${li_uri}
+	${resp} = 		Fusion Api Create Uplink Set	body=${body}
+	${task} =       Wait For Task 	${resp} 	2 min	15s
+	${valDict} = 	Create Dictionary	status_code=${200}
+	...									taskState=Completed
+	Validate Response	${task}	${valDict}
+
+Try to create an US that spans multiple FEX modules
+    [Tags]    25    NEG    US
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+    ${resp} =       Remove all uplinksets
+
+	${li_uri} = 	Get LI URI   ${LE}-${LIG1}
+	${us} = 		Copy Dictionary	${li_uplink_sets['FEX-US-cannot-span-ICMs']}
+	${body} = 		Build US body 	${us}	${li_uri}
+	${resp} = 		Fusion Api Create Uplink Set	body=${body}
+	${valDict} = 	Create Dictionary	status_code=${400}
+	...									errorCode=CRM_PORTS_IN_DIFFERENT_SWITCH_WITH_ILS
+	...                                 message=Ports of uplink set, "FEX-US-cannot-span-ICMs", belong to different interconnects. When there is an associated internal link set all uplink set ports must belong to a single interconnect.
+    Validate Response   ${resp}    ${valDict}
+
+Try to create an US that contains an FC network
+    [Tags]    26    NEG    US
+    Log    Bug - ls going from configured to configuring
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	${li_uri} = 	Get LI URI   ${LE}-${LIG1}
+	${us} = 		Copy Dictionary	${li_uplink_sets['FEX-with-FC-US']}
+	${body} = 		Build US body 	${us}	${li_uri}
+	${resp} = 		Fusion Api Create Uplink Set	body=${body}
+	${valDict} = 	Create Dictionary	status_code=${400}
+	...									errorCode=CRM_PORT_CONFIG_INFO_LOCATION_IS_NOT_FC_UPLINK_CAPABLE
+	...                                 message=The port specified is not Fibre Channel or uplink capable
+    Validate Response   ${resp}    ${valDict}
+
+# VLANs 3968 to 4047 and 4094 are reserved for internal use; these VLANs cannot be changed or used.
+
+Try to use an Ethernet and FCoE network in the “reserved range” in an FEX uplink set
+    [Tags]    27    NEG
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+    ${resp} =       Remove all Uplinksets
+
+	${li_uri} = 	Get LI URI   ${LE}-${LIG1}
+	${us} = 		Copy Dictionary	${li_uplink_sets['FEX-reserved-vlans']}
+	${body} = 		Build US body 	${us}	${li_uri}
+	${resp} = 		Fusion Api Create Uplink Set	body=${body}
+	${valDict} = 	Create Dictionary	status_code=${400}
+	...									errorCode=CRM_UPLINK_SET_INCLUDES_RESERVED_VLAN_IDS
+	...                                 message=The uplink set contains a network using a VLAN ID reserved by the top of rack switch.
+    Validate Response   ${resp}    ${valDict}
+
+Try to create an FEX US that exceeds the maximum ethernet networks per LI (1000)
+    [Tags]    28    NEG
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+    ${resp} =       Remove all Uplinksets
+
+	${li_uri} = 	Get LI URI   ${LE}-${LIG1}
+	${us} = 		Copy Dictionary	${li_uplink_sets['FEX-exceeds-max-vlans-per-LI']}
+	${body} = 		Build US body 	${us}	${li_uri}
+	${resp} = 		Fusion Api Create Uplink Set	body=${body}
+	${valDict} = 	Create Dictionary	status_code=${400}
+	...                                 errorCode=CRM_MAX_ETHERNET_NETWORKS_EXCEEDED_ON_SINGLE_UPLINK_SET
+	...                                 message=An uplink set can contain no more than 1000 Ethernet networks. The requested configuration will result in 1001 networks.
+	Validate Response	${resp}    ${valDict}
+
+Try to create an FEX US that exceeds the maximum FCoE networks per LI (32)
+    [Tags]    30    POS    THINSLICE
+	Run Keyword and Ignore Error    Write To ciDebug Log
+    ${resp} =       Remove all Uplinksets
+
+	${li_uri} = 	Get LI URI   ${LE}-${LIG1}
+	${us} = 		Copy Dictionary	${li_uplink_sets['FEX-exceeds-max-fcoe-per-LI']}
+	${body} = 		Build US body 	${us}	${li_uri}
+	${resp} = 		Fusion Api Create Uplink Set	body=${body}
+	${valDict} = 	Create Dictionary	status_code=${400}
+	...                                 errorCode=CRM_EXCEEDS_MAX_ALLOWED_FCOE_NETWORKS_PER_UPLINKSET
+	...                                 message=Too many FCoE networks have been specified for the uplink set.
+	#...                                 taskState=Error
+	#...									taskStatus=An uplink set can contain no more than 32 FCoE networks. The requested configuration will result in 33 networks.
+	Validate Response	${resp}	${valDict}
+
+Create an FEX US that uses the maximum ethernet networks per LI (1000) and max FCoE (32) (net_2000 - 3000)
+    [Tags]    31    NEG
+	Run Keyword and Ignore Error    Write To ciDebug Log
+
+    ${resp} =       Remove all Uplinksets
+
+	${li_uri} = 	Get LI URI   ${LE}-${LIG1}
+	${us} = 		Copy Dictionary	${li_uplink_sets['FEX-max-vlans-per-LI']}
+	${body} = 		Build US body 	${us}	${li_uri}
+	${resp} = 		Fusion Api Create Uplink Set	body=${body}
+	${task} =       Wait For Task 	${resp} 	20 min	15s
+	${valDict} = 	Create Dictionary	status_code=${200}
+	...									taskState=Completed
+	Validate Response	${task}	${valDict}
+
+Try to use an untagged network in an FEX uplink set
+    [Tags]    32    NEG
+	Run Keyword and Ignore Error    Write To ciDebug Log
+    ${resp} =       Remove all Uplinksets
+	${li_uri} = 	Get LI URI   ${LE}-${LIG1}
+	${us} = 		Copy Dictionary	${li_uplink_sets['FEX-untagged-US']}
+	${body} = 		Build US body 	${us}	${li_uri}
+	${resp} = 		Fusion Api Create Uplink Set	body=${body}
+	${valDict} = 	Create Dictionary	status_code=${400}
+	...									errorCode=CRM_INVALID_ETHERNET_TYPE_FOR_FEX
+	...                                 message=Untagged ethernet network type is not valid for Cisco Fabric Extender logical uplink.
+    Validate Response   ${resp}    ${valDict}
+
+Try to use a Tunnel network in an FEX uplink set
+    [Tags]    33    NEG
+	Run Keyword and Ignore Error    Write To ciDebug Log
+    ${resp} =       Remove all Uplinksets
+	${li_uri} = 	Get LI URI   ${LE}-${LIG1}
+	${us} = 		Copy Dictionary	${li_uplink_sets['FEX-tunnel-US']}
+	${body} = 		Build US body 	${us}	${li_uri}
+	${resp} = 		Fusion Api Create Uplink Set	body=${body}
+	${valDict} = 	Create Dictionary	status_code=${400}
+	...									errorCode=CRM_INVALID_ETHERNET_TYPE_FOR_FEX
+	...                                 message=Tunnel ethernet network type is not valid for Cisco Fabric Extender logical uplink.
+    Validate Response   ${resp}    ${valDict}
+
+LI modified, so Update From Group
+    [Tags]    34    POS    THINSLICE
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	Perform an Update From Group    ${LE}-${LIG1}	25 min		30s
+
+#ASPIRE
+#Use ioMeter to pump traffic over Ethernet and FCoE connections
+#1. Tax the connections heavily using ioMeter
+
+#4.1.5 Server Profiles
+#POSITIVE
+#Create profiles on supported hardware types: G7, G8, G9 TBD
+#1. Create a server profile on a G7
+#2. Create a server profile on a G9
+
+#Create profiles with connection on supported Mezz cards TBD
+#DONE!  Bay2 uses a Mezz card.
+#1. Create profiles on blades that use several mezz card types
+
+#Create profiles with connection that uses an untagged network (in Network Set)
+
+#Edit a profile
+#1. Add an additional FEX connection to an existing profile
+#2.
+
+#NEGATIVE
+
+#Server profile using FEX and VC LI
+#1. Try to create a server profile that uses networks on both an FEX US and a VC US
+
+#NEGATIVE
+
+#Try to use Internal Networks in an FEX profile
+#1. Try to create a server profile that uses internal networks on a connection
+
+
+#4.1.2 Logical Interconnect re-apply configuration
+Re-apply LI configuration
+    [Tags]   34    THINSLICE
+    #PUT /rest/logical-interconnects/{id}/configuration
+    #Fail	Test temporarily disabled.
+	${li_uri} = 	Get LI URI   ${LE}-${LIG1}
+    ${resp} =       Fusion Api Reapply LI Configuration    uri=${li_uri}
+	${task} =	    Wait For Task 	${resp}     30min	30s
+	${valDict} = 	Create Dictionary	taskState=Completed
+	Validate Response	${task}	${valDict}
+
+	${li_uri} = 	Get LI URI   ${LE}-${LIG2}
+    ${resp} =       Fusion Api Reapply LI Configuration    uri=${li_uri}
+	${task} =	    Wait For Task 	${resp} 	30min	30s
+	${valDict} = 	Create Dictionary	taskState=Completed
+	Validate Response	${task}	${valDict}
+
+
+Efuse FEX module off\on
+    [Tags]     35   efuse    POSITIVE
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	Fusion Api Login Appliance 		${APPLIANCE_IP}		${admin_credentials}
+    ${uri} =     Get IC URI    ${ENC1}, interconnect 1
+    Wait Until Keyword Succeeds		120s	5s	   IC reached state    ${uri}    Configured
+    OA CLI EFUSE    ${OA_HOST}    ${OA_USER}    ${OA_PASS}   SWM    1    off
+    Wait Until Keyword Succeeds		12min	10s	   IC reached state    ${uri}    Absent
+    OA CLI EFUSE    ${OA_HOST}    ${OA_USER}    ${OA_PASS}   SWM    1    on
+    Wait Until Keyword Succeeds		12min   	30s	   IC reached state    ${uri}    Configured
+
+*** Keywords ***
+FTS
+    [Documentation]  ...
+    [Tags]  FTS
+	Set Log Level	DEBUG
+	log variables
+    Get VM IP    ${VM}
+	First Time Setup					password=hpvse123
+
+Test Specific Setup
+    [Documentation]  ...
+    [Tags]  TSS    Setup
+	Set Log Level	TRACE
+	Run Keyword and Ignore Error    Write To ciDebug Log
+	Log to console and logfile	${\n}[TEST-SPECIFIC SETUP]
+	${users} =	Get Variable Value	${users}
+	Run Keyword If	${users} is not ${null}	Add Users from variable				${users}
+	${ethernet_networks} =	Get Variable Value	${ethernet_networks}
+	Run Keyword If	${ethernet_networks} is not ${null}	Add Ethernet Networks from variable	${ethernet_networks}
+	${ethernet_ranges} =	Get Variable Value	${ethernet_ranges}
+	Run Keyword If	${ethernet_ranges} is not ${null}		Run Keyword for List	${ethernet_ranges}	Create Ethernet Range
+	${network_sets} =	Get Variable Value	${network_sets}
+	Run Keyword If	${network_sets} is not ${null}	Add Network Sets from variable		${network_sets}
+	${fc_networks} =	Get Variable Value	${fc_networks}
+	Run Keyword If	${fc_networks} is not ${null}	Add FC Networks from variable		${fc_networks}
+	${fcoe_networks} =	Get Variable Value	${fcoe_networks}
+	Run Keyword If	${fcoe_networks} is not ${null}	        Add FCoE Networks from variable		${fcoe_networks}
+	${fcoe_ranges} =	Get Variable Value	${fcoe_ranges}
+	Run Keyword If	${fcoe_ranges} is not ${null}	Run Keyword for List	${fcoe_ranges}	Create FCoE Range
+
+	${ranges} =	Get Variable Value	${ranges}
+    ${pools} =  Run Keyword If	${ranges} is not ${null}	Create List		/rest/id-pools/vmac	/rest/id-pools/vwwn	/rest/id-pools/vsn
+    Run Keyword If	${ranges} is not ${null}                Run Keyword for List	${pools}	Disable ALL Generated ID Ranges
+	Run Keyword If	${ranges} is not ${null}				Add Ranges From variable	${ranges}
+	Power Off All Servers
+
+Run FTS and test-specific setup
+    [Documentation]  ...
+	Set Log Level	TRACE
+    FTS
+    Test Specific Setup
+
+SSH to host and ping x
+    [Documentation]    SSH's to a given host, then pings an IP from that host
+    [Arguments]	       ${HOST}    ${HOST2}
+    Open Connection And Log In      ${HOST}
+    ${Output}=    Execute Command    ping -c 4 ${HOST2}    return_stdout=True    return_rc=False
+    Log to console and logfile    ${Output}
+    Should Contain    ${Output}    ttl=
+    Close All Connections
+
+Remove all uplinksets
+    [Documentation]  ...
+    ${us} =    Fusion Api Get Uplink Set
+	${l} = 	   Get Length	${us['members']}
+	:FOR	${x}	IN RANGE	0	${l}
+	\   Wait for switch to be configured
+	\	${us_uri} = 	Get From Dictionary		${us['members'][${x}]}	uri
+    \   ${resp} =       Fusion API delete uplink set   uri=${us_uri}
+    \   ${task} =       Wait For Task   ${resp}   25m  10s
+    \   ${valDict} = 	Create Dictionary	status_code=${200}
+	\   ...                                 taskState=Completed
+	\   Validate Response Regex		${task}	${valDict}
+	\   Wait for switch to be configured
+
+Wait for switch to be configured
+	[Documentation]	Waits for a switch to reach the Configured state
+	[Arguments]		${timeout}=20 min	${interval}=10 s   ${count}=1
+	Log to console and logfile	${\n}Waiting for switch to reach configured state
+    ${resp} =    fusion api get switch
+    ${uri} =     Get from dictionary    ${resp['members'][0]}    uri
+	Wait Until Keyword Succeeds		${timeout}	${interval}	Switch reached state   ${uri}   Configured
+
+Switch reached state
+    [Documentation]  ...
+	[Arguments]	    ${uri}  ${state}
+	Set Log Level	TRACE
+    ${resp} =   fusion api get resource     ${uri}
+	Log to console and logfile  	\t ${uri}: ${resp['state']}
+	Should Match Regexp 	${resp['state']}    ${state}
+	[Return]	${resp}
+
+Wait for ILS to exist
+	[Documentation]	Waits for an ILS to be created
+	[Arguments]		${timeout}=20 min	${interval}=10 s   ${count}=1
+	Log to console and logfile	${\n}Waiting for ${count} ILS to be created
+	Wait Until Keyword Succeeds		${timeout}	${interval}	ILS Exists   ${count}
+
+ILS Exists
+    [Documentation]  ...
+    [Arguments]   ${count}
+    ${resp} =    Fusion Api Get Internal Link Sets
+	Should Be Equal as integers    	${resp['count']}	${count}
+
+Perform an Update From Group
+    [Documentation]  ...
+	[Arguments]		${li}=${LE}-${LIG1}	${timeout}=5 min 	${interval}=15s
+	${li_uri} =     Get LI URI   ${li}
+	${resp} = 	    Fusion Api Update from group	${li_uri}
+	${task} =	    Wait For Task 	${resp} 	${timeout}		${interval}
+	${valDict} = 	Create Dictionary	status_code=${200}
+	...                                 taskState=Completed
+	Validate Response	${task}	${valDict}

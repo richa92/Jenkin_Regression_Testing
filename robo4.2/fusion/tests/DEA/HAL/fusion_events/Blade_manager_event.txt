@@ -1,0 +1,176 @@
+*** Settings ***
+Documentation    Test suite to validate blade related events on OneView and FLM
+...    It covers testing of:
+...        BladeManagerFault
+...        BladeManagerFaultCleared
+...        BladeManagerInternalCritical
+...        BladeManagerInternalCriticalCleared
+...        BladeManagerInternalWarning
+...        BladeManagerInternalWarningCleared
+...    = GENERIC USAGE =
+...    | pybot | -v ENC_SERIAL_NO:[enclosure serial #] | -v APPLIANCE_IP:<ipv4> | -v CIM_Linux_IP:<ipv4> |-v GIT_REPO_ROOT: | AC9_blade_manager_event.txt |
+...    = Variables =
+...    | GIT_REPO_ROOT |      Required: Repo root path if NOT defined in environment variable this is mgmtfw root location|
+...    | ENC_SERIAL_NO |      Optional: If omitted, will use the 1st enclosure detected in OV |
+...    | APPLIANCE_IP |       Required: OneView IPv4 address |
+...    | CIM_Linux_IP |       Required:CI Manager ipv4 under test |
+
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Library           RoboGalaxyLibrary
+Library           MgmtFWLibrary
+Library           json
+Library           Telnet
+
+Suite Setup       Configure Events Test Environment
+Suite Teardown    Run Keywords  Logout of EM RIS   AND    Logout of Fusion Via REST
+
+*** Test Case ***
+TC 01: Verify Events BladeManagerFault and BladeManagerFaultCleared
+    [Documentation]    This test is to verify Events BladeManagerFault and BladeManagerFaultCleared
+    [Tags]    Blade    Alert    Events    FLM2.00    OV3.10    Automated
+    ${present_list}=    Get List of Occupied Bigbird Blade Bays
+    Should Not Be Empty    ${present_list}    msg=No Bigbird Blades present in the enlcosure
+    ${blade_bay}=    Get From List    ${present_list}    0 
+    Log    message=Injecting BladeManagerFault Events    console=True
+    ${blade_bay-1}=    evaluate    ${blade_bay} - 1
+    ${blade_ID}=    Catenate    SEPARATOR=    3    ${blade_bay-1}
+    ${last_fusion_event_id}=    get last fusion event ID
+    EM API Get Diags    EnableMpActivityDetection/${blade_ID}/false
+    Wait for Device Degraded    ${Blade_Device}    ${blade_bay}
+    Sleep    5    # Wait 5 secs here after we get the BladeWarning for the event to be logged to audit log and then check
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Status Change MessageID Event    ${EL_Blade_Warning}    ${Blade_Device}    ${blade_bay}    250
+    Verify Audit Log Alert Event    ${EL_Blade_Manager_Fault}    ${Blade_Device}    ${blade_bay}    250
+    Verify Fusion Event Sent By EM    ${EL_Blade_Manager_Fault}    ${last_fusion_event_id}
+    Sleep    8
+    EM API Get Diags    EnableMpActivityDetection/${Blade_ID}/true
+    Wait for Device OK    ${Blade_Device}    ${blade_bay}
+    Sleep    5    #Wait 5 secs here after we get the BladeOK for the event to be logged to audit log and then check
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Status Change MessageID Event    ${EL_Blade_Ok}    ${Blade_Device}    ${blade_bay}    250
+    Verify Audit Log Alert Event    ${EL_Blade_Manager_Fault_Cleared}    ${Blade_Device}    ${blade_bay}    250
+    Verify Fusion Event Sent By EM    ${EL_Blade_Manager_Fault_Cleared}    ${last_fusion_event_id}
+    [Teardown]    Run Keyword If Test Failed    EM API Get Diags    EnableMpActivityDetection/${Blade_ID}/true
+
+TC 02: Verify Events BladeManagerInternalCritical and BladeManagerInternalCritialCleared
+    [Documentation]    This test is to verify  Events BladeManagerInternalCritical and BladeManagerInternalCritialCleared
+    [Tags]    Blade    Alert    Events    FLM2.00    OV3.10    Automated
+    ${present_list}=    Get List of Occupied Bigbird Blade Bays     
+    Should Not Be Empty    ${present_list}    msg=No Bigbird Blades present in the enlcosure
+    : FOR    ${blade_bay}    IN    @{present_list}
+    \    Log    message=Injecting Warning Health to Blade:${blade_bay} and verify failed status/alert event in diags audit log    console=True
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${Blade_Status}=    Set EM RIS Faults    StorageBladeFaultInjection    ${blade_bay}    OsHealth    Critical
+    \    Should Be Equal As Strings    ${Blade_Status}    <Response [200]>
+    \    Sleep    10
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_Blade_Critical}    ${Blade_Device}    ${blade_bay}    ${Healthalerts_timediff}
+    \    Verify Audit Log Alert Event    ${EL_Blade_Manager_Internal_Critical}    ${Blade_Device}    ${blade_bay}    ${Healthalerts_timediff}
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_Manager_Internal_Critical}    ${last_fusion_event_id}
+    \    Log    message=Injecting OK Health to Blade:${blade_bay} and verify failed status/alert event in diags audit log    console=True 
+    \    ${Blade_Status}=    Set EM RIS Faults    StorageBladeFaultInjection    ${blade_bay}    OsHealth    OK
+    \    Should BE Equal As Strings    ${Blade_Status}    <Response [200]>
+    \    Sleep    10
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_Blade_OK}    ${Blade_Device}    ${blade_bay}    ${Healthalerts_timediff}
+    \    Verify Audit Log Alert Event    ${EL_Blade_Manager_Internal_Critical_Cleared}    ${Blade_Device}    ${blade_bay}    ${Healthalerts_timediff}
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_Manager_Internal_Critical_Cleared}    ${last_fusion_event_id}
+    [Teardown]    Run Keyword If Test Failed     Set EM RIS Faults    StorageBladeFaultInjection    ${blade_bay}    OsHealth    OK
+
+TC 03: Verify Events BladeManagerInternalWarning and BladeManagerInternalWarningCleared
+    [Documentation]    This test is to verify Events BladeManagerInternalWarning and BladeManagerInternalWarningCleared
+    [Tags]    Blade    Alert    Events    FLM2.00    OV3.10    Automated
+    ${present_list}=    Get List of Occupied Bigbird Blade Bays     
+    Should Not Be Empty    ${present_list}    msg=No Bigbird Blades present in the enlcosure
+    : FOR    ${blade_bay}    IN    @{present_list}
+    \    Log    message=Injecting Warning Health to Blade:${blade_bay} and verify failed status/alert event in diags audit log    console=True
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${Blade_Status}=    Set EM RIS Faults    StorageBladeFaultInjection    ${blade_bay}    OsHealth    Warning
+    \    Should Be Equal As Strings    ${Blade_Status}    <Response [200]>
+    \    Sleep    10
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_Blade_Warning}    ${Blade_Device}    ${blade_bay}    ${Healthalerts_timediff}
+    \    Verify Audit Log Alert Event    ${EL_Blade_Manager_Internal_Warning}    ${Blade_Device}    ${blade_bay}    ${Healthalerts_timediff}
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_Manager_Internal_Warning}    ${last_fusion_event_id}
+    \    Log    message=Injecting OK Health to Blade:${blade_bay} and verify failed status/alert event in diags audit log    console=True 
+    \    ${Blade_Status}=    Set EM RIS Faults    StorageBladeFaultInjection    ${blade_bay}    OsHealth    OK
+    \    Should BE Equal As Strings    ${Blade_Status}    <Response [200]>
+    \    Sleep    10
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_Blade_OK}    ${Blade_Device}    ${blade_bay}    ${Healthalerts_timediff}
+    \    Verify Audit Log Alert Event    ${EL_Blade_Manager_Internal_Warning_Cleared}    ${Blade_Device}    ${blade_bay}    ${Healthalerts_timediff}
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_Manager_Internal_Warning_Cleared}    ${last_fusion_event_id}
+    [Teardown]    Run Keyword If Test Failed     Set EM RIS Faults    StorageBladeFaultInjection    ${blade_bay}    OsHealth    OK
+
+TC 04: Blade Manager Event - Validate BladeManagerIloInternalWarning and BladeManagerIloInternalWarningCleared events 
+    [Documentation]    This test is to verify events for BladeManagerIloInternalWarning and BladeManagerIloInternalWarningCleared events using telnet blade ilo
+    [Tags]    Blade    Alert    Events    FLM2.00    OV3.10    Automated 
+    ${present_blade_list}=    Get List of Occupied iLO Blade Bays
+    Should Not Be Empty    ${present_blade_list}    msg=No Blades present in the enlcosure
+    : FOR    ${blade_bay}    IN    @{present_blade_list}
+    \    ${ilo_ip}=    Get iLO IPv6 LL Address from EM RIS    ${blade_bay}
+    \    ${status}=    Login to iLO    ${ilo_ip}    ${iLO_Username}    ${iLO_Password}
+    \    ${version}=   Get iLO Firmware Firmware Version
+    \    ${check_debug_version}=  Run Keyword And Return Status   Should Contain    ${version}  debug
+    \    Run Keyword If  '${check_debug_version}' == 'False'    Continue For Loop          #Continue For Loop
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    Telnet.Open Connection    ${ilo_ip}    alias=server    port=8
+    \    Telnet.Write    h fail 2     # Fail the Fan
+    \    Sleep  3
+    \    ${fail_output}=    Telnet.Read
+    \    Should Contain  ${fail_output}  set to 0
+    \    Telnet.Write    h ok 2       # Set fan to OK state
+    \    Sleep  3
+    \    ${ok_output}=    Telnet.Read
+    \    Should Contain  ${ok_output}  set to 1
+    \    Sleep  60
+    \    Wait for Device OK    ${Blade_Device}    ${blade_bay}
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_Blade_Manager_iLo_Warning}    ${Blade_Device}    ${blade_bay}    250
+    \    Verify Audit Log Alert Event    ${EL_Blade_Manager_iLo_Warning_Cleared}    ${Blade_Device}    ${blade_bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_Manager_iLo_Warning}    ${last_fusion_event_id}
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_Manager_iLo_Warning_Cleared}    ${last_fusion_event_id}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    RIS EM Efuse Blade    ${blade_bay}    10    AND    Sleep    10     AND    Wait for Device OK    ${Blade_Device}    ${blade_bay}
+
+TC 05: Blade Manager Event - Validate BladeManagerIloInternalCritical and BladeManagerIloInternalCriticalCleared events 
+    [Documentation]    This test is to verify events for BladeManagerIloInternalCritical and BladeManagerIloInternalCriticalCleared events using telnet blade ilo
+    [Tags]    Blade    Alert    Events    FLM2.00    OV3.10    Automated
+    ${present_blade_list}=    Get List of Occupied Debug iLO Blade Bays
+    Should Not Be Empty    ${present_blade_list}    msg=No Debg Ilo Blades present in the enlcosure
+    : FOR    ${blade_bay}    IN    @{present_blade_list}
+    \    ${ilo_ip}=    Get iLO IPv6 LL Address from EM RIS    ${blade_bay}
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    Telnet.Open Connection    ${ilo_ip}    alias=server    port=8
+    \    Telnet.Write    h fail 3     # Fail the Sensor Inlet Ambiant 
+    \    Sleep  3
+    \    ${fail_output}=    Telnet.Read
+    \    Should Contain  ${fail_output}  set to 1
+    \    Telnet.Write    h ok 3       # Set OK state to Sensor Inlet Ambiant
+    \    Sleep  3
+    \    ${ok_output}=    Telnet.Read 
+    \    Should Contain  ${ok_output}  set to 0
+    \    Wait for Device OK    ${Blade_Device}    ${blade_bay}
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    Sleep  20
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Alert Event    ${EL_Blade_Manager_iLo_Critical}    ${Blade_Device}    ${blade_bay}    250
+    \    Verify Audit Log Alert Event    ${EL_Blade_Manager_iLo_Critical_Cleared}    ${Blade_Device}    ${blade_bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_Manager_iLo_Critical}    ${last_fusion_event_id}
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_Manager_iLo_Critical_Cleared}    ${last_fusion_event_id}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    RIS EM Efuse Blade    ${blade_bay}    10    AND    Sleep    10     AND    Wait for Device OK    ${Blade_Device}    ${blade_bay}
+    

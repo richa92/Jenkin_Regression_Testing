@@ -1,0 +1,133 @@
+*** Settings ***
+Documentation      Stacking Ports Verification_OVD8872(OVT75354,OVT75355,OVT77730)Stacking link gets disconnected with power on/off,fw upgrade operations on C7K FIT systems.
+Library    json
+Library    FusionLibrary
+Library    RoboGalaxyLibrary
+Library    Collections
+Library    String
+Library    BuiltIn
+Library    Dialogs
+Variables    data_variables.py
+Resource         ../../../../../Resources/api/fusion_api_resource.txt
+Suite Setup    Presetup
+
+1 Power on/Off all the servers individually
+
+    [Documentation]   Powering on/off all the servers
+
+    :FOR    ${SP}    IN   @{server_profiles}
+    \    ${resp}=    Add Server Profiles from variable     ${SP}
+    \    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp[0]}    12m    1m    ELSE    Fail    Log    failed    console=True
+    \    Power on ALL servers
+    \    sleep   240s
+    \    Power off ALL servers        PressAndHold
+
+2 Uploading the Firmware Bundle
+
+    [Documentation]    Uploading the Firmware Bundle
+    Log    \nUploading old spp bundle"    console=True
+
+    :FOR    ${Bundles}    IN   @{Firmware_Bundles}
+    \    ${resp} =     Fusion Api Upload Firmware Bundle      localfile=${CURDIR}/SPP/${Bundles}
+    \    sleep    100s
+    \    Log    Uploadsppdetails ${resp}    console=True
+    \    Log    \nSPP bundles is successfully uploaded    console=True
+
+2_1 Downgrading the ICM's Latest version to lowest version
+
+    [Documentation]   Downgrading ICM's with old firmware bundle
+
+    ${uri} =    Get LI URI    ${LI['name']}
+    Set to dictionary     ${liupdate}     sppUri    ${fw_uri_4_10}
+    ${response}=    Fusion Api Li Upgrade Firmware    ${liupdate}    ${uri}
+    Log    \n The response is:${response}    console=True
+    Run Keyword If  ${response['status_code']} !=202    fail    msg=\nLI Firmware update Failed. \n ErrorCode:${response['errorCode']}\nMessage:${response['message']}
+    ${task} =     Wait For Task        ${response}   60min    2min
+    Run Keyword If  '${task['taskState']}' !='Completed' or ${task['status_code']} !=200   fail    msg=\nLI Firmware update Failed. \n ErrorCode:${task['taskErrors'][0][errorCode]}\n :Message ${task['taskErrors'][0][errorCode]}
+    ...         ELSE    Log    \n\nLI FW Downgrade completed!!    console=True
+
+2_2 Upgrading the ICM's to latest version
+
+    [Documentation]   Upgrading ICM's with latest firmware bundle
+
+    ${li_uri} =    Get LI URI    ${LI['name']}
+    Set to dictionary     ${liupdate}     sppUri    ${fw_uri_5_0}
+    ${response}=    Fusion Api Li Upgrade Firmware    ${liupdate}    ${li_uri}
+    Log    \n The response is:${response}    console=True
+    Run Keyword If  ${response['status_code']} !=202    fail    msg=\nLI Firmware update Failed. \n ErrorCode:${response['errorCode']}\nMessage:${response['message']}
+    ${task} =     Wait For Task        ${response}   60min    1min
+    Run Keyword If  '${task['taskState']}' !='Completed' or ${task['status_code']} !=200   fail    msg=\nLI Firmware update Failed. \n ErrorCode:${task['taskErrors'][0][errorCode]}\n :Message ${task['taskErrors'][0][errorCode]}
+    ...         ELSE    Log    \n\nLI FW Upgrade completed successfully !!    console=True
+
+3 Edit LIG and performing UFG in LI
+
+    [Documentation]    Edit LIG and Update from Group in LI
+
+    ${resp}=    Edit LIG    ${Edit_lig}
+    ${task} =   Wait For Task   ${resp[0]}    60s  2s
+    Log    LIG edited successfully    console=True
+    Update Logical Interconnect from Group    ${LI}
+
+4 Verify the stacking link is in linked state
+
+    [Documentation]   Verifying the Stacking link connection for the ICM's which having stacking link ports
+
+    :FOR   ${IC}   IN   @{INTERCONNECTS_list}
+    \    Verify Linked Stacking Port Status    ${IC}
+
+    ${resp}=    Fusion Api Get Interconnect    param=?filter="'name'=='${IC}'"
+    ${ports} =    Get from Dictionary    ${resp['members'][0]}    ports
+    ${len} =    Get Length    ${ports}
+    :FOR    ${x}    IN RANGE    0    ${len}
+    \    Run Keyword If  '${ports[${x}]['portType']}' == 'Stacking'    Verify Unlinked Stacking ports status    ${ports[${x}]}    ${stacking_ports}
+
+***Keywords***
+Presetup
+
+    [Documentation]   Presetup
+    Set Log Level   TRACE
+    ${Login_response} =    Fusion Api Login Appliance    ${appliance_ip}        ${admin_credentials}
+    Run keyword unless  ${Login_response[0]['status_code']}== 200   Fail    "Unable to Login"
+
+    Clean OV
+
+    Log    Create Ethernet Networks    console=True
+    ${Response}     Add Ethernet Networks from variable    ${ethernet_network}
+    Log    ${Response}    console=True
+    Run keyword unless  ${Response[0]['status_code']}== 202    Fail    "Unable to Create Ethernet network"
+    Log    Ethernet Networks created successfully!!    console=True
+    ${lig_resp}    Add LIG from variable   ${LIG}
+    ${Resp}    Add Enclosure Group from variable        ${enc_groups}
+    ${resp_enc}    Add Enclosures from variable    ${encs}
+
+
+Clean OV
+    [Documentation]  Clean OV
+    Power off ALL servers
+    Remove All Server Profiles
+    Remove All Enclosures
+    Remove All Enclosure Groups
+    Remove All LIGs
+    Remove All Ethernet Networks
+    Remove ALL FCoE Networks
+    Remove All FC Networks
+
+Verify Linked Stacking Port Status
+    [Documentation]    Verify Status of Ports from IC
+    [Arguments]    ${IC}
+    ${resp} =    Fusion Api Get Interconnect     param=?filter="'name'=='${IC}'"
+    ${ports} =    Get from Dictionary    ${resp['members'][0]}    ports
+    ${len} =    Get Length    ${ports}
+    :FOR    ${y}    IN RANGE    0    ${len}
+    \   Run Keyword If    '${ports[${y}]['portStatus']}' != 'Linked' or '${ports[${y}]['portType']}' != 'Stacking'    Continue For Loop
+    \   ...    ELSE    Log    \n Stacking port ${ports[${y}]['portName']} is in Linked state for bay${ports[${y}]['bayNumber']}    console=True
+
+
+Verify Unlinked Stacking ports status
+    [Documentation]    Verify unlinked Status of Ports from IC
+    [Arguments]    ${ports}    ${stacking_ports}
+
+    ${len} = Get Length    ${stacking_ports}
+    :FOR    ${x}    IN RANGE    0   ${len}
+    \    Run Keyword If  '${ports['portName']}' == '${stacking_ports[${x}]}' and '${ports['portStatus']}' == 'Unlinked'    fail    Log    \n Stacking port is not in linked state
+    \   ...    ELSE    Log    \n Stacking port ${ports[${x}]['portName']}  is in Linked state for bay${ports[${x}]['bayNumber']}    console=True

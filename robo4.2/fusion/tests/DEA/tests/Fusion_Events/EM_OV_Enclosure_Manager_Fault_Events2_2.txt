@@ -1,0 +1,144 @@
+*** Settings ***
+Documentation     Validate EM Enclosure Manager events on OneView
+...               = GENERIC USAGE =
+...               | pybot | -v GIT_REPO_ROOT:<repo root path> | -v APPLIANCE_IP:<ipv4> |EM_OV_Enclosure_Manager_Events2_2.txt |
+...               = Variables =
+...               | GIT_REPO_ROOT | Required: Repo root path if NOT defined in environment variable|
+...               | APPLIANCE_IP | Required: OneView IPv4 address |
+Suite Setup       Configure Events Test Environment
+Suite Teardown    Run Keywords    Reboot FLM after the suite    AND    Logout of EM RIS    AND    Logout of Fusion Via REST
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Library           RoboGalaxyLibrary
+Library           MgmtFWLibrary
+Library           json
+
+*** Test Cases ***
+TC05: Verify EM Switch and Switch Comm Critical and OK Events
+    [Documentation]    Verify EM Switch and Switch Comm Critical and OK Events
+    [Tags]    EM     FLM1.01    Automated
+    Run Keyword and Ignore Error    Wait for Node Consistent
+    ${standby_em_bay}=    Get Diags EmClusterStatus Standby Node
+    ${active_em_bay}=    Get Diags EmClusterStatus Active Node
+    ${last_fusion_event_id}=    get last fusion event ID
+    Log To Console    Setting Comm Fault on EM
+    ${status}=    Set EM RIS Faults    EmSwitchEventInjection    ${active_em_bay}    Comm    true
+    Should Be Equal As Strings    ${status}    <Response [200]>
+    Sleep    15
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Status Change MessageID Event    ${EM_SwitchCritical}    ${EMSwitches}    ${active_em_bay}    240
+    Verify Audit Log Alert Event    ${EM_SwitchCommunicationCritical}    ${EMSwitches}    ${active_em_bay}    240
+    Verify Fusion Event Sent By EM    ${EM_SwitchCommunicationCritical}    ${last_fusion_event_id}    ${Enclosure_category}
+    Log To Console    Clearing Comm Fault on EM
+    ${status}=    Set EM RIS Faults    EmSwitchEventInjection    ${active_em_bay}    Comm    false
+    Should Be Equal As Strings    ${status}    <Response [200]>
+    Sleep    15
+    #Verifying  resource updated event in  diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EM_SwitchCommunicationOK}    ${EMSwitches}    ${active_em_bay}    240
+    Verify Audit Log Status Change MessageID Event    ${EM_SwitchOK}    ${EMSwitches}    ${active_em_bay}    240
+    Verify Fusion Event Sent By EM    ${EM_SwitchCommunicationOK}    ${last_fusion_event_id}    ${Enclosure_category}
+    # Additional time needed for the active EM to determine that the standby is operational.Confirmed with dev on the wait time
+    Log to Console    Sleeping 5 minutes
+    Sleep    ${EM_REBOOT_TIME}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Set EM RIS Faults    EmSwitchFaultInjection    ${active_em_bay}    Comm    false
+    ...    AND    Sleep    ${EM_REBOOT_TIME}
+
+TC06: Verify EM Missing and EM Missing Cleared Events
+    [Documentation]    Verify EM Missing and EM Cleared Events
+    [Tags]    EM     FLM1.01     Automated
+    Run Keyword and Ignore Error    Wait for Node Consistent
+    ${standby_em_bay}=    Get Diags EmClusterStatus Standby Node
+    ${active_em_bay}=    Get Diags EmClusterStatus Active Node
+    ${last_fusion_event_id}=    get last fusion event ID
+    Log To Console    Removing the EM from the bay:${standby_em_bay} and verify event
+    RIS EM Efuse On OTHER EM    ${standby_em_bay}
+    #Verifying resource removed event in diags audit log with 50 recent entries
+    Sleep    5
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Resource Removed Event    ${EM_Device_Name}    ${EM_Removed_Message_ID}    ${standby_em_bay}    240
+    Verify Audit Log Alert Event    ${EM_Missing}    ${EM_Device}    ${standby_em_bay}    240
+    # Verify Fusion Event including event description and resolution
+    Verify Fusion Event Sent By EM    ${EM_Removed_Message_ID}    ${last_fusion_event_id}    ${Enclosure_category}
+    Verify Fusion Event Sent By EM    ${EM_Missing}    ${last_fusion_event_id}    ${Enclosure_category}
+    Log To Console    Inserting the EM to the bay:${standby_em_bay} and verify event
+    RIS EM Efuse Off OTHER EM Without Healthcheck    ${standby_em_bay}
+    Sleep    30
+    #Verifying resource removed event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    #Verify Audit Log Resource Added Event    ${EM_Device_Name}    ${EM_Inserted_Message_ID}    ${standby_em_bay}    250
+    Verify Audit Log Alert Event    ${EM_Missing_Cleared}    ${EM_Device}    ${standby_em_bay}    250
+    # Verify Fusion Event including event description and resolution
+    Verify Fusion Event Sent By EM    ${EM_Inserted_Message_ID}    ${last_fusion_event_id}    ${Enclosure_category}
+    Verify Fusion Event Sent By EM    ${EM_Missing_Cleared}    ${last_fusion_event_id}    ${Enclosure_category}
+    # Additional time needed for the active EM to determine that the standby is operational.Confirmed with dev on the wait time
+    Log to Console    Sleeping 5 minutes
+    Sleep    ${EM_REBOOT_TIME}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    RIS EM Efuse Off OTHER EM Without Healthcheck    ${standby_em_bay}
+    ...    AND    Sleep    ${EM_REBOOT_TIME}
+
+TC07: Verify that EmIsActive Alert event is generated on StandBy EM Failover
+    [Documentation]    This test will verify if EmIsActive Alert event is recevied on StandBy EM Failover
+    [Tags]    EM    FLM1.01    Automated
+    Wait for Device OK    ${EM_Device}    1
+    Wait for Device OK    ${EM_Device}    2
+    Run Keyword and Ignore Error    Wait for Node Consistent
+    ${last_fusion_event_id}=    get last fusion event ID
+    ${standby_em_bay}=    Get StandBy EM Bay Number
+    ${ris_status}=    RIS EM Force Failover    ${standby_em_bay}
+    Should Be Equal As Integers    ${ris_status}    202
+    Sleep    ${EM_REBOOT_TIME}
+    Login to EM Via RIS
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log All Alerts
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EL_EmIsActive}    ${EM_Device_Type}    ${standby_em_bay}    480
+    Verify Fusion Event Sent By EM    ${EL_EmIsActive}    ${last_fusion_event_id}    ${Enclosure_category}
+    Wait for Device OK    ${EM_Device}    ${Standby_EM_Bay}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Login to EM Via RIS    AND    Wait for Device OK    ${EM_Device}    ${Standby_EM_Bay}
+
+TC 08: Verify EmDataReplicationFault & EmDataReplicationFaultCleared Is Generated
+    [Documentation]    This test will verify EmDataReplicationFault
+    ...                and EmDataReplicationFaultCleared events
+    [Tags]    EM    FLM1.01    Automated
+    Run Keyword and Ignore Error    Wait for Node Consistent
+    ${last_fusion_event_id}=    get last fusion event ID
+    ${ChassisInfo}=    Get Chassis Object
+    ${Chassis_health}=    Get From Dictionary    ${ChassisInfo}    Status.Health
+    Should Be Equal    ${Chassis_health}    ${HEALTH_OK}
+    ${standby_em_bay}=    Get Diags EmClusterStatus Standby Node
+    ${standby_em_health}=    Get EnclosureManager Health    ${standby_em_bay}
+    Should Be Equal    ${standby_em_health}    ${STATUS_OK}
+    #Injecting EmDataReplicationFault
+    ${fault_injection_status}=    Get Diags DataReplication Option    cpg-send-fail
+    ${maintenance_loginstatus}=     Set Maintenance Login Options    True    None
+    Should Be Equal As Integers    ${maintenance_loginstatus}    202
+    Sleep    20
+    ${maintenance_loginstatus}=     Set Maintenance Login Options    False    None
+    Should Be Equal As Integers    ${maintenance_loginstatus}    202
+    Sleep    20
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EM_DataReplicationFault}    ${EM_Device_Name}    ${standby_em_bay}    250
+    Verify Fusion Event Sent By EM    ${EM_DataReplicationFault}    ${last_fusion_event_id}    ${Enclosure_category}
+    Sleep    70
+    #Verifying resource updated event in diags audit log with 50 recent entries
+    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    Verify Audit Log Alert Event    ${EM_DataReplicationFaultCleared}    ${EM_Device_Name}    ${standby_em_bay}    250
+    Verify Fusion Event Sent By EM    ${EM_DataReplicationFaultCleared}    ${last_fusion_event_id}    ${Enclosure_category}
+    ${ChassisInfo}=    Get Chassis Object
+    ${Chassis_health}=    Get From Dictionary    ${ChassisInfo}    Status.Health
+    Should Be Equal    ${Chassis_health}    ${HEALTH_OK}
+    ${standby_em_bay}=    Get Diags EmClusterStatus Standby Node
+    ${standby_em_health}=    Get EnclosureManager Health    ${standby_em_bay}
+    Should Be Equal    ${standby_em_health}    ${STATUS_OK}
+    ${maintenance_loginstatus}=     Set Maintenance Login Options    False    None
+    Should Be Equal As Integers    ${maintenance_loginstatus}    202
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Set Maintenance Login Options    False    None    AND    Sleep    60

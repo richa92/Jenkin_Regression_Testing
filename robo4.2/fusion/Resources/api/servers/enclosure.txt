@@ -1,0 +1,431 @@
+*** Settings ***
+Library                RoboGalaxyLibrary
+Library                FusionLibrary
+Library                OperatingSystem
+Library                BuiltIn
+Library                Collections
+Library                XML
+Library                SSHLibrary
+Library                String
+Library                Dialogs
+
+*** Keywords ***
+Add Enclosures from variable
+    [Documentation]    Adds Enclosures to an appliance from a variable which contains a list of dicts with the entire payload
+    ...                scope process example:
+    ...                 'initialScopeUris': ['Scope:Test', 'Scope:Production']
+    [Arguments]        ${encs}        ${timeout}=10min
+    Log      Adding ENCLOSURES    console=True
+    ${resplist} =   Create List
+    :FOR    ${enc}    IN    @{encs}
+    \    ${enc} =    Copy Dictionary    ${enc}
+    \    ${encuri} =     Get From Dictionary    ${enc}    enclosureGroupUri
+    \    ${encuri} =     Run Keyword If  '${encuri}'!= '${None}'    Common URI Lookup by name    ${encuri}
+    \    Set to dictionary    ${enc}    enclosureGroupUri        ${encuri}
+    \    ${firmwareBaseline} =    Pop From Dictionary    ${enc}    firmwareBaselineUri    default=${None}
+    \    ${firmwareBaseline} =    Run keyword If    '${firmwareBaseline}' != '${None}'    Get Firmware Bundle By Version  ${firmwareBaseline}
+    \    ...                      ELSE              Get Variable Value   ${firmwareBaseline}
+    \    Run keyword If    '${firmwareBaseline}' != '${None}'  Set to dictionary    ${enc}    firmwareBaselineUri        ${firmwareBaseline}
+    #    -Initial Scope process.
+	\    ${initialScopeUris}=  Pop From Dictionary  ${enc}  initialScopeUris  default=${None}
+    \    ${scopeUris}=       Run Keyword If    ${initialScopeUris} != ${None}
+    \    ...                 Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    \    Run Keyword If      ${initialScopeUris} != ${None}
+    \    ...                 Set To Dictionary    ${enc}  initialScopeUris  ${scopeUris}
+    \    ${resp} =    Fusion Api Add Enclosure     ${enc}
+    \    Append To List        ${resplist}    ${resp}
+    ${tasklist} =   Create List
+    :FOR    ${resp}    IN    @{resplist}
+    \    ${task} =    Wait For Task    ${resp}     ${timeout}    10s
+    \    Append To List        ${tasklist}    ${task}
+    [return]    ${tasklist}
+
+Add Enclosures from variable Async
+    [Documentation]    Adds Enclosures to an appliance from a variable which contains a list of dicts with the entire payload
+    ...                Updated to return -${resplist}, helps Async deletion.
+    ...               Handle the response list in the test case using "Run Keyword for List with kwargs  ${responses}  Wait For Task2   timeout=600    interval=5"
+    [Arguments]        ${encs}
+
+    ${resplist} =  Create List
+    Log      Adding ENCLOSURES    console=True
+    :FOR    ${enc}    IN    @{encs}
+    \    ${encuri} =     Get From Dictionary    ${enc}    enclosureGroupUri
+    \    ${encuri} =     run keyword if  '${encuri}'!= '${None}'   Common URI Lookup by name    ${encuri}
+    \    Set to dictionary    ${enc}    enclosureGroupUri        ${encuri}
+    #    -Initial Scope process.
+	\    ${initialScopeUris}=  Pop From Dictionary  ${enc}  initialScopeUris  default=${None}
+    \    ${scopeUris}=       Run Keyword If    ${initialScopeUris} != ${None}
+    \    ...                 Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    \    Run Keyword If      ${initialScopeUris} != ${None}
+    \    ...                 Set To Dictionary    ${enc}  initialScopeUris  ${scopeUris}
+    \    ${resp} =    Fusion Api Add Enclosure     ${enc}
+    \    append to list        ${resplist}    ${resp}
+    [return]    ${resplist}
+
+Add Non-Existing Enclosures from variable Async
+    [Documentation]    Adds Enclosures to an appliance from a variable which contains a list of dicts with the entire payload
+    ...                Updated to return -${resplist}, helps Async deletion.
+    ...               Handle the response list in the test case using "Run Keyword for List with kwargs  ${responses}  Wait For Task2   timeout=600    interval=5"
+    [Arguments]        ${encs}
+
+    ${resplist} =  Create List
+    Log      Adding ENCLOSURES   console=True
+    :FOR    ${enc}    IN    @{encs}
+    \    ${getenc} =    Fusion Api Get Enclosures  param=?filter="'name'=='${enc['name']}'"
+    \   ${count} =  Get From Dictionary  ${getenc}  count
+    \    ${uri} =     Run Keyword if    ${count} != 0    Get From Dictionary        ${getenc['members'][0]}    uri
+    \    Run Keyword if    ${count} != 0    Run Keyword If    '${uri}' != ${null}
+            ...     Log  Enclosure ${enc['name']} exists
+            ...        WARN
+    \   Run Keyword if    ${count} != 0    Continue For Loop If  '${uri}' != ${null}
+    \    ${encuri} =     Get From Dictionary    ${enc}    enclosureGroupUri
+    \    ${encuri} =     run keyword if  '${encuri}'!= '${None}'   Common URI Lookup by name    ${encuri}
+    \    Set to dictionary    ${enc}    enclosureGroupUri        ${encuri}
+    \    Pop from dictionary    ${enc}    name
+    \    ${resp} =    Fusion Api Add Enclosure     ${enc}
+    \    append to list        ${resplist}    ${resp}
+    [return]    ${resplist}
+
+Add Remote Enclosure
+    [Documentation]  Adds a Remote enclousre to an existing OneView instance
+    [Arguments]    ${ipv6}
+
+    ${enc} =       Create Dictionary   hostname=${ipv6}
+    ${resp} =    Fusion Api Add Enclosure     ${enc}
+    [return]    ${resp}
+
+Edit Enclosure
+    [Documentation]     Edit Enclosure from Enclosure DTO
+    ...              Example:
+    ...                Edit Enclosure  ${encl_update}
+    ...              Data Required:
+    ...                Enclosure DTO    {"op": "replace", "path": "/name", "value": newname, "name": oldname}
+    [Arguments]     ${encl_update}
+    ${encl_update} =    Copy Dictionary    ${encl_update}
+    ${name} =  Get From Dictionary  ${encl_update}  name
+    Log  ${\n}Editing Enclosure ${name}    console=True
+    ${uri} =  Get Enclosure URI  ${name}
+    Remove from Dictionary  ${encl_update}  name
+    ${encl_update_list} =   Create List
+    Append To List  ${encl_update_list}     ${encl_update}
+    ${headers} =    Fusion Api Get Headers
+    ${resp_enc} =   Get Enclosure   ${name}
+    ${etag} =   Get From Dictionary     ${resp_enc}     eTag
+    Set to Dictionary   ${headers}  If-Match    ${etag}
+    ${resp} =  Fusion Api Patch Enclosure  ${encl_update_list}  ${uri}      headers=${headers}
+    [Return]    ${resp}
+
+Edit Enclosure from list
+    [Documentation]  Edit Enclosure from a list of Enclosure DTO
+    ...              Example:
+    ...                Edit Enclosure from list  ${enclosures}
+    ...              Data Required:
+    ...                List of Enclosure DTO
+    [Arguments]  ${enclosures}
+    Log  ${\n}Editing Enclosure from list    console=True
+    ${resplist} =   Create List
+    Log     ${enclosures}
+    :FOR    ${enclosure}    IN    @{enclosures}
+    \   ${resp} =  Edit Enclosure  ${enclosure}
+    \   append to list  ${resplist}     ${resp}
+    [Return]    ${resplist}
+
+
+Refresh Enclosure
+    [Documentation]     Refresh enclosure
+    [Arguments]     ${enclosure}
+    ${uri} =     Get Enclosure URI   ${enclosure['name']}
+    ${resp} =   Fusion Api Refresh Enclosure    uri=${uri}/refreshState
+    [return]  ${resp}
+
+Refresh Enclosures Async
+    [Documentation]     Refresh Enclosures from a variable which contains a list of dicts with the entire payload
+    [Arguments]     ${encs}
+    ${resplist} =   Create List
+    :FOR    ${enc}  IN  @{encs}
+    \   Log  Refreshing ENCLOSURE ${enc['name']}    console=True
+    \   ${resp} =   Refresh Enclosure    ${enc}
+    \   append to list  ${resplist}     ${resp}
+    [return]    ${resplist}
+
+Get Enclosure URI
+    [Documentation]     Get Enclosure URI
+    [Arguments]        ${name}
+    ${resp} =     Fusion Api Get Enclosures  param=?filter="'name'=='${name}'"
+    ${count} =  Get From Dictionary  ${resp}  count
+    Return from keyword if  ${count}==0  '/bad_enclosure_uri'
+    ${uri} =     Get From Dictionary        ${resp['members'][0]}    uri
+    [Return]    ${uri}
+
+Get Enclosure Firmware Version
+    [Documentation]  Get enclosure firmware version by name
+    ...              Example:
+    ...                Get Enclosure Firmware Version  ${enclosure}
+    [Arguments]        ${name}
+    ${enclosure} =     Get Enclosure   ${name}
+    ${fwversion} =     Get From Dictionary        ${enclosure['managerBays'][0]}    fwVersion
+    [Return]    ${fwversion}
+
+Get Enclosure
+    [Documentation]     Get Enclosure
+    [Arguments]        ${name}
+    ${resp} =     Fusion Api Get Enclosures  param=?filter="'name'=='${name}'"
+    Log  ${resp}  TRACE
+    ${count} =  Get From Dictionary  ${resp}  count
+    Return from keyword if  ${count}==0  ${resp}
+    [Return]    ${resp['members'][0]}
+
+Patch Enclosure
+    [Documentation]  Patch Enclosure
+    ...              Example:
+    ...                Patch Enclosure  ${ENC1}  op=replace  path=/uidState  value=Off
+    ...                Patch Enclosure  ${ENC1}  op=replace  path=/deviceBays/1/bayPowerState  value=Reset
+    ...              Data Required:
+    ...                Enclosure name
+    [Arguments]  ${name}  ${op}=replace  ${path}=/uidState  ${value}=/off
+    ${name} =  replace string using regexp  ${name}  ENC:  ${EMPTY}
+    Log     Patching Enclosure ${name} with op=${op} path=${path} and value=${value}    console=True
+    ${uri} =  Get Enclosure URI  ${name}
+    ${dict} =  Create Dictionary  op=${op}  path=${path}  value=${value}
+    ${payload} =  Create List  ${dict}
+    ${resp_enc} =   Get Enclosure   ${name}
+    ${etag} =   Get From Dictionary     ${resp_enc}     eTag
+    ${resp} =  Fusion Api Patch Enclosure  ${payload}  ${uri}  etag=${etag}
+    [Return]  ${resp}
+
+Power Off All Enclosures UID
+    [Documentation]  Power off all enclosures UID
+    ${encs}=      Fusion Api Get Enclosures
+    ${name_list}=     Create List
+    :FOR    ${enc}    IN    @{encs['members']}
+    \       ${enc_name}=    Set Variable    ${enc["name"]}
+    \       ${resp}=     Patch Enclosure  ${enc_name}  op=replace  path=/uidState  value=Off
+    \       Wait For Task2  ${resp}  timeout=60  interval=5
+
+Remove All Enclosures
+    [Documentation]    Querys the appliance for all Enclosures and then removes them
+    ...             Usage: The argument should be "param=?force=true" if you want force deleting.
+    [Arguments]    ${param}=${EMPTY}
+    Log      Removing ENCLOSURES    console=True
+    ${encs} =     Fusion Api Get Enclosures
+    :FOR    ${enc}    IN    @{encs['members']}
+    \        ${resp} =        Fusion Api Remove Enclosure        uri=${enc['uri']}  param=${param}
+    \        Wait For Task2     ${resp}     timeout=600   interval=10
+
+Remove Enclosure
+    [Documentation]  Remove the enclosure by name
+    [Arguments]     ${name}  ${param}=?force=False
+    ${uri} =  Get Enclosure URI  ${name}
+    ${resp} =  Fusion Api Remove Enclosure  uri=${uri}  param=${param}
+    Wait For Task2  ${resp}  timeout=1800  interval=10
+
+Verify Enclosure
+    [Documentation]  Verify enclosure DTO with the expected one specified in the data file
+    ...              **kwargs are used to add key value pair to the expected DTO
+    ...              Example:
+    ...                Verify Enclosure  ${expected_dto}
+    ...                Verify Enclosure  ${expected_dto}  state=Monitored
+    ...              Data Required:
+    ...                Expected enclosure DTO
+    [Arguments]  ${expected_dto}  &{kwargs}
+    ${name} =  Get From Dictionary  ${expected_dto}  name
+    Log     ${\n}[Verifying Enclosure ${name}]
+    ${new_expected_dto} =  Add Key Value to DTO  ${expected_dto}  &{kwargs}
+    ${dto} =  Get Enclosure  ${name}
+    ${validate_status} =   Run Keyword And Continue on Failure    Fusion api validate response follow  ${new_expected_dto}  ${dto}  #wordy=${True}
+    Run Keyword If  '${validate_status}'=='False'    Run Keyword And Continue on Failure      Fail  Validate Enclosure ${name} failed
+
+Verify Enclosures from list
+    [Documentation]  Verify enclosure DTOs with the expected ones specified in the data file
+    ...              **kwargs are used to add key value pair to the expected DTO
+    ...              Example:
+    ...                Verify Enclosures from a list ${list}
+    ...                Verify Enclosures from a list ${list}  state=Monitored
+    ...              Data Required:
+    ...                List of expected enclosure DTO
+    [Arguments]  ${list}  &{kwargs}
+    Log     ${\n}Verifying enclosures
+    Run Keyword for List with kwargs  ${list}  Verify Enclosure  &{kwargs}
+
+Check Enclosure Added
+    [Documentation]  Check if the enclosure is added
+    ...              Example:
+    ...                Check Enclosures Added  ${enclosure}
+    ...                Check Enclosures Added  ${enclosure}  timeout=600  interval=10
+    ...              Data Required:
+    ...                Enclosure DTO
+    [Arguments]  ${enclosure}  ${timeout}=600  ${interval}=10
+    ${name} =     Get from Dictionary    ${enclosure}  name
+    Log     ${\n}Checking Enclosure ${name} Added    console=True
+    ${task} =     Get Task By Param   param=?filter="'name'='Add' AND associatedResource.resourceName='${name}'"&sort=created:descending&count=1
+    log  ${\n}The enclossure add task uri for enclosure ${name} is ${task['uri']}  TRACE
+    Wait For Task2  ${task}  timeout=${timeout}  interval=${interval}
+
+Check Enclosures Added from list
+    [Documentation]  Check if the enclosures are added
+    ...              Example:
+    ...                Check Enclosures Added  from list ${list}
+    ...                Check Enclosures Added  from list ${list}  timeout=600  interval=10
+    ...              Data Required:
+    ...                List of enclosures
+    [Arguments]  ${list}  ${timeout}=600  ${interval}=10
+    Log     ${\n}Checking Enclosures Added from list
+    Run Keyword for List with kwargs  ${list}  Check Enclosure Added  timeout=${timeout}  interval=${interval}
+
+Remove All Enclosures async
+    [Documentation]    Querys the appliance for all Enclosures and then removes them. Verifies the deletion only if user reuests using the additional argument.
+    [Arguments]     ${VERIFY}=${FALSE}    ${timeout}=240    ${interval}=10    ${RETURN_CODE}=404
+    Log      Removing ENCLOSURES    console=True
+    ${actualencls} =  create list
+    ${response} =     create list
+    ${encs} =     Fusion Api Get Enclosures
+    ${count}=    Convert To String  ${encs['count']}
+    Run Keyword If  '${count}'=='0'   Log  Enclosure doesn't exists   WARN
+    :FOR    ${enc}    IN    @{encs['members']}
+    \    ${resp} =        Fusion Api Remove Enclosure    uri=${enc['uri']}  param=?force=true
+    \    ${deleteInfo} =  Create Dictionary
+    \    Set To Dictionary  ${deleteInfo}  name=${enc['name']}
+    \    Set To Dictionary  ${deleteInfo}  uri=${enc['uri']}
+    \    Set To Dictionary  ${deleteInfo}  resp=${resp}
+    \    append to list    ${actualencls}   ${deleteInfo}
+    \    append to list    ${response}     ${resp}
+    Wait For Task2     ${response}   ${timeout}   ${interval}
+    Return From Keyword If  ${VERIFY}==${FALSE}
+    :FOR    ${encl}  IN  @{actualencls}
+    \    ${resp} =  Fusion Api Get Resource  ${encl['uri']}
+    \    Run Keyword If  ${resp['status_code']}!=${RETURN_CODE}  Run Keyword And Continue On Failure  FAIL  msg=Enclosure ${encl['name']} is not Deleted
+
+Wait For ALL Enclosures In OK Status
+    [Documentation]    Querys the appliance for all Enclosures and wait for them in OK status
+    [Arguments]     ${timeout}=600s  ${interval}=15s
+    Log      Wait For ALL Enclosures in OK status    console=True
+    ${enclosures} =     Fusion Api Get Enclosures
+    :FOR    ${enclosure}    IN    @{enclosures['members']}
+    \        Continue For Loop If    '${enclosure['status']}'=='OK'
+    \        Wait Until Keyword Succeeds    ${timeout}    ${interval}    Enclosure In OK Status    ${enclosure}
+
+Enclosure In OK Status
+    [Documentation]     Enclosure In OK Status
+    [Arguments]    ${enclosure}
+    Set Log Level    TRACE
+    ${enclosure} =   Fusion Api Get Enclosures     ${enclosure['uri']}
+    ${status} =  Get From Dictionary  ${enclosure}  status
+    Log    \t Enclosure: [${enclosure['name']}] is: ${status}    console=True
+    Should Match    ${status}    OK
+
+Wait For ALL Enclosures Complete Refresh
+    [Documentation]    Querys the appliance for all Enclosures and wait for them refresh complete
+    [Arguments]     ${timeout}=600s  ${interval}=5s
+    Log      Wait For ALL Enclosures Complete Refreshing    console=True
+    ${enclosures} =     Fusion Api Get Enclosures
+    :FOR    ${enclosure}    IN    @{enclosures['members']}
+    \        Continue For Loop If    '${enclosure['refreshState']}'!='Refreshing'
+    \        Wait Until Keyword Succeeds    ${timeout}    ${interval}    Enclosure Refresh Complete    ${enclosure}
+
+Enclosure Refresh Complete
+    [Documentation]     Enclosure Refresh Complete
+    [Arguments]    ${enclosure}
+    Set Log Level    TRACE
+    ${enclosure} =   Fusion Api Get Enclosures     ${enclosure['uri']}
+    ${refresh_state} =  Get From Dictionary  ${enclosure}  refreshState
+    Log    \t Enclosure: [${enclosure['name']}] is: ${refresh_state}    console=True
+    Should Not Match    ${refresh_state}    Refreshing
+
+All Enclosures State Should Be Monitored
+    [Documentation]  Check state of Enclosure and warn user in case of state is not Monitored
+    ...  act_on_failure provide option to either fail current test(Fail) or complete suite(Fatal Error)
+    [Arguments]    ${act_on_failure}=Fail
+    [Tags]    ENC-HEALTH
+    ${encs} =  Fusion Api Get Enclosures
+    # Make sure we get (more than zero) enclosures listed
+    ${count}       Get From Dictionary    ${encs}    count
+    Run Keyword If  '${count}'=='0'    Fail    msg=No enclosures found
+    :FOR  ${enc}  IN  @{encs['members']}
+    \  Run Keyword If  '${enc['state']}' == 'Monitored'  Log  ${enc['name']}, State ${enc['state']}
+    ...  ELSE  Run Keyword And Continue On Failure  ${act_on_failure}  ${enc['name']}, State ${enc['state']}
+
+Enclosures Attribute ${attribute} Should Have Value ${value}
+    [Documentation]  Check attribute of Enclosure and warn user in case of state is not expected
+    ${encs} =  Fusion Api Get Enclosures
+    # Make sure we get (more than zero) enclosures listed
+    ${count}       Get From Dictionary    ${encs}    count
+    Run Keyword If  '${count}'=='0'    Fail    msg=No enclosures found
+    ${res} =  Set Variable  ${empty}
+    :FOR  ${enc}  IN  @{encs['members']}
+    \  ${res} =  Run Keyword If  '${enc['${attribute}']}' != '${value}'  Catenate  ${res}
+    ...     \nEnclosure name [${enc['name']}] Expected ${attribute} ${value} but found ${enc['${attribute}']}
+    \  ...  ELSE  Set Variable  ${res}
+    ${count} =  Get Length  ${res}
+    Run Keyword If  '${count}' > '0'  Fail  ${res}
+
+All Enclosures Status Should Be OK or Warning
+    [Documentation]  Check status of Enclosure and warn user in case of status is not OK
+    ...              Warning shown where status is Warning
+    ...              Fail test where status is other than OK and Warning
+    ...  act_on_failure provide option to either fail current test(Fail) or complete suite(Fatal Error)
+    [Arguments]    ${act_on_failure}=Fail
+    [Tags]    ENC-HEALTH
+    ${encs} =  Fusion Api Get Enclosures
+    # Make sure we get (more than zero) enclosures listed
+    ${count}       Get From Dictionary    ${encs}    count
+    Run Keyword If  '${count}'=='0'    Fail    msg=No enclosures found
+    :FOR  ${enc}  IN  @{encs['members']}
+    \  Run Keyword If  '${enc['status']}' == 'OK'  Log  ${enc['name']}, Status ${enc['status']}
+    ...  ELSE IF  '${enc['status']}' == 'Warning'  Log  ${enc['name']}, Status ${enc['status']}  level=WARN
+    ...  ELSE  Run Keyword And Continue On Failure  ${act_on_failure}  ${enc['name']}, Status ${enc['status']}
+
+All Fan Status Should Be OK or Warning
+    [Documentation]  Check status of Fan and warn user in case of status is not OK
+    ...              Warning shown where status is Warning
+    ...              Fail test where status is other than OK and Warning
+    ...  act_on_failure provide option to either fail current test(Fail) or complete suite(Fatal Error)
+    [Arguments]    ${act_on_failure}=Fail
+    ${encs} =  Fusion Api Get Enclosures
+    # Make sure we get (more than zero) enclosures listed
+    ${count}       Get From Dictionary    ${encs}    count
+    Run Keyword If  '${count}'=='0'    Fail    msg=No enclosures found
+    :FOR  ${enc}  IN  @{encs['members']}
+    \  Devices Status Should Be OK or Warning  ${enc}  fanBays  ${act_on_failure}
+
+All Power Supply Status Should Be OK or Warning
+    [Documentation]  Check status of Power Supply and warn user in case of status is not OK
+    ...              Warning shown where status is Warning
+    ...              Fail test where status is other than OK and Warning
+    ...  act_on_failure provide option to either fail current test(Fail) or complete suite(Fatal Error)
+    [Arguments]    ${act_on_failure}=Fail
+    ${encs} =  Fusion Api Get Enclosures
+    # Make sure we get (more than zero) enclosures listed
+    ${count}       Get From Dictionary    ${encs}    count
+    Run Keyword If  '${count}'=='0'    Fail    msg=No enclosures found
+    :FOR  ${enc}  IN  @{encs['members']}
+    \  Devices Status Should Be OK or Warning  ${enc}  powerSupplyBays  ${act_on_failure}
+
+Devices Status Should Be OK or Warning
+    [Documentation]  Check status of given device and warn user in case of status is Warning
+    ...  Fail test where status is other than OK and Warning
+    ...  act_on_failure provide option to either fail current test(Fail) or complete suite(Fatal Error)
+    [Arguments]    ${enc}  ${devicename}  ${act_on_failure}=Fail
+    Log  ${devicename} health check for Enclosure ${enc['name']}  console=True
+    ${devices} =  Get From Dictionary  ${enc}  ${devicename}
+    :FOR  ${device}  IN  @{devices}
+    \  Continue For Loop If  '${device['devicePresence']}' != 'Present'
+    \  Run Keyword If  '${device['status']}' == 'OK'
+    ...    Log  Enclosure ${enc['name']} ${devicename} Bay ${device['bayNumber']}, Status ${device['status']}
+    ...  ELSE IF  '${device['status']}' == 'Warning'
+    ...    Log  Enclosure ${enc['name']} ${devicename} Bay ${device['bayNumber']}, Status ${device['status']}  level=WARN
+    ...  ELSE  Run Keyword And Continue On Failure  ${act_on_failure}
+    ...    Enclosure ${enc['name']} ${devicename} Bay ${device['bayNumber']}, Status ${device['status']}
+
+Frame Link Topology Should Be Discovered Without Error
+    [Documentation]    Verify all FLTs were discovered properly without errors
+    ${encs} =  Fusion API Get Enclosures
+    # Make sure we get (more than zero) interconnects listed
+    Run Keyword If  '${encs['count']}'=='0'    Fail    msg=No Enclosure found
+    :FOR  ${enc}  IN  @{encs['members']}
+    \    Frame Link Topology Status Should be OK  ${enc}
+
+Frame Link Topology Status Should be OK
+    [Documentation]    Verify FLT status should be OK
+    [Arguments]  ${enc}
+    :FOR  ${flt}  IN  @{enc['managerBays']}
+    \  Run Keyword And Continue On Failure  Should Match  ${flt['status']}  OK  FLT IP Address [${flt['ipAddress']}]

@@ -1,0 +1,304 @@
+*** Settings ***
+Library				RoboGalaxyLibrary
+Library				FusionLibrary
+Library				OperatingSystem
+Library				BuiltIn
+Library				Collections
+Library				XML
+Library		        SSHLibrary
+Library				String
+Library				Dialogs
+Documentation       Data File Example:
+...                 For POST, the root template will be queried by the storage pool if "ROOT" is specified in templateUri.
+...                 add_storage_volumes = [
+...                     {"properties":{"name":"wpst16bay1-priv","description":"","storagePool":STORESERV1_POOL1
+...                                   ,"size":1073741824,"provisioningType":"Thin","isShareable":False,"snapshotPool":STORESERV1_POOL1},
+...                     "templateUri":'storeserv1-pool1-private',"isPermanent":True,}
+...                    {"properties":{"name":"wpst16-sharedvol","description":"","storagePool":STORESERV1_POOL1
+...                                  ,"size":1073741824,"provisioningType":"Thin","isShareable":True,"snapshotPool":STORESERV1_POOL1},
+...                     "templateUri":'ROOT',"isPermanent":True,}
+...                    {"properties":{"name":"wpst16bay1-priv-vsa1","description":"","storagePool":STOREVIRTUAL1_POOL,
+...                                   "size":1073741824,"dataProtectionLevel":"NetworkRaid5SingleParity","provisioningType":"Thin",
+...                                   "isShareable":False,"isAdaptiveOptimizationEnabled":True},
+...                     "templateUri":'vsa1-raid5-private',"isPermanent":True,}
+...                    {"properties":{"name":"wpst16-vsa1-sharedvol-vsa1","description":"","storagePool":STOREVIRTUAL1_POOL,
+...                                  "size":1073741824,"dataProtectionLevel":"NetworkRaid5SingleParity","provisioningType":"Thin",
+...                                   "isShareable":True,"isAdaptiveOptimizationEnabled":True},
+...                     "templateUri":'vsa1-raid5-shared',"isPermanent":True,} ]
+...                  existing_storage_volumes = [
+...                     {"name":"DataVolume", 'description':'', 'storageSystemUri':STORESERV1_NAME, 'deviceVolumeName':'DataVolume', 'isShareable':False},]
+...                  edit_storage_volumes = [
+...                     {'name':'volume1',"isShareable": True,}
+...                     {'name':volume2,"deviceSpecificAttributes":{"dataProtectionLevel":"NetworkRaid0None"}},,]
+
+
+*** Keywords ***
+Add Storage Volume
+	[Documentation]	Add storage Volume and return the response.
+	...             {"properties": {"name": VOLUME_PROFILE1_3PAR1_PRIV, "description": "", "storagePool": STORESERV1_POOL1, "size": 1073741824, "provisioningType": "Thin", "isShareable": False, "snapshotPool": STORESERV1_POOL1},
+    ...              "templateUri": '3par1-pool1-private',
+     ...             "isPermanent": True,
+    ...              "initialScopeUris": ["Scope:Test", "Scope:Production"},}
+	[Arguments]     ${volume}
+    ${payload} =  Create Storage Volume POST Payload  ${volume}
+    ${resp} =   Fusion Api Create Storage Volume    body=${payload}
+	[Return]	${resp}
+
+Add Storage Volumes Async
+	[Documentation]	Add a list of storage volumes and return the responses.
+    [Arguments]     ${volumes}     ${sv_status_code}=202
+    ${resplist} =  Create List
+    :FOR	${vol}	IN	@{volumes}
+    \   ${status} =  Check Resource Existing  SVOL:${vol['properties']['name']}
+    \   run keyword if  ${status}=='PASS'  Log  Volume ${vol['properties']['name']} already present in OneView  WARN
+    \   continue for loop if  ${status}=='PASS'
+    \	Log  Adding Storage Volume ${vol['properties']['name']}   console=True
+    \   ${resp} =  Add Storage Volume  ${vol}
+    \   Run Keyword If  ${resp['status_code']}!=${sv_status_code}    Run Keyword And Continue On Failure     FAIL     Adding Storage Volume ${vol['properties']['name']} failed
+    \   Continue For Loop If    ${resp['status_code']}!=${sv_status_code}
+    \   Append To List  ${resplist}  ${resp}
+	[Return]	${resplist}
+
+Create Storage Volume POST Payload
+	[Documentation]	Create POST payload to add storage volume.
+	[Arguments]		 ${volume}
+	${payload} =  copy dictionary  ${volume}
+	${properties} =  get from dictionary  ${volume}  properties
+	${storagePool} =  get from dictionary  ${properties}  storagePool
+	${storageSystem} =  Evaluate   ${properties}.get('storageSystem', ${None})
+	${storagePoolUri} =  Get Storage Pool URI  ${storagePool}   ${storageSystem}
+	set to dictionary  ${properties}  storagePool  ${storagePoolUri}
+	Remove From Dictionary    ${properties}    storageSystem
+	# set templateURI in payload
+	${template} =  get from dictionary  ${volume}  templateUri
+	${uri1} =  Run keyword if  '${template}'=='ROOT'  Get Root Template URI by Storage Pool  ${storagePool}
+	${uri2} =  Run keyword if  '${template}'!='ROOT'  Get Storage Volume Template URI  ${template}
+    ${templateUri} =  set variable if  '${template}'=='ROOT'  ${uri1}  ${uri2}
+	set to dictionary  ${payload}  templateUri  ${templateUri}
+    # set snapshotPool in properties for StoreServ
+	${status}  ${rtn} =  Run Keyword and Ignore Error  Get From Dictionary  ${properties}  snapshotPool
+	${snapshotPool} =  set variable if  '${status}'=='PASS'  ${rtn}  ${None}
+	${snapshotPoolUri} =  Run keyword if  '${status}'=='PASS'  Get Storage Pool URI  ${snapshotPool}    ${storageSystem}
+    Run keyword if  '${status}'=='PASS'  set to dictionary  ${properties}  snapshotPool  ${snapshotPoolUri}
+    # set properties in payload
+    set to dictionary  ${payload}  properties  ${properties}
+    # Initial Scope process.
+    ${initialScopeUris}=  Pop From Dictionary  ${payload}  initialScopeUris  default=${None}
+    ${scopeUris}=       Run Keyword If    ${initialScopeUris} != ${None}
+    ...                 Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    Run Keyword If      ${initialScopeUris} != ${None}
+    ...                 Set To Dictionary    ${payload}  initialScopeUris  ${scopeUris}
+
+	[Return]  ${payload}
+
+Add Existing Storage Volume
+    [Documentation]	Add existing storage volume on the storage system and return the repsonse.
+    ...             {"name": VOLUME_EXIST_VSA1_SHARED,
+    ...             'description': '',
+    ...             'storageSystemUri': STOREVIRTUAL1_NAME,
+    ...             'deviceVolumeName': VOLUME_EXIST_VSA1_SHARED,
+    ...             'isShareable': True},
+	[Arguments]     ${volume}
+	${payload} =  copy dictionary  ${volume}
+	${ssUri} =  Get Storage System URI  ${payload['storageSystemUri']}
+	set to dictionary  ${payload}  storageSystemUri  ${ssUri}
+    ${resp} =   Fusion Api Add Existing Storage Volume    body=${payload}
+	[Return]	${resp}
+
+Add Existing Storage Volumes Async
+	[Documentation]	Add existing storage volumes on the storage systems and return the repsonses.
+    [Arguments]     ${storageVolumes}     ${sv_status_code}=202
+	${resplist} =  Create List
+    :FOR	${vol}	IN	@{storageVolumes}
+    \   ${status} =  Check Resource Existing  SVOL:${vol['name']}
+    \   run keyword if  ${status}=='PASS'  Log  Volume ${vol['name']} already imported in OneView  WARN
+    \   continue for loop if  ${status}=='PASS'
+    \   Log  Adding Existing Storage volume ${vol['name']}   console=True
+    \   ${resp} =  Add Existing Storage Volume  ${vol}
+    \   Run Keyword If  ${resp['status_code']}!=${sv_status_code}    Run Keyword And Continue On Failure     FAIL     Adding Storage Volume ${vol['properties']['name']} failed
+    \   Continue For Loop If    ${resp['status_code']}!=${sv_status_code}
+    \   Append To List  ${resplist}  ${resp}
+	[Return]	${resplist}
+
+Edit Storage Volume
+	[Documentation]	Edit the storage volume.
+	[Arguments]		${volume}
+	${payload} =  Create Storage Volume PUT Payload  ${volume}
+	${resp} =  Fusion Api Update Storage Volume  ${payload}  ${payload['uri']}
+	[Return]  ${resp}
+
+Edit Storage Volumes Async
+	[Documentation]	Edit a list of storage volumes and return the responses.
+	[Arguments]		${volumes}
+	Log  	Editing Storage Volumess   console=True
+	${resplist} =  Create List
+	:FOR	${vol}	IN	@{volumes}
+	\       Log  Editing the storage volume ${vol['name']}  console=True
+	\		${resp} =  Edit Storage Volume  ${vol}
+	\		Append To List  ${resplist}  ${resp}
+	[Return]	${resplist}
+
+Create Storage Volume PUT Payload
+	[Documentation]	Create the payload for edit storage volume.
+	[Arguments]		${volume}
+	${name} =  Get from Dictionary  ${volume}  name
+	${uri} =  Get Storage Volume URI  ${name}
+    ${volCopy} =  copy dictionary  ${volume}
+	${payload} =  fusion api get resource  ${uri}
+	# remove the status_code and headers in the response
+	remove from dictionary  ${payload}  status_code
+	remove from dictionary  ${payload}  headers
+	# update deviceSpecificAttributes if defined
+	${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${volCopy}  deviceSpecificAttributes
+	Run keyword if  '${status}'=='PASS'  Update Dictionary Subset  ${payload['deviceSpecificAttributes']}  ${volCopy['deviceSpecificAttributes']}
+	Run keyword if  '${status}'=='PASS'  remove from dictionary  ${volCopy}    deviceSpecificAttributes
+	# update the rest
+	Update Dictionary Subset  ${payload}  ${volCopy}
+	[return]		${payload}
+
+Get Storage Volume URI
+	[Documentation]	Get storage Volume Uri by name.
+	[Arguments]		${volName}
+	${resp} = 	Fusion Api Get Storage Volumes	param=?filter="'name'=='${volName}'"
+	Return From Keyword If  ${resp['count']}==0  /rest/storage_volume_uri_${volName}_not_found
+	${uri} = 	Get From Dictionary		${resp['members'][0]}	uri
+	[Return]	${uri}
+
+Remove Storage Volumes Async
+    [Documentation]  Remove a list of storage volumes.
+    ...             When ${param} set to ?suppressDeviceUpdates=true, volumes will be removed from Oneview only.
+    ...             When ${param} set to ?suppressDeviceUpdates=false, volumes will be removed from Oneview and storage system.
+    [Arguments]  ${volumes}   ${param}  ${status_code}=404
+    ${resplist} =   Create List
+    Log  Removing Storage Volumes  console=yes
+    :FOR	${vol}	IN	@{volumes}
+    \   ${msg} =  set variable if  '${param}'=='?suppressDeviceUpdates=true'  from Oneview only  from Oneview and storage system
+    \   ${status}  ${rtn} =  Run Keyword and Ignore Error  Get From Dictionary  ${vol}  name
+    \   ${name} =  set variable if  '${status}'=='PASS'  ${rtn}  ${vol['properties']['name']}
+    \   ${status} =  Check Resource Existing  SVOL:${name}
+    \   run keyword if  ${status}=='FAIL'  Log  Volume ${name} not present in OneView  WARN
+    \   continue for loop if  ${status}=='FAIL'
+    \   Log  Remove storage volume ${name} ${msg}  console=yes
+    \   ${vol} =  Get Resource  SVOL:${name}
+    \   ${headers} =  fusion api get headers
+    \   set to dictionary  ${headers}  If-Match  ${vol['eTag']}
+    \   ${resp}=  Fusion Api Delete Storage Volume  uri=${vol['uri']}  param=${param}  headers=${headers}
+    \   Append To List  ${resplist}  ${resp}
+    [Return]  ${resplist}
+
+
+Remove ALL Storage Volumes Async
+	[Documentation]	Query the appliance for all storage volumes, remove them, and return the responses.
+	...             When ${param} set to ?suppressDeviceUpdates=true, volumes will be removed from Oneview only.
+	...             When ${param} set to ?suppressDeviceUpdates=false, volumes will be removed from Oneview and storage system.
+	[Arguments]  ${param}
+	Log  	Removing ALL Storage Volumes   console=True
+	${resplist} =  Create List
+	${volumes} =  Fusion Api Get Storage Volumes  param=?sort=name:ascending
+	:FOR	${vol}	IN	@{volumes['members']}
+	\   ${msg} =  set variable if  '${param}'=='?suppressDeviceUpdates=true'  from Oneview only  from Oneview and storage system
+	\	Log  Remove storage volume ${vol['name']} ${msg}   console=True
+	\   ${headers} =  fusion api get headers
+	\   set to dictionary  ${headers}  If-Match  ${vol['eTag']}
+	\	${resp} = 	Fusion Api Delete Storage Volume  uri=${vol['uri']}  param=${param}  headers=${headers}
+	\	append to list  ${resplist}	${resp}
+	[return]	${resplist}
+
+Storage Volume Should Match Expected DTO
+    [Documentation]  Compares storage volume DTO with expected DTO
+    ...              **kwargs are used to add key value pair to the expected DTO
+    ...              Example:
+    ...                Storage Volume Should Match Expected DTO  ${expected_dto}
+    ...                Storage Volume Should Match Expected DTO  ${expected_dto}  status=OK
+    ...              Data Required:
+    ...                Expected volume DTO
+    ...                 Example: {
+    ...                        "allocatedCapacity": "1090519040",
+    ...                        "category": "storage-volumes",
+    ...                        "created": "2017-02-07T23:04:20.000Z",
+    ...                        "description": "useful description",
+    ...                        "deviceSpecificAttributes": {
+    ...                            "dataProtectionLevel": "NetworkRaid0None",
+    ...                            "id": 1614,
+    ...                            "iqn": "iqn.2003-10.com.lefthandnetworks:vsa-mg-116:1614:ovf959-storevirtual-raid-0-full-private",
+    ...                            "isAdaptiveOptimizationEnabled": true,
+    ...                            "numberOfReplicas": 1
+    ...                        },
+    ...                        "deviceVolumeName": "OVF959-StoreVirtual-RAID-0-Full-Private",
+    ...                        "eTag": "1/57",
+    ...                        "isPermanent": false,
+    ...                        "isShareable": false,
+    ...                        "lastRefreshTime": "2017-02-08T17:26:09.000Z",
+    ...                        "lunWwn": null,
+    ...                        "modified": "2017-02-08T17:26:09.000Z",
+    ...                        "name": "OVF959-StoreVirtual-RAID-0-Full-Private",
+    ...                        "provisionedCapacity": "1073741824",
+    ...                        "provisioningType": "Full",
+    ...                        "requestingRefresh": null,
+    ...                        "revertToSnapshotUri": null,
+    ...                        "snapshotsUri": "/rest/storage-volumes/45FB2DC6-7AB5-40AF-9B2F-A713017C3820/snapshots",
+    ...                        "state": "Managed",
+    ...                        "status": "OK",
+    ...                        "storagePoolUri": STORAGE_POOL_NAME,
+    ...                        "templateConsistency": "Consistent",
+    ...                        "type": "StorageVolumeV4",
+    ...                        "uri": VOLUME_NAME,
+    ...                        "volumeTemplateUri": VOLUME_TEMPLATE_NAME
+    ...                        }
+    [Arguments]  ${expected_dto}  &{kwargs}
+    ${name} =  Get From Dictionary  ${expected_dto}  name
+    Log  ${\n}Validating Storage Volume '${name}' against expected DTO   console=True
+    # Look-up the storage pool uri
+    ${status1}  ${storagePoolName} =  Run Keyword and Ignore Error  Get From Dictionary  ${expected_dto}  storagePoolUri
+    ${storagePoolUri} =  Run Keyword If  '${status1}'=='PASS' and '${storagePoolName}'!='' and '${storagePoolName}'!='${None}'  Get Storage Pool Uri  ${storagePoolName}
+    Run Keyword If  '${status1}'=='PASS' and '${storagePoolName}'!='' and '${storagePoolName}'!='${None}'  Set to Dictionary  ${expected_dto}  storagePoolUri  ${storagePoolUri}
+    # Look-up the volume uri
+    ${status2}  ${volumeName} =  Run Keyword and Ignore Error  Get From Dictionary  ${expected_dto}  uri
+    ${volumeUri} =  Run Keyword If  '${status2}'=='PASS' and '${volumeName}'!='' and '${volumeName}'!='${None}'  Get Storage Volume Uri  ${volumeName}
+    Run Keyword If  '${status2}'=='PASS' and '${volumeName}'!='' and '${volumeName}'!='${None}'  Set to Dictionary  ${expected_dto}  uri  ${volumeUri}
+    # Look-up the volume template uri
+    ${status3}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${expected_dto}  volumeTemplateUri
+    @{words} =  Run Keyword if  '${return}'!='' and '${return}'!='${None}'  Split String  ${return}  :
+	${type} = 	Run Keyword if  '${return}'!='' and '${return}'!='${None}'  Get From List  ${words}  0
+	${volumeTemplateName} =  Run Keyword if  '${return}'!='' and '${return}'!='${None}'  Get From List  ${words}  1
+    ${volumeTemplateUri} =  Run Keyword If  '${status3}'=='PASS' and '${type}'!='ROOT' and '${volumeTemplateName}'!='' and '${volumeTemplateName}'!='${None}'  Get Storage Volume Template Uri  ${volumeTemplateName}
+    ${volumeTemplateUri} =  Run Keyword If  '${status3}'=='PASS' and '${type}'=='ROOT' and '${volumeTemplateName}'!='' and '${volumeTemplateName}'!='${None}'  Get Root Template URI by Storage Pool  ${volumeTemplateName}
+    Run Keyword If  '${status3}'=='PASS' and '${volumeTemplateUri}'!='' and '${volumeTemplateUri}'!='${None}'  Set to Dictionary  ${expected_dto}  volumeTemplateUri  ${volumeTemplateUri}
+    ${expected_dto} =  Add Key Value to DTO  ${expected_dto}  &{kwargs}
+    ${dto} =  Get Resource  SVOL:${name}
+    ${validate_status} =  Fusion api validate response follow  ${expected_dto}  ${dto}  wordy=${True}
+    Run Keyword If  '${validate_status}'=='False'  Fail  Validate Storage Volume  ${name}  failed
+
+Storage Volumes Should Match Expected DTOs
+    [Documentation]  Verifies a list of storage volumes against their expected DTO's
+    [Arguments]  ${volumes}
+    :FOR    ${volume}   IN  @{volumes}
+    \   Storage Volume Should Match Expected DTO   ${volume}
+
+Storage Volume Should Not Be Found
+    [Documentation]  Verfies that a volume has been deleted
+    [Arguments]  ${volume}
+    ${name} =  Get From Dictionary  ${volume}  name
+    ${dto} =  Get Resource  SVOL:${name}
+    ${status}  ${details} =  Run Keyword and Ignore Error  Get From Dictionary  ${dto}  details
+    Should Be Equal  '${details}'  'The requested resource could not be found.'
+    Log  ${\n}Storage Volume '${name}' cannot be found   console=True
+
+Storage Volumes Should Not Be Found
+    [Documentation]  Verfies that a list of volumes have been deleted
+    [Arguments]  ${volumes}
+    :FOR    ${volume}   IN  @{volumes}
+    \   Storage Volume Should Not Be Found   ${volume}
+
+Storage Volumes Attribute ${attribute} Should Have Value ${value}
+    [Documentation]    Check attribute of Storage Volumes
+    ...    Fail the test in case of attribute other than expected
+    ${svs} =    Fusion Api Get Storage Volumes
+    Run Keyword If  ${svs['count']}=='0'  Fail  msg=No Storage volumes found
+    ${res} =  Set Variable  ${empty}
+    :FOR  ${sv}  IN  @{svs['members']}
+    \  ${res} =  Run Keyword If  '${sv['${attribute}']}' != '${value}'  Catenate  ${res}
+    ...  \nStorage System name [${sv['name']}] Expected ${attribute} ${value} but found ${sv['${attribute}']}
+    \  ...  ELSE  Set Variable  ${res}
+    ${count} =  Get Length  ${res}
+    Run Keyword If  '${count}' > '0'  Fail  ${res}

@@ -1,0 +1,149 @@
+*** Settings ***
+Library             RoboGalaxyLibrary
+Library             FusionLibrary
+Library             OperatingSystem
+Library             BuiltIn
+Library             Collections
+Library             XML
+Library             SSHLibrary
+Library             String
+Library             Dialogs
+Resource            ../global_variables.robot
+
+*** Variables ***
+${APPLIANCE_IP}      unknown
+
+*** Keywords ***
+
+Clear Test Environment
+    [Arguments]    ${userFlag}=${false}   ${directoryFlag}=${false}    ${scopeFlag}=${false}
+    [Documentation]    Prepare the test case pre condition according to the profile
+    Fusion Api Login Appliance      ${APPLIANCE_IP}    ${admin_credentials}
+    Run Keyword If    ${userFlag}    Remove All Users
+    Run Keyword If    ${directoryFlag}   Remove Directory and Certificate
+    Run Keyword If    ${scopeFlag}   Remove All Scopes
+    Log To Console    Successfully Removed User/Group/Directory As Required
+    Log To Console    Clear Task DONE
+
+Remove Directory and Certificate
+    [Documentation]  Remove the directory server and AD server related CA certificate
+    Remove All Directories Async
+    Run Keyword And Ignore Error     Remove CA By Allias Name    ${ALIAS_NAME}
+
+Credential Login
+    [Arguments]    ${credentials_list}
+    [Documentation]    Login as each credential, so can switch session for test needs
+    :FOR    ${credential}    IN    @{credentials_list}
+    \       Fusion Api Login Appliance    ${APPLIANCE_IP}    ${credential}
+
+Pre Condition
+    [Arguments]    ${directoryProfiles}=${None}    ${groupProfiles}=${None}    ${userProfiles}=${None}    ${scopeProfiles}=${None}
+    # [Arguments]    ${directoryProfiles}    ${groupProfiles}=${None}    ${userProfiles}=${None}    ${scopeProfiles}=${None}
+    [Documentation]    Prepare the test case pre condition according to the profile
+    Fusion Api Login Appliance      ${APPLIANCE_IP}    ${admin_credentials}
+    Run Keyword If    ${directoryProfiles}    Import AD Server Certificates    ${CERT_BODY}    ${AD_CERTIFICATE}    ${ALIAS_NAME}
+    Run Keyword If    ${directoryProfiles}    Prepare Directories For Test   ${directory_profiles}
+    Run Keyword If    ${groupProfiles}    Create Groups    ${groupProfiles}
+    Run Keyword If    ${userProfiles}     Add Users From Variable Async    ${userProfiles}
+    Run Keyword If    ${scopeProfiles}    Create Scopes    ${scopeProfiles}
+    Log To Console    Pre Condition DONE
+
+Prepare Directories For Test
+    [Arguments]    ${directory_profiles}
+    [Documentation]    Create directories and check the result
+    ${response} =     Add Active Directory    ${directory_profiles}
+    :FOR    ${resp}    IN    @{response}
+    \       ${status}=    Get From Dictionary    ${resp}    status_code
+    \       Should Be Equal    ${status}    ${201}
+
+Create Groups
+    [Arguments]    ${groupProfiles}
+    [Documentation]    Add Group in specify Directory according to the group profile and return the uris list
+    ${group_uri_list}    Create List    ${EMPTY}
+    :FOR    ${profile}    IN    @{groupProfiles}
+    \       ${resps} =  Fusion Api Assign Roles To Directory Group    ${profile}
+    \       ${status}=    Get From Dictionary    ${resps}    status_code
+    \       Should Be Equal    ${status}    ${201}
+    \       ${group_uri} =    Get From Dictionary    ${resps}    uri
+    \       Append To List    ${group_uri_list}    ${group_uri}
+    [Return]    ${group_uri_list}
+
+Edit Existing User Role
+    [Arguments]    ${bodyProfile}    ${user_profile}
+    [Documentation]    Edit User Role Assignment
+    ${index} =    Set Variable    ${0}
+    :FOR    ${body}    IN    @{bodyProfile}
+    \       ${name} =     Get From Dictionary     ${user_profile[${index}]}    userName
+    \       ${resps} =    Fusion Api Edit User    body=${body}    uri=/rest/users/${name}/roles?multiResource=true
+    \       ${index} =    Set Variable    ${index + 1}
+    \       ${status} =    Get From Dictionary    ${resps}    status_code
+    \       Should Match    '${status}'    '${200}'
+
+Can Edit Scope Resources
+    [Arguments]    ${scope_body}    ${add_flag}=${None}    ${new_name}=${None}
+    [Documentation]    With these user or group token, can edit Scope resources
+    ${sh_uri_list} =    Get All Server Hardware Uris
+    ${resp} =     Run Keyword If    '${add_flag}' == '${true}'     Edit Scope    name=${scope_body['name']}    addresources=${sh_uri_list}
+    ...           ELSE IF           '${add_flag}' ==' ${false}'    Edit Scope    name=${scope_body['name']}    removeresources=${sh_uri_list}
+    ...           ELSE IF           '${new_name}' != '${None}'     Edit Scope    name=${scope_body['name']}   new_name=${new_name}
+    ...           ELSE               Return From Keyword    ${false}
+    Wait For Task2    ${resp}
+
+Can Get Role Info
+    [Arguments]    ${uri}=${None}
+    [Documentation]    Can Get role info with specifal uri or not
+    ${resp} =    Run Keyword If  ${uri}    Fusion Api Get Roles    uri=${uri}
+    ...          ELSE                      Fusion Api Get Roles
+    ${status} =    Get From Dictionary   ${resp}    status_code
+    Should Be Equal    ${status}    ${200}
+
+Should Failed Assign Non Existing User Role
+    [Arguments]    ${bodyProfile}    ${user_profile}
+    [Documentation]    Should Failed Assign Non Existing User Role
+    ${index} =    Set Variable    ${0}
+    :FOR    ${body}    IN    @{bodyProfile}
+    \       ${name} =    Get From Dictionary    ${user_profile[${index}]}    userName
+    \       ${resps} =    Fusion Api Edit User    body=${body}    uri=/rest/users/${name}/roles?multiResource=true
+    \       ${index} =    Set Variable    ${index + 1}
+    \       ${status} =    Get From Dictionary   ${resps}    status_code
+    \       Should Not Be Equal    ${status}    ${200}
+
+Should Failed Assign Non Existing Group Role
+    [Arguments]    ${bodyProfile}
+    [Documentation]    Should Failed Assign Non Existing Group Role
+    :FOR    ${body}    IN    @{bodyProfile}
+    \       ${resps} =    Fusion Api Update Group Role Assignment    body=${body}
+    \       ${status} =    Get From Dictionary   ${resps}    status_code
+    \       Should Not Be Equal    ${status}    ${200}
+
+Should Failed To Delete Server Hardware Type
+    [Documentation]    With these user or group token, should not modify server hardware
+    ${sh_type_uri_list} =    Get All Server hardware Type Uris
+    :FOR    ${sh_type_uri}    IN    @{sh_type_uri_list}
+    \       ${resp} =    Fusion Api Delete Server Hardware Types    uri=${sh_type_uri}
+    \       Should Not Be Equal  '${resp["status_code"]}'    '204'    msg= SA or SO user or gourp can delete resource other than scope!
+    \       Should Be Equal    '${resp["errorCode"]}'    'AUTHORIZATION'
+
+Should Failed To Delete Scope
+    [Documentation]    With these user or group token, Should Failed To Create Scope
+    :FOR    ${scope}    IN    @{p005_scopes}
+    \       ${scope_uri} =    Get Scope URI By Name    ${scope['name']}
+    \       ${response} =    Fusion Api Delete Scope    uri=${scope_uri}
+    \       Should Not Be Equal    '${response["status_code"]}'   '204'    msg= SO role can delete scope!!!!!
+    \       Should Be Equal    '${response["errorCode"]}'    'ACTION_FORBIDDEN_BY_ROLE'
+
+Should Failed To Modify Server Hardware Type
+    [Arguments]   ${body}=None
+    [Documentation]    With these user or group token, should not modify server hardware
+    ${sh_type_uri_list} =    Get All Server hardware Type Uris
+    :FOR    ${sh_type_uri}    IN    @{sh_type_uri_list}
+    \       ${resp} =    Fusion Api Edit Server Hardware Types    body=${body}    uri=${sh_type_uri}
+    \       Should Not Be Equal  '${resp["status_code"]}'    '204'    msg= SA or SO user or gourp can modify resource other than scope!
+    \       Should Be Equal    '${resp["errorCode"]}'    'AUTHORIZATION'
+
+Should Failed To Create Scope
+    [Arguments]    ${body}
+    [Documentation]    With these user or group token, Should Failed To Create Scope
+    ${resp} =    Create Scope    ${body}
+    Should Not Be Equal    '${resp["status_code"]}'   '202'    msg= SO role can create scope!!!!!
+    Should Be Equal    '${resp["errorCode"]}'    'ACTION_FORBIDDEN_BY_ROLE'

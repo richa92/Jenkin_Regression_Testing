@@ -1,0 +1,288 @@
+***Settings***
+Documentation    OVF4512_keywords
+Library             RoboGalaxyLibrary
+Library             FusionLibrary
+Library             OperatingSystem
+Library             BuiltIn
+Library             Collections
+Library             SSHLibrary
+Library             String
+Library             Telnet
+Resource            ../../../../../Resources/api/fusion_api_resource.txt
+
+*** Keywords ***
+
+Disable Enable Ports
+    [Documentation]    Disable or Enable the port in the portname list of the specified interconnect uri
+
+    [Arguments]        ${IC_ports}    ${ic_uri}    ${update}    ${status}=${None}
+    ...            ${portStatus}=${None}    ${portStatusReason}=${None}
+
+    ${body} =    Create List
+
+    :FOR    ${portname}    IN    @{IC_ports}
+    \    ${resp} =     Get IC Port    ${ic_uri}    ${portname}
+    \    Set to Dictionary   ${resp}   enabled    ${update}
+    \    Append to list    ${body}    ${resp}
+
+   ${resp} =    fusion api edit interconnect ports    uri=${ic_uri}   body=${body}
+   ${task} =    Wait For Task     ${resp}    30 min  60s
+   Should Be Equal As Strings    ${task['taskState']}    Completed
+
+    :FOR    ${port}    IN    @{IC_ports}
+    \    Log    Verifying if Port status is changed    console=True
+    \    Wait Until Keyword Succeeds     20 min   10s    Verify Port    ${ic_uri}    ${port}    ${status}    ${portStatus}    ${portStatusReason}
+
+Verify Port Status
+    [Documentation]    Verify Port Status
+    [Arguments]        ${IC_ports}    ${ic_uri}    ${status}=${None}
+    ...            ${portStatus}=${None}    ${portStatusReason}=${None}
+
+    :FOR    ${port}    IN    @{IC_ports}
+    \    Log    Verifying if Port status is changed    console=True
+    \    Wait Until Keyword Succeeds     20 min   10s    Verify Port    ${ic_uri}    ${port}    ${status}    ${portStatus}    ${portStatusReason}
+
+Checking Master Port is Linked
+    [Documentation]     Checking Master Port is Linked
+    [Arguments]    ${US_details}
+    :FOR    ${port}    IN    @{US_details[0]['Act_ports']}
+    \    ${portStatus}    ${trunkMaster}    ${enabled}    Get port details    ${ENC1}    ${US_details[0]['bay']}    ${port}
+    \    Run Keyword Unless    '${portStatus}'=='Linked'    FAIL
+    \    Run Keyword Unless    '${trunkMaster}'!='None'    FAIL
+    :FOR    ${port}    IN    @{US_details[1]['Act_ports']}
+    \    ${portStatus}    ${trunkMaster}    ${enabled}    Get port details    ${ENC1}    ${US_details[1]['bay']}    ${port}
+    \    Run Keyword Unless    '${portStatus}'=='Linked'    FAIL
+    \    Run Keyword Unless    '${trunkMaster}'!='None'    FAIL
+
+Validating Downlink Attributes for Lower XApi Version
+    [Documentation]    Validating Downlink Attributes for Lower XApi Version
+    [Arguments]    ${name}    ${xapi}
+    ${res}    Fusion Api Get Interconnect   param=?filter="'name'=='${name}'"     api=${xapi}
+    Log    \n${res['members'][0]['ports']}    console=True
+    ${l}     Get Length    ${res['members'][0]['ports']}
+    Log    \n${l}    console=True
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \     ${fc_port}    Get From Dictionary    ${res['members'][0]['ports'][${x}]}    fcPortProperties
+    \     Log    \n${fc_port}     console=True
+    \     Should Not Contain    ${fc_port}    downlinkToUplinkPortMapping    mappedUplinkPortIsTrunkMaster
+
+Get port details
+    [Arguments]    ${Enc_name}    ${bay_num}    ${Port_num}
+    [Documentation]    Getting the port details of respective port number.
+    ${resp}    Fusion Api Get Interconnect    param=?filter="'name'=='${Enc_name}, interconnect ${bay_num}'"
+    ${ports}    Get Variable Value    ${resp['members'][0]['ports']}
+    :FOR    ${port}    IN     @{ports}
+    \    Run Keyword If    '${port['portName']}' != '${Port_num}'    Continue For Loop
+    \    ${portStatus}    Set Variable     ${port['portStatus']}
+    \    ${trunkMaster}    Set Variable    ${port['fcPortProperties']['trunkMaster']}
+    \    ${enabled}    Set Variable    ${port['enabled']}
+    \    Exit For Loop
+    [Return]    ${portStatus}    ${trunkMaster}    ${enabled}
+
+Check For Trunk Group in Brocade
+    [Documentation]    Checking for the trunk group existence in switch
+    [Arguments]    ${FC_switch_details}    ${Trunk_Commands}
+    Log    Checking for trunk group details in the Brocade switch    console=true
+    Open Connection    ${FC_switch_details['ip']}
+    Login   ${FC_switch_details['userName']}    ${FC_switch_details['password']}
+    ${stdout}   Execute Command    ${Trunk_Commands[0]}
+    Log    Show command output is \n ${stdout}    console=True
+    Close Connection
+    [Return]    ${stdout}
+
+Get the number of Trunk Group in switch
+    [Documentation]    Getting the number of trunk groups in switch
+    [Arguments]    ${show_command_output}
+    @{words}  Split String    ${show_command_output}
+    Log    The output splitted with dots is \n ${words}    console=true
+    Remove From List    ${words}    -1
+    Remove From List    ${words}    0
+    ${group_count}    Get Length    ${words}
+    Log    The number of trunk groups present is ${group_count}    console=True
+    [Return]    ${group_count}    ${words}
+
+Create Trunk Group with ports
+    [Documentation]    Creating Trunk Group with ports on switch
+    [Arguments]    ${FC_switch_details}    ${Trunk_Commands}    ${Ports_to_trunk}
+    ${First_port}    Set Variable    ${Ports_to_trunk[0]}
+    ${Last_port}    Set Variable    ${Ports_to_trunk[-1]}
+    Open Connection    ${FC_switch_details['ip']}
+    Login    ${FC_switch_details['userName']}    ${FC_switch_details['password']}
+    Execute Command    ${Trunk_Commands[1]} ${First_port}-${Last_port}
+    Sleep   3s
+    :FOR   ${y}   IN    @{Ports_to_trunk}
+    \   Execute Command   ${Trunk_Commands[3]} ${y} 1
+    \   Sleep   3s
+    Execute Command   ${Trunk_Commands[5]} ${First_port}-${Last_port} -index ${First_port}
+    Sleep   3s
+    Execute Command   ${Trunk_Commands[4]} ${First_port}-${Last_port}
+    Sleep   3s
+    Close Connection
+
+Delete trunk group and release ports
+    [Documentation]    Deleting the trunk group
+    [Arguments]    ${FC_switch_details}    ${Trunk_Commands}    ${Ports_in_TG}
+    ${First_port}    Set Variable    ${Ports_in_TG[0]}
+    ${Last_port}    Set Variable    ${Ports_in_TG[-1]}
+    Open Connection    ${FC_switch_details['ip']}
+    Login   ${FC_switch_details['userName']}    ${FC_switch_details['password']}
+    Execute Command    ${Trunk_Commands[1]}     ${First_port}-${Last_port}
+    Sleep   3s
+    Execute Command    ${Trunk_Commands[2]}     ${First_port}-${Last_port}
+    Sleep   3s
+    :FOR   ${y}   IN    @{Ports_in_TG}
+    \   Execute Command    ${Trunk_Commands[3]}    ${y}    0
+    \   Sleep   3s
+    Execute Command   ${Trunk_Commands[4]}     ${First_port}-${Last_port}
+    Sleep   3s
+    Close Connection
+
+Poweroff Interconnect
+    [Documentation]     Poweroff Interconnect
+    [Arguments]         ${SSH_HOST}   ${SSH_USER}    ${interconnect}
+    Open Connection     ${SSH_HOST}     timeout=180s
+    Set Suite variable  ${SSH_PASS}     ${OA_PASS}
+    Login    ${SSH_USER}    ${SSH_PASS}
+    Write     poweroff interconnect ${interconnect}
+    Write     poweroff interconnect ${interconnect}
+    Close All Connections
+
+Poweron Interconnect
+    [Documentation]     Poweron Interconnect
+    [Arguments]         ${SSH_HOST}   ${SSH_USER}    ${interconnect}
+    Open Connection     ${SSH_HOST}     timeout=180s
+    Set Suite variable  ${SSH_PASS}     ${OA_PASS}
+    Login    ${SSH_USER}    ${SSH_PASS}
+    Write     poweron interconnect ${interconnect}
+    Write     poweron interconnect ${interconnect}
+    Close All Connections
+
+OA CLI EFUSE
+    [Documentation]    issues an EFUSE Action to the given Device\Bay.
+    ...   {DEVICE} = <BLADE|IOM|NETTRAY|SWM|FAN|OA|EM>
+    ...   {BAY} = desired bay for given device
+    ...   {ACTION} = <ON|OFF>
+    [Arguments]    ${OA_HOST}    ${OA_USER}     ${OA_PASS}    ${DEVICE}    ${BAY}    ${ACTION}
+    Open Connection     ${OA_HOST}     prompt=>    timeout=20s
+    Login               ${OA_USER}     ${OA_PASS}
+    Write    ++diag--
+    Read Until    diag>
+    Write    efuse ${DEVICE} ${BAY} ${ACTION}
+    Write    q
+    Close All Connections
+
+GET IC STATE
+    [Documentation]     GET IC STATE
+    [Arguments]     ${IC}    ${IC_state}
+    ${resp} =    Fusion Api Get Interconnect    param=?filter="'name'=='${IC}'"
+    Run Keyword If  "${resp['members'][0]['state']}" != "${IC_state}"    Fail    The Interconnect module ${INTERCONNECTS_enc1[0]} is in ${${resp['members'][0]['state']}} state!!
+
+
+
+Verify Port
+    [Documentation]    Verify the named port of specified interconnect uri has the optional expected attribute values
+    [Arguments]    ${uri}    ${portName}    ${status}=${None}    ${portStatus}=${None}
+    ...            ${portStatusReason}=${None}    ${opSpeed}=${None}    ${enabled}=${None}
+    ...            ${loginsCount}=${None}    ${connectedTo}=${None}
+
+    ${resp} =    Get IC Port    ${uri}    ${portName}
+    Should Not Be Empty    ${resp}
+
+    # for optional kw arguments. If not specified, do not check
+    Run Keyword IF    '${status}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['status']}    ${status}
+    Run Keyword IF    '${portStatus}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['portStatus']}    ${portStatus}
+    Run Keyword IF    '${portStatusReason}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['portStatusReason']}    ${portStatusReason}
+    Run Keyword IF    '${opSpeed}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['operationalSpeed']}    ${opSpeed}
+    Run Keyword IF    '${enabled}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['enabled']}    ${enabled}
+    Run Keyword IF    '${loginsCount}' != '${None}'
+    ...               should be equal as Integers    ${resp['fcPortProperties']['loginsCount']}    ${loginsCount}
+    Run Keyword IF    '${connectedTo}' != '${None}'
+    ...               Should be Equal As Strings    ${resp['fcPortProperties']['principleInterconnectName']}
+    ...                                             ${connectedTo}
+
+
+Check For Ports in Trunk Group
+    [Documentation]   Checking for the master port and port count in the trunk group
+    [Arguments]   ${Ports_data}     ${TG_number}
+    Remove From List    ${Ports_data}   -1
+    Remove From List      ${Ports_data}   0
+    ${Ports_count}    Get Length    ${Ports_data}
+    Log    The number of ports present in TG${TG_number} is ${Ports_count}    console=True
+    ${Ports_list}    Create List
+    :FOR    ${y}    IN RANGE   0   ${Ports_count}
+    \   ${data1}   Split String   ${Ports_data[${y}]}
+    \   ${data2}   Get Length   ${data1}
+    \   Append To List   ${Ports_list}   ${data1[-1]}
+    ${Master_port}   Set Variable   ${data1[-3]}
+    [Return]   ${Ports_count}   ${Master_port}   ${Ports_list}
+
+Get IC Port
+    [Documentation]    Returns the port info of the named port of specified interconnect uri
+    [Arguments]     ${uri}    ${portName}
+
+    ${return} =    Create List
+    ${resp} =    fusion api get interconnect ports    uri=${uri}
+    ${ports} =    Get From Dictionary    ${resp}    members
+    :FOR    ${port}    IN    @{ports}
+    \    ${return} =    Run Keyword If    '${port['portName']}' == '${portName}'    set variable    ${port}
+    \    Exit for loop if    '${port['portName']}' == '${portName}'
+    [Return]    ${return}
+
+
+Validate Downlink to Uplinkport Mapping and Trunk Master
+    [Documentation]    Validate downlink to uplinkport mapping and trunk master
+    [Arguments]     ${INTERCONNECTS}    ${downlinkport}    ${trunking_flag}    ${downlink_value}
+    ${len}      Get Length    ${downlinkport}
+    :FOR     ${x}    IN RANGE     0    ${len}
+    \    ${IC_uri}    Get IC URI    ${INTERCONNECTS}
+    \    Log    ${IC_uri}    console=true
+    \    ${resp} =    Get IC Port    ${IC_uri}    ${downlinkport[${x}]}
+    \    ${downlinkToUplinkPortMapping}    Get From Dictionary    ${resp['fcPortProperties']}    downlinkToUplinkPortMapping
+    \    ${mappedUplinkPortIsTrunkMaster}    Get From Dictionary    ${resp['fcPortProperties']}    mappedUplinkPortIsTrunkMaster
+    \    Verify Downlink To Uplinkport Mapping     ${downlinkToUplinkPortMapping}     ${mappedUplinkPortIsTrunkMaster}     ${trunking_flag}    ${downlink_value}
+
+
+Verify Downlink To Uplinkport Mapping
+    [Documentation]    Verify Downlink To Uplinkport Mapping
+    [Arguments]    ${downlinkToUplinkPortMapping}     ${mappedUplinkPortIsTrunkMaster}    ${trunking_flag}    ${downlinkmapping}
+    Run Keyword If    '${trunking_flag}' == 'disabled'    Run Keyword If    '${downlinkToUplinkPortMapping}' > '0' and '${mappedUplinkPortIsTrunkMaster}' == 'False'    Log    \nValidating for disabled     console=True    ELSE    FAIL
+    ...    ELSE IF    '${trunking_flag}' == 'enabled'    Run Keyword If    '${downlinkToUplinkPortMapping}' == '${downlinkmapping}' and '${mappedUplinkPortIsTrunkMaster}' == 'True'    Log    \nValidating for enabled     console=True    ELSE    FAIL
+    ...    ELSE IF    '${trunking_flag}' == 'None'    Run Keyword If    '${downlinkToUplinkPortMapping}' == 'None' and '${mappedUplinkPortIsTrunkMaster}' == 'False'    Log    \nValidating as none and false    console=True    ELSE    FAIL
+    ...    ELSE    FAIL
+
+Getting the Master Uplink Port
+    [Documentation]    Getting the master uplink port
+    [Arguments]    ${US_details}
+    ${trunk_master_list}   Create List
+    :FOR   ${port}  IN   @{US_details[0]['Act_ports'][0:7]}
+    \   ${portStatus}   ${trunkMaster}   ${enabled}   Get port details   ${ENC1}   ${US_details[0]['bay']}   ${port}
+    \   Run Keyword Unless    '${portStatus}'=='Linked'   FAIL
+    \   Run Keyword Unless   '${trunkMaster}'!='None'     FAIL
+    Append To List   ${trunk_master_list}   ${trunkMaster}
+
+    :FOR   ${port}   IN   @{US_details[1]['Act_ports'][0:2]}
+    \   ${portStatus}   ${trunkMaster}   ${enabled}   Get port details   ${ENC1}   ${US_details[1]['bay']}  ${port}
+    \   Run Keyword Unless   '${portStatus}'=='Linked'   FAIL
+    \   Run Keyword Unless   '${trunkMaster}'!='None'   FAIL
+    Append To List   ${trunk_master_list}    ${trunkMaster}
+    Set Global Variable  ${trunk_master_list}    ${trunk_master_list}
+    Log    \nTrunk master ports ${trunk_master_list}    console=True
+    [Return]     ${trunk_master_list}
+
+Suite Setup Tasks
+    [Documentation]    Suite Setup Tasks
+    ${resp}    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    Run Keyword If  '${resp[0]['status_code']}' != '200'  Fail  ELSE  Log    Successfully logged into the appliance    console=true
+    Power OFF ALL Servers    PressAndHold
+    Remove ALL Server Profiles
+    Remove ALL Enclosures
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove ALL Ethernet Networks
+    Remove ALL FC Networks
+    Remove ALL Users

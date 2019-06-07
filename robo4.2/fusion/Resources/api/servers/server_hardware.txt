@@ -1,0 +1,924 @@
+*** Settings ***
+Library                RoboGalaxyLibrary
+Library                FusionLibrary
+Library                OperatingSystem
+Library                BuiltIn
+Library                Collections
+Library                XML
+Library                SSHLibrary
+Library                String
+Library                Dialogs
+
+*** Keywords ***
+
+Add Server Hardware Async
+    [Documentation]    Adds server hardware ( DL server) to an appliance from a variable which contains a list of dicts with the
+    ...  entire payload.  Also supports Adding and validating server asyncronously.  Does not validate by default
+    ...                Data file Ex:   server_hardwares = [{"hostname":"10.31.0.20", "username":"Administrator", "password":"Cosmos123", "force":False,
+    ...                                                     "licensingIntent":"OneView", "configurationState":"Managed"},
+    ...                                                  "initialScopeUris": ['Scope:Test', 'Scope:Production']
+    ...                                                    ]
+    ...                                expected_server_hardwares = [{"type":"server-hardware-4", "name":"ILOMXQ233014F", "state":"NoProfileApplied", "category":"server-hardware", "formFactor":"1U", "intelligentProvisioningVersion":"1.40.80", "licensingIntent":"OneViewNoiLO", "model":"ProLiant DL360p Gen8",
+    ...                                                              "mpFirmwareVersion":"2.30 pass 37 Aug 19 2015", "mpHostInfo":{"mpHostName":"ILOMXQ233014F", "mpIpAddresses":[{"address":"10.31.0.20", "type":"Static"}]},
+    ...                                                              "mpModel":"iLO4", "mpState":"OK", "partNumber":"670635-S01", "portMap":None, "position":0, "powerLock":False, "powerState":"On", "processorCoreCount":8, "processorCount":2, "processorSpeedMhz":2200, "processorType":"Intel(R) Xeon(R) CPU E5-2660 0 @ 2.20GHz", "refreshState":"NotRefreshing",
+    ...                                                              "romVersion":"P71 12/14/2012", "serialNumber":"MXQ233014F", "serverProfileUri":None, "shortModel":"DL360p Gen8", "status":"Critical"}
+    ...                                                             ]
+    [Arguments]     ${server_hardware}    ${VERIFY}=${FALSE}  ${expected_server_hardware}=${EMPTY}  ${STATUS_CODE}=202
+    ${tasks} =  Create Dictionary
+    ${actualServerHardware} =  create list
+    Log  Adding Server hardware    console=True
+    :FOR    ${sh}  IN  @{server_hardware}
+    #       -First, if $VERIFY, check if ${sh} already exists.  Skip if it does
+    \        ${shname}=  Get Server Hardware Name from ILO IP  ${sh['hostname']}
+    \       ${resp} =   Run Keyword If    ${VERIFY}    Get Resource    SH:${shname}
+    \       Run Keyword If    ${VERIFY}  Run Keyword If    ${resp['status_code']}==200
+            ...     Log  server Hardware ${sh['hostname']} exists
+    \       Run Keyword If    ${VERIFY}  Continue For Loop If  ${resp['status_code']}==200
+    #       -Initial Scope process.
+    \       ${initialScopeUris}=  Pop From Dictionary  ${sh}  initialScopeUris  default=${None}
+    \       ${scopeUris}=       Run Keyword If    ${initialScopeUris} != ${None}
+    \       ...                 Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    \       Run Keyword If      ${initialScopeUris} != ${None}
+    \       ...                 Set To Dictionary    ${sh}  initialScopeUris  ${scopeUris}
+    #       -Add the server hardware
+    \        Log  Adding server hardware ${sh['hostname']}
+    \       ${resp} =  Fusion Api Add Server Hardware   body=${sh}
+    #       -If !$VERIFY, then go to the next server hardware
+    \       continue for loop if  ${VERIFY}==${FALSE}
+    #       -Check the response code to ensure the server hardware was added as expected
+    \       should be equal as integers  ${resp['status_code']}  ${STATUS_CODE}
+    \        Log  ${resp}  TRACE
+    #       -We need a way to track the responses for later verification.  Add info to a dict, then add the dict to a list
+    \       ${dict} =  create dictionary
+    \       set to dictionary   ${dict}  resp=${resp}
+    \       set to dictionary   ${dict}  name=${shname}
+     \       append to list  ${actualServerHardware}  ${dict}
+      # If !{VERIFY}, then we're done
+    Return From Keyword If  ${VERIFY}==${FALSE}
+    Run Keyword If  ${VERIFY}  Log    ${tasks}  TRACE    console=true
+    # Iterate through the list of responses build in the last for loop
+    :FOR    ${ash}  IN  @{actualServerHardware}
+    #       -Wait for the sh creation task to finish
+    \       Wait For Task2  ${ash['resp']}  800
+    #       -Grab the correct sh from the expected sh listed that was passed in
+    \       ${expItem} =  Fusion Api Get Dict From List  ${expected_server_hardware}  name  ${ash['name']}
+    #       -If the sh isn't in the list to validate, skip it
+    \       CONTINUE FOR LOOP IF  ${expItem}=={}
+    #       -Get the sh resource and do the comparison
+    \       ${actItem} =  Get Resource    SH:${ash['name']}
+    \       ${result} =  fusion api validate response follow   ${expItem}  ${actItem}  #wordy=${TRUE}
+    \       Run keyword and continue on failure  should be equal  ${result}  ${TRUE}
+    \       Log  ${result}
+
+Add Server hardware from variable
+    [Documentation]       Adds server hardware ( DL server) to an appliance from a variable which contains a list of dicts with the
+    ...                   entire payload.
+    ...          rackservers = [{"name": "wpstdl1-ilo","hostname": "16.125.77.97", "username": "Administrator",
+    ...                          "password": "hpvse1-ilo", "force": True, "licensingIntent": "OneViewNoiLO",
+    ...                          "configurationState": "Managed"}, 'initialScopeUris': ['Scope:Test', 'Scope:Production']]
+    ...          expected_rackservers = [{'type':'server-hardware-7', 'name':'wpstdl31-ilo', 'state':'NoProfileApplied', 'stateReason':'NotApplicable', 'assetTag':'', 'category':'server-hardware', 'formFactor':'1U',
+    ...                                   'intelligentProvisioningVersion':'2.10.83', 'licensingIntent':'OneViewNoiLO', 'locationUri':None, 'memoryMb':8192, 'migrationState':'Unknown', 'model':'ProLiant DL360 Gen9',
+    ...                                   'mpFirmwareVersion':'2.50 pass 17 Jan 21 2016',"mpHostInfo":{"mpHostName": "wpstdl31-ilo","mpIpAddresses":[{"address": "16.114.209.73","type": "Static"},{"address": "fe80:0:0:0:fe15:b4ff:fe25:4bbe","type": "LinkLocal"}]},
+    ...                                   'mpModel':'iLO4', 'mpState':'OK', 'partNumber':'110000-002',
+    ...                                   'portMap':None, 'position':0, 'powerLock':False, 'powerState':'Off', 'processorCoreCount':20, 'processorCount':1, 'processorSpeedMhz':2000, 'processorType':'Genuine Intel(R) CPU 0000 @ 2.00GHz', 'refreshState':'NotRefreshing',
+    ...                                   'romVersion':'P89 08/28/2015', 'scopeUris':[], 'serialNumber':'cn74200212', 'serverGroupUri':None, 'serverHardwareTypeUri':'SHT:DL360 Gen9 1',
+    ...                                   'serverProfileUri':None, 'serverSettings':None,
+    ...                                   'shortModel':'DL360 Gen9', 'signature':None, 'status':'OK', 'supportDataCollectionState':None, 'supportDataCollectionType':None, 'supportState':'NotSupported', 'uidState':'Unsupported', 'uri':'SH:wpstdl31-ilo', 'uuid':'30303131-3030-6E63-3734-323030323132', 'virtualSerialNumber':None, 'virtualUuid':None}
+    ...                                  ]
+    [Arguments]    ${serverhardware}    ${notFoundStatusCodeList}=404    ${status_code}=202
+    ${toAdd} =  Create List
+    ${responses}=  Create List
+    :FOR    ${sh}    IN    @{serverhardware}
+    #       -Initial Scope process.
+    \       ${initialScopeUris}=  Pop From Dictionary  ${sh}  initialScopeUris  default=${None}
+    \       ${scopeUris}=       Run Keyword If    ${initialScopeUris} != ${None}
+    \       ...                 Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    \       Run Keyword If      ${initialScopeUris} != ${None}
+    \       ...                 Set To Dictionary    ${sh}  initialScopeUris  ${scopeUris}
+    \       ${resp} =   Get Resource    SH:${sh['name']}
+    \       ${response_status_code}=  Convert To String  ${resp['status_code']}
+    \       ${status}=      Run Keyword And Return Status   List Should Contain Value  ${notFoundStatusCodeList}  ${response_status_code}
+    \       Run Keyword If    ${status}==False    Log       ServerHardware ${sh['name']} is already added   WARN
+    \       Run Keyword If    ${status}==True    Append To List   ${toAdd}  ${sh}
+    ${count}=   Get Length    ${toAdd}
+    Return From Keyword If    '${count}'=='0'
+    :FOR  ${add}   IN    @{toAdd}
+    \   ${name}=   Pop From Dictionary    ${add}    name
+    \   ${resp} =  Fusion Api Add Server Hardware   body=${add}
+    \   Run Keyword If  '${resp['status_code']}'!= '${status_code}'
+        ...  Run Keyword And Continue On Failure   Fail   Log  Adding Server Hardware ${add['name']} Failed
+    \   continue for loop if  '${resp['status_code']}'!= '${status_code}'
+    \   Append To List  ${responses}  ${resp}
+    [Return]   ${responses}
+
+Add Server hardware from variable async
+    [Documentation]       Adds server hardware asynchronously ( DL server) to an appliance from a variable which contains a list of dicts with the
+    ...                   entire payload and verifies.
+    ...          rackservers = [{"name": "wpstdl1-ilo","hostname": "16.125.77.97", "username": "Administrator",
+    ...                          "password": "hpvse1-ilo", "force": True, "licensingIntent": "OneViewNoiLO",
+    ...                          "configurationState": "Managed"}，'initialScopeUris': ['Scope:Test', 'Scope:Production']]
+    ...          expected_rackservers = [{'type':'server-hardware-7', 'name':'wpstdl31-ilo', 'state':'NoProfileApplied', 'stateReason':'NotApplicable', 'assetTag':'', 'category':'server-hardware', 'formFactor':'1U',
+    ...                                   'intelligentProvisioningVersion':'2.10.83', 'licensingIntent':'OneViewNoiLO', 'locationUri':None, 'memoryMb':8192, 'migrationState':'Unknown', 'model':'ProLiant DL360 Gen9',
+    ...                                   'mpFirmwareVersion':'2.50 pass 17 Jan 21 2016',"mpHostInfo":{"mpHostName": "wpstdl31-ilo","mpIpAddresses":[{"address": "16.114.209.73","type": "Static"},{"address": "fe80:0:0:0:fe15:b4ff:fe25:4bbe","type": "LinkLocal"}]},
+    ...                                   'mpModel':'iLO4', 'mpState':'OK', 'partNumber':'110000-002',
+    ...                                   'portMap':None, 'position':0, 'powerLock':False, 'powerState':'Off', 'processorCoreCount':20, 'processorCount':1, 'processorSpeedMhz':2000, 'processorType':'Genuine Intel(R) CPU 0000 @ 2.00GHz', 'refreshState':'NotRefreshing',
+    ...                                   'romVersion':'P89 08/28/2015', 'scopeUris':[], 'serialNumber':'cn74200212', 'serverGroupUri':None, 'serverHardwareTypeUri':'SHT:DL360 Gen9 1',
+    ...                                   'serverProfileUri':None, 'serverSettings':None,
+    ...                                   'shortModel':'DL360 Gen9', 'signature':None, 'status':'OK', 'supportDataCollectionState':None, 'supportDataCollectionType':None, 'supportState':'NotSupported', 'uidState':'Unsupported', 'uri':'SH:wpstdl31-ilo', 'uuid':'30303131-3030-6E63-3734-323030323132', 'virtualSerialNumber':None, 'virtualUuid':None}
+    ...                                  ]
+    [Arguments]    ${serverhardware}    ${VERIFY}=${FALSE}  ${expected_rackservers}=@empty    ${notFoundStatusCodeList}=404    ${status_code}=202
+    ${toAdd} =  Create List
+    ${responses}=  Create List
+    :FOR    ${sh}    IN    @{serverhardware}
+    #       -Initial Scope process.
+    \       ${initialScopeUris}=  Pop From Dictionary  ${sh}  initialScopeUris  default=${None}
+    \       ${scopeUris}=       Run Keyword If    ${initialScopeUris} != ${None}
+    \       ...                 Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    \       Run Keyword If      ${initialScopeUris} != ${None}
+    \       ...                 Set To Dictionary    ${sh}  initialScopeUris  ${scopeUris}
+    \       ${resp} =   Get Resource    SH:${sh['name']}
+    \       ${response_status_code}=  Convert To String  ${resp['status_code']}
+    \       ${status}=      Run Keyword And Return Status   List Should Contain Value  ${notFoundStatusCodeList}  ${response_status_code}
+    \       Run Keyword If    ${status}==False    Log       ServerHardware ${sh['name']} is already added   WARN
+    \       Run Keyword If    ${status}==True    Append To List   ${toAdd}  ${sh}
+    ${count}=   Get Length    ${toAdd}
+    Return From Keyword If    '${count}'=='0'
+    :FOR  ${add}   IN    @{toAdd}
+    \   ${name}=   Pop From Dictionary    ${add}    name
+    \   ${resp} =  Fusion Api Add Server Hardware   body=${add}
+    \   Run Keyword If  '${resp['status_code']}'!= '${status_code}'
+        ...  Run Keyword And Continue On Failure   Fail   Log  Adding Server Hardware ${add['name']} Failed
+    \   continue for loop if  '${resp['status_code']}'!= '${status_code}'
+    \   Append To List  ${responses}  ${resp}
+    Run Keyword If  ${responses} is not ${null}     Wait For Task2   ${responses}   timeout=500    interval=5
+    [Return]   ${responses}
+
+Add Multiple Server Hardware
+    [Documentation]    Uses ranges or comma or newline seperated hosts or IP to add multiple rack servers in one POST call
+    ...    rack_server_ranges = {
+    ...                    "mpHostsAndRanges": ["16.114.213.170-16.114.213.173"],
+    ...                    "username": "Administrator",
+    ...                    "password": "hpvse1-ilo",
+    ...                    "licensingIntent": "OneViewNoiLO",
+    ...                    "configurationState": "Managed",
+    ...                    "initialScopeUris": []
+    ...                    }
+    ...
+    ...    rack_server_list = {
+    ...                "mpHostsAndRanges": ["DL1.vse.rdlabs.hpecorp.net", "DL2.vse.rdlabs.hpecorp.net", "DL3.vse.rdlabs.hpecorp.net", "DL4.vse.rdlabs.hpecorp.net"],
+    ...                "username": "Administrator",
+    ...                "password": "hpvse1-ilo",
+    ...                "licensingIntent": "OneViewNoiLO",
+    ...                "configurationState": "Managed",
+    ...                "initialScopeUris": []
+    ...                 }
+    [Arguments]    ${add}
+    ${resp} =  Fusion Api Add Server Hardware   body=${add}    param=/discovery
+    [Return]    ${resp}
+
+
+Get Server Hardware Name from ILO IP
+    [Documentation]  Get Server Hardware Name from ILO IP
+    [Arguments]        ${Server_hardware_ILO}
+    Log   Search server name by iLO IP ${Server_Hardware_ILO}    console=True
+    ${resp} =     Fusion Api Get Server Hardware
+    Return From Keyword If  ${resp['count']}==0  /rest/server_hardware_ilo_${Server_Hardware_ILO}_not_found
+    :FOR    ${sh}    IN    @{resp['members']}
+    \       ${result} =    Validate Hardware IP    ${sh['mpHostInfo']['mpIpAddresses']}    ${Server_Hardware_ILO}
+    \        Run Keyword If     ${result} == ${True}   Log    Expected name for ILO ${Server_Hardware_ILO} is - ${sh['name']}
+    \        Run Keyword If     ${result} == ${True}   Return From Keyword  ${sh['name']}
+    [Return]    /rest/server_hardware_ilo_${Server_Hardware_ILO}_not_found
+
+Get Server Hardware URI
+    [Documentation]  Get Server Hardware URI from Server Hardware name
+    [Arguments]        ${enc_server}
+    ${resp} =     Fusion Api Get Server Hardware    param=?filter="'name'=='${enc_server}'"
+    Return From Keyword If  ${resp['count']}==0  /rest/server_hardware_uri_${enc_server}_not_found
+    ${uri} =     Get From Dictionary        ${resp['members'][0]}    uri
+    [Return]    ${uri}
+
+Get Server Hardware URI By ILO IP
+    [Documentation]  Get Server Hardware URI By ILO IP
+    [Arguments]        ${Server_Hardware_ILO}
+    Log   Search server uri by iLO IP ${Server_Hardware_ILO}    console=True
+    ${resp} =     Fusion Api Get Server Hardware
+    Return From Keyword If  ${resp['count']}==0  /rest/server_hardware_ilo_${Server_Hardware_ILO}_not_found
+    :FOR    ${sh}    IN    @{resp['members']}
+    \       ${result} =    Validate Hardware IP    ${sh['mpHostInfo']['mpIpAddresses']}    ${Server_Hardware_ILO}
+    \        Run Keyword If     ${result} == ${True}   Log    Expected uri for ILO ${Server_Hardware_ILO} is - ${sh['uri']}
+    \        Run Keyword If     ${result} == ${True}   Return From Keyword  ${sh['uri']}
+    [Return]    /rest/server_hardware_ilo_${Server_Hardware_ILO}_not_found
+
+Validate Hardware IP
+    [Documentation]  Validate Hardware IP
+    [Arguments]        ${IP_Addresses}    ${Server_Hardware_ILO}
+    :FOR    ${ip}    IN    @{IP_Addresses}
+    \        ${shILOIp} =    Set Variable    ${ip['address']}
+    \        ${strILOIp}=    Convert To String  ${shILOIp}
+    \        Log  ${strILOIp}
+    \        Run Keyword If     '${Server_Hardware_ILO}' == '${strILOIp}'   Return From Keyword  ${True}
+    [Return]    ${False}
+
+Get All Server Hardwares iLO IP Except Gen5/Gen6
+    [Documentation]  Get all servers from appliance
+    ${servers}=      Fusion Api Get Server Hardware
+    ${ilo_list}=     Create List
+    :FOR    ${server}    IN    @{servers['members']}
+    \       ${server_name}=    Set Variable    ${server["name"]}
+    \       ${server_type}=    Set Variable    ${server["model"]}
+    \       ${type}=    Split String From Right  ${server_type}
+    \       Continue For Loop If    "${type[-1]}" in ["Gen5", "Gen6", "G5", "G6"]
+    \       ${ilo}=    Get Server Hardware iLO IP    ${server_name}
+    \       Append To List    ${ilo_list}  ${ilo}
+    [Return]  ${ilo_list}
+
+Get Server Hardware Firmware
+    [Documentation]  Get Server Hardware Firmware Version
+    [Arguments]        ${enc_server}
+    ${resp} =     Fusion Api Get Server Hardware    param=?filter="'name'=='${enc_server}'"
+    Return From Keyword If  ${resp['count']}==0  /rest/server_hardware_uri_${enc_server}_not_found
+    ${uri} =     Get From Dictionary        ${resp['members'][0]}    uri
+    ${firmware} =   Fusion Api Get Server Hardware Firmware     ${uri}
+    ${firmware} =   Get From Dictionary    ${firmware}  components
+    [Return]    ${firmware}
+
+Get Server Hardware Firmware Compliance
+    [Documentation]  Get Server Hardware Firmware Compliance
+    [Arguments]        ${serverName}    ${firmwareBaselineId}
+    ${resp} =     Fusion Api Get Server Hardware    param=?filter="'name'=='${serverName}'"
+    Return From Keyword If  ${resp['count']}==0  server_hardware_${serverName}_not_found
+    ${uuid} =     Get From Dictionary        ${resp['members'][0]}    uuid
+    ${body} =   Create Dictionary   firmwareBaselineId=${firmwareBaselineId}
+    ...                             serverUUID=${uuid}
+    ${firmwareComponent} =   Fusion Api Get Server Hardware Firmware Compliance   ${body}
+    [Return]    ${firmwareComponent}
+
+Update Server ILO Firmware
+    [Documentation]  Update Server ILO Firmware
+    [Arguments]        ${server_hardware}
+    :FOR    ${SERVER}   IN  @{server_hardware}
+    \   Log    Updating iLO ${SERVER['iloIP']} with firmware ${SERVER['firmwareURI']}    console=True
+    \   ILO Connect     ${SERVER['iloIP']}    ${SERVER['iloUserName']}   ${SERVER['iloPassword']}
+    \   ${currentFW} =  ILO Get FW Version
+    \   Log    ${currentFW}    console=True
+    \   ${resp} =     ILO Update Firmware     ${SERVER['firmwareURI']}
+    \   Log    ${resp}    console=True
+    \   Should Be True    ${resp}    Update iLO firmware failed
+    \   Sleep   3 minutes
+    [Return]
+
+Get Server Hardware iLO IP
+    [Documentation]    Get the server iLO IP address by its name.
+    ...                    Get Server Hardware iLO IP  SH:${ENC1SHBAY1}
+    ...                    Get Server Hardware iLO IP  ${ENC1SHBAY1}
+    [Arguments]        ${name}
+    ${ilo} =  set variable  ${EMPTY}
+    ${name} =  replace string using regexp  ${name}  SH:  ${EMPTY}
+    ${server} =  Get Resource  SH:${name}
+    @{mp_ips} =  set variable  ${server['mpHostInfo']['mpIpAddresses']}
+    :FOR    ${ip}    IN    @{mp_ips}
+    \   continue for loop if  '${ip['type']}'=='LinkLocal'
+    \   ${ilo} =  set variable  ${ip['address']}
+    Should not be equal  ${ilo}  ${EMPTY}  msg=iLO IP is empty
+    Log        \nThe iLO IP for server ${name} is ${ilo}
+    [Return]  ${ilo}
+
+Get Server Hardware iLO LinkLocal IP
+    [Documentation]    Get the server iLO LinkLocal IP address by its name.
+    ...                    Get Server Hardware iLO LinkLocal IP  SH:${ENC1SHBAY1}
+    ...                    Get Server Hardware iLO LinkLocal IP  ${ENC1SHBAY1}
+    [Arguments]        ${name}
+    ${name} =  replace string using regexp  ${name}  SH:  ${EMPTY}
+    ${server} =  Get Resource  SH:${name}
+    @{mp_ips} =  set variable  ${server['mpHostInfo']['mpIpAddresses']}
+    :FOR    ${ip}    IN    @{mp_ips}
+    \   continue for loop if  '${ip['type']}'!='LinkLocal'
+    \    ${ll_address} =  set variable  ${ip['address']}
+    Log        \nThe iLO LinkLocal IP for server ${name} is ${ll_address}
+    [Return]  ${ll_address}
+
+Get Server Hardware State
+    [Documentation]    Get the Current Hardware State
+    ...                    Get Server Hardware State    SH:${ENC1SHBAY1}
+    [Arguments]        ${name}
+    ${name} =  replace string using regexp  ${name}  SH:  ${EMPTY}
+    ${server} =  Get Resource  SH:${name}
+    Log        \nCurrent Hardware State of Server ${server['name']} is ${server['state']}
+    [return]    ${server['state']}
+
+Get Server Power
+    [Documentation]    Get the Server Power Status
+    ...                    Get Server Power    SH:${ENC1SHBAY1}
+    [Arguments]        ${name}
+    ${name} =  replace string using regexp  ${name}  SH:  ${EMPTY}
+    ${server} =  Get Resource  SH:${name}
+    Log        \nCurrent Power State of Server is ${server['powerState']}
+    [return]    ${server['powerState']}
+
+Power off Server
+    [Documentation]  Power off the server by its name.
+    ...              Power off Server  SH:${ENC1SHBAY1}
+    ...              Power off Server  ${ENC1SHBAY1}  powerControl=MomentaryPress
+    [Arguments]     ${name}  ${powerControl}=PressAndHold
+    ${body} =   Create Dictionary   powerState=Off
+    ...                             powerControl=${powerControl}
+    ${name} =  replace string using regexp  ${name}  SH:  ${EMPTY}
+    Log   \nPowering off ${name}    console=True
+    ${server} =  Get Resource  SH:${name}
+    ${resp} =   Fusion Api Edit Server Hardware Power State   body=${body}   uri=${server['uri']}
+    ${task} =   Wait For Task   ${resp}   240s   5s
+    Server Power State Should Be    ${name}    Off
+
+Server Power State Should Be
+    [Documentation]  Verifying Server Power State
+    [Arguments]   ${name}  ${desiredState}
+    ${status}=  Get Server Power   ${name}
+    ${state}=   Run Keyword And Return Status   Should Match Regexp  ${status}   ((?i)Off|On|PoweringOff|PoweringOn|Resetting|Unknown)
+    Run Keyword If  '${state}'!= 'True'  Fail  msg=State of Server is not as expected
+    Run Keyword If  '${status}'== '${desiredState}'  Log  Server Power of ${name} is in desired State
+    Run Keyword If  '${status}'!= '${desiredState}'  Fail  msg=Server Power of ${name} is not in desired State
+
+Reset Server
+    [Documentation]    Reset the server by its name.
+    ...                    Reset Server  SH:${ENC1SHBAY1}
+    ...                    Reset Server  ${ENC1SHBAY1}  powerControl=Reset
+    ...                 Reset Server  ${ENC1SHBAY1}  powerControl=ColdBoot
+    [Arguments]     ${name}  ${powerControl}=Reset
+    ${body} =     Create Dictionary    powerState=On
+    ...                                powerControl=${powerControl}
+    ${name} =  replace string using regexp  ${name}  SH:  ${EMPTY}
+    Log     \nResetting ${name}    console=True
+    ${server} =  Get Resource  SH:${name}
+    ${resp} =     Fusion Api Edit Server Hardware Power State        body=${body}    uri=${server['uri']}
+    ${task} =    Wait For Task     ${resp}     360s    5s
+
+Power off ALL servers
+    [Documentation]    Querys the appliance for all Servers and then Powers them off
+    [Arguments]     ${control}=MomentaryPress
+    Log      Powering off SERVERS
+    ${body} =     Create Dictionary    powerState=Off
+    ...                                powerControl=${control}
+    Log      Powering Off All SERVERS    console=True
+    ${servers} =     Fusion Api Get Server Hardware
+    ${resp_list} =       Create List
+    :FOR    ${server}    IN    @{servers['members']}
+    \        Continue For Loop If    '${server['powerState']}'!='On'
+    \       Log      Powering Off ${server['name']}, uri ${server['uri']}    console=True
+    \        ${resp} =     Fusion Api Edit Server Hardware Power State        body=${body}    uri=${server['uri']}
+    \       Append To List    ${resp_list}    ${resp}
+
+    ${count} =   Get Length    ${resp_list}
+    Run Keyword If    '${count}'=='0'    Log    All servers were off, no need to Wait For Task
+    Return From Keyword If    '${count}'=='0'
+
+    :FOR    ${resp}    IN    @{resp_list}
+    \        ${task} =    Wait For Task     ${resp}     360s    5s
+
+
+#  Workaround for QXCR1001503340:  FVT:Server Powered Off, PowerState verified OFF, profile failed "power not off"
+#  As per Travis Offtermatt:  The power off script should probably wait ~15 seconds after the server’s off and re-verify the server’s still off.
+#    Log    \nWill Sleep then Powering off again due to QXCR1001503340    console=true
+#    Sleep    40s    QXCR1001503340: FVT:Server PoweredOff, PowerState verified OFF, profile failed "power not off"
+#    ${servers} =     Fusion Api Get Server Hardware
+#    :FOR    ${server}    IN    @{servers['members']}
+#    \        Continue For Loop If    '${server['powerState']}'!='On'
+#    \       Log    Powering Off ${server['name']}, uri ${server['uri']}
+#    \        ${resp} =     Fusion Api Edit Server Hardware Power State        body=${body}    uri=${server['uri']}
+#    \        ${task} =    Wait For Task     ${resp}     360s    5s
+#    \       ${sh} =   fusion api get server hardware     uri=${server['uri']}
+#    \       Should Match    ${sh['powerState']}    Off
+
+Power Off All Servers UID
+    [Documentation]  Power Off all Servers UID
+    ${servers}=      Fusion Api Get Server Hardware
+    ${name_list}=     Create List
+    :FOR    ${server}    IN    @{servers['members']}
+    \       ${server_name}=    Set Variable    ${server["name"]}
+    \       ${resp}=     Patch Server Hardware  ${server_name}  op=replace  path=/uidState  value=Off
+    \       Wait For Task2  ${resp}  timeout=60  interval=5
+
+Wait For ALL Servers Complete Refresh
+    [Documentation]    Querys the appliance for all Servers and wait for them refresh complete
+    [Arguments]     ${timeout}=360s  ${interval}=5s
+    Log      Wait For ALL Servers Complete Refreshing
+    ${servers} =     Fusion Api Get Server Hardware
+    :FOR    ${server}    IN    @{servers['members']}
+    \        Continue For Loop If    '${server['refreshState']}'!='Refreshing'
+    \        Wait Until Keyword Succeeds    ${timeout}    ${interval}    Server Refresh Complete    ${server}
+
+Server Refresh Complete
+    [Documentation]  Get server hardware state and check that it does not match "Refreshing"
+    [Arguments]    ${server}
+    Set Log Level    TRACE
+    ${server} =   Fusion Api Get Server Hardware     ${server['uri']}
+    ${refresh_state} =  Get From Dictionary  ${server}  refreshState
+    Log    \t Server: [${server['name']}] is: ${refresh_state}
+    Should Not Match    ${refresh_state}    Refreshing
+
+Power off Servers in Profiles
+    [Documentation]  Power off the servers defined in the profiles
+    ...              Data File Example:
+    ...              profile = {"type":"ServerProfileV6","serverHardwareUri":'SH:'+ ${ENC1SHBAY1}, ...}
+    ...              profile = {"type":"ServerProfileV6","serverHardwareUri": ${ENC1SHBAY1}, ...}
+    [Arguments]   ${profiles}  ${powerControl}=PressAndHold
+    Log   Powering off Servers in Profiles    console=True
+    :FOR   ${profile}  IN  @{profiles}
+    \   ${sh} =  Get From Dictionary  ${profile}  serverHardwareUri
+    \   ${status}=  Get Server Power   ${sh}
+    \   Run Keyword If   '${status}' == 'Off'  Log    Server Hardware ${sh} is powered off    console=true
+    \   Run Keyword if   '${status}' == 'On'   Power off Server  ${sh}  powerControl=${powerControl}
+
+Power on server
+    [Documentation]    Power on the server by its name.
+    ...                    Power on Server  SH:${ENC1SHBAY1}
+    ...                    Power on Server  ${ENC1SHBAY1}
+    [Arguments]     ${name}
+    ${body} =     Create Dictionary    powerState=On
+    ...                                powerControl=MomentaryPress
+    ${name} =  replace string using regexp  ${name}  SH:  ${EMPTY}
+    Log      \nPowering on ${name}    console=True
+    ${server} =  Get Resource  SH:${name}
+    ${resp} =     Fusion Api Edit Server Hardware Power State        body=${body}    uri=${server['uri']}
+    ${task} =    Wait For Task     ${resp}     240s    5s
+    Server Power State Should Be    ${name}    On
+
+Power On Server By Uri
+    [Documentation]    Power on the server by its uri.
+    ...                    Power on Server  ${ENC1SHBAY1}
+    [Arguments]     ${server}
+    ${body} =     Create Dictionary    powerState=On
+    ...                                powerControl=MomentaryPress
+    Log      \nPowering on ${server}    console=True
+    ${resp} =     Fusion Api Edit Server Hardware Power State        body=${body}    uri=${server}
+    ${task} =    Wait For Task     ${resp}     240s    5s
+
+Wait for Server to reach POST State
+    [Documentation]    Wait for Server to reach the desired POST state
+    ...                   Wait for Server to reach POST State  ${ENC1SHBAY1}
+    ...                Wait for Server to reach POST State  SH:${ENC1SHBAY1}  post_state=FINISHED_POST
+    ...                Wait for Server to reach POST state  ${ENC1SHBAY1}  post_state=IN_POST_DISCOVERY_COMPLETE|FINISHED_POST  timeout=5m  interval=20s
+    ...             Data file needs to define:
+    ...                 ilo_credentials =  {'userName': 'Administrator', 'password': 'hpvse123'}
+    [Arguments]     ${name}  ${post_state}=FINISHED_POST  ${timeout}=5m  ${interval}=20s
+    Log  \nWait for Server ${name} to reach POST State ${post_state}
+    ${ilo} =  Get Server Hardware iLO IP  ${name}
+    Wait Until Keyword Succeeds  ${timeout}  ${interval}  Run cpqlocfg and Verify Server POST State  ${ilo}  ${post_state}
+    log  \nServer ${name} has reached the POST state ${post_state}    console=True
+
+Wait for Blade to reach POST State Using ILO
+    [Documentation]    Wait for Server to reach the desired POST state
+    ...                Wait for Blade to reach POST State  ${ilo}
+    ...                Wait for Blade to reach POST State  ${ilo}  post_state=FINISHED_POST
+    ...                Wait for Blade to reach POST State  ${ilo}  post_state=IN_POST_DISCOVERY_COMPLETE|FINISHED_POST  timeout=5m  interval=20s
+    ...             Data file needs to define:
+    ...                 ilo_credentials =  {'userName': 'Administrator', 'password': 'hpvse123'}
+    [Arguments]     ${ilo}  ${post_state}=IN_POST_DISCOVERY_COMPLETE|FINISHED_POST  ${timeout}=6m  ${interval}=10s
+    Log  \nWait for Server to reach POST State ${post_state}    console=True
+    Wait Until Keyword Succeeds  ${timeout}  ${interval}  Run cpqlocfg and Verify Server POST State  ${ilo}  ${post_state}  VERBOSE=True
+    Log  \nServer has reached the POST state ${post_state}    console=True
+
+Power on ALL servers
+    [Documentation]    Querys the appliance for all Servers and then Powers them on
+    Log      Powering On All SERVERS    console=True
+    ${body} =     Create Dictionary    powerState=On
+    ...                                powerControl=MomentaryPress
+    ${servers} =     Fusion Api Get Server Hardware
+    :FOR    ${server}    IN    @{servers['members']}
+    \        Continue For Loop If    '${server['powerState']}'!='Off'
+    \        ${resp} =     Fusion Api Edit Server Hardware Power State        body=${body}    uri=${server['uri']}
+    \        ${task} =    Wait For Task     ${resp}     240s    5s
+
+Power On ALL Servers Async
+    [Documentation]    Querys the appliance for all Servers and then Powers them on Asynchronously
+    ${body} =     Create Dictionary    powerState=On
+    ...                                powerControl=MomentaryPress
+    Log      Powering On All SERVERS    console=True
+
+    ${servers} =     Fusion Api Get Server Hardware
+    ${resp_list} =       Create List
+    :FOR    ${server}    IN    @{servers['members']}
+    \        Continue For Loop If    '${server['powerState']}'!='Off'
+    \       Log      Powering On ${server['name']}, uri ${server['uri']}    console=True
+    \        ${resp} =     Fusion Api Edit Server Hardware Power State        body=${body}    uri=${server['uri']}
+    \       Append To List    ${resp_list}    ${resp}
+    ${count} =   Get Length    ${resp_list}
+    Run Keyword If    '${count}'=='0'    Log    All servers were On, no need to Wait For Task
+    Return From Keyword If    '${count}'=='0'
+
+    :FOR    ${resp}    IN    @{resp_list}
+    \        ${task} =    Wait For Task     ${resp}     360s    5s
+
+All Servers Should Be Powered On
+    [Documentation]     Verify all the servers are powered on
+    Log      Verify All Servers Are Powered On    console=True
+    ${error_code} =    Set Variable  0
+    ${servers} =     Fusion Api Get Server Hardware
+    :FOR    ${server}    IN    @{servers['members']}
+    \       Continue For Loop If    '${server['powerState']}'=='On'
+    \       ${error_code} =    Set Variable  1
+    \       Log  Failed! Server:${server['name']} is Off!    console=True
+    Run Keyword If  '${error_code}'=='1'  Fail  Verify All Servers Are Powered On Failed!
+
+Power on Servers in Profiles
+    [Documentation]    Power on the servers defined in the profiles
+    ...             Data File Example:
+    ...                   profile = {"type":"ServerProfileV6","serverHardwareUri":'SH:'+ ${ENC1SHBAY1}, ...}
+    ...                   profile = {"type":"ServerProfileV6","serverHardwareUri": ${ENC1SHBAY1}, ...}
+    [Arguments]        ${profiles}
+    Log      Powering on Servers in Profiles    console=True
+    :FOR    ${profile}    IN    @{profiles}
+    \   ${sh} =  Get From Dictionary  ${profile}  serverHardwareUri
+    \   Power on Server  ${sh}
+
+Wait for Servers in Profiles to reach POST State
+    [Documentation]    Wait for Servers defined in the profiles to reach desired POST State
+    ...                    Wait for Servers to reach POST State  ${profiles}
+    ...                    Wait for Servers to reach POST State  ${profiles}  post_state=IN_POST_DISCOVERY_COMPLETE
+    ...                 Wait for Servers to reach POST State  ${profiles}  post_state=IN_POST_DISCOVERY_COMPLETE|FINISHED_POST  timeout=5m  interval=10s
+    ...             Data File Example:
+    ...                 ilo_credentials =  {'userName': 'Administrator', 'password': 'hpvse123'}
+    ...                    profile = {"type":"ServerProfileV6","serverHardwareUri":'SH:'+ ${ENC1SHBAY1}, ...}
+    ...                    profile = {"type":"ServerProfileV6","serverHardwareUri":'${ENC1SHBAY1}, ...}
+    [Arguments]        ${profiles}  ${post_state}=FINISHED_POST  ${timeout}=5m  ${interval}=10s
+    Log  \nWait for Servers in Profiles to reach POST State ${post_state}    console=True
+    :FOR    ${profile}    IN    @{profiles}
+    \   ${sh} =  Get From Dictionary  ${profile}  serverHardwareUri
+    \   Wait for Server to reach POST State  ${sh}  post_state=${post_state}  timeout=${timeout}  interval=${interval}
+
+powerControl=MomentaryPress
+    [Documentation]  Power off server with Momentary Press
+    ${servers} =     Fusion Api Get Server Hardware
+    :FOR    ${server}    IN    @{servers['members']}
+    \        Continue For Loop If    '${server['powerState']}'!='On'
+    \        ${resp} =     Fusion Api Edit Server Hardware Power State        body=${body}    uri=${server['uri']}
+    \        ${task} =    Wait For Task     ${resp}     240s    5s
+
+Remove All DL Server Hardware Async
+    [Documentation]    Querys the appliance for all server Hardware and then removes them asyncronously.  As it iterates
+    ...  through the list of server hardware, it creates a dictionary for each DL server containing the server name, task uri,
+    ...  and resource uri.  It then adds these to a list, deleteResources, and uses this list to perform the
+    ...  asyncronous task checking and optional validation that the resource uri returns a 404
+    [Arguments]  ${VERIFY}=${FALSE}  ${RETURN_CODE}=404  ${ServerTypes}=DL
+    ${deleteServerHardware} =  Create List
+    ${response} =  Create List
+    Log      Removing Server Hardware DL     console=True
+    ${resp} =     Fusion Api Get Server Hardware
+    ${count}=    Convert To String  ${resp['count']}
+    Run Keyword If  '${count}'=='0'   Log  Server Hardware doesn't exists   WARN
+    :FOR    ${sh}    IN    @{resp['members']}
+    \        ${shortModel} =    Set Variable    ${sh['shortModel']}
+    \        ${isDL} =   Run Keyword And Return Status    Should Match Regexp    ${shortModel}    ${ServerTypes}
+    \        Continue For Loop If  '${isDL}' != 'True'
+    \        ${resp} =     Fusion Api Delete Server Hardware        uri=${sh['uri']}
+    \       Log  ${resp}  TRACE
+    \       Log  Removing DL Server- ${sh['name']}
+    \       ${deleteInfo} =  Create Dictionary
+    \        Set To Dictionary  ${deleteInfo}  name=${sh['name']}
+    \        Set To Dictionary  ${deleteInfo}  uri=${sh['uri']}
+    \        Set To Dictionary  ${deleteInfo}  resp=${resp}
+    \       Append To List  ${deleteServerHardware}  ${deleteInfo}
+    \       Append To List  ${response}  ${resp}
+    Wait For Task2      ${response}
+    :FOR    ${sh}  IN  @{deleteServerHardware}
+    \       Continue For Loop If   ${VERIFY}==${FALSE}
+    \       ${resp} =  Fusion Api Get Resource  ${sh['uri']}
+    \       Run Keyword If  ${resp['status_code']}!=${RETURN_CODE}  Run Keyword And Continue On Failure  FAIL  msg=Server Hardware ${sh['name']} is not Deleted
+
+Refresh Server Hardware
+    [Documentation]    Refresh server hardware.
+    ...                    Refresh Server Hardware  SH:${ENC1SHBAY1}
+    ...                    Refresh Server Hardware  ${ENC1SHBAY1}
+    [Arguments]     ${name}
+    ${payload} =     Create Dictionary    refreshState=RefreshPending
+    ${name} =  replace string using regexp  ${name}  SH:  ${EMPTY}
+    Log      \nRefreshing server ${name}    console=True
+    ${server} =  Get Resource  SH:${name}
+    ${resp} =     Fusion Api Refresh Server Hardware  body=${payload}  uri=${server['uri']}
+    [return]  ${resp}
+
+Refresh Servers in Profiles
+    [Documentation]    Refresh servers defined in profiles.
+    [Arguments]     ${profiles}
+    ${resplist} =  create list
+    Log      Refreshing Servers in Profiles    console=True
+    :FOR    ${profile}    IN    @{profiles}
+    \   ${sh} =  Get From Dictionary  ${profile}  serverHardwareUri
+    \   ${resp} =  Refresh Server Hardware  ${sh}
+    \   append to list  ${resplist}  ${resp}
+    [return]  ${resplist}
+
+Patch Server Hardware
+    [Documentation]  Patch server sardware.
+    ...              Example:
+    ...                Patch Server Hardware  ${ENC1SHBAY3}  op=replace  path=/uidState  value=Off
+    ...                Patch Server Hardware  ${ENC1SHBAY3}  op=replace  path=/mpState  value=Reset
+    ...              Data Required:
+    ...                Server Hardware name
+    [Arguments]  ${name}  ${op}=replace  ${path}=/uidState  ${value}=/off
+    ${name} =  replace string using regexp  ${name}  SH:  ${EMPTY}
+    Log    Patching Server Hardware ${name} with op=${op} path=${path} and value=${value}    console=True
+    ${uri} =  Get Server Hardware URI  ${name}
+    ${dict} =  Create Dictionary  op=${op}  path=${path}  value=${value}
+    ${payload} =  Create List  ${dict}
+    ${resp} =  fusion api patch server hardware  ${payload}  ${uri}
+    [return]  ${resp}
+
+Reset Server Hardware iLO
+    [Documentation]  On Tbird, reset server hardware iLO via patch.
+    ...              Example:
+    ...                Reset Server Hardware  iLO ${ENC1SHBAY3}
+    ...              Data Required:
+    ...                Server Hardware name
+    [Arguments]  ${name}
+    ${name} =  replace string using regexp  ${name}  SH:  ${EMPTY}
+    Log     Reset Server Hardware iLO for ${name}    console=True
+    ${resp} =  Patch Server Hardware  ${name}  op=replace  path=/mpState  value=Reset
+    [return]  ${resp}
+
+Reset Server Hardware iLO via cpqlocfg and Wait for Refresh to Finish
+    [Documentation]  On C7000, reset server hardware iLO via cpqlocfg, refresh the server and wait for it to finish
+    ...              Example:
+    ...                Reset Server Hardware iLO via cpqlocfg and Refresh  ${ENC1SHBAY3}  timeout=300  interval=10
+    ...              Data Required:
+    ...                Server Hardware name
+    [Arguments]  ${name}  ${timeout}=300  ${interval}=10
+     ${name} =  replace string using regexp  ${name}  SH:  ${EMPTY}
+     ${ilo} =  Get Server Hardware iLO IP  ${name}
+     Run cpqlocfg and Reset iLO  ${ilo}
+     ${resp} =  Refresh Server Hardware  ${name}
+     Wait for task2  ${resp}  ${timeout}  ${interval}
+
+Reset Server Hardware iLO and Wait for System Refresh to Finish
+    [Documentation]  On Tbird, reset server hardware iLO and wait for the system-initiated refresh task to finish
+    ...              Example:
+    ...                Reset Server Hardware iLO and Wait for System Refresh to Finish  ${ENC1SHBAY3}  timeout=300  interval=10
+    ...              Data Required:
+    ...                Server Hardware name
+    [Arguments]  ${name}  ${timeout}=300  ${interval}=10
+    ${name} =  replace string using regexp  ${name}  SH:  ${EMPTY}
+    ${resp} =  Reset Server Hardware iLO  ${name}
+    Wait for task2  ${resp}  ${timeout}  ${interval}
+    Wait Until Keyword Succeeds  ${timeout}  ${interval}  Get task by param  param=?filter="'name'='Refresh' AND associatedResource.resourceName='${name}' AND taskState='Running'"&sort=created:descending&count=1
+    ${task} =  Get task by param  param=?filter="'name'='Refresh' AND associatedResource.resourceName='${name}' AND taskState='Running'"&sort=created:descending&count=1
+    log   The system-initiated refresh task for server ${name} is ${task}    console=True
+    Wait for task2  ${task}  ${timeout}  ${interval}
+
+Verify Servers PowerState in Profiles
+    [Documentation]    Verify servers powerState defined in profiles.
+    [Arguments]     ${profiles}  ${powerState}
+    Log      Verifying Servers PowerState in Profiles    console=True
+    :FOR    ${profile}    IN    @{profiles}
+    \   ${status}  ${sh} =  Run Keyword and Ignore Error  Get From Dictionary  ${profile}  serverHardwareUri
+    \   continue for loop if  '${status}'=='FAIL'
+    \   Check Resource Attribute  ${sh}  powerState  ${powerState}
+
+Check Server Hardware Server Name
+    [Documentation]    Check server name on iLO
+    ...                   Check Server Name  ${ENC1SHBAY1}  newhost
+    ...                Check Server Name  SH:${ENC1SHBAY1}  newhost
+    ...             Data file needs to define:
+    ...                 ilo_credentials =  {'userName': 'Administrator', 'password': 'hpvse123'}
+    [Arguments]     ${name}  ${server_name}
+    Log  \nCheck server name for ${name}
+    ${ilo} =  Get Server Hardware iLO IP  ${name}
+    ${status} =  Run cpqlocfg and Check Server Name  ${ilo}  ${server_name}
+    [return]  ${status}
+
+Set Server Hardware Server Name
+    [Documentation]    Set server name on iLO
+    ...                   Set Server Name  ${ENC1SHBAY1}  newname
+    ...                Set Server Name  SH:${ENC1SHBAY1}  newname
+    ...             Data file needs to define:
+    ...                 ilo_credentials =  {'userName': 'Administrator', 'password': 'hpvse123'}
+    [Arguments]     ${name}  ${server_name}
+    Log  \nSet server name for ${name}
+    ${ilo} =  Get Server Hardware iLO IP  ${name}
+    ${status} =  Run cpqlocfg and Set Server Name  ${ilo}  ${server_name}
+    [return]  ${status}
+
+CQTDISC Should Not Be Set on Server
+    [Documentation]  CQTDISC Should Not Be Set on Server
+    ...                CQTDISC Should Not Be Set on Server    SH:${ENC1SHBAY1}
+    ...             Data file needs to define:
+    ...                 ilo_credentials =  {'userName': 'Administrator', 'password': 'hpvse123'}
+    [Arguments]     ${name}
+    Log  \nVerifying the CQTDISC is not set on Server ${name}  console=True
+    ${ilo} =  Get Server Hardware iLO IP    ${name}
+    Run cpqlocfg and Verify CQTDISC Should Not Be Set    ${ilo}
+    log  \nThe CQTDISC EV is Not Set on Server ${name}. The server will not reboot.    console=True
+
+CQTDISC Should Not Be Set on Servers
+    [Documentation]  CQTDISC Should Not Be Set on Servers
+    ...                CQTDISC Should Not Be Set on Servers    SH:${ENC1SHBAY1}
+    ...             Data file needs to define:
+    ...                 ilo_credentials =  {'userName': 'Administrator', 'password': 'hpvse123'}
+    ...                                     profile = {"type":"ServerProfileV6","serverHardwareUri":'SH:'+ ${ENC1SHBAY1}, ...}
+    ...                                     profile = {"type":"ServerProfileV6","serverHardwareUri":'${ENC1SHBAY1}, ...}
+    [Arguments]     ${profiles}
+    :FOR    ${profile}  IN  @{profiles}
+    \   ${sh} =  Get From Dictionary  ${profile}  serverHardwareUri
+    \   CQTDISC Should Not Be Set on Server  ${sh}
+
+All Servers Status Should Be OK or Warning
+    [Documentation]  Check status of Server and warn user in case of status is not OK
+    ...              Warning shown where status is Warning
+    ...              Fail test where status is other than OK and Warning
+    ...  act_on_failure provide option to either fail current test(Fail) or complete suite(Fatal Error)
+    [Arguments]    ${act_on_failure}=Fail
+    ${servers} =   Fusion Api Get Server Hardware
+    # Make sure we get (more than zero) server hardware listed
+    ${count}       Get From Dictionary    ${servers}    count
+    Run Keyword If  '${count}'=='0'    Fail    msg=No servers found
+    :FOR  ${server}  IN  @{servers['members']}
+    \  Run Keyword If  '${server['status']}' == 'OK'  Log  Name ${server['name']}, Status ${server['status']}
+    ...  ELSE IF  '${server['status']}' == 'Warning'  Log  Name ${server['name']}, Status ${server['status']}  level=WARN
+    ...  ELSE  Run Keyword And Continue On Failure  ${act_on_failure}  Name ${server['name']}, Status ${server['status']}
+
+Get All Server Hardware Uris
+    [Documentation]    Get Resources Uris list and return it
+    ${resp} =    Fusion Api Get Server Hardware
+    ${memb_list} =    Get From Dictionary    ${resp}    members
+    ${uri_list} =    Create List
+    :FOR    ${memb}    IN    @{memb_list}
+    \       ${uri} =    Get From Dictionary    ${memb}    uri
+    \       Append To List    ${uri_list}    ${uri}
+    [Return]      ${uri_list}
+
+Get Server Hardware Subresources
+    [Documentation]  Get Server Hardware subresources
+    ...                 Get Server Hardware Subresources        ${enc_server}
+    ...                 Get Server Hardware Subresources        ${enc_server}  ${api}=1000
+    [Arguments]        ${enc_server}  ${api}=1000
+    ${sh_uuid} =  Get Resource Attribute  SH:${enc_server}  uuid
+    ${resp} =     Fusion Api Get Server Hardware        param=/${sh_uuid}?expand=all  api=${api}
+    ${subresources} =     Get From Dictionary        ${resp}    subResources
+    [Return]    ${subresources}
+
+Should Match Gen10 Server Memory
+    [Documentation]  Should Match Gen10 Server Memory
+    ...                 Should Match Gen10 Server Memory  ${risnode}
+    [Arguments]        ${ris_node}
+    ${ris}=  Get RIS Server Memory  ${ris_node}
+    ${subresources} =  Get Server Hardware Subresources        ${ris_node['server']}
+    ${powerState}=  Get Server Power   ${ris_node['server']}
+
+    # collection state check
+    Should Match Regexp  ${subResources['Memory']['collectionState']}   ((?i)Collected|CollectedStale)
+    Should Match Regexp  ${subResources['MemoryList']['collectionState']}    ((?i)Collected|CollectedStale)
+    Should Match Regexp  ${subResources['AdvancedMemoryProtection']['collectionState']}    ((?i)Collected|CollectedStale)
+
+    # Check Processors details
+    ${ris_memory} =    Set Variable    ${ris['Oem']['Hpe']['MemoryList']}
+    Log  SH data ${subResources['MemoryList']['data']}
+    Lists Should Be Equal    ${subResources['MemoryList']['data']}    ${ris_memory}    msg=Processors details do not match
+    Log  Verify Gen10 server memory - memory succeeded    console=True
+
+    # Check AMP details
+    ${ris_amp} =    Set Variable    ${ris['Oem']['Hpe']}
+    remove from dictionary  ${ris_amp}  MemoryList
+    ${validate_status} =  Fusion api validate response follow  ${subResources['AdvancedMemoryProtection']['data'][0]}  ${ris_amp}  wordy=${True}
+    Run Keyword If  '${validate_status}'=='False'  Fail  Verify Gen10 server memory failed
+    Log  Verify Gen10 server memory - amp succeeded    console=True
+
+    # Check Dimms details
+    ${ris_dimms} =    Set Variable    ${ris['memory']}
+    ${count} =    Set Variable    0
+
+    :FOR    ${dimm}    IN    @{ris_dimms}
+    \       ${dimm2} =  json.loads  ${dimm}
+    \       remove from dictionary  ${dimm2}  @odata.context
+    \       remove from dictionary  ${dimm2}  @odata.etag
+    \       remove from dictionary  ${dimm2}  @odata.id
+    \       remove from dictionary  ${dimm2['Oem']['Hpe']}  @odata.context
+    \       ${sh_dimm} =    Set Variable    ${subResources['Memory']['data'][${count}]}
+    \       remove from dictionary  ${sh_dimm}  @odata.etag
+    \       remove from dictionary  ${sh_dimm}  SerialNumber
+    \       remove from dictionary  ${sh_dimm}  FirmwareRevision
+    \       remove from dictionary  ${sh_dimm}  Manufacturer
+    \       remove from dictionary  ${sh_dimm}  OperatingMemoryModes
+    \       remove from dictionary  ${sh_dimm}  PartNumber
+    \       remove from dictionary  ${sh_dimm}  PersistentRegionSizeLimitMiB
+    \       remove from dictionary  ${sh_dimm}  SubsystemDeviceID
+    \       remove from dictionary  ${sh_dimm}  SubsystemVendorID
+    \       remove from dictionary  ${sh_dimm}  VolatileRegionSizeLimitMiB
+    \       remove from dictionary  ${sh_dimm['Status']}  HealthRollup
+    \       remove from dictionary  ${sh_dimm['Status']}  Oem
+#    \       Run Keyword If  '${sh_dimm['BaseModuleType']}'=='None'  remove from dictionary  ${sh_dimm}  BaseModuleType
+#    \       Run Keyword If  '${sh_dimm['OperatingSpeedMhz']}'=='None'  remove from dictionary  ${sh_dimm}  OperatingSpeedMhz
+    \       ${validate_status} =  Fusion api validate response follow  ${sh_dimm}  ${dimm2}  wordy=${True}
+    \       Run Keyword If  '${validate_status}'=='False'  Fail  Verify Gen10 server memory failed
+    \       Log  Verify Gen10 server memory - dimm data ${count} succeeded    console=True
+    \       ${count} =    Set Variable    ${count}+1
+
+Should Match Gen10 Servers Memory
+    [Documentation]  Should Match Gen10 Servers Memory
+    ...                 Should Match Gen10 servers memory  ${risnodes}
+    [Arguments]        ${ris_nodes}
+    :FOR    ${risnode}    IN    @{ris_nodes}
+    \   Should Match Gen10 Server Memory  ${risnode}
+
+Should Match DCS Gen10 Server Memory
+    [Documentation]  Should Match DCS Gen10 Server Memory
+    ...                 Should Match DCS Gen10 Server Memory  ${risnode}
+    [Arguments]        ${ris_node}
+    ${ris}=  Get DCS RIS Server Memory  ${ris_node}
+    ${subresources} =  Get Server Hardware Subresources        ${ris_node['server']}
+    ${powerState}=  Get Server Power   ${ris_node['server']}
+
+    # collection state check
+    Should Match Regexp  ${subResources['Memory']['collectionState']}   ((?i)Collected|CollectedStale)
+    Should Match Regexp  ${subResources['MemoryList']['collectionState']}    ((?i)Collected|CollectedStale)
+    Should Match Regexp  ${subResources['AdvancedMemoryProtection']['collectionState']}    ((?i)Collected|CollectedStale)
+
+    # Check Processors details
+    ${ris_memory} =    Set Variable    ${ris['Oem']['Hpe']['MemoryList']}
+    Log  SH data ${subResources['MemoryList']['data']}
+    Lists Should Be Equal    ${subResources['MemoryList']['data']}    ${ris_memory}    msg=Processors details do not match
+    Log  Verify Gen10 server memory - memory succeeded    console=True
+    # Check AMP details
+    ${ris_amp} =    Set Variable    ${ris['Oem']['Hpe']}
+    remove from dictionary  ${ris_amp}  MemoryList
+    ${validate_status} =  Fusion api validate response follow  ${subResources['AdvancedMemoryProtection']['data'][0]}  ${ris_amp}  wordy=${True}
+    Run Keyword If  '${validate_status}'=='False'  Fail  Verify Gen10 server memory failed
+    Log  Verify Gen10 server memory - amp succeeded    console=True
+    # Check Dimms details
+    ${ris_dimms} =    Set Variable    ${ris['memory']}
+    ${count} =    Set Variable    0
+
+    :FOR    ${dimm}    IN    @{ris_dimms}
+    \       remove from dictionary  ${dimm}  @odata.context
+    \       remove from dictionary  ${dimm}  @odata.etag
+    \       remove from dictionary  ${dimm}  @odata.id
+    \       remove from dictionary  ${dimm['Oem']['Hpe']}  @odata.context
+    \       ${sh_dimm} =    Set Variable    ${subResources['Memory']['data'][${count}]}
+    \       remove from dictionary  ${sh_dimm}  @odata.etag
+    \       remove from dictionary  ${sh_dimm}  Id
+    \       remove from dictionary  ${sh_dimm}  SerialNumber
+    \       remove from dictionary  ${sh_dimm}  FirmwareRevision
+    \       remove from dictionary  ${sh_dimm}  Manufacturer
+    \       remove from dictionary  ${sh_dimm}  OperatingMemoryModes
+    \       remove from dictionary  ${sh_dimm}  PartNumber
+    \       remove from dictionary  ${sh_dimm}  PersistentRegionSizeLimitMiB
+    \       remove from dictionary  ${sh_dimm}  SubsystemDeviceID
+    \       remove from dictionary  ${sh_dimm}  SubsystemVendorID
+    \       remove from dictionary  ${sh_dimm}  VolatileRegionSizeLimitMiB
+    \       remove from dictionary  ${sh_dimm['Status']}  HealthRollup
+    \       remove from dictionary  ${sh_dimm['Status']}  Oem
+#    \       Run Keyword If  '${sh_dimm['BaseModuleType']}'=='None'  remove from dictionary  ${sh_dimm}  BaseModuleType
+#    \       Run Keyword If  '${sh_dimm['OperatingSpeedMhz']}'=='None'  remove from dictionary  ${sh_dimm}  OperatingSpeedMhz
+    \       Run Keyword If  '${sh_dimm['RankCount']}'=='None'  remove from dictionary  ${sh_dimm}  RankCount
+    \       ${validate_status} =  Fusion api validate response follow  ${sh_dimm}  ${dimm}  wordy=${True}
+    \       Run Keyword If  '${validate_status}'=='False'  Fail  Verify Gen10 server memory failed
+    \       Log  Verify Gen10 server memory - dimm data ${count} succeeded    console=True
+    \       ${count} =    Set Variable    ${count}+1
+
+Should Match DCS Gen10 Servers Memory
+    [Documentation]  Should Match Gen10 Servers Memory
+    ...                 Should Match Gen10 servers memory  ${risnodes}
+    [Arguments]        ${ris_nodes}
+    :FOR    ${risnode}    IN    @{ris_nodes}
+    \   Should Match DCS Gen10 Server Memory  ${risnode}
+
+Servers Refresh Should be completed
+    [Documentation]  Check status of Server and fail test in case of Refresh not completed
+    ...              Fail test where status is other than OK and Warning
+    [Arguments]    ${exprefresh_state}=Refreshing
+    ${servers} =   Fusion Api Get Server Hardware
+    Run Keyword If  '${servers['count']}'=='0'    Fail    msg=No servers found
+    :FOR  ${server}  IN  @{servers['members']}
+    \    Run Keyword And Continue On Failure  Should Not Match    ${server['refreshState']}    ${exprefresh_state}    Server name [${server['name']}]
+
+Server Hardwares State Should Not Be
+    [Documentation]  Verify server hardwares states are NOT Unmanaged
+    ...    Servers Hardware State Should Not Be  Unmanaged
+    [Arguments]    ${expstate}=Unmanaged
+    ${servers} =   Fusion Api Get Server Hardware
+    Run Keyword If  '${servers['count']}'=='0'    Fail    msg=No servers found
+    ${res} =  Set Variable  ${empty}
+    :FOR  ${server}  IN  @{servers['members']}
+    \  ${res} =  Run Keyword If  '${server['state']}' == '${expstate}'  Catenate  ${res}    \nServer name [${server['name']}] Expected State not ${expstate} but found ${server['state']}
+     \  ...  ELSE  Set Variable  ${res}
+    ${count} =  Get Length  ${res}
+    Run Keyword If  '${count}' > '0'  Fail  ${res}
+
+Server Hardwares Status Should Be
+    [Documentation]  Check status of Server and warn user in case of status is not OK
+    ...              Fail test where status is other than OK
+    [Arguments]    ${status}=OK
+    ${servers} =   Fusion Api Get Server Hardware
+    Run Keyword If  '${servers['count']}'=='0'    Fail    msg=No servers found
+    ${res} =  Set Variable  ${empty}
+    :FOR  ${server}  IN  @{servers['members']}
+    \  ${res} =  Run Keyword If  '${server['status']}' != '${status}'  Catenate  ${res}    \nServer name [${server['name']}] Expected Status '${status}' but found ${server['status']}
+     \  ...  ELSE  Set Variable  ${res}
+    ${count} =  Get Length  ${res}
+    Run Keyword If  '${count}' > '0'  Fail  ${res}
+
+DCS Memory State Check
+    [Documentation]  Memory State Check
+    ...                 Memory State Check  ${risnode}    ${state}
+    [Arguments]        ${ris_node}    ${state}
+    ${ris}=  Get DCS RIS Server Memory  ${ris_node}
+    ${subresources} =  Get Server Hardware Subresources        ${ris_node['server']}
+    Should Match    ${subResources['Memory']['collectionState']}     ${state}
+

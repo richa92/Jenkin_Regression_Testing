@@ -1,0 +1,142 @@
+*** Settings ***
+Library    RoboGalaxyLibrary
+Library    FusionLibrary
+Library    OperatingSystem
+Library    BuiltIn
+Library    Collections
+Library    XML
+Library    SSHLibrary
+Library    String
+Library    Dialogs
+Resource    ../../../../Resources/api/fusion_api_resource.txt
+Resource    ../global_variables.robot
+
+*** Keywords ***
+Generate Certificate Chain Payload
+    [Documentation]    Gnerate certificate payload
+    [Arguments]    ${HOST}    ${payload}    ${ROOT_CRT}    ${aliasname}=${None}
+    Log    Generate certificate payload    console=True
+    ${cert} =    Fusion Api Get Remote Certificate     ${HOST}
+    ${body} =    Copy Dictionary    ${payload}
+    Set To Dictionary    ${body['certificateDetails'][0]}   base64Data    ${ROOT_CRT}
+    set to dictionary     ${body['certificateDetails'][0]}   aliasName    ${aliasname}
+    set to dictionary    ${body['certificateDetails'][1]}   base64Data    ${cert['certificateDetails'][0]['base64Data']}
+    [Return]    ${body}
+
+Generate Certificate Payload
+    [Documentation]    Generate Certificate Payload
+    [Arguments]      ${HOST}  ${payload}  ${aliasname}=${None}
+    ${cert} =  Fusion Api Get Remote Certificate     ${HOST}
+    ${body} =  Copy Dictionary    ${payload}
+    Set To Dictionary    ${body['certificateDetails'][0]}    base64Data    ${cert['certificateDetails'][0]['base64Data']}
+    Run Keyword If  '${aliasname}' != '${None}'   set to dictionary    ${body['certificateDetails'][0]}  aliasName   ${aliasname}
+    [Return]    ${body}
+
+Verify Leaf Certificate Exist By Aliasname
+    [Documentation]  Verify if leaf certificate is existed by GET / rest / certifciates / servers / aliasname
+    [Arguments]      ${aliasname}   ${expected}=${True}
+    ${resp} =  Fusion Api Get Server Certificate  ${aliasname}
+    Run Keyword If  ${expected} == ${True}      should be equal as integers   ${resp['status_code']}  200   msg = "${aliasname} does not exist"
+    Run Keyword If  ${expected} != ${True}        should not be equal as integers   ${resp['status_code']}  200   msg = "${aliasname} was already existd"
+    Log    certificate is existed ${expected}    console=True
+
+Verify Server Certificate Trust Status
+     [Documentation]  Verify remote server certificate trust status as expected, True or False
+     [Arguments]     ${HOST}  ${expected}
+     ${resp} =   Fusion Api Get Remote Certificate  ${HOST}
+     should be equal as strings    ${resp['certificateStatus']['trusted']}    ${expected}
+     Log    ${HOST} trust status is ${expected}    console=True
+
+Validator Certificate As Expected Type
+    [Documentation]  Validator certificate to check if it is CA or leaf certificate, LEAF_CERT_TYPE / CUSTOM_ROOT_TYPE, and also cert numbers(CUSTOM_ROOT / INTERMEDIATE / )
+    [Arguments]      ${payload}  ${expected}  ${expected_root_cert_number}=0  ${expected_inter_cert_number}=0   ${expected_leaf_cert_number}=0
+    ${resp} =  Fusion Api Validator Certificate    ${payload}
+    Should Be Equal As Integers   ${resp['status_code']}  200
+    Should Be Equal  ${resp['certType']}  ${expected}   msg = certificate type is not as expected
+    @{list} =  create list
+    : For   ${cert}  IN  @{resp['authorityInfoCollection']['members']}
+    \  append to list  ${list}  '${cert['certType']}'
+    ${root_cert_number} =  Count Values In List   ${list}  'CUSTOM_ROOT'
+    ${inter_cert_number} =  Count Values In List   ${list}  'INTERMEDIATE'
+    #${leaf_cert_number}=  Count Values In List   ${list}     'LEAF'
+    Should Be Equal As Integers   ${root_cert_number}   ${expected_root_cert_number}
+    Should Be Equal As Integers   ${inter_cert_number}  ${expected_inter_cert_number}
+    #Should Be Equal As Integers   ${leaf_cert_number}   ${expected_leaf_cert_number}
+    Log    certType is ${expected}, ${root_cert_number} root cert, ${inter_cert_number} intermediate cert, ${expected_leaf_cert_number} leaf cert    console=True
+
+Validator Certificate As Expected Type LEAF
+    [Documentation]  This is a workround for OVD12626
+    [Arguments]      ${payload}  ${expected}
+    ${resp} =  Fusion Api Validator Certificate    ${payload}
+    Should Be Equal As Integers   ${resp['status_code']}  200
+    Should Be Equal  ${resp['certType']}  ${expected}   msg = certificate type is not as expected
+    Log    certType is ${expected}    console=True
+
+Validator CA Certificates Not In Config File
+    [Documentation]   To check if ca-certificates string in config file, curl-config.cfg, rabbitmq.config, ssl.conf
+    [Arguments]     ${config_file_path}
+    ${command} =  Set Variable  cat ${config_file_path}|grep -c ca-certificates
+    ${output} =  Execute SSH Command   ${command}
+    ${lines}=  Split to Lines  ${output}   0    -1
+    Should Be Equal   ${lines[0]}  0    msg= ca-certificates should not existed in this file
+
+Validator Fetch Certificate State And Status
+    [Documentation]   Verify Get /rest/certificates/https/remote return state and status as expected
+    [Arguments]       ${HOST}   ${expected_state}  ${expected_status}   @{state_list}
+    ${resp} =  Fusion Api Get Remote Certificate  ${HOST}
+    Should Be Equal As Strings      ${resp['state']}         ${expected_state}        msg=certificate state is not as expected
+    Should Be Equal As Strings       ${resp['status']}        ${expected_status}       msg=certificate status is not as expected
+    @{list} =  Create List
+    : For   ${cert}  IN   @{resp['certificateDetails']}
+    \   Log    'state:${cert['state']}'    console=True
+    \   Log    'status:${cert['status']}'    console=True
+    \   Append To List  ${list}  'state:${cert['state']}'
+    \   Append To List  ${list}   'status:${cert['status']}'
+    Should Be Equal   ${list}   ${state_list}
+    Log    certificate status and state are as expected    console=True
+
+Validator Default ILO Treat AS Self Signed
+    [Documentation]  Veriofy default ilo certificate is self-signed
+    [Arguments]   ${HOST}
+    ${resp} =  Fusion Api Get Remote Certificate  ${HOST}
+    Should Be Equal   ${resp['certificateDetails'][0]['issuer']}   iLO Default Issuer (Do not trust)    msg=ILO not with default cert
+    Should Be Equal   ${resp['certificateDetails'][0]['state']}    OK    msg=ILO cert is invalid
+    Should Be Equal As Strings    ${resp['certificateStatus']['selfsigned']}  True    msg=ILO cert default is not selfsigned
+    Log    ILO server ${HOST} default is self-signed    console=True
+
+Verify Server Certificate Exist In Allcertificates
+    [Documentation]  Verify remote server certificate is in all-certificates.bks
+    [Arguments]     ${HOST}  ${expected}=${True}
+    ${resp} =   Fusion Api Get Remote Certificate  ${HOST}
+    ${command} =  Set Variable   ${CMD} ${resp['certificateDetails'][0]['sha256Fingerprint']}
+    ${output} =  Execute SSH Command   ${command}
+    Run Keyword If  ${expected} != ${True}     should be equal   ${output[0]}    0    msg= "Remote server certificate was existed in all-certificates.bks"
+    Run Keyword If  ${expected} == ${True}     should be equal   ${output[0]}    1    msg= "Remote server certificate was not existed in all-certificates.bks"
+    Log    ${HOST} certificate was existed in all-certificates.bks:${expected}    console=True
+
+Get Certificate ThumbPrint
+    [Documentation]  Get Certificate ThumbPrint
+    [Arguments]     ${ALIASNAME}
+    ${response} =  Fusion Api Get Certificate Status
+    ${thumprint} =  Set Variable   None
+    : For   ${mem}   IN   @{response['members']}
+    \     ${thumprint}=   Run Keyword If   '${mem['aliasName']}' == '${ALIASNAME}'    Set Variable  ${mem['thumbPrint']}
+    [Return]    ${thumprint}
+
+Clear env
+    [Documentation]   Clear up env certificate
+    [Arguments]      ${cert_type}  ${aliasname}
+    ${resp}=      Run Keyword If   '${cert_type}' == 'server'  Fusion Api Delete Server Certificate  ${aliasname}
+    ...           ELSE     fusion api remove external ca certificates   ${aliasname}
+    Run Keyword And Ignore Error     Wait For Task2  ${resp}      300     10
+    
+Start remote SSL Server
+    [Documentation]   Trigger remote Light Weight Server
+    [Arguments]      ${Host_Port_combo}    ${cmd1}=${START_SERVER1}    ${cmd2}=${START_SERVER2}
+    @{IP}=    split String    ${Host_Port_combo}    :
+    ${status}    ${resp}=    Run Keyword And Ignore Error    Open Connection    ${IP[0]}
+    Run Keyword If    '${status}'=='FAIL'        Fail    Failed to Open SSH Connection to the server with IP ${IP[0]}
+    ${newstatus}    ${resp}=    Run Keyword And Ignore Error    Login    ${FUSION_SSH_USERNAME}    ${FUSION_SSH_PASSWORD}
+    Run Keyword If    '${newstatus}'=='FAIL'        Fail    Failed to do SSH Login to the server with IP ${IP[0]}
+    ${command}=    set variable   ${cmd1} ${IP[1]} ${cmd2}
+    Start Command    ${command}

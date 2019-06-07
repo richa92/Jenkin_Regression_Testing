@@ -1,0 +1,838 @@
+*** Settings ***
+Documentation        Feature Test: OVF3322 FCoE for TClass
+Variables            data_variables_420.py
+Resource             ../../../../../Resources/api/fusion_api_resource.txt
+Resource             OVF3322_Resource.txt
+Library              FusionLibrary
+Library              RoboGalaxyLibrary
+Library              Collections
+Library              BuiltIn
+Library              OVF3322_validate.py
+Suite Setup          Suite Setup Tasks
+Suite Teardown       Suite Setup Tasks
+
+*** Variables ***
+${APPLIANCE_IP}     15.245.131.206
+
+*** Test Cases ***
+
+TC_1_Create FCoE network using VLAN 1
+    [Documentation]    Create FCoE network using VLAN 1
+    Set Log Level    TRACE
+    [Tags]  1
+
+    ${resp}    Add FCoE Networks from variable    ${fcoe_1}
+    ${valDict}    Create Dictionary    status_code=${400}
+    ...                                errorCode=CRM_NETWORK_VLAN_ID_NOT_VALID_RANGE_EXISTS
+    ...                                message=The VLAN ID must be between 2 and 4094, excluding internally reserved VLAN IDs 3967-4094.
+    Validate Response    ${resp[0]}    ${valDict}
+    Log    \nError:${resp[0]['errorCode']}    console=True
+
+
+TC_2_Create 257 FCoE networks (max is 256)
+    [Documentation]    Create 257 FCoE networks (max is 256)
+    [Tags]  2
+
+    ${resp}    Create Fcoe Range    ${fcoe_ranges['fcoe-range32a']}
+    Wait For Task2    ${resp}    5min    10
+    ${resp}    Create Fcoe Range    ${fcoe_ranges['fcoe-range32b']}
+    Wait For Task2    ${resp}    5min    10
+    ${resp}    Create Fcoe Range    ${fcoe_ranges['fcoe-range32c']}
+    Wait For Task2    ${resp}    5min    10
+    ${resp}    Create Fcoe Range    ${fcoe_ranges['fcoe-range32d']}
+    Wait For Task2    ${resp}    5min    10
+    ${resp}    Create Fcoe Range    ${fcoe_ranges['fcoe-range128']}
+    Wait For Task2    ${resp}    5min    10
+
+    ${resp}    Add FCoE Networks from variable    ${fcoe_100}
+    ${valDict}    Create Dictionary    status_code=${400}
+    ...                                errorCode=CRM_MAX_FCOE_NETWORKS_REACHED
+    ...                                message=FCoE network fcoe-100 cannot be created because the maximum number of FCoE networks (256) exists.
+    Validate Response    ${resp[0]}    ${valDict}
+    Log    \nError:${resp[0]['errorCode']}    console=True
+
+TC_3_Create LIG with FcoE US,enclosure group and LE
+    [Documentation]    Create LIG with FcoE US,enclosure group and LE
+    [Tags]  3
+    ${resp}    Add Ethernet Networks from variable    ${ethernet_networks}
+    ${l}    Get Length    ${resp}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Run Keyword If  '${resp[${x}]['status_code']}' == '202'    Wait For Task2    ${resp[${x}]}    20m    1m    ELSE    Fail    Log    '${resp[${x}]['errorCode']}'    Console = True
+
+    Add LIG from variable    ${ligs['LIG']}
+
+    ${resp}    Add Enclosure Group from variable    ${enc_group['EG']}
+    Run Keyword If  '${resp['status_code']}' == '201'    Wait For Task2    ${resp}    ELSE    Fail    Log    failed    console=True
+
+    Add Logical Enclosure from variable    ${les['LE']}
+
+    Log    Verifying if interconnects are configured    console=True
+    :FOR    ${x}    IN    @{Interconnect_dto}
+    \    Verify Interconnect    ${x}    state=Configured
+
+    Log    Fetching ICM URI    console=True
+    ${ic_uris}    Create List
+    :FOR    ${icm}    IN    @{Interconnect_name}
+    \    ${uri} =    Get IC URI    ${icm}
+    \    Run Keyword If    '${icm}' == '${Interconnect_name[0]}'    Set Suite Variable    ${ICM3_uri}    ${uri}
+    \    ...    ELSE IF    '${icm}' == '${Interconnect_name[1]}'   Set Suite Variable    ${ICM6_uri}    ${uri}
+    \    Append To List    ${ic_uris}    ${uri}
+    Log     ${ICM3_uri}    console=True
+    Log     ${ICM6_uri}    console=True
+    Set Suite Variable    ${ICM_uris}    ${ic_uris}
+
+    Log    Verify if ports are linked    console=True
+    Wait Until Keyword Succeeds    10 min    20s    Verify Ports Status    ${ICM_uris}    ${port_name}
+
+TC_4_Happy Path - Create 3 server profile with FcoE connection (2 profile has BFS[1 Win OS + 1 Esxi OS] connection) and pass traffic on all the servers
+    [Documentation]    Happy Path - Create 3 server profile with FcoE connection (2 profile has BFS[1 Win OS + 1 Esxi OS] connection) and pass traffic on all the servers
+    [Tags]  4
+    ${resp}    Add Server Profiles from variable   ${server_profiles}
+    ${l}    Get Length    ${resp}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Run Keyword If  '${resp[${x}]['status_code']}' == '202'    Wait For Task2    ${resp[${x}]}    20m    1m    ELSE    Fail    Log    failed    console=True
+    \    Power on server    ${server_profiles[${x}]['serverHardwareUri']}
+    Sleep    10min
+
+    Validate Windows BFS Disk Size    ${ilo_details[1]}    ${server_credentials[1]}
+
+    ${lun_count_list}    Create List
+    ${l}    Get Length    ${ilo_details}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    ${serverIp}    Get Server Ip Windows    ${ilo_details[${x}]}
+    \    Wait For Appliance To Become Pingable    ${serverIp[0]}
+
+    \    ${output}    execute_windows_commands    ${serverIp[0]}    ${server_credentials[${x}]['userName']}    ${server_credentials[${x}]['password']}    ${diskspd_cmd[0]}
+    \    Run Keyword If  ${output} == 0    Log    \n Successfully passed the traffic    console=True    ELSE    Fail    Log    Unable to pass traffic    console=True
+
+    \    ${lun_count}    validate_windows_lun_count    ${serverIp[0]}    ${server_credentials[${x}]['userName']}    ${server_credentials[${x}]['password']}
+    \    Append To List    ${lun_count_list}    ${lun_count}
+
+    Set Suite Variable    ${win_lun_count}    ${lun_count_list}
+
+    Wait For Appliance To Become Pingable    ${server_BFS['ip']}
+    ${lun_count}    Get ESXI LUN Count    ${server_BFS}    ${cmd1}
+    Set Suite Variable    ${esxi_lun_BFS}    ${lun_count}
+
+TC_5_Delete 20 FCoE Networks
+    [Documentation]    Delete 20 FCoE Networks
+    [Tags]  5
+
+    ${resp}    Delete Fcoe Range    ${fcoe_ranges['fcoe-range-delete-20']}
+    Run Keyword If  '${resp['status_code']}' == '202'    Wait For Task2    ${resp}    3min    10    ELSE    Fail    Log    failed    console=True
+
+TC_6_Create a new FCoE network (name + vlan doesn't already exist)
+    [Documentation]    Create a new FCoE network (name + vlan doesn't already exist)
+    [Tags]  6
+
+    ${resp}    Add FCoE Networks from variable    ${fcoe_100}
+    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp}    ELSE    Fail    Log    Failed    console=True
+
+TC_7_Create a new FCoE network (fcoe network with same vlan already exists, but name is different)
+    [Documentation]    Create a new FCoE network (fcoe network with same vlan already exists, but name is different)
+    [Tags]  7
+
+    ${resp}    Add FCoE Networks from variable    ${fcoe_100b}
+    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp}    ELSE    Fail    Log    Failed    console=True
+
+
+TC_8_Create a new FCoE network (name+vlan already exists)
+    [Documentation]    Create a new FCoE network (name+vlan already exists)
+    [Tags]  8
+
+    ${resp}    Add FCoE Networks from variable    ${fcoe_100b}
+    ${valDict}    Create Dictionary    status_code=${400}
+    ...                                errorCode=CRM_DUPLICATE_NETWORK_NAME
+    ...                                message=A network with the name ${fcoe_100b[0]['name']} already exists.
+    Validate Response    ${resp[0]}    ${valDict}
+    Log    \nError:${resp[0]['errorCode']}    console=True
+
+TC_9_Create a new FCoE network without supplying a vlanId
+    [Documentation]    Create a new FCoE network without supplying a vlanId
+    [Tags]  9
+
+    ${resp}    Add FCoE Networks from variable    ${no_vlanId}
+    ${valDict}    Create Dictionary    status_code=${400}
+    ...                                errorCode=CRM_MISSING_VLAN_ID_IN_NETWORK
+    ...                                message=vlanId is required.
+    Validate Response    ${resp[0]}    ${valDict}
+    Log    \nError:${resp[0]['errorCode']}    console=True
+
+TC_10_Create a new FCoE network with same name as existing ETHERNET and FibreChannel network
+    [Documentation]    Create a new FCoE network with same name as existing ETHERNET and FibreChannel network
+    [Tags]  10
+
+    ${resp}    Add FC Networks from variable    ${fc_network}
+    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp}    ELSE    Fail    Log    Failed    console=True
+
+    ${resp}    Add FCoE Networks from variable    ${fcoe_enet}
+    ${valDict}    Create Dictionary    status_code=${400}
+    ...                                errorCode=CRM_DUPLICATE_NETWORK_NAME
+    ...                                message=A network with the name ${fcoe_enet[0]['name']} already exists.
+    Validate Response    ${resp[0]}    ${valDict}
+    Log    \nError:${resp[0]['errorCode']}    console=True
+
+    ${resp}    Add FCoE Networks from variable    ${fcoe_fc}
+    ${valDict}    Create Dictionary    status_code=${400}
+    ...                                errorCode=CRM_DUPLICATE_NETWORK_NAME
+    ...                                message=A network with the name ${fcoe_fc[0]['name']} already exists.
+    Validate Response    ${resp[0]}    ${valDict}
+    Log    \nError:${resp[0]['errorCode']}    console=True
+
+TC_11_Create a new FCoE network with vlanId 4095 (max is 4094)
+    [Documentation]    Create a new FCoE network with vlanId 4095 (max is 4094)
+    [Tags]  11
+
+    ${resp}    Add FCoE Networks from variable    ${fcoe_4095}
+    ${valDict}    Create Dictionary    status_code=${400}
+    ...                                errorCode=CRM_NETWORK_VLAN_ID_NOT_VALID_RANGE_EXISTS
+    ...                                message=The VLAN ID must be between 2 and 4094, excluding internally reserved VLAN IDs 3967-4094.
+    Validate Response    ${resp[0]}    ${valDict}
+    Log    \nError:${resp[0]['errorCode']}    console=True
+
+TC_12_Try to change the vlanId of an FCoE network
+    [Documentation]    Try to change the vlanId of an FCoE network
+    [Tags]  12
+
+    ${net}    Fusion Api Get Fcoe Networks    param=?filter="'name'=='${fcoe_100b[0]['name']}'"
+    ${body}    Get From Dictionary    ${net}    members
+    Set to Dictionary    ${body[0]}    vlanId    2999
+    ${resp}    Fusion Api Edit Fcoe Network    body=${body[0]}    uri=${body[0]['uri']}
+    ${valDict}    Create Dictionary    status_code=${400}
+    ...                                errorCode=CRM_CHANGING_VLAN_ID
+    ...                                message=VLAN ID can NOT be changed.
+    Validate Response    ${resp}    ${valDict}
+    Log    \nError:${resp['errorCode']}    console=True
+
+
+TC_13_Try to add an FCoE network to a Network Set
+    [Documentation]    Try to add an FCoE network to a Network Set
+    [Tags]  13
+
+    ${uri}    Get FCoE URI    ${fcoe_100[0]['name']}
+    ${networkUris}    Create List
+    Append To List    ${networkUris}    ${uri}
+    Set to Dictionary    ${network_sets[0]}    networkUris    ${networkUris}
+    ${resp}    Fusion Api Create Network Set    body=${network_sets[0]}
+    ${valDict}    Create Dictionary    status_code=${400}
+    ...                                errorCode=CRM_INVALID_NETWORK_URI
+    ...                                message=The type of the network URI passed is not valid. This call requires ethernet-networks URI. Please provide a valid ethernet-networks URI.
+    Validate Response    ${resp}    ${valDict}
+    Log    \nError:${resp['errorCode']}    console=True
+
+TC_14_Try to change Default Connection Template to Max BW of 51gb (50gb is max supported)
+    [Documentation]    Try to change Default Connection Template to Max BW of 26gb (25gb is max supported)
+    [Tags]  14
+
+    ${dct}    Get defaultConnectionTemplate
+    ${bw}    Create Dictionary    maximumBandwidth=51000    typicalBandwidth=2500
+    Set to Dictionary    ${dct}    bandwidth=${bw}
+    Remove From Dictionary    ${dct}    status_code    headers
+
+    ${resp}    Fusion Api Update Default Connection Template    ${dct}
+    ${valDict}    Create Dictionary    status_code=${400}
+    ...                                errorCode=CRM_DEFAULT_INVALID_ARGUMENT
+    ...                                message=Updating connection-template: Invalid bandwidth: Maximum bandwidth exceeds 50 GBits/s
+    Validate Response    ${resp}    ${valDict}
+    Log    \nError:${resp['errorCode']}    console=True
+
+TC_15_Try to change FCoE networks Connection Template to Max BW of 51gb (50gb is max supported)
+    [Documentation]    Try to change FCoE networks Connection Template to Max BW of 26gb (25gb is max supported)
+    [Tags]  15
+
+    ${nets}    Fusion Api Get Fcoe Networks    param=?filter="'name'=='${fcoe_100[0]['name']}'"
+    ${net}    Get From Dictionary    ${nets}    members
+    ${ct}    Fusion Api Get Connection Templates    ${net[0]['connectionTemplateUri']}
+    ${bw}    Create Dictionary    maximumBandwidth=51000    typicalBandwidth=2500
+    Set to Dictionary    ${ct}    bandwidth=${bw}
+    Remove From Dictionary    ${ct}    status_code    headers
+    ${resp}    Fusion Api Update Connection Template    ${ct}    ${net[0]['connectionTemplateUri']}
+    ${valDict}    Create Dictionary    status_code=${400}
+    ...                                errorCode=CRM_DEFAULT_INVALID_ARGUMENT
+    ...                                message=Updating connection-template: Invalid bandwidth: Maximum bandwidth exceeds 50 GBits/s
+    Validate Response    ${resp}    ${valDict}
+    Log    \nError:${resp['errorCode']}    console=True
+
+TC_16_Edit LIG and try to add a new US with 33 FCoE networks (max is 32)
+    [Documentation]    Edit LIG and try to add a new US with 33 FCoE networks (max is 32)
+
+    [Tags]  16
+    ${body}    Get From Dictionary    ${ligs_neg}    LIG_max_us33
+    ${lig_body}    Create List    ${body}
+    ${resp}    Edit LIG    ${lig_body}
+    ${valDict}    Create Dictionary    errorCode=CRM_EXCEEDS_MAX_ALLOWED_FCOE_NETWORKS_PER_UPLINKSET
+    ...                                message=Too many FCoE networks have been specified for the uplink set.
+    Validate Response    ${resp[0]}    ${valDict}
+    Log    \nError:${resp[0]['errorCode']}    console=True
+
+TC_17_Try to create an LIG with more than 64 FCoE
+    [Documentation]    Try to create an LIG with more than 64 FCoE
+    [Tags]  17
+    ${body}    Get From Dictionary    ${ligs_neg}    LIG-with-more-than-64-fcoe
+    ${lig_body}    Build LIG body      ${body}
+    ${resp}    Fusion Api Create LIG    ${lig_body}
+    ${valDict}    Create Dictionary    status_code=${400}
+    ...                                errorCode=CRM_MAX_FCOE_NETWORKS_EXCEEDED
+    ...                                message=The number of FCoE networks has exceeded the maximum limit of 64.
+    Validate Response    ${resp}    ${valDict}
+    Log    \nError:${resp['errorCode']}    console=True
+
+TC_18_Try to create a new LIG with an US with a 2 FCoE networks with the same vlan Id
+    [Documentation]    Try to create a new LIG with an US with a 2 FCoE networks with the same vlan Id
+    Set Log Level    TRACE
+    [Tags]  18
+    ${body}    Get From Dictionary    ${ligs_neg}    duplicate-vlans
+    ${lig_body1}    Build LIG body    ${body}
+    ${resp}    Fusion Api Create LIG    ${lig_body1}
+    ${valDict}    Create Dictionary    status_code=${400}
+    ...                                errorCode=CRM_DUPLICATE_VLAN_IDS_LOGICAL_INTERCONNECT_GROUP
+    ...                                message=Duplicate VLAN IDs are not allowed in this logical interconnect group.
+    Validate Response    ${resp}    ${valDict}
+    Log    \nError:${resp['errorCode']}    console=True
+
+TC_19_Try to create a new LIG with an US with an ETHERNET network vlan Id 100 and FCoE network vlan Id 100
+    [Documentation]    Try to create a new LIG with an US with an ETHERNET network vlan Id 100 and FCoE network vlan Id 100
+    [Tags]  19
+    ${body}    Get From Dictionary    ${ligs_neg}    Invalid-LIG
+    ${lig_body}    Build LIG body    ${body}
+    ${resp}    Fusion Api Create LIG    ${lig_body}
+    ${valDict}    Create Dictionary    status_code=${400}
+    ...                                errorCode=CRM_DUPLICATE_VLAN_IDS_LOGICAL_INTERCONNECT_GROUP
+    ...                                message=Duplicate VLAN IDs are not allowed in this logical interconnect group.
+    Validate Response    ${resp}    ${valDict}
+    Log    \nError:${resp['errorCode']}    console=True
+
+TC_20_Try to edit LIG and edit a US that has 32 FCoE networks with 33 FCoE networks (max is 32)
+    [Documentation]    Try to edit LIG and edit a US that has 32 FCoE networks with 33 FCoE networks (max is 32)
+    Set Log Level    TRACE
+    [Tags]  20
+    # first, Edit LIG to have one US with 32 networks
+    ${body}    Get From Dictionary    ${ligs_neg}    LIG_with_us_only_32_fcoe
+    ${lig_body}    Create List    ${body}
+    ${resp}    Edit LIG    ${lig_body}
+    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp[0]}    10min    10    ELSE    Fail    Log    failed    console=True
+
+
+    ${body}    Get From Dictionary    ${ligs_neg}    LIG-with-US-with-more-than-32-fcoe
+    ${lig_body}    Create List    ${body}
+    ${resp}    Edit LIG    ${lig_body}
+    #${task}    Wait For Task    ${resp[0]}    15m    10
+    ${valDict}    Create Dictionary    errorCode=CRM_EXCEEDS_MAX_ALLOWED_FCOE_NETWORKS_PER_UPLINKSET
+    ...                                message=Too many FCoE networks have been specified for the uplink set.
+    Validate Response    ${resp[0]}    ${valDict}
+    Log    \nError:${resp[0]['errorCode']}    console=True
+
+TC_21_Edit the LIG from the previous test, and add an ETHERNET network to all of the existing US
+    [Documentation]    Edit the LIG from the previous test, and add an ETHERNET network to all of the existing US
+    [Tags]  21
+
+    ${body}    Get From Dictionary    ${ligs}    LIG_with_us_fcoe_enet
+    ${lig_body}    Create List    ${body}
+    ${resp}    Edit LIG    ${lig_body}
+    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp[0]}    10min    10    ELSE    Fail    Log    failed    console=True
+
+
+TC_22_Edit the LIG from the previous test and add a new ETHERNET ONLY US
+    [Documentation]    Edit the LIG from the previous test and add a new ETHERNET ONLY US
+    [Tags]  22
+    ${body}    Get From Dictionary    ${ligs}    LIG_with_us_only_enet
+    ${lig_body}    Create List    ${body}
+    ${resp}    Edit LIG    ${lig_body}
+    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp[0]}    10min    10    ELSE    Fail    Log    failed    console=True
+    ${task}    Wait For Task2    ${resp[0]}    15m    10
+
+
+TC_23_Try to create a new LIG with an FCoE US that spans multiple interconnects
+    [Documentation]    Try to create a new LIG with an FCoE US that spans multiple interconnects
+    [Tags]  23
+    ${body}    Get From Dictionary    ${ligs_neg}    LIG_with_fcoe_us_multiplie_ic
+    ${lig_body}    Build LIG body      ${body}
+    ${resp}    Fusion Api Create LIG    ${lig_body}
+    ${task}    Wait For Task    ${resp}    120s    2s
+    ${valDict}    Create Dictionary    errorCode=CRM_LUT_FCOE_PORTS_DO_NOT_ALL_BELONG_TO_SAME_SWITCH
+    ...                                message=When FCoE networks are present in an uplink set, the uplink ports must be selected from a single FCoE capable interconnect module.
+    Validate Response    ${task['taskErrors'][0]}    ${valDict}
+    Log    \nError:${task['taskErrors'][0]['errorCode']}    console=True
+
+TC_24_Try to remove LE with active server profile
+    [Documentation]    Try to remove LE with active server profile
+    [Tags]  24
+    Power off ALL servers
+    ${resp}    Fusion Api Delete Logical Enclosure    name=${LE}
+    ${task}    Wait For Task    ${resp}    120s    2s
+    ${valDict}    Create Dictionary    errorCode=LE_DELETE_ACTIVE_PROFILE_ERROR
+    ...                                message=Unable to delete this logical enclosure because it is hosting active server profiles.
+    Validate Response    ${task['taskErrors'][0]}    ${valDict}
+    Log    \nError:${task['taskErrors'][0]['errorCode']}    console=True
+
+    #Revert to a clean LE\LI for LI tests
+    Power off ALL servers    PressAndHold
+    Remove All Server Profiles
+
+TC_25_Try to add a new US in LI with 1 FCoE on Nitro that already has max FCoE networks (max is 32)
+    [Documentation]    Try to add a new US in LI with 1 FCoE on Nitro that already has max FCoE networks (max is 32)
+    [Tags]  25
+
+    Remove All uplinksets
+
+    ${uri}    Get LI URI    ${LI['name']}
+    Set Suite Variable    ${li_uri}    ${uri}
+    ${us}    Copy Dictionary    ${li_uplink_sets['us1_32fcoe']}
+    ${body}    Build US body    ${us}    ${li_uri}
+    ${resp}    Fusion Api Create Uplink Set    ${body}
+    Run Keyword If  '${resp['status_code']}' == '202'    Wait For Task2    ${resp}    5min    10    ELSE    Fail    Log    failed    console=True
+
+    ${us}    Copy Dictionary    ${li_uplink_sets['us_1_fcoe']}
+    ${body}    Build US body    ${us}    ${li_uri}
+    ${resp}    Fusion Api Create Uplink Set    ${body}
+    ${valDict}    Create Dictionary    status_code=${400}
+    ...                                errorCode=CRM_EXCEEDS_MAX_ALLOWED_FCOE_NETWORKS_PER_BAY
+    ...                                message=The interconnect in bay 3 has exceeded the maximum number of allowed FCoE networks.
+    Validate Response    ${resp}    ${valDict}
+    Log    \nError:${resp['errorCode']}    console=True
+
+TC_26_Try to add 1 FCoE network to an existing US that already has 32 FCoE networks
+    [Documentation]    Try to add 1 FCoE network to an existing US that already has 32 FCoE networks
+    [Tags]  26
+    ${resp}    Edit uplinkset    ${li_uplink_sets['us1_32fcoe']['name']}    ${li_uplink_sets['us1_33fcoe']}    ${LI['name']}
+    ${valDict}    Create Dictionary    errorCode=CRM_EXCEEDS_MAX_ALLOWED_FCOE_NETWORKS_PER_UPLINKSET
+    ...                                message=Too many FCoE networks have been specified for the uplink set.
+    Validate Response    ${resp}    ${valDict}
+    Log    \nError:${resp['errorCode']}    console=True
+
+TC_27_Remove an uplink port from US that has 32 FCoE networks
+    [Documentation]    Remove an uplink port from US that has 32 FCoE networks
+    [Tags]  27
+    ${resp}    Edit uplinkset    ${li_uplink_sets['us1_32fcoe']['name']}    ${li_uplink_sets['us1_remove_uplink_port']}    ${LI['name']}
+    Run Keyword If  '${resp['status_code']}' == '202'    Wait For Task2    ${resp}    15min    10    ELSE    Fail    Log    failed    console=True
+
+TC_28_Try to create a new FCoE US in LI that spans multiple interconnects
+    [Documentation]    Try to create a new FCoE US in LI that spans multiple interconnects
+    [Tags]  28
+    ${uri}    Get LI URI    ${LI['name']}
+    Set Suite Variable    ${li_uri}    ${uri}
+
+    ${us}    Copy Dictionary    ${li_uplink_sets['us_spans_2_ics']}
+    ${body}    Build US body    ${us}    ${li_uri}
+    ${resp}    Fusion Api Create Uplink Set    ${body}
+    ${valDict}    Create Dictionary    status_code=${400}
+    ...                                errorCode=CRM_LU_FCOE_PORTS_DO_NOT_ALL_BELONG_TO_SAME_SWITCH
+    ...                                message=When FCoE networks are present in an uplink set, the uplink ports must be selected from a single FCoE capable interconnect module.
+    Validate Response    ${resp}    ${valDict}
+    Log    \nError:${resp['errorCode']}    console=True
+
+TC_29_Try to create a new US with an ETHERNET network vlan Id 100 and FCoE network vlan Id 100
+    [Documentation]    Try to create a new US with an ETHERNET network vlan Id 100 and FCoE network vlan Id 100
+    [Tags]  29
+    ${us}    Copy Dictionary    ${li_uplink_sets['us_dup_vlanId']}
+    ${body}    Build US body    ${us}    ${li_uri}
+    ${resp}    Fusion Api Create Uplink Set    ${body}
+    ${valDict}    Create Dictionary    status_code=${400}
+    ...                                errorCode=CRM_DUPLICATE_VLAN_IDS_UPLINK_SET
+    ...                                message=Duplicate VLAN IDs are not allowed in the same uplink set.
+    Validate Response    ${resp}    ${valDict}
+    Log    \nError:${resp['errorCode']}    console=True
+
+TC_30_Edit LIG and Update from Group LI to bring back to initial setup
+    [Documentation]    Edit LIG and Update from Group LI to bring back to initial setup
+    [Tags]  30
+    ${body}    Get From Dictionary    ${ligs}    LIG
+    ${lig_body}    Create List    ${body}
+    ${resp}    Edit LIG    ${lig_body}
+    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp[0]}    5min    10    ELSE    Fail    Log    failed    console=True
+
+    Update Logical Interconnect from Group    ${LI}  ##Should be in dictionary format
+
+TC_31_Add a new ETHERNET US on Nitro that already has an FCoE US
+    [Documentation]    Add a new ETHERNET US on Nitro that already has an FCoE US
+    [Tags]  31
+    ${uri}    Get LI URI    ${LI['name']}
+    Set Suite Variable    ${li_uri}    ${uri}
+    ${us}    Copy Dictionary    ${li_uplink_sets['us-eth']}
+    ${body}    Build US body    ${us}    ${li_uri}
+    ${resp}    Fusion Api Create Uplink Set    ${body}
+    Run Keyword If  '${resp['status_code']}' == '202'    Wait For Task2    ${resp}    12min    10    ELSE    Fail    Log    failed    console=True
+
+
+TC_32_Edit the LI from the previous test, and add an ETHERNET networks to all of the existing US
+    [Documentation]    Edit the LI from the previous test, and add an ETHERNET networks to all of the existing US
+    [Tags]  32
+    ${resp}    Edit uplinkset    ${li_uplink_sets['US1']['name']}    ${li_uplink_sets['US_FcoE_enet1']}    ${LI['name']}
+    Run Keyword If  '${resp['status_code']}' == '202'    Wait For Task2    ${resp}    15min    10    ELSE    Fail    Log    failed    console=True
+
+    ${resp}    Edit uplinkset    ${li_uplink_sets['US2']['name']}    ${li_uplink_sets['US_FcoE_enet2']}    ${LI['name']}
+    Run Keyword If  '${resp['status_code']}' == '202'    Wait For Task2    ${resp}    15min    10    ELSE    Fail    Log    failed    console=True
+
+TC_33_Try to create an Uplink set with more than 33 FcoE in LI
+    [Documentation]    Try to create an Uplink set with more than 33 FcoE in LI
+    [Tags]  33
+
+    ${uri}    Get LI URI    ${LI['name']}
+    Set Suite Variable    ${li_uri}    ${uri}
+    ${us}    Copy Dictionary    ${li_uplink_sets['us1_33fcoe']}
+    ${body}    Build US body    ${us}    ${li_uri}
+    ${resp}    Fusion Api Create Uplink Set    ${body}
+    ${valDict}    Create Dictionary    status_code=${400}
+    ...                                errorCode=CRM_EXCEEDS_MAX_ALLOWED_FCOE_NETWORKS_PER_UPLINKSET
+    ...                                message=Too many FCoE networks have been specified for the uplink set.
+    Validate Response    ${resp}    ${valDict}
+    Log    \nError:${resp['errorCode']}    console=True
+
+TC_34_Update US2 to have Eth102 and FcoE 1003 for BFS
+    [Documentation]    Update US2 to have Eth102 and FcoE 1003 for BFS
+    [Tags]  34
+
+    Remove All uplinksets
+
+    ${uri}    Get LI URI    ${LI['name']}
+    Set Suite Variable    ${li_uri}    ${uri}
+    ${us}    Copy Dictionary    ${li_uplink_sets['US2']}
+    ${body}    Build US body    ${us}    ${li_uri}
+    ${resp}    Fusion Api Create Uplink Set    ${body}
+    Run Keyword If  '${resp['status_code']}' == '202'    Wait For Task2    ${resp}    5min    10    ELSE    Fail    Log    failed    console=True
+
+
+TC_35_Edit the LIG and create BFS US on Nitro only, update from group, Create 3 server profile with FcoE connection (2 profile has BFS[1 Win OS + 1 Esxi OS] connection) and pass traffic on all the servers
+    [Documentation]    Edit the LIG and create BFS US on Nitro only, update from group, Create 3 server profile with FcoE connection (2 profile has BFS[1 Win OS + 1 Esxi OS] connection) and pass traffic on all the servers
+    [Tags]  35
+    ${body}    Get From Dictionary    ${ligs}    LIG1
+    ${lig_body}    Create List    ${body}
+    ${resp}    Edit LIG    ${lig_body}
+    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp[0]}    5min    10    ELSE    Fail    Log    failed    console=True
+
+    Update Logical Interconnect from Group    ${LI}  ##Should be in dictionary format
+
+    ${resp}    Add Server Profiles from variable   ${server_profiles}
+    ${l}    Get Length    ${resp}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \    Run Keyword If  '${resp[${x}]['status_code']}' == '202'    Wait For Task2    ${resp[${x}]}    20m    1m    ELSE    Fail    Log    failed    console=True
+    \    Power on server    ${server_profiles[${x}]['serverHardwareUri']}
+    Sleep    10min
+
+    Validate Windows BFS Disk Size    ${ilo_details[1]}    ${server_credentials[1]}
+    Execute Traffic And Validate Windows LUN    ${ilo_details}    ${server_credentials}    ${win_lun_count}
+
+    Wait For Appliance To Become Pingable    ${server_BFS['ip']}
+    ${lun_count}    Get ESXI LUN Count    ${server_BFS}    ${cmd1}
+    Run Keyword If  '${lun_count}' == '${esxi_lun_BFS}'    Log    \n Expected LUN disks are available in BFS     console=True    ELSE    Fail    Log    Failed    console=True
+
+TC_36_Delete an FCoE network that is used in an US but not in a SP
+    [Documentation]    Delete an FCoE network that is used in an US but not in a SP
+    [Tags]  36
+
+    ${resp}    Fusion Api Delete FCoE Network     ${fcoe_100[0]['name']}
+    Run Keyword If  '${resp['status_code']}' == '202'    Wait For Task2    ${resp}    5min    10    ELSE    Fail    Log    failed    console=True
+
+TC_37_Change Bandwidth settings for an existing FCoE network that is used in an active SP
+    [Documentation]    Change Bandwidth settings for an existing FCoE network that is used in an active SP
+    [Tags]  37
+    ${net}    Fusion Api Get FCoE Networks    param=?filter="'name'=='fcoe-1003'"
+    ${fcoe_uri}    Get From Dictionary    ${net['members'][0]}    uri
+    ${ct_uri}    Get From Dictionary    ${net['members'][0]}    connectionTemplateUri
+    ${ct}    Fusion Api Get connection templates    uri=${ct_uri}
+    # change max bandwidth from 10000 to 8000
+    ${body}    Create dictionary    type=connection-template
+    Set to Dictionary    ${body}    name    ${ct['name']}
+    Set to Dictionary    ${body}    bandwidth    ${ct['bandwidth']}
+    Set to Dictionary    ${body['bandwidth']}    maximumBandwidth    ${8000}
+    ${resp}    Fusion Api Update connection template    body=${body}    uri=${ct_uri}
+    Sleep    1min
+    ${resp}    Fusion Api Get Connections
+    # check that the bandwidth is updated in the connection
+    ${l}    Get Length    ${resp['members']}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    ${networkResourceUri}    Get From Dictionary    ${resp['members'][${x}]}    networkResourceUri
+    \    ${conn}    Run Keyword If    '${networkResourceUri}' == '${fcoe_uri}'    Get From List    ${resp['members']}    ${x}
+    \    Exit For Loop If    ${conn} is not ${null}
+    ${max}    Get From dictionary    ${conn['connectionBandwidth']}    maximum
+    ${result}    Should Be Equal As Integers    ${max}    ${8000}
+    #Log    Sleeping 5 min to allow profile update to complete - should not have to do this!    WARN
+    Sleep    5 min
+
+# Reverting back the Max bandwidth
+    ${net}    Fusion Api Get FCoE Networks    param=?filter="'name'=='fcoe-1003'"
+    ${fcoe_uri}    Get From Dictionary    ${net['members'][0]}    uri
+    ${ct_uri}    Get From Dictionary    ${net['members'][0]}    connectionTemplateUri
+    ${ct}    Fusion Api Get connection templates    uri=${ct_uri}
+    # change max bandwidth from 8000 to 10000
+    ${body}    Create dictionary    type=connection-template
+    Set to Dictionary    ${body}    name    ${ct['name']}
+    Set to Dictionary    ${body}    bandwidth    ${ct['bandwidth']}
+    Set to Dictionary    ${body['bandwidth']}    maximumBandwidth    ${10000}
+    ${resp}    Fusion Api Update connection template    body=${body}    uri=${ct_uri}
+    Sleep    1min
+    ${resp}    Fusion Api Get Connections
+    # check that the bandwidth is updated in the connection
+    ${l}    Get Length    ${resp['members']}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    ${networkResourceUri}    Get From Dictionary    ${resp['members'][${x}]}    networkResourceUri
+    \    ${conn}    Run Keyword If    '${networkResourceUri}' == '${fcoe_uri}'    Get From List    ${resp['members']}    ${x}
+    \    Exit For Loop If    ${conn} is not ${null}
+    ${max}    Get From dictionary    ${conn['connectionBandwidth']}    maximum
+    ${result}    Should Be Equal As Integers    ${max}    ${10000}
+    #Log    Sleeping 5 min to allow profile update to complete - should not have to do this!    WARN
+    Sleep    5 min
+
+TC_38_Remove/Re-add FCoE Uplink ports-Edit LIG and remove/add FcoE uplink ports and followed by UFG in LI, Verify BFS and LUN
+    [Documentation]    Remove/Re-add FCoE Uplink ports-Edit LIG and remove/add FcoE uplink ports and followed by UFG in LI, Verify BFS and LUN
+    [Tags]  38
+
+    :FOR    ${x}    IN RANGE    0   2
+    #\    Power off Server    ${server_profiles[1]['serverHardwareUri']}
+    \    Log    Removing uplink ports in LIG    console=True
+    \    ${resp}    Edit LIG    ${ligs_remove_add_uplinkport[${x}]}
+    \    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp}    5min    10    ELSE    Fail    Log    failed    console=True
+
+    \    Update Logical Interconnect from Group    ${LI}  ##Should be in dictionary format
+
+    # Verifying alerts in Interconnects and profiles
+    \    Verify Alerts    ${alertstate_ICM}    ${alertType_ICM}    ${interconnect_alert}
+    \    Verify Alerts    ${alertstate_profiles}    ${alertType_profiles}    ${profile_alert}
+
+    # Passing traffic and verifying LUN in both local and BFS servers - Failover - After removing one port traffic is flowing through another port
+    \    Validate Windows BFS Disk Size    ${ilo_details[1]}    ${server_credentials[1]}
+    \    Execute Traffic And Validate Windows LUN    ${ilo_details}    ${server_credentials}    ${win_lun_count}
+
+    \    Log    Adding uplink ports in LIG    console=True
+    \    ${body}    Get From Dictionary    ${ligs}    LIG
+    \    ${lig_body}    Create List    ${body}
+    \    ${resp}    Edit LIG    ${lig_body}
+    \    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp}    5min    10    ELSE    Fail    Log    failed    console=True
+
+    \    Update Logical Interconnect from Group    ${LI}
+
+    # Passing traffic and verifying LUN in both local and BFS servers - After adding port, it is regained to original
+    \    Validate Windows BFS Disk Size    ${ilo_details[1]}    ${server_credentials[1]}
+    \    Execute Traffic And Validate Windows LUN    ${ilo_details}    ${server_credentials}    ${win_lun_count}
+
+    \    Wait For Appliance To Become Pingable    ${server_BFS['ip']}
+
+    \    ${lun_count}    Get ESXI LUN Count    ${server_BFS}    ${cmd1}
+    \    Run Keyword If  '${lun_count}' == '${esxi_lun_BFS}'    Log    Expected LUN disks are available in BFS     console=True    ELSE    Fail    Log    Failed    console=True
+
+
+
+TC_39_Disable/Enable uplink ports – Disable/ enable uplink ports in Interconnects and verify BFS and LUN
+    [Documentation]    Disable/Enable uplink ports – Disable/ enable uplink ports in Interconnects and verify BFS and LUN
+    [Tags]  39
+
+    ${len}    Get Length    ${ICM_uris}
+    :FOR    ${x}    IN RANGE    0   ${len}
+    \    ${Resp}    Get IC Port    ${ICM_uris[${x}]}    ${port_name[${x}]}
+    \    ${enabled_portStatusReason} =    Set Variable If    '${Resp['portStatus']}' == 'Linked'    ActiveFcoeActive    Unknown
+    \    ${enabled_portStatus} =    Set Variable If    '${Resp['portStatus']}' == 'Linked'    Linked    Unlinked
+
+    \    Log    Disabling the uplink port    console=True
+    \    Set to Dictionary   ${Resp}   enabled    False
+    \    ${Return}    Update IC Port    ${Interconnect_name[${x}]}    ${port_name[${x}]}    ${Resp}
+    \    Wait Until Keyword Succeeds    5 min    20s      IC reached state    ${ICM_uris[${x}]}    Configured
+    \    Log    Verifying if Port is disabled    console=True
+    \    Sleep    200s
+    \    ${Disabled_Resp}    Get IC Port    ${ICM_uris[${x}]}    ${port_name[${x}]}
+    \    Should be Equal As Strings    ${Disabled_Resp['portStatusReason']}    AdminDisabled
+
+    # Verifying alerts in Interconnects and profiles
+    \    Verify Alerts    ${alertstate_ICM}    ${alertType_ICM}    ${interconnect_alert}
+    \    Verify Alerts    ${alertstate_profiles}    ${alertType_profiles}    ${profile_alert}
+
+    # Passing traffic and verifying LUN in both local and BFS servers - Failover - After Disabling one fcoe uplink port traffic is flowing through another por
+    \    Validate Windows BFS Disk Size    ${ilo_details[1]}    ${server_credentials[1]}
+    \    Execute Traffic And Validate Windows LUN    ${ilo_details}    ${server_credentials}    ${win_lun_count}
+
+    \    Log    Enabling the uplink port    console=True
+    \    ${Resp}    Get IC Port    ${ICM_uris[${x}]}    ${port_name[${x}]}
+    \    Set to Dictionary   ${Resp}   enabled    True
+    \    ${Return}    Update IC Port    ${Interconnect_name[${x}]}    ${port_name[${x}]}    ${Resp}
+    \    Wait Until Keyword Succeeds    5 min    20s      IC reached state    ${ICM_uris[${x}]}    Configured
+    \    Log    Verifying if Port is Enabled    console=True
+    \    Sleep    240s
+    \    ${Enabled_Resp}    Get IC Port    ${ICM_uris[${x}]}    ${port_name[${x}]}
+    \    Should be Equal As Strings    ${Enabled_Resp['portStatusReason']}    ${enabled_portStatusReason}
+    \    Should be Equal As Strings    ${Enabled_Resp['portStatus']}    ${enabled_portStatus}
+
+    # Passing traffic and verifying LUN in both local and BFS servers - After enabling fcoe port, it is regained to original
+    \    Validate Windows BFS Disk Size    ${ilo_details[1]}    ${server_credentials[1]}
+    \    Execute Traffic And Validate Windows LUN    ${ilo_details}    ${server_credentials}    ${win_lun_count}
+    \    Wait For Appliance To Become Pingable    ${server_BFS['ip']}
+
+    \    ${lun_count}    Get ESXI LUN Count    ${server_BFS}    ${cmd1}
+    \    Run Keyword If  '${lun_count}' == '${esxi_lun_BFS}'    Log    Expected LUN disks are available in BFS     console=True    ELSE    Fail    Log    Failed    console=True
+
+
+TC_40_Remove/Re-add Networks – Remove networks in Networks page, Verify LUN, Add networks in Networks page, Edit LIG to add a network and perform UFG in LI and reapply profile
+    [Documentation]    Remove/Re-add Networks – Remove networks in Networks page, Verify LUN, Add networks in Networks page, Edit LIG to add a network and perform UFG in LI and reapply profile
+    [Tags]  40
+
+
+    ${len}    Get Length    ${fcoe_BFS}
+    :FOR    ${x}    IN RANGE    0   ${len}
+    \    ${resp}    Fusion Api Delete FCoE Network     ${fcoe_BFS[${x}][0]['name']}
+    \    Run Keyword If  '${resp['status_code']}' == '202'    Wait For Task2    ${resp}    5min    10    ELSE    Fail    Log    failed    console=True
+
+    \    Verify Alerts    ${alertstate_ICM}    ${alertType_ICM}    ${interconnect_alert}
+    \    Verify Alerts    ${alertstate_profiles}    ${alertType_profiles}    ${profile_alert}
+
+    # Passing traffic and verifying LUN in both local and BFS servers - Failover - After removing one fcoe network traffic is flowing through another fcoe network
+    \    Validate Windows BFS Disk Size    ${ilo_details[1]}    ${server_credentials[1]}
+    \    Execute Traffic And Validate Windows LUN    ${ilo_details}    ${server_credentials}    ${win_lun_count}
+
+    \    ${resp}    Add FCoE Networks from variable    ${fcoe_BFS[${x}]}
+    \    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp}    ELSE    Fail    Log    Failed    console=True
+
+    \    Log    Adding fcoe network in LIG    console=True
+    \    ${body}    Get From Dictionary    ${ligs}    LIG
+    \    ${lig_body}    Create List    ${body}
+    \    ${resp}    Edit LIG    ${lig_body}
+    \    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp}    5min    10    ELSE    Fail    Log    failed    console=True
+
+    \    Update Logical Interconnect from Group    ${LI}
+
+    \    Power off ALL servers    PressAndHold
+    \    ${resp}    Edit Server Profiles from variable   ${server_profiles}
+    \    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp[0]}    20m    1m    ELSE    Fail    Log    failed    console=True
+    \    Power on server    ${server_profiles[0]['serverHardwareUri']}
+    \    Run Keyword If  '${resp[1]['status_code']}' == '202'    Wait For Task2    ${resp[1]}    20m    1m    ELSE    Fail    Log    failed    console=True
+    \    Power on server    ${server_profiles[1]['serverHardwareUri']}
+    \    Run Keyword If  '${resp[2]['status_code']}' == '202'    Wait For Task2    ${resp[2]}    20m    1m    ELSE    Fail    Log    failed    console=True
+    \    Power on server    ${server_profiles[2]['serverHardwareUri']}
+    \    Sleep    10min
+
+    # Passing traffic and verifying LUN in both local and BFS servers - After adding fcoe network, it is regained to original
+    \    Validate Windows BFS Disk Size    ${ilo_details[1]}    ${server_credentials[1]}
+    \    Execute Traffic And Validate Windows LUN    ${ilo_details}    ${server_credentials}    ${win_lun_count}
+    \    Wait For Appliance To Become Pingable    ${server_BFS['ip']}
+
+    \    ${lun_count}    Get ESXI LUN Count    ${server_BFS}    ${cmd1}
+    \    Run Keyword If  '${lun_count}' == '${esxi_lun_BFS}'    Log    Expected LUN disks are available in BFS     console=True    ELSE    Fail    Log    Failed    console=True
+
+
+
+TC_41_Remove/Re-add Networks – Edit LIG and remove/add FcoE networks and followed by UFG in LI, Verify BFS and LUN
+    [Documentation]    Remove/Re-add Networks – Edit LIG and remove/add FcoE networks and followed by UFG in LI, Verify BFS and LUN
+    [Tags]  41
+
+
+    :FOR    ${x}    IN RANGE    0   2
+    \    Log    Removing fcoe network in LIG    console=True
+    \    ${resp}    Edit LIG    ${ligs_remove_add_network_in_US[${x}]}
+    \    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp}    5min    10    ELSE    Fail    Log    failed    console=True
+
+    \    Update Logical Interconnect from Group    ${LI}  ##Should be in dictionary format
+
+    \    Verify Alerts    ${alertstate_ICM}    ${alertType_ICM}    ${interconnect_alert}
+    \    Verify Alerts    ${alertstate_profiles}    ${alertType_profiles}    ${profile_alert}
+
+    # Passing traffic and verifying LUN in both local and BFS servers - Failover - After removing one fcoe network traffic is flowing through another fcoe network
+    \    Validate Windows BFS Disk Size    ${ilo_details[1]}    ${server_credentials[1]}
+    \    Execute Traffic And Validate Windows LUN    ${ilo_details}    ${server_credentials}    ${win_lun_count}
+
+    \    Log    Adding fcoe network in LIG    console=True
+    \    ${body}    Get From Dictionary    ${ligs}    LIG
+    \    ${lig_body}    Create List    ${body}
+    \    ${resp}    Edit LIG    ${lig_body}
+    \    Run Keyword If  '${resp[0]['status_code']}' == '202'    Wait For Task2    ${resp}    5min    10    ELSE    Fail    Log    failed    console=True
+
+    \    Update Logical Interconnect from Group    ${LI}
+    \    Sleep    5min
+
+    # Passing traffic and verifying LUN in both local and BFS servers - After adding fcoe network, it is regained to original
+    \    Validate Windows BFS Disk Size    ${ilo_details[1]}    ${server_credentials[1]}
+    \    Execute Traffic And Validate Windows LUN    ${ilo_details}    ${server_credentials}    ${win_lun_count}
+    \    Wait For Appliance To Become Pingable    ${server_BFS['ip']}
+
+    \    ${lun_count}    Get ESXI LUN Count    ${server_BFS}    ${cmd1}
+    \    Run Keyword If  '${lun_count}' == '${esxi_lun_BFS}'    Log    Expected LUN disks are available in BFS     console=True    ELSE    Fail    Log    Failed    console=True
+
+
+TC_42_Power off /on Nitro Module and verify traffic for FCoE network
+    [Documentation]    Power off /on Nitro Module and verify traffic for FCoE network
+    [Tags]  42
+
+    ${len}    Get Length    ${Interconnect_dto}
+    :FOR    ${x}    IN RANGE    0   ${len}
+    \    Patch Interconnect     ${Interconnect_dto[${x}]}    op=replace  path=/powerState  value=Off  timeout=60  interval=10
+    \    Wait Until Keyword Succeeds    10 min    20s      IC reached state    ${ICM_uris[${x}]}    Maintenance
+    \    Sleep    100sec
+
+    # Passing traffic and verifying LUN in server - Failover - While Powering off one Nitro ICM traffic is flowing through another Nitro ICM
+    \    Validate Windows BFS Disk Size    ${ilo_details[1]}    ${server_credentials[1]}
+    \    Execute Traffic And Validate Windows LUN    ${ilo_details}    ${server_credentials}    ${win_lun_count}
+
+    \    Patch Interconnect     ${Interconnect_dto[${x}]}    op=replace  path=/powerState  value=On  timeout=60  interval=10
+    \    Wait Until Keyword Succeeds    20 min    20s      IC reached state    ${ICM_uris[${x}]}    Configured
+    \    Sleep    100sec
+
+    # Passing traffic and verifying LUN in both local and BFS servers - After power on Nitro ICM, it is regained to original
+    \    Validate Windows BFS Disk Size    ${ilo_details[1]}    ${server_credentials[1]}
+    \    Execute Traffic And Validate Windows LUN    ${ilo_details}    ${server_credentials}    ${win_lun_count}
+    \    Wait For Appliance To Become Pingable    ${server_BFS['ip']}
+
+
+    \    ${lun_count}    Get ESXI LUN Count    ${server_BFS}    ${cmd1}
+    \    Run Keyword If  '${lun_count}' == '${esxi_lun_BFS}'    Log    Expected LUN disks are available in BFS     console=True    ELSE    Fail    Log    Failed    console=True
+
+
+TC_43_Reset Nitro ICM - verify traffic for FCoE network
+    [Documentation]    Reset Nitro ICM - verify traffic for FCoE network
+    [Tags]  43
+
+    ${len}    Get Length    ${Interconnect_dto}
+    :FOR    ${x}    IN RANGE    0   ${len}
+    \    Log    Reseting interconnect     console=True
+
+    \    Patch Interconnect     ${Interconnect_dto[${x}]}    op=replace  path=/deviceResetState  value=Reset  timeout=600  interval=10
+    \    Sleep    30sec
+
+    # Passing traffic and verifying LUN in server - Failover - After resetting one Nitro ICM traffic is flowing through another Nitro ICM
+    \    Validate Windows BFS Disk Size    ${ilo_details[1]}    ${server_credentials[1]}
+    \    Execute Traffic And Validate Windows LUN    ${ilo_details}    ${server_credentials}    ${win_lun_count}
+
+    \    Wait Until Keyword Succeeds     5 min   10s      Get Interconnect stackingDomainRole    ${Interconnect_name[0]}    ${IC_stacking_domain_role[${x}][0]}
+    \    Wait Until Keyword Succeeds     5 min   10s      Get Interconnect stackingDomainRole    ${Interconnect_name[1]}    ${IC_stacking_domain_role[${x}][1]}
+
+    \    Verify Alerts    ${alertstate_ICM}    ${alertType_ICM}    ${interconnect_alert}
+    \    Verify Alerts    ${alertstate_profiles}    ${alertType_profiles}    ${profile_alert}
+
+    # Passing traffic and verifying LUN in both local and BFS servers - After reset Nitro ICM, it is regained to original
+    \    Sleep    2min
+    \    Validate Windows BFS Disk Size    ${ilo_details[1]}    ${server_credentials[1]}
+    \    Execute Traffic And Validate Windows LUN    ${ilo_details}    ${server_credentials}    ${win_lun_count}
+    \    Wait For Appliance To Become Pingable    ${server_BFS['ip']}
+
+    \    ${lun_count}    Get ESXI LUN Count    ${server_BFS}    ${cmd1}
+    \    Run Keyword If  '${lun_count}' == '${esxi_lun_BFS}'    Log    Expected LUN disks are available in BFS     console=True    ELSE    Fail    Log    Failed    console=True
+
+TC_44_Efuse Remove / Insert Nitro Module and verify traffic for FCoE network
+    [Documentation]    Efuse Remove / Insert Nitro Module and verify traffic for FCoE network
+    [Tags]  44
+
+
+    ${len}    Get Length    ${ICM_uris}
+    :FOR    ${x}    IN RANGE    0   ${len}
+
+    \    Get EM IP    ${ENCs[${x}]}
+    \    Get EM Token    ${ENCs[${x}]}
+    \    Efuse ICM    EFuseOn    ${bay_numbers[${x}]}
+    \    Wait Until Keyword Succeeds    10 min    20s      IC reached state    ${ICM_uris[${x}]}    Absent
+
+    \    Verify Alerts    ${alertstate_ICM}    ${alertType_ICM}    ${interconnect_alert}
+    \    Verify Alerts    ${alertstate_profiles}    ${alertType_profiles}    ${profile_alert}
+
+    # Passing traffic and verifying LUN in server - Failover - After removing one Nitro ICM traffic is flowing through another Nitro ICM
+    \    Validate Windows BFS Disk Size    ${ilo_details[1]}    ${server_credentials[1]}
+    \    Execute Traffic And Validate Windows LUN    ${ilo_details}    ${server_credentials}    ${win_lun_count}
+
+    \    Get EM IP    ${ENCs[${x}]}
+    \    Get EM Token    ${ENCs[${x}]}
+    \    Efuse ICM    EFuseOff    ${bay_numbers[${x}]}
+    \    Wait Until Keyword Succeeds    20 min    20s      IC reached state    ${ICM_uris[${x}]}    Configured
+    \    Sleep    120sec
+
+    # Passing traffic and verifying LUN in both local and BFS servers - After adding Nitro ICM, it is regained to original
+    \    Validate Windows BFS Disk Size    ${ilo_details[1]}    ${server_credentials[1]}
+    \    Execute Traffic And Validate Windows LUN    ${ilo_details}    ${server_credentials}    ${win_lun_count}
+    \    Wait For Appliance To Become Pingable    ${server_BFS['ip']}
+
+    \    ${lun_count}    Get ESXI LUN Count    ${server_BFS}    ${cmd1}
+    \    Run Keyword If  '${lun_count}' == '${esxi_lun_BFS}'    Log    Expected LUN disks are available in BFS     console=True    ELSE    Fail    Log    Failed    console=True
+

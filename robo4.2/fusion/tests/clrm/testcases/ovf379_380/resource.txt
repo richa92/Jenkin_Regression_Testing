@@ -1,0 +1,473 @@
+*** Settings ***
+Library                         FusionLibrary
+Resource                        ../../../../Resources/api/fusion_api_resource.txt
+Resource                        ../../support_files/clrm_common.txt
+
+*** Variables ***
+${file_location}    r"E:\Shares\testrepo\Logs"
+
+*** Keywords ***
+Get Cluster with Consistent state
+    [Arguments]  ${Cluster_name}
+    Set Log Level    Trace
+    Log    Function called    console=True
+    Connect To VI Server   ${VSPHERE_IP}    ${VSPHERE_USERNAME}    ${VSPHERE_PASSWORD}
+    Fusion Api Login Appliance  ${OV_IP}     ${OV_credentials}
+    ${cp_details}   ${count}=    Get Cluster Profile    ${Cluster_name}
+    Should not be equal    ${count}     0       No Cluster found in the appliance
+    Set Suite Variable      ${Cluster_with_prereq}      ${NONE}
+    Should Be Equal As Strings      ${cp_details['complianceState']}      Consistent       msg="Cluster is not in consistent sate"
+    ${hostprofile_count}=     get length    '${cp_details['hypervisorHostProfileUris']}'
+    should not be equal as integers     ${hostprofile_count}    0    msg="No host porfiles in the cluster"
+    ${Status}=     Check Host profile Ip Settings      ${cp_details}
+    should be true      ${status}       msg=Host doesnot of the IP Assigned
+    Set Suite Variable      ${Cluster_with_prereq}      ${cp_details}
+
+Remove Connection from SP
+    [Arguments]     ${server_profile_uri}
+    ${server_profile_response}=     Fusion Api Get Server Profiles      uri=${server_profile_uri}
+    Power Off Server By Uri     ${server_profile_response['serverHardwareUri']}
+    ${Connections}=     Get From Dictionary     ${server_profile_response['connectionSettings']}     connections
+    ${connections_length}=     Get length      ${Connections}
+    :For    ${index}   IN RANGE    ${connections_length}
+    \   Run keyword if      '${Connections[${index}]['boot']['priority']}' != 'NotBootable'    Continue for loop
+    \   ${resp}=    Fusion Api Get Ethernet Networks      ${Connections[${index}]['networkUri']}
+    \   Run keyword if      '${resp['category']}' != 'ethernet-networks'    Continue for loop
+    \   Run keyword if      '${resp['purpose']}' != 'Management'    run keywords
+    \   ...     Remove from list      ${Connections}    ${index}      AND
+    \   ...     Exit for loop
+    Remove from dictionary      ${server_profile_response}      headers     status_code
+    ${response}=    Fusion Api Edit Server Profile      body=${server_profile_response}     uri=${server_profile_response['uri']}
+    Wait For Task2  ${response}  300  5
+    Power On Server By Uri      ${server_profile_response['serverHardwareUri']}
+
+Add Connection to SP
+    [Arguments]    ${server_profile_uri}    ${new_net_name}
+    ${net_uri} =       Get Ethernet URI     ${new_net_name}
+    ${server_profile_response}=     Fusion Api Get Server Profiles      uri=${server_profile_uri}
+    Power Off Server By Uri     ${server_profile_response['serverHardwareUri']}
+    ${Connections}=     Get From Dictionary     ${server_profile_response['connectionSettings']}     connections
+    ${Additional_network}=     Create Dictionary     networkUri=${net_uri}
+    Append to list      ${Connections}      ${Additional_network}
+    Remove from dictionary      ${server_profile_response}      headers     status_code
+    ${spt_edit_response}=    Fusion Api Edit Server Profile      body=${server_profile_response}     uri=${server_profile_response['uri']}
+    Wait For Task2  ${spt_edit_response}  300  5
+    Log    Waiting for the cluster to became Inconsistent,Wait time is for 5 min maximum
+    Power On Server By Uri      ${server_profile_response['serverHardwareUri']}
+
+Update Connection Bandwidth in SP
+    [Arguments]    ${server_profile_uri}
+    ${server_profile_response}=     Fusion Api Get Server Profiles      uri=${server_profile_uri}
+    ${Connections}=     Get From Dictionary     ${server_profile_response['connectionSettings']}     connections
+    :For    ${connection}   in      @{Connections}
+    \   ${resp}=    Fusion Api Get Ethernet Networks      ${connection['networkUri']}
+    \   Run keyword if      '${resp['category']}' != 'ethernet-networks'    Continue for loop
+    \   Run keyword if      '${resp['purpose']}' == 'FaultTolerance'    run keywords
+    \   ...     set to Dictionary      ${connection}      requestedMbps=2000     AND
+    \    Run keyword if      '${resp['purpose']}' == 'VMMigration'    run keywords
+    \   ...     set to Dictionary      ${connection}      requestedMbps=2000     AND
+    \   Run keyword if      '${resp['purpose']}' == 'Management'    run keywords
+    \   ...     set to Dictionary      ${connection}      requestedMbps=1500     AND
+    \   ...     Exit for loop
+    Remove from dictionary      ${server_profile_response}      headers     status_code
+    ${spt_edit_response}=    Fusion Api Edit Server Profile      body=${server_profile_response}     uri=${server_profile_response['uri']}
+    Wait For Task2  ${spt_edit_response}  300  5
+    Log    Waiting for the cluster to became Inconsistent,Wait time is for 5 min maximum
+
+
+Update Connection in SPT
+    [Arguments]         ${SPT_uri}      ${new_net_name}
+    ${net_uri} =       Get Ethernet URI     ${new_net_name}
+    ${spt_response}=    Fusion Api Get Server Profile Templates     uri=${SPT_uri}
+    Remove from dictionary      ${spt_response}      headers    status_code
+    ${Connections}=     Get From Dictionary     ${spt_response['connectionSettings']}     connections
+    :For    ${connection}   in      @{Connections}
+    \   Run keyword if      '${connection['boot']['priority']}' != 'NotBootable'    Continue for loop
+    \   ${resp}=    Fusion Api Get Ethernet Networks      ${connection['networkUri']}
+    \   Run keyword if      '${resp['category']}' != 'ethernet-networks'    Continue for loop
+    \   Run keyword if      '${resp['purpose']}' != 'Management'    run keywords
+    \   ...     set to Dictionary      ${connection}      networkUri=${net_uri}     AND
+    \   ...     Exit for loop
+    ${spt_edit_response}=    Fusion Api Edit Server Profile Template     ${spt_response}     uri=${Cluster_with_prereq['hypervisorHostProfileTemplate']['serverProfileTemplateUri']}
+    Wait For Task2  ${spt_edit_response}  300  5
+
+Add Ethernet Connection to SPT
+    [Arguments]         ${SPT_uri}      ${new_net_name}
+    ${net_uri} =       Get Ethernet URI     ${new_net_name}
+    ${spt_response}=    Fusion Api Get Server Profile Templates     uri=${SPT_uri}
+    Remove from dictionary      ${spt_response}      headers       status_code
+    ${Connections}=     Get From Dictionary     ${spt_response['connectionSettings']}     connections
+    ${Additional_network}=     Create Dictionary     networkUri=${net_uri}
+    Append to list      ${Connections}      ${Additional_network}
+    ${spt_edit_response}=    Fusion Api Edit Server Profile Template     ${spt_response}     uri=${Cluster_with_prereq['hypervisorHostProfileTemplate']['serverProfileTemplateUri']}
+    Wait For Task2  ${spt_edit_response}  300  5
+    Log    Waiting for the cluster to became Inconsistent,Wait time is for 5 min maximum
+
+Remove Ethernet Connection from SPT
+    [Arguments]      ${SPT_uri}      ${new_net_name}
+    ${net_uri} =       Get Ethernet URI     ${new_net_name}
+    ${spt_response}=    Fusion Api Get Server Profile Templates     uri=${SPT_uri}
+    Remove from dictionary      ${spt_response}      headers       status_code
+    ${Connections}=     Get From Dictionary     ${spt_response['connectionSettings']}     connections
+    ${connections_length}=     Get length      ${Connections}
+    :For    ${index}   IN RANGE    ${connections_length}
+    \   Run keyword if      '${Connections[${index}]['networkUri']}' == '${net_uri}'    run keywords
+    \   ...     Remove from list      ${Connections}    ${index}      AND
+    \   ...     Exit for loop
+    ${Connections}=     Get From Dictionary     ${spt_response['connectionSettings']}     connections
+    ${spt_edit_response}=    Fusion Api Edit Server Profile Template     ${spt_response}     uri=${Cluster_with_prereq['hypervisorHostProfileTemplate']['serverProfileTemplateUri']}
+    Wait For Task2  ${spt_edit_response}  300  5
+    Log    Waiting for the cluster to became Inconsistent,Wait time is for 5 min maximum
+
+Add Volume to SPT
+    [Arguments]         ${SPT_uri}      ${new_volume}
+    ${vol_uri} =       Get Storage Volume URI     ${new_volume}
+    ${spt_response}=    Fusion Api Get Server Profile Templates     uri=${SPT_uri}
+    Remove from dictionary      ${spt_response}      headers    status_code
+    ${volumeAttachments}=     Get From Dictionary     ${spt_response['sanStorage']}     volumeAttachments
+    ${Additiomal_volume}=   Create Dictionary       volumeUri=${vol_uri}    lunType=Auto
+    Append to list      ${volumeAttachments}    ${Additiomal_volume}
+    ${spt_edit_response}=    Fusion Api Edit Server Profile Template     ${spt_response}     uri=${Cluster_with_prereq['hypervisorHostProfileTemplate']['serverProfileTemplateUri']}
+    Wait For Task2  ${spt_edit_response}  300  5
+
+Remove Volume to SPT
+    [Arguments]         ${SPT_uri}      ${volume}
+    ${vol_uri} =       Get Storage Volume URI     ${volume}
+    ${spt_response}=    Fusion Api Get Server Profile Templates     uri=${SPT_uri}
+    Remove from dictionary      ${spt_response}      headers    status_code
+    ${volumeAttachments}=     Get From Dictionary     ${spt_response['sanStorage']}     volumeAttachments
+    ${count}=  Get Length    ${volumeAttachments}
+    :For    ${index}    In Range     ${count}
+    \   Run keyword if    '${volumeAttachments[${index}]['volumeUri']}' == '${vol_uri}'   Run keywords
+    \   ...     Remove From List    ${volumeAttachments}     ${index}        AND
+    \   ...     Exit for loop
+    ${spt_edit_response}=    Fusion Api Edit Server Profile Template     ${spt_response}     uri=${Cluster_with_prereq['hypervisorHostProfileTemplate']['serverProfileTemplateUri']}
+    Wait For Task2  ${spt_edit_response}  300  5
+
+Check Host profile Ip Settings
+    [Documentation]     Cheks if IP has set to the host for the cluster selected
+    [Arguments]     ${cluster_with_consistency}
+    ${host_profiles}=       Get from Dictionary    ${cluster_with_consistency}    hypervisorHostProfileUris
+    :For    ${host_profile}     In      @{host_profiles}
+    \     ${host_profile_detail}=     Get Host Profile by Uri     ${host_profile}
+    \     return from keyword if    ${host_profile_detail['ipSettings']} == ${None}
+    \     return from keyword if      '${host_profile_detail['ipSettings']['ip']}'=='${None}'
+    [return]    ${True}
+
+Get Unused Nics from host
+    [Documentation]     Gets all unsued nics from the host
+    [Arguments]     ${host_name}
+    ${host_vmnic_list}=    get host vmnics       ${host_name}
+    ${vswitch_vmnic_list}=    get host vswitch vmnics       ${host_name}
+    ${unused_vmnics}=    Evaluate    set($host_vmnic_list) - set($vswitch_vmnic_list)
+    ${unused_vmnics}=    convert to list    ${unused_vmnics}
+    [return]       ${unused_vmnics}
+
+Get Ip From Host Profile
+    [Documentation]     Gets the IP Address Configures in the Host profile
+    [Arguments]     ${host_profile_uri}
+    ${host_profile_detail}=     Get Host Profile by Uri     ${host_profile_uri}
+    [return]        ${host_profile_detail['ipSettings']['ip']}
+
+Collect SupportDump on Failure
+    [Documentation]     Collect Support Dump on failure of the test case
+    [Arguments]     ${cluster_standard}
+    ${cluster_uri}=     Get Cluster Profile Uri by Name     ${cluster_standard[0]['name']}
+    #Run keyword IF      '${TEST_STATUS}' == 'FAIL'      Collect Support Dump    ${file_location}\\${TEST_NAME}_SupportDump.sdmp
+    Run keyword IF      '${TEST_STATUS}' == 'FAIL'    Delete and Create Inconsistent cluster    ${cluster_standard}
+    #Run keyword Unless      '${TEST_STATUS}' == 'FAIL' or '${passed}' == 'True'    Log    ${cluster_standard[0]['name']}    console=True
+
+Delete and Create Inconsistent cluster
+    [Arguments]    ${cluster_standard}
+    ${cluster_uri}=     Get Cluster Profile Uri by Name     ${cluster_standard[0]['name']}
+    Run keyword and return if      '${cluster_uri}' == 'None'    Delete and Create Cluster    ${cluster_standard}
+    ${passed}=    Run Keyword And Return Status      Cluster Should Be Consistent    ${cluster_uri}
+    Run keyword IF      '${passed}' == 'False'    Delete and Create Cluster    ${cluster_standard}
+
+Delete and Create Cluster
+    [Arguments]     ${cluster_standard}
+    ${cluster_uri}=     Get Cluster Profile Uri by Name     ${cluster_standard[0]['name']}
+    :For    ${server}     In      @{cluster_standard[0]['server_hardware']}
+    \    Power off Server    ${server}    powerControl=PressAndHold
+    ${resp}=    Run keyword IF      '${cluster_uri}' != 'None'    Delete cluster profile by url       ${cluster_uri}      True
+    wait for task2      ${resp[0]['task_resp']}
+    Delete and Create SPT    ${cluster_standard[0]['profile_name']}
+    Create cluster    ${cluster_standard}    auto_hardware=False
+
+Delete and Create SPT
+    [Arguments]     ${spt_name}
+    ${resp} =   Fusion Api Delete Server Profile Template  name=${spt_name}
+    wait for task2      ${resp}
+    ${resp_list}=    Add Non Existing Server Profile Templates    ${remediation_spt}
+    wait for task2    ${resp_list}    timeout=3m    interval=1m    errorMessage=Creation of SPT failed
+
+Remediate cluster profile Inconsistent
+    [Documentation]     Remediates the cluster in Inconsistent state
+    [Arguments]     ${cluster_uri}
+    ${hcp_response}=    Fusion Api Get Hypervisor Cluster Profile       ${cluster_uri}
+    Remove from dictionary      ${hcp_response}      headers    status_code
+    set to dictionary       ${hcp_response}      complianceState    Remediate
+    ${remediate_response}=      Fusion Api Update Hypervisor Cluster Profile    body=${hcp_response}    uri=${hcp_response['uri']}
+    [return]    ${remediate_response}
+
+Remediate cluster profile Inconsistent with Vswitch
+    [Documentation]     Remediates the cluster which has vSwitch compliance issues
+    [Arguments]     ${cluster_uri}
+    ${hcp_response}=    Fusion Api Get Hypervisor Cluster Profile       ${cluster_uri}
+    ${Hypervisor_count}=     Get length      ${hcp_response['hypervisorHostProfileUris']}
+    ${time_out_for_task}=    Evaluate    ${Hypervisor_count} * 30
+    ${vsl}=     Get Virtual switch layout       ${Cluster_uri}
+    Remove from dictionary      ${hcp_response}      headers    status_code
+    ${vsl_json}     json.loads      ${vsl['response_body']}
+    set to dictionary       ${hcp_response['hypervisorHostProfileTemplate']}      virtualSwitches    ${vsl_json}
+    ${remediate_response}=      Fusion Api Update Hypervisor Cluster Profile    body=${hcp_response}    uri=${hcp_response['uri']}
+    should be equal as integers     ${remediate_response['status_code']}      202
+    Wait For Task2    ${remediate_response}    timeout=${time_out_for_task}m    interval=1m    errorMessage=Remediate Failed
+    ${remediate_response}=    Remediate cluster profile Inconsistent    ${cluster_uri}
+    [return]    ${remediate_response}
+
+
+
+Import Certificate to OV
+    [Documentation]    Adds the TAO Certificates from TAO to OneView Appliance
+    [Arguments]    ${external_ip}    ${ov_ip}    ${admin_credentials}         ${alias_name}
+    Fusion Api Login Appliance    ${ov_ip}    ${admin_credentials}
+    ${response} =  Fusion Api Get Remote Certificate        ${external_ip}
+    Set To Dictionary    ${certificate['certificateDetails'][0]}    base64Data    ${response['certificateDetails'][0]['base64Data']}
+                ${headers}=                       Fusion APi Get Headers
+                set to Dictionary                               ${headers}                          forceSaveLeaf=True
+                set to Dictionary                               ${certificate['certificateDetails'][0]}                    aliasName=${alias_name}
+    ${resp}=        Fusion Api Import Server Certificate   ${certificate}                        headers=${headers}
+    ${task}=       Wait For Task   ${resp}         timeout=500s            interval=5s
+    ${response} =  Fusion Api Get Server Certificate   ${alias_name}
+    Should Not Be Empty  ${response['certificateDetails'][0]['sha1Fingerprint']}
+    Should Not Be Empty  ${response['certificateDetails'][0]['sha256Fingerprint']}
+    Should Not Be Empty  ${response['certificateDetails'][0]['sha384Fingerprint']}
+
+Get Virtual switch layout
+    [Documentation]     gets virtual switch layout for the cluster provided
+    [Arguments]     ${cluster_uri}
+    ${hcp_response}=    Fusion Api Get Hypervisor Cluster Profile       ${cluster_uri}
+    ${payload}=     Create Dictionary
+    set to dictionary       ${payload}      serverProfileTemplateUri=${hcp_response['hypervisorHostProfileTemplate']['serverProfileTemplateUri']}
+    ...     hypervisorManagerUri=${hcp_response['hypervisorManagerUri']}    hypervisorClusterSettings=${hcp_response['hypervisorClusterSettings']}
+    ...     virtualSwitchConfigPolicy=${hcp_response['hypervisorHostProfileTemplate']['virtualSwitchConfigPolicy']}
+    Log     ${payload}   console=True
+    ${VSL}=  Fusion Api Create Virtual Switch Layout    ${payload}
+    Remove from dictionary      ${VSL}      headers     status_code
+    [return]    ${VSL}
+
+Get all the Network uris in SPT
+    [Documentation]     gets all the networks on the SPT provided
+    [Arguments]     ${SPT_URI}
+    ${spt_response}=     Fusion Api get server profile Templates     uri=${SPT_URI}
+    ${Connections}=     Get From Dictionary     ${spt_response['connectionSettings']}     connections
+    ${net_list}=     Create list
+    :For    ${connection}   in      @{Connections}
+    \   Append to list      ${net_list}     ${connection['networkUri']}
+    [return]    ${net_list}
+
+Get all LIG for SPT
+    [Documentation]     gets LIG details for the SPT
+    [Arguments]     ${SPT_URI}
+    ${spt_response}=     Fusion Api get server profile Templates     uri=${SPT_URI}
+    ${EG_URI}=      Get from Dictionary     ${spt_response}     enclosureGroupUri
+    ${EG_response}=     Fusion Api Get Enclosure Groups     uri=${EG_URI}
+    ${ligs}=        Get from Dictionary     ${EG_response}      interconnectBayMappings
+    ${lig_list}=     Create list
+    :for    ${lig}      IN      @{ligs}
+    \   Append to list      ${lig_list}     ${lig['logicalInterconnectGroupUri']}
+    [return]    ${lig_list}
+
+Get LI From LIG
+    [Documentation]     gets Logical Interconnect from the logical Interconnect Group
+    [Arguments]     ${lig_name}
+    ${li_response}=    Fusion Api Get LI
+    ${li_members}=      Get from Dictionary     ${li_response}     members
+    :for    ${li}     In       @{li_members}
+    \    ${name}=       Get from Dictionary     ${li}       name
+    \    ${li_uri}=     Run keyword if     '-${lig_name}' in '${name}'    set variable    ${li['uri']}
+    \    Exit For Loop If     '${li_uri}' != '${None}'
+    [return]    ${li_uri}
+
+OVTC29253_Teardown
+    [Documentation]     OVTC29253 Teardown
+    [Arguments]     ${SPT_Body}     ${Cluster_uri}      ${net_uri}
+    ${spt_response}=    Fusion Api Get Server Profile Templates     uri=${SPT_Body['uri']}
+    Set to Dictionary    ${SPT_Body}    eTag    ${spt_response['eTag']}
+    ${response}=    Fusion Api Edit Server Profile Template     ${SPT_Body}     uri=${SPT_Body['uri']}
+    Wait For Task2  ${response}  300  5
+    ${remediate_response}=      Remediate cluster profile Inconsistent with Vswitch   ${Cluster_uri}
+    should be equal as integers     ${remediate_response['status_code']}      202
+    ${hcp_response}=    Fusion Api Get Hypervisor Cluster Profile       ${Cluster_uri}
+    ${Hypervisor_count}=     Get length      ${hcp_response['hypervisorHostProfileUris']}
+    ${time_out_for_task}=    Evaluate    ${Hypervisor_count} * 30
+    Wait For Task2    ${remediate_response}    timeout=${time_out_for_task}m    interval=1m    errorMessage=Remediate Failed
+    Delete Ethernet network     ${net_uri}
+    Collect SupportDump on Failure
+
+OVTC29247_Teardown
+    [Documentation]     OVTC29247 Teardown
+    [Arguments]     ${SPT_Body}     ${Cluster_uri}      ${net_uri}
+    ${spt_response}=    Fusion Api Get Server Profile Templates     uri=${SPT_Body['uri']}
+    Set to Dictionary    ${SPT_Body}    eTag    ${spt_response['eTag']}
+    ${spt_edit_response}=    Fusion Api Edit Server Profile Template     ${SPT_Body}     uri=${SPT_Body['uri']}
+    Wait For Task2  ${spt_edit_response}  300  5
+    ${remediate_response}=      Remediate cluster profile Inconsistent with Vswitch   ${Cluster_uri}
+    should be equal as integers     ${remediate_response['status_code']}      202
+    ${hcp_response}=    Fusion Api Get Hypervisor Cluster Profile       ${Cluster_uri}
+    ${Hypervisor_count}=     Get length      ${hcp_response['hypervisorHostProfileUris']}
+    ${time_out_for_task}=    Evaluate    ${Hypervisor_count} * 30
+    Wait For Task2    ${remediate_response}    timeout=${time_out_for_task}m    interval=1m    errorMessage=Remediate Failed
+    Run keyword if  '${net_uri}' != '${None}'     Delete netset network     ${net_uri}
+    Collect SupportDump on Failure
+
+OVTC29263_Teardown
+    [Documentation]     OVTC29263 Teardown
+    [Arguments]     ${SPT_Body}     ${Cluster_uri}
+    ${spt_response}=    Fusion Api Get Server Profile Templates     uri=${SPT_Body['uri']}
+    Set to Dictionary    ${SPT_Body}    eTag    ${spt_response['eTag']}
+    ${response}=    Fusion Api Edit Server Profile Template     ${SPT_Body}     uri=${SPT_Body['uri']}
+    Wait For Task2  ${response}  300  5
+    ${remediate_response}=      Remediate cluster profile Inconsistent with Vswitch   ${Cluster_uri}
+    should be equal as integers     ${remediate_response['status_code']}      202
+    ${hcp_response}=    Fusion Api Get Hypervisor Cluster Profile       ${Cluster_uri}
+    ${Hypervisor_count}=     Get length      ${hcp_response['hypervisorHostProfileUris']}
+    ${time_out_for_task}=    Evaluate    ${Hypervisor_count} * 30
+    Wait For Task2    ${remediate_response}    timeout=${time_out_for_task}m    interval=1m    errorMessage=Remediate Failed
+    Collect SupportDump on Failure
+
+Add Networks to LIG for Remediation
+    [Documentation]     Add new network and attach it to LIG Internal Network
+    [Arguments]     ${ethernet_network_dict}    ${SPT}
+    Add Ethernet Networks from variable    ${ethernet_network_dict}
+    ${lig_list}=       Get all LIG for SPT      ${SPT}
+    ${resp} =     Fusion Api Get LIG      uri=${lig_list[0]}
+    Remove from dictionary      ${resp}      headers    status_code
+    ${internal_nets}=   Get from Dictionary     ${resp}     internalNetworkUris
+    :For    ${net}      in      @{ethernet_network_dict}
+    \   ${net_uri}=     Get Ethernet URI     ${net['name']}
+    \   Append to list     ${internal_nets}    ${net_uri}
+    set to dictionary       ${resp}     internalNetworkUris=${internal_nets}
+    ${response}=    Fusion Api Edit Lig     body=${resp}     uri=${lig_list[0]}
+    Wait For Task2  ${response}  202  2
+    ${li_uri}=      Get LI From LIG     ${resp['name']}
+    ${response}=    Fusion Api Update From Group    ${li_uri}
+    Return From Keyword if    "${response['status_code']}" == "400"
+    Wait For Task  ${response}  300  5
+
+
+Add Network to LIG
+    [Documentation]     Add new network and attach it to LIG Internal Network
+    [Arguments]     ${ethernet_network_dict}
+    Add Ethernet Networks from variable    ${ethernet_network_dict}
+    ${net_uri} =       Get Ethernet URI     ${ethernet_network_dict[0]['name']}
+    ${lig_list}=       Get all LIG for SPT      ${Cluster_with_prereq['hypervisorHostProfileTemplate']['serverProfileTemplateUri']}
+    ${resp} =     Fusion Api Get LIG      uri=${lig_list[0]}
+    Remove from dictionary      ${resp}      headers    status_code
+    ${internal_nets}=   Get from Dictionary     ${resp}     internalNetworkUris
+    :For    ${net}      in      @{ethernet_network_dict}
+    \   ${net_uri}=     Get Ethernet URI     ${net['name']}
+    \   Append to list     ${internal_nets}    ${net_uri}
+    set to dictionary       ${resp}     internalNetworkUris=${internal_nets}
+    ${response}=    Fusion Api Edit Lig     body=${resp}     uri=${lig_list[0]}
+    Wait For Task2  ${response}  202  2
+    ${li_uri}=      Get LI From LIG     ${resp['name']}
+    ${response}=    Fusion Api Update From Group    ${li_uri}
+    Wait For Task2  ${response}  300  5
+    set Test Variable       ${net_uri}     ${net_uri}
+
+Power Off Server By Uri
+    [Documentation]     Power on the server by its uri.
+    ...     Power on Server  ${ENC1SHBAY1}
+    [Arguments]     ${server}
+    ${body} =       Create Dictionary   powerState=Off
+    ...             powerControl=PressAndHold
+    Log     ${ov_ip}    console=True
+    Log     \nPowering off ${server}    console=True
+    ${resp} =       Fusion Api Edit Server Hardware Power State     body=${body}    uri=${server}
+    ${task} =       Wait For Task       ${resp}     240s    5s
+
+Delete Ethernet network
+    [Documentation]     Deletes the network wtih network URI
+    [Arguments]     ${net_uri}
+    ${del_net_response}=    Fusion Api Delete Ethernet Network      uri=${net_uri}
+    Wait For Task2  ${del_net_response}  300  5
+
+Delete Netset network
+    [Documentation]     Deletes the network wtih network URI
+    [Arguments]     ${net_uri}      ${delete_networks}=True
+    ${netset_response}=     Fusion Api Get Network Set      uri=${net_uri}
+    ${response}=    Fusion Api Delete Ethernet Network      uri=${net_uri}
+    Wait For Task2  ${response}  300  5
+    Return from keyword if    ${delete_networks} == ${False}
+    ${net_uris_list}=       Get from Dictionary     ${netset_response}      networkUris
+    :For    ${net_uri}      In      @{net_uris_list}
+    \       Delete Ethernet network     ${net_uri}
+
+Cluster Should Not Be Consistent
+    [Documentation]     Checks cluster consistancy state
+    [Arguments]    ${cluster_uri}
+    ${hcp_response}=    Fusion Api Get Hypervisor Cluster Profile       ${cluster_uri}
+    Should not be equal     ${hcp_response['complianceState']}      Consistent
+
+Cluster Should Be Consistent
+    [Documentation]     Checks cluster consistancy state
+    [Arguments]    ${cluster_uri}
+    ${hcp_response}=    Fusion Api Get Hypervisor Cluster Profile       ${cluster_uri}
+    Should be equal     ${hcp_response['complianceState']}      Consistent
+
+Remediate cluster profile StorageInconsistent
+    [Documentation]    Remediate cluster profile StorageInconsistent
+    [Arguments]     ${cluster_uri}    ${vol_uri}
+    ${hcp_response}=    Fusion Api Get Hypervisor Cluster Profile       ${cluster_uri}
+    Remove from dictionary      ${hcp_response}      headers    status_code
+    ${Additiomal_volume}=   Create Dictionary       storageVolumeUri=${vol_uri}   volumeFileSystemType=VMFS
+    Append to list      ${hcp_response['sharedStorageVolumes']}   ${Additiomal_volume}
+    ${remediate_response}=      Fusion Api Update Hypervisor Cluster Profile    body=${hcp_response}    uri=${hcp_response['uri']}
+    Wait For Task2  ${remediate_response}  300  5
+    ${remediate_response}=      Remediate cluster profile Inconsistent    ${cluster_uri}
+    [return]    ${remediate_response}
+
+OVTC29248_Teardown
+    [Documentation]    OVTC29248_Teardown
+    [Arguments]     ${SPT_Body}     ${Cluster_uri}      ${vol_uri}
+    ${spt_response}=    Fusion Api Get Server Profile Templates     uri=${SPT_Body['uri']}
+    Set to Dictionary    ${SPT_Body}    eTag    ${spt_response['eTag']}
+    ${spt_edit_response}=    Fusion Api Edit Server Profile Template     ${SPT_Body}     uri=${SPT_Body['uri']}
+    Wait For Task2  ${spt_edit_response}  300  5
+    ${hcp_response}=    Fusion Api Get Hypervisor Cluster Profile       ${cluster_uri}
+    Remove from dictionary      ${hcp_response}      headers    status_code
+    ${sharedStorageVolumes}=     Get From Dictionary     ${hcp_response}     sharedStorageVolumes
+    ${count}=  Get Length    ${sharedStorageVolumes}
+    :For    ${index}    In Range     ${count}
+    \   Run keyword if    '${sharedStorageVolumes[${index}]['storageVolumeUri']}' == '${vol_uri}'   Run keywords
+    \   ...     Remove From List    ${sharedStorageVolumes}    ${index}     AND
+    \   ...     Exit for loop
+    ${hcp_edit_response}=      Fusion Api Update Hypervisor Cluster Profile    body=${hcp_response}    uri=${Cluster_uri}
+    Wait For Task2  ${hcp_edit_response}  300  5
+    Collect SupportDump on Failure
+
+Collect Support Dump
+    [Documentation]     Collect logs from the OV Appliance and places it support dump loc
+    [Arguments]     ${file_location}
+    ${sd_body}=    Create Dictionary                   encrypt=${false}    errorCode=CI
+    ${sd_resp}=    Fusion Api Create Support Dump      ${sd_body}
+    Return From Keyword If      ${sd_resp} is None or ${sd_resp['status_code']} !=200
+    ${uri}=     Get From Dictionary                 ${sd_resp}             uri
+    ${resp}=    Fusion Api Download Support Dump    uri=${uri}          localfile=${file_location}
+
+
+Remediate ClusterTemplateVSwitchError
+    [Documentation]    Remediate ClusterTemplateVSwitchError
+    [Arguments]     ${cluster_uri}
+    ${hcp_response}=    Fusion Api Get Hypervisor Cluster Profile       ${cluster_uri}
+    ${vsl}=     Get Virtual switch layout       ${Cluster_uri}
+    Remove from dictionary      ${hcp_response}      headers    status_code
+    ${vsl_json}     json.loads      ${vsl['response_body']}
+    set to dictionary       ${hcp_response['hypervisorHostProfileTemplate']}      virtualSwitches    ${vsl_json}
+    ${remediate_response}=      Fusion Api Update Hypervisor Cluster Profile    body=${hcp_response}    uri=${hcp_response['uri']}
+    Wait For Task2  ${remediate_response}  300  5
+    ${remediate_response}=      Remediate cluster profile Inconsistent    ${cluster_uri}
+    [return]    ${remediate_response}
+

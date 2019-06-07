@@ -1,0 +1,187 @@
+*** Settings ***
+Documentation
+...     = Usage =
+...     | pybot | -L DEBUG | -v ENCLOSURE:tesla | api_support_dump.txt |
+...     = Variables =
+...     | ENCLOSURE     | Required; Enclosure name to run on (dcs, tesla, etc) |
+...     | FUSION IP     | Required; IP address of the FusionVM to use |
+...     = Preconditions =
+...     Claimed/Added Enclosure
+...     One or more interconnects
+
+Library         tarfile
+Library         json
+Library         RoboGalaxyLibrary           # RoboGalaxy Robot Framework extensions
+Library         FusionLibrary               # RoboGalaxy Fusion extensions
+Variables       ../resources/variables.py   ${ENCLOSURE}    # Variables file
+Resource        ../resources/fusion_api.txt                 # AM-DVT Fusion API extensions
+Resource        ../resources/perm_api.txt   # AM-DVT PERM API extensions
+Resource        ../resources/defaults.txt   # AM-DVT default variables
+Force Tags      API    HW
+
+Suite Setup     Run Keywords
+...             Login to Fusion Via REST
+#...            Verify Claimed EM
+#...            Verify Added EM
+# ...             Verify Enclosure in Monitored State
+# ...             Create Logical Interconnect Group
+# ...             Create Enclosure Group
+# ...             Create Logical Enclosure
+# ...             Verify Enclosure in Configured State
+
+Suite Teardown      Run Keywords
+# ...                 Verify Enclosure in Configured State
+# ...                 Delete Logical Enclosure
+# ...                 Delete Enclosure Group
+# ...                 Delete LIG
+# ...                 Delete Logical Interconnect Group
+# ...                 Verify Enclosure in Monitored State
+...                 Logout of Fusion Via REST
+
+
+*** Variables ***
+${Appliance Dump File}      fusion_support_dump.sdmp
+${Enclosure Dump File}      enclosure_support_dump.sdmp
+@{EM SUPPORT DUMP DIR}      enclosureManagers
+...                         enclosureManagers/var/tmp/enclosureManagers
+...                         enclosureManagers/var/tmp/enclosureManagers/${ENC_SERIAL_NUMBER}
+...                         enclosureManagers/var/tmp/enclosureManagers/${ENC_SERIAL_NUMBER}/support_dump
+
+
+*** Test Cases ***
+Verify EM data in Appliance Support Dump
+    Create And Download Support Dump            ${Appliance Dump File}
+    ${DUMP TARFILE}=            Evaluate        tarfile.open(name="${Appliance Dump File}", mode='r')   tarfile
+    ${DUMP ITEMS}=              Set Variable    ${DUMP TARFILE.getnames()}
+    Log List                    ${DUMP ITEMS}
+    :FOR    ${em dir}    IN    @{EM SUPPORT DUMP DIR}
+    \    List Should Contain Value   ${DUMP ITEMS}   ${em dir}    msg=Failed to find '${em_dir}' in Appliance Support Dump.
+
+# Verify EM data in Enclosure Support Dump
+#     Get Enclosure Support Dump      ${Enclosure Dump File}
+#     ${DUMP TARFILE}=                Evaluate        tarfile.open(name="${Enclosure Dump File}", mode='r')   tarfile
+#     ${DUMP ITEMS}=                  Set Variable    ${DUMP TARFILE.getnames()}
+#     Log List                        ${DUMP ITEMS}
+#     :FOR    ${em dir}    IN    @{EM SUPPORT DUMP DIR}
+#     \    List Should Contain Value   ${DUMP ITEMS}   ${em dir}    msg=Failed to find '${em_dir}' in Enclosure Support Dump.
+
+
+*** Keywords ***
+Create Logical Enclosure
+    [Arguments]     ${LE NAME}=${LE Name}   ${EG Name}=${EG Name}
+
+    # Get enclosureGroupUri
+    ${Response}=            Fusion Api Get Enclosure Groups     param=?filter="name=${EG NAME}"
+    ${members}=             Get From Dictionary                 ${Response}     members
+    ${member}=              Get From List                       ${members}      0
+    ${enclosureGroupUri}=   Get From Dictionary                 ${member}       uri
+
+    # Get enclosureUri
+    ${Response}=        Fusion Api Get Enclosures
+    ${members}=         Get From Dictionary     ${Response}     members
+    ${member}=          Get From List           ${members}      0
+    ${enclosureUri}=    Get From Dictionary     ${member}       uri
+    ${enclosureUris}=   Create List             ${enclosureUri}
+
+    # Build Payload
+    ${LE Payload}=      Fusion API Create Logical Enclosure Payload     name=${LE Name}
+    ...                 enclosureGroupUri=${enclosureGroupUri}
+    ...                 enclosureUris=${enclosureUris}
+
+    # Create Logical Enclosure
+    ${Response}=        Fusion Api Create Logical Enclosure         body=${LE Payload}
+    ${status_code}=     Get From Dictionary     ${Response}         status_code
+    Should Be Equal as Strings                  ${status_code}      202
+    ...                 msg=Failed to initiate create Enclosure.
+
+    # Wait for task to complete
+    ${task} =                       Wait For Task           ${Response}     300s    30s
+    ${status_code}=                 Get From Dictionary     ${task}         status_code
+    Should Be Equal as Strings      ${status_code}          200             msg=Failed to Create Enclosure.
+
+    [Return]    ${Response}
+
+Get Enclosure Support Dump
+    [Arguments]                 ${file}
+    # Get Logical Enclosure Id
+    ${Response}=                Fusion Api Get Logical Enclosure
+    ${members}=                 Get From Dictionary     ${Response}                 members
+    ${member}=                  Get From List           ${members}                  0
+    ${logicalEnclosureUri}=     Get From Dictionary     ${member}                   uri
+    ${logicalEnclosureId}=      Fetch From Right        ${logicalEnclosureUri}      /
+
+    # Build LE Support Dump Payload
+    ${encrypt}=         Convert to Integer      0
+    ${applianceDump}=   Convert to Integer      0
+    ${LE SupportDump Payload}=                  Create Dictionary   errorCode=API-TEST      encrypt=${encrypt}
+    ...                 includeApplianceDump=${applianceDump}
+
+    # Create Enclosure Support Dump
+    ${Response}=        Fusion Api Get Logical Enclosure Support Dump   body=${LE SupportDump Payload}
+    ...                 id=${logicalEnclosureId}
+    ${status_code}=     Get From Dictionary     ${Response}             status_code
+    Should Be Equal as Strings                  ${status_code}          202
+    ...                 msg=Failed to initiate Create Enclosure Support Dump.
+
+    # Wait for task to complete
+    ${task} =                       Wait For Task           ${Response}     300s    30s
+    ${status_code}=                 Get From Dictionary     ${task}         status_code
+    Should Be Equal as Strings      ${status_code}          200             msg=Failed to Create Enclosure Support Dump.
+
+    # Download Generated Support Dump file
+    ${associatedResource}=      Get From Dictionary     ${task}                 associatedResource
+    ${supportDumpUri}=          Get From Dictionary     ${associatedResource}   resourceUri
+
+    ${Response}=        Fusion Api Download Support Dump            uri=${supportDumpUri}   localfile=${file}
+    ${status_code}=     Get From Dictionary     ${Response}         status_code
+    Should Be Equal as Strings                  ${status_code}      200
+    ...                 msg=Failed to Download Enclosure Support Dump.
+
+    [Return]    ${Response}
+
+Delete Logical Enclosure
+    ${Response}=        Fusion Api Delete Logical Enclosure         name=${LE Name}
+    ${status_code}=     Get From Dictionary     ${Response}         status_code
+    Should Be Equal as Strings                  ${status_code}      202
+    ...                 msg=Failed to initiate delete Logical Enclosure.
+
+    # Wait for task to complete
+    ${task} =                       Wait For Task           ${Response}     300s    30s
+    ${status_code}=                 Get From Dictionary     ${task}         status_code
+    Should Be Equal as Strings      ${status_code}          200             msg=Failed to delete Logical Enclosure.
+
+Verify Enclosure in Monitored State
+    ${Enc}=         Get Enclosure     ${ENC Serial Number}
+    ${state}=       Get From Dictionary     ${Enc}       state
+    # Should be Equal as Strings    ${state}                Monitored   msg=Enclosure ${ENC Serial Number} not in Monitored state.
+
+Verify Enclosure in Configured State
+    ${Enc}=         Get Enclosure     ${ENC Serial Number}
+    ${state}=       Get From Dictionary     ${Enc}       state
+    # Should be Equal as Strings    ${state}                Configured      msg=Enclosure ${ENC Serial Number} not in Configured state.
+
+Wait For Task
+    [Documentation]     Waits for a task to reach an end-state
+    [Arguments]         ${resp}                         ${timeout}=60s      ${interval}=2s
+    Log to console      \n
+    ${task} =           Wait Until Keyword Succeeds     ${timeout}          ${interval}     Task Reached Endstate   ${resp}
+    ${NicelyFormattedJsonString}                        dumps               ${task}         indent=${4}
+    ...                 sort_keys=${True}
+    Log                 ${NicelyFormattedJsonString}
+    [Return]            ${task}
+
+Task Reached Endstate
+    [Arguments]             ${resp}
+    Set Log Level           TRACE
+    Should Contain          ${resp}                 uri
+    ${task_uri} =           Get From Dictionary     ${resp}                         uri
+    ${task} =               Fusion Api Get Task     uri=${task_uri}
+    ${task_state} =         Get From Dictionary     ${task}                         taskState
+    ${task_category} =      Get From Dictionary     ${task}                         category
+    ${task_name} =          Get From Dictionary     ${task}                         name
+    ${resource} =           Get From Dictionary     ${task['associatedResource']}   resourceName
+    ${resource_uri} =       Get From Dictionary     ${task['associatedResource']}   resourceUri
+    Log To Console          \t Task: [${task_category}:${task_name}] is: ${task_state} for resource: ${resource} ${resource_uri}
+    Should Match Regexp     ${task_state}           ((?i)Warning|Unknown|Terminated|Killed|Error|Completed)
+    [Return]                ${task}
+

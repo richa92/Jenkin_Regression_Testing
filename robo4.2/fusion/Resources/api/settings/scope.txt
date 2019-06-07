@@ -1,0 +1,225 @@
+*** Settings ***
+Library                RoboGalaxyLibrary
+Library                FusionLibrary
+Library                OperatingSystem
+Library                BuiltIn
+Library                Collections
+Library                XML
+Library                SSHLibrary
+Library                String
+
+
+*** Keywords ***
+Get Scope Type
+    [Documentation]    Get Scope Type using API version for 3.10 to 4.00 appliances
+    ${resp} =           Fusion Api Get Appliance Api Versions
+    ${version} =        Get Variable Value      ${X-API-VERSION}        ${resp['currentVersion']}
+    ${type} =    Set Variable If
+    ...    ${version} == 500    ScopeV2
+    ...    ${version} == 600    ScopeV3    ScopeV3
+    [Return]    ${type}
+
+Get Resource Scope Type
+    [Documentation]    Get Resource Scope Type using API version for 4.00 appliances
+    ${resp} =           Fusion Api Get Appliance Api Versions
+    ${version} =        Get Variable Value      ${X-API-VERSION}        ${resp['currentVersion']}
+    ${type} =    Set Variable If
+    ...    ${version} == 600    ScopedResource    ScopedResource
+    [Return]    ${type}
+
+Get Scope URI By Name
+    [Documentation]    Get Scope URI By Name
+    [Arguments]    ${name}
+    ${resp}=    Fusion Api Get Scope  param=?query=name eq '${name}'
+    ${count}=   Get From Dictionary     ${resp}  count
+    Return from keyword if  ${count}==0  /bad_scope_uri
+    ${uri}=     Get From Dictionary  ${resp['members'][0]}  uri
+    [Return]    ${uri}
+
+Get Scope URIs By Name
+    [Documentation]  Get Scope URIs by Name
+	[Arguments]		${scopeList}
+	${urilist} = 	Create List
+	:FOR	${scope}	IN	@{scopeList}
+	\	${resp} = 	Get Scope URI By Name  ${scope}
+	\	Append To List	${urilist}	${resp}
+	[Return]	${urilist}
+
+Create Scope
+    [Documentation]    Create Scope with correct scope type
+    ...                Example:
+    ...                 Scope = {"name": "Test",
+    ...                          "description": "",
+    ...                          "type": SCOPE_TYPE,
+    ...                          "addedResourceUris": [],
+    ...                          "removedResourceUris": [],
+    ...                         }
+    ...               Or
+    ...                 Scope = {"name": "Test",
+    ...                          "description": "",
+    ...                          "type": SCOPE_TYPE,
+    ...                          "addedResourceUris": ["SPOOL:FVT_Tbird_reg1_r1", "SPOOL:FVT_Tbird_reg1_r5", "SPOOL:FC_r5"],
+    ...                          "removedResourceUris": ["SPOOL:FVT_Tbird_reg1_r5"]
+    ...                          "initialScopeUris":["Scope:Test1", "Scope:Test2"]
+    ...                         }
+    [Arguments]    ${payload}
+    ${payload} =  Copy Dictionary  ${payload}
+    ${default_type} =    Get Scope Type
+    ${status}    ${return}    Run Keyword and Ignore Error    Get From Dictionary    ${payload}    type
+    ${type} =    Set Variable If    '${status}'=='PASS'    ${return}    ${default_type}
+    Set to Dictionary    ${payload}    type    ${type}
+
+    # Process the "addedResourceUris"
+    ${addedResourceUris}=  Pop From Dictionary  ${payload}  addedResourceUris  default=${None}
+    ${scopeUris}=       Run Keyword If    ${addedResourceUris} != ${None}
+    ...                 Run Keyword for List  ${addedResourceUris}  Common URI lookup by name
+    Run Keyword If      ${addedResourceUris} != ${None}
+    ...                 Set To Dictionary    ${payload}  addedResourceUris  ${scopeUris}
+
+    # Porcess the "removedResourceUris"
+    ${removedResourceUris}=  Pop From Dictionary  ${payload}  removedResourceUris  default=${None}
+    ${scopeUris}=       Run Keyword If    ${removedResourceUris} != ${None}
+    ...                 Run Keyword for List  ${removedResourceUris}  Common URI lookup by name
+    Run Keyword If      ${removedResourceUris} != ${None}
+    ...                 Set To Dictionary    ${payload}  removedResourceUris  ${scopeUris}
+
+    # Porcess the "initialScopeUris"
+    ${initialScopeUris}=  Pop From Dictionary  ${payload}  initialScopeUris  default=${None}
+    ${scopeUris}=       Run Keyword If    ${initialScopeUris} != ${None}
+    ...                 Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    Run Keyword If      ${initialScopeUris} != ${None}
+    ...                 Set To Dictionary    ${payload}  initialScopeUris  ${scopeUris}
+    ${resp} =  Fusion API Create Scope    ${payload}
+    [Return]    ${resp}
+
+Create Scopes
+    [Documentation]    Create Scopes
+    [Arguments]    ${scopes}
+    Log    Create Scopes by list   console=True
+    ${resplist} =  Create List
+    :FOR    ${scope}    IN    @{scopes}
+    \    ${status} =  Check Resource Existing  Scope:${scope['name']}
+    \    run keyword if  ${status}=='PASS'  Log  Scope ${scope['name']} already present in OneView  WARN
+    \    continue for loop if  ${status}=='PASS'
+    \	 Log  Adding Scope ${scope['name']}   console=True
+    \    ${resp} =  Create Scope    ${scope}
+    \    append to list        ${resplist}    ${resp}
+    [Return]    ${resplist}
+
+Remove All Scopes
+    [Documentation]    Remove all scopes and wait for task complete
+    ...                    Remove All Scopes
+    Log    \nDeleting All Scopes    console=true
+    ${scopes}=    Fusion Api Get Scope
+    :FOR    ${scope}    IN    @{scopes['members']}
+    \       ${uri} =      Get From Dictionary  ${scope}  uri
+    \       ${resp} =     Fusion Api Delete Scope        uri=${uri}
+    \       Wait For Task2       ${resp}     50    5
+
+Remove Scope By Name
+    [Documentation]    Remove scope by name and wait for task complete
+    [Arguments]    ${name}
+    ${uri} =    Get Scope URI By Name    ${name}
+    ${resp} =    Fusion Api Delete Scope    uri=${uri}
+    Wait For Task2       ${resp}     50    5
+    [Return]    ${resp}
+
+Get Assigned Scope URIs By Resource Name
+    [Documentation]    Get a resource's scope, containing a list of the scopes
+    ...                to which the resource is assigned.
+    ...                Example:  Get Assigned Scope URIs By Resource Name  ${resource}
+    ...                ${resource} should like "ENC:CN75120D7B" or "ETH:eth2"
+
+    [Arguments]    ${resource}
+    Log            Get resource ${resource} URI  console=True
+    ${resource_uri}=    Common URI lookup by name  ${resource}
+    ${resp} =      Fusion Api Get Scope    /rest/scopes/resources${resource_uri}
+    [Return]    ${resp['scopeUris']}
+
+Validate Resource Assign To Scope
+    [Documentation]    Check if a resource assigned to a scope
+    [Arguments]    ${scope}    ${resource}
+    Log    Validating resource ${resource} assigned to ${scope}    console=true
+    ${scoperesource} =    Fusion Api Get Scope    /rest/scopes/resources${resource}
+    Should Contain    ${scoperesource['scopeUris']}    ${scope}
+
+Validate Resource Not Assign To Scope
+    [Documentation]    Check if a resource not assigned to a scope
+    [Arguments]    ${scope}    ${resource}
+    Log    Validating resource ${resource} not assigned to ${scope}    console=true
+    ${scoperesource} =    Fusion Api Get Scope    /rest/scopes/resources${resource}
+    Should Not Contain    ${scoperesource['scopeUris']}    ${scope}
+
+Validate Resource Not Assign To Any Scope
+    [Documentation]    Validate Resource Not Assign To Any Scope
+    [Arguments]    ${resource}
+    Log    Validating resource ${resource} assigned to any scope    console=true
+    ${scoperesource} =    Fusion Api Get Scope    /rest/scopes/resources${resource}
+    Should Be Empty    ${scoperesource['scopeUris']}
+
+Edit Scope
+    [Documentation]    Edit Scope
+    [Arguments]    ${name}    ${addresources}=${None}    ${removeresources}=${None}    ${new_name}=${None}
+    Log    Editing Scope ${name}    console=true
+    ${new_name} =    Set Variable If    '${new_name}'=='${None}'    ${name}    ${new_name}
+    ${type} =    Get Scope Type
+    ${uri} =    Get Scope URI By Name    ${name}
+    ${scope} =    Fusion Api Get Scope    ${uri}
+    ${eTag} =    Get From Dictionary    ${scope}    eTag
+    ${add} =    Create List
+    ${add} =    Set Variable If    ${addresources}==${None}    ${add}    ${addresources}
+    ${remove} =    Create List
+    ${remove} =    Set Variable If    ${removeresources}==${None}    ${remove}    ${removeresources}
+    ${payload} =  Create Dictionary    type=${type}    name=${new_name}    eTag=${eTag}    addedResourceUris=${add}    uri=${uri}    removedResourceUris=${remove}
+    ${resp} =  Fusion API Edit Scope    uri=${uri}    body=${payload}    eTag=${eTag}
+    [Return]    ${resp}
+
+Edit Resource Scope
+    [Documentation]    Edit Resource Scope
+    [Arguments]    ${resource}    ${scopes}=${None}
+    Log    Editing Scope for ${resource}    console=true
+    ${type} =    Get Resource Scope Type
+    ${reousrcescope} =    Fusion Api Get Scope    /rest/scopes/resources${resource}
+    ${eTag} =    Get From Dictionary    ${reousrcescope}    eTag
+    ${scopeuris} =    Create List
+    :FOR    ${scope}    IN    @{scopes}
+    \       Append To List    ${scopeuris}    ${scope}
+    ${payload} =  Create Dictionary    type=${type}    resourceUri=${resource}    eTag=${eTag}    scopeUris=${scopeuris}
+    ${resp} =  Fusion API Edit Scope    uri=/rest/scopes/resources${resource}    body=${payload}    eTag=${eTag}
+    [Return]    ${resp}
+
+Patch Resources Scopes
+    [Documentation]  Patch Resources scopes
+    ...              Example:
+    ...                Patch resources scopes  name  body  value=Off
+    ...                Get Scope  URI By Resource Name  ETH:${ETH1}
+    ...              Data Required:
+    ...                resources name    example: /ethernet_networks/3059e3393939331
+    ...                body:     [{"op":"add", "path":"/scopeUris/-", "value":"Scope:Test"}]
+    ...                or        [{ "op": "remove", "path": "/scopeUris/0" }]
+    [Arguments]  ${resource_name}  ${body}
+    Log     Patching Resources Scopes    console=True
+    ${resource_uri}=   Common URI lookup By Name   ${resource_name}
+    ${payload}=  Create List
+    :FOR    ${data}  IN  @{body}
+    \       ${value}=  Pop From Dictionary  ${data}  value  default=${None}
+    \       ${scopeUri}=       Run Keyword If    '${value}' != '${None}'
+    \       ...                 Run Keyword     Common URI lookup by name  ${value}
+    \       Run Keyword If      '${value}' != '${None}'
+    \       ...                 Set To Dictionary    ${data}  value  ${scopeUri}
+    \       Append To List    ${payload}    ${data}
+    ${etag}=   Set Variable  *
+    ${resp} =  Fusion Api Patch Scope    uri=/rest/scopes/resources${resource_uri}  body=${payload}  etag=${etag}
+    [Return]    ${resp}
+
+Update Scope With Resources
+    [Documentation]    Update Scope With Specify Resources According To Test Requirements To Add it into scope or Remove from scope
+    ...                resources_list     example:  [FC:FA1,ENC:wpst23,FCOE:FCoE1]
+    [Arguments]     ${scope_name}    ${resources_list}    ${add_flag}=${true}
+    ${Resources} =    Create List
+    :FOR    ${resource}    IN    @{resources_list}
+    \       ${resource_uri}=    Common URI lookup by name  ${resource}
+    \       Append To List    ${Resources}    ${resource_uri}
+    ${resp} =    Run Keyword If    ${add_flag}    Edit Scope    name=${scope_name}    addresources=${Resources}
+    ...          ELSE                             Edit Scope    name=${scope_name}    removeresources=${Resources}
+    Wait For Task2    ${resp}

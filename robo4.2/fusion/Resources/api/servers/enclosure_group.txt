@@ -1,0 +1,283 @@
+*** Settings ***
+Library              RoboGalaxyLibrary
+Library              FusionLibrary
+Library              OperatingSystem
+Library              BuiltIn
+Library              Collections
+Library              XML
+Library              SSHLibrary
+Library              String
+Library              Dialogs
+
+*** Keywords ***
+Get Enclosure Group URI
+    [Documentation]   Get Enclosure Group URI
+    [Arguments]  ${name}
+    ${resp} =  fusion api get enclosure groups  param=?filter="'name' = '${name}'"
+    ${count} =  Get From Dictionary  ${resp}  count
+    Return from keyword if  ${count}==0    /rest/EnclosureGroup_${name}_not_found
+    ${uri} =     Get From Dictionary  ${resp['members'][0]}  uri
+    [Return]    ${uri}
+
+Get Enclosure Group URIS
+    [Documentation]    Get Resources Uris list and return it
+    ...                Data File Example:
+    ...                EGlist = ["EG1", "EG2", "EG3", "EG4"]
+    [Arguments]      ${EGlist}
+    ${urilist} =     Create List
+    :FOR    ${EG}   IN    @{EGlist}
+    \   ${resp} =   Get Enclosure Group URI     ${EG}
+    \   Append To List    ${urilist}    ${resp}
+    [Return]    ${urilist}
+
+Add Enclosure Group from variable
+    [Documentation]	Adds an Enclosure Group to an appliance from a variable which contains a list of dicts with the entire payload
+    ...              scope process example:
+    ...                 'initialScopeUris': ['Scope:Test', 'Scope:Production']
+    [Arguments]    ${enc_group}
+    Log    Adding EG ${enc_group['name']}    console=True
+    # -Initial Scope process.
+    ${initialScopeUris}=  Pop From Dictionary  ${enc_group}  initialScopeUris  default=${None}
+    ${scopeUris}=       Run Keyword If    ${initialScopeUris} != ${None}
+    ...                 Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    Run Keyword If      ${initialScopeUris} != ${None}
+    ...                 Set To Dictionary    ${enc_group}  initialScopeUris  ${scopeUris}
+
+    ${resp_group} =     Frame enclosure group payload    ${enc_group}
+    ${resp} =    Fusion Api Create Enclosure Group	${resp_group}
+    Log    status_code:${resp['status_code']}    console=yes
+    Should Not Be Equal As Numbers     ${resp['status_code']}  400    Bad request: ${resp_group} \n response: ${resp}
+    [Return]    ${resp}
+
+Add Enclosure Group and Verify
+    [Arguments]  ${enclosure_group}
+    [Documentation]   Add Enclosure Group and Verify
+    ...               scope process example:
+    ...                 'initialScopeUris': ['Scope:Test', 'Scope:Production']
+
+    # -Initial Scope process.
+    ${initialScopeUris}=  Pop From Dictionary  ${enc_group}  initialScopeUris  default=${None}
+    ${scopeUris}=       Run Keyword If    ${initialScopeUris} != ${None}
+    ...                 Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    Run Keyword If      ${initialScopeUris} != ${None}
+    ...                 Set To Dictionary    ${enc_group}  initialScopeUris  ${scopeUris}
+
+    ${response} =  Add Enclosure Group From Variable  ${enclosure_group}
+    ${status}  ${error_message} =  Run Keyword and Ignore Error  Get From Dictionary  ${response}  message
+    Dictionary Should Not Contain Key  ${response}  message  ${error_message}
+
+Add Enclosure Group from list
+    [Documentation]  Add EG from a list of EG DTO
+    ...              Example:
+    ...                Add Enlcosure Group from list  ${list}
+    ...              Data Required:
+    ...                List of EG DTO
+    [Arguments]  ${list}
+    Log    ${\n}Adding Enclosure Group from list
+    Run Keyword for List  ${list}  Add Enclosure Group from variable
+
+Add Enclosure Group from variable sync
+    [Documentation]   Adds an Enclosure Group to an appliance from a variable which contains a list of dicts with the entire payload. also a verify feature for verifying its addition.
+    [Arguments]   ${enc_group}        ${VERIFY}=${FALSE}      ${expected_result}=@empty    ${status_code}=201    ${notFoundStatusCodeList}=404
+    ${actualegs} =  create list
+    ${toAdd} =  Create List
+    :FOR    ${eachEG}  IN  @{enc_group}
+    \       ${resp} =          Get Resource  EG:${eachEG['name']}
+    \       ${response_status_code}=  Convert To String  ${resp['status_code']}
+    \       ${status}=      Run Keyword And Return Status   List Should Contain Value  ${notFoundStatusCodeList}  ${response_status_code}
+    \        Run Keyword If    ${status}==False        Log    Enclosure Group ${eachEG['name']} is already added    WARN
+    \       Run Keyword If    ${status}==True    Append To List   ${toAdd}  ${eachEG}
+
+    :FOR    ${Add}    IN    @{toAdd}
+    #       -Initial Scope process.
+    \       ${initialScopeUris}=  Pop From Dictionary  ${Add}  initialScopeUris  default=${None}
+    \       ${scopeUris}=       Run Keyword If    ${initialScopeUris} != ${None}
+    \       ...                 Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    \       Run Keyword If      ${initialScopeUris} != ${None}
+    \       ...                 Set To Dictionary    ${Add}  initialScopeUris  ${scopeUris}
+    \       ${resp}=     Add Enclosure Group from variable    ${Add}
+    \       Log      Add Response Body is: ${resp}
+    \       Run Keyword If  ${resp['status_code']}!=${status_code}
+            ...   Run Keyword And Continue on Failure  FAIL  Failed to create Enclosure Group ${Add['name']}
+    \       continue for loop if  ${resp['status_code']}!=${status_code}
+    \       Wait For Task2    ${resp}
+    \       append to list    ${actualegs}   ${resp}
+    :FOR    ${eachactualegs}  IN  @{actualegs}
+    \       ${expItem} =     Run keyword if    '${VERIFY}'=='True'    fusion_api_get_dict_from_list     ${expected_result}  name  ${eachactualegs['name']}
+    \       Run keyword if    '${VERIFY}'=='True'     CONTINUE FOR LOOP IF  ${expItem}=={}
+    \       ${framed_expItem} =     Run keyword if    '${VERIFY}'=='True'     Frame enclosure group payload    ${expItem}
+    \       ${result} =    Run keyword if    '${VERIFY}'=='True'     fusion api validate response follow   ${framed_expItem}  ${eachactualegs}  #wordy=${TRUE}
+    \       Run keyword if    '${VERIFY}'=='True'    Run keyword and continue on failure    should be equal  ${result}  ${TRUE}
+    \       Run keyword if    '${VERIFY}'=='True'    Log    ${result}
+
+Add Enclosure Group from variable async
+    [Documentation]   Adds an Enclosure Group to an appliance from a variable which contains a list of dicts with the entire payload. also a verify feature for verifying its addition.
+    [Arguments]   ${enc_group}        ${VERIFY}=${FALSE}      ${expected_result}=@empty    ${status_code}=201    ${notFoundStatusCodeList}=404
+    ${actualegs} =  create list
+    ${response} =  Create List
+    ${toAdd} =  Create List
+    :FOR    ${eachEG}  IN  @{enc_group}
+    \       ${resp} =          Get Resource  EG:${eachEG['name']}
+    \       ${response_status_code}=  Convert To String  ${resp['status_code']}
+    \       ${status}=      Run Keyword And Return Status   List Should Contain Value  ${notFoundStatusCodeList}  ${response_status_code}
+    \        Run Keyword If    ${status}==False        Log    Enclosure Group ${eachEG['name']} is already added    WARN
+    \       Run Keyword If    ${status}==True    Append To List   ${toAdd}  ${eachEG}
+
+    :FOR    ${Add}    IN    @{toAdd}
+    #       -Initial Scope process.
+    \       ${initialScopeUris}=  Pop From Dictionary  ${Add}  initialScopeUris  default=${None}
+    \       ${scopeUris}=       Run Keyword If    ${initialScopeUris} != ${None}
+    \       ...                 Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    \       Run Keyword If      ${initialScopeUris} != ${None}
+    \       ...                 Set To Dictionary    ${Add}  initialScopeUris  ${scopeUris}
+    \       ${resp}=     Add Enclosure Group from variable    ${Add}
+    \       Log      Add Response Body is: ${resp}
+    \       Run Keyword If  ${resp['status_code']}!=${status_code}
+            ...   Run Keyword And Continue on Failure  FAIL  Failed to create Enclosure Group ${Add['name']}
+    \       continue for loop if  ${resp['status_code']}!=${status_code}
+    \       Append To List  ${response}  ${resp}
+    \       append to list    ${actualegs}   ${resp}
+    Wait For Task2    ${response}
+    :FOR    ${eachactualegs}  IN  @{actualegs}
+    \       ${expItem} =     Run keyword if    '${VERIFY}'=='True'    fusion_api_get_dict_from_list     ${expected_result}  name  ${eachactualegs['name']}
+    \       Run keyword if    '${VERIFY}'=='True'     CONTINUE FOR LOOP IF  ${expItem}=={}
+    \       ${framed_expItem} =     Run keyword if    '${VERIFY}'=='True'     Frame enclosure group payload    ${expItem}
+    \       ${result} =    Run keyword if    '${VERIFY}'=='True'     fusion api validate response follow   ${framed_expItem}  ${eachactualegs}  #wordy=${TRUE}
+    \       Run keyword if    '${VERIFY}'=='True'    Run keyword and continue on failure    should be equal  ${result}  ${TRUE}
+    \       Run keyword if    '${VERIFY}'=='True'    Log    ${result}
+
+
+Frame enclosure group payload
+    [Documentation]    Accepts the input as dictionary, and frames the input dict with appropriate URI for the LIG.
+    [Arguments]    ${eg_payl}
+    ${l} =     Get Length    ${eg_payl['interconnectBayMappings']}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    ${liguri} =    Get From Dictionary    ${eg_payl['interconnectBayMappings'][${x}]}    logicalInterconnectGroupUri
+    \   Continue For Loop If    '${liguri}' == 'None'
+    \    ${liguri} =     Common URI Lookup by name    ${liguri}
+    \    Set to dictionary    ${eg_payl['interconnectBayMappings'][${x}]}    logicalInterconnectGroupUri    ${liguri}
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get from Dictionary  ${eg_payl}  osDeploymentSettings
+    ${status2}  ${return2}=  Run Keyword If  '${status}'=='PASS'   Run Keyword and Ignore Error  Get from Dictionary  ${eg_payl['osDeploymentSettings']}  deploymentModeSettings
+    ${status3}  ${return3}=  Run Keyword If  '${status2}'=='PASS'   Run Keyword and Ignore Error  Get from Dictionary  ${eg_payl['osDeploymentSettings']['deploymentModeSettings']}  deploymentNetworkUri
+    ${NetworkUri_Status} =  Set Variable If   '${status3}'=='PASS'  ${return}  error
+    ${NetworkUri} =  Run Keyword If    '${status3}'=='PASS' and ${NetworkUri_Status} is not ${None}    Lookup Deployment Network Uri    ${eg_payl['osDeploymentSettings']['deploymentModeSettings']}
+    Run Keyword If   '${status3}'=='PASS' and ${NetworkUri_Status} is not ${None}
+    ...   set to dictionary  ${eg_payl['osDeploymentSettings']}  deploymentModeSettings   ${NetworkUri}
+    [Return]    ${eg_payl}
+
+Lookup Deployment Network Uri
+    [Documentation]    Processes enclosure group Deployment Network, and dynamiclly looks up the network uris.
+    [Arguments]    ${deploymentModeSettings}
+    ${deploymentNetworkUri}=  Get From Dictionary  ${deploymentModeSettings}  deploymentNetworkUri
+    ${NetworkUri}=       Run Keyword If    '${deploymentNetworkUri}' != '${None}'
+    ...                  Run Keyword        Common URI lookup by name   ETH:${deploymentNetworkUri}
+    Run Keyword If      '${deploymentNetworkUri}' != '${None}'
+    ...                 Set To Dictionary    ${deploymentModeSettings}  deploymentNetworkUri  ${NetworkUri}
+    [Return]    ${deploymentModeSettings}
+
+Edit Enclosure Group
+    [Documentation]    Edit Enclosure Group from EG DTO
+    ...              Example:
+    ...                Edit Enclosure Group  ${enc_group}
+    ...              Data Required:
+    ...                EG DTO
+    [Arguments]    ${enc_group}  ${api}=${None}
+    ${name} =  Get From Dictionary  ${enc_group}  name
+    Log  ${\n}Editing Enclosure Group ${name}   console=True
+    ${uri} =  Get Enclosure Group URI  ${name}
+    ${EG_resp} =     Get Resource  EG:${name}
+    ${EG_etag} =     Get From Dictionary    ${EG_resp}    eTag
+    Set to dictionary    ${enc_group}    eTag    ${EG_etag}
+    # Create the payload
+     ${resp_group} =     Frame enclosure group payload    ${enc_group}
+    Set to dictionary  ${resp_group}  uri  ${uri}
+    ${resp} =  fusion api edit enclosure group  ${resp_group}  ${uri}    api=${api}
+    [Return]    ${resp}
+
+Edit Enclosure Group from list
+    [Documentation]  Edit Enclosure Group from a list of EG DTO
+    ...              Example:
+    ...                Edit Enclosure Group from list  ${list}
+    ...              Data Required:
+    ...                List of EG DTO
+    [Arguments]  ${list}
+    Log    ${\n}Editing Enclosure Group from list
+    Run Keyword for List  ${list}  Edit Enclosure Group
+
+Remove Enclosure Group By Name
+    [Documentation]  Remove the specified Enclosure Groups
+    [Arguments]      ${EG_name}
+    Log       Removing ENCLOSURE GROUPS    console=True
+    ${resp}=    Fusion Api Delete Enclosure Group  ${EG_name}
+    Wait For Task2  ${resp}    240    2
+
+Remove All Enclosure Groups
+    [Documentation]  Querys the appliance for all Enclosure Groups and then removes them
+    [Arguments]   ${VERIFY}=${FALSE}      ${status_code}=404
+    Log       Removing ENCLOSURE GROUPS    console=True
+    ${encs} =    Fusion Api Get Enclosure Groups
+    ${count}=    Convert To String  ${encs['count']}
+    Run Keyword If  '${count}'=='0'   Log   Enclosure Group doesn't exists   WARN
+    ${response} =   Create List
+    :FOR   ${enc}  IN   @{encs['members']}
+    \       ${resp} =   Fusion Api Delete Enclosure Group   uri=${enc['uri']}
+    \       Append to List  ${response}     ${resp}
+    Wait For Task2  ${response}  240  2
+    :FOR   ${enc}  IN   @{encs['members']}
+    \       Continue For Loop If   ${VERIFY}==${FALSE}
+    \       ${resp} =  Fusion Api Get Resource  ${enc['uri']}
+    \       Run Keyword If  ${resp['status_code']}!=${status_code}  Run Keyword And Continue On Failure  FAIL  msg=Enclosure Group ${enc['name']} is not Deleted
+
+Verify Enclosure Group
+    [Documentation]  Verify Enclosure Group DTO with the expected one
+    ...              **kwargs are used to add key value pair to the expected DTO
+    ...              Example:
+    ...                Verify Enclosure Group  ${enc_group}
+    ...                Verify Enclosure Group  ${enc_group}  status=OK
+    ...              Data Required:
+    ...                Expected profile DTO
+    [Arguments]  ${enc_group}  &{kwargs}
+    ${name} =  Get From Dictionary  ${enc_group}  name
+    Log    ${\n}VerifyingEnclosure Group ${enc_group}   console=True
+    ${status}  ${return} =  Run Keyword and Ignore Error  Get From Dictionary  ${enc_group}  serverProfileTemplateUri
+    ${spt} =  set variable if  '${status}'=='PASS'  ${return}  error
+    ${expected_dto} =  Frame enclosure group payload    ${enc_group}
+    ${expected_dto} =  Add Key Value to DTO  ${expected_dto}  &{kwargs}
+    Remove from Dictionary    ${expected_dto}     eTag
+    ${dto} =  Get Resource  EG:${name}
+    ${validate_status} =  Fusion api validate response follow  ${expected_dto}  ${dto}  wordy=${True}
+    Run Keyword If  '${validate_status}'=='False'  Fail  Validate Enclosure Group ${name} failed
+
+Verify Enclosure Group from list
+    [Documentation]  Verify EG from a list of EG DTO
+    ...              Example:
+    ...                Verify Enlcosure Group from list  ${list}
+    ...              Data Required:
+    ...                List of EG DTO
+    [Arguments]  ${list}
+    Log    ${\n}Verifying Enclosure Group from list
+    Run Keyword for List  ${list}  Verify Enclosure Group
+
+EnclosureGroup Status Should Be
+    [Documentation]     Enclosure Group Should be in expected status
+    [Arguments]    ${encgroup}   ${status}
+    Set Log Level    TRACE
+    :FOR   ${enc}   IN    @{encgroup}
+    \   ${name} =  Get From Dictionary  ${enc}  name
+    \   ${encgrp} =   Fusion Api Get Enclosure Groups     param=?filter="name='${name}'"
+    \   Should Be Equal as Integers    ${encgrp['count']}    1
+    \   Should Match    ${encgrp['members'][0]['status']}    ${status}
+
+Enclosure Group Attribute ${attribute} Should Have Value ${value}
+    [Documentation]     Enclosure Group attribute Should be in expected
+    ${egs} =  Fusion Api Get Enclosure Groups
+    # Make sure we get (more than zero) EG listed
+    ${count}       Get From Dictionary    ${egs}    count
+    Run Keyword If  '${count}'=='0'    Fail    msg=No EG found
+    ${res} =  Set Variable  ${empty}
+    :FOR   ${eg}   IN    @{egs['members']}
+    \  ${res} =  Run Keyword If  '${eg['${attribute}']}' != '${value}'  Catenate  ${res}
+    ...     \nEnclosure Group name [${eg['name']}] Expected ${attribute} ${value} but found ${eg['${attribute}']}
+    \  ...  ELSE  Set Variable  ${res}
+    ${count} =  Get Length  ${res}
+    Run Keyword If  '${count}' > '0'  Fail  ${res}

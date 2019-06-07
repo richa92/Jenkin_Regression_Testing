@@ -1,0 +1,392 @@
+*** Settings ***
+Resource    task.txt
+Library     RoboGalaxyLibrary
+Library     FusionLibrary
+Library     OperatingSystem
+Library     BuiltIn
+Library     Collections
+Library     XML
+Library     SSHLibrary
+Library     String
+
+Variables   ${DATA}
+
+*** Variables ***
+${DATA}         data_variables.py
+${VM}           ${None}
+${VMSETUP}      no
+${FTS}          no
+${CONFIGURE}    no
+${sleeptime}    10
+
+
+*** Keywords ***
+#######################################
+# SETUP WORFLOWS
+#######################################
+
+Create Storage Volumes
+    [Documentation]     Creates Storage Volumes to an appliance from a variable which contains a list of dicts with the entire payload
+    [Arguments]     ${volumes}
+    Log     Creating STORAGE VOLUME     console=yes
+    :FOR    ${vol}  IN  @{volumes}
+    \   ${storagePoolUri} =     Get Storage Pool URI    ${vol['provisioningParameters']['storagePoolUri']}
+    \   Set to dictionary   ${vol['provisioningParameters']}    storagePoolUri  ${storagePoolUri}
+    \   ${snapshotPoolUri} =    Get Storage Pool URI    ${vol['snapshotPoolUri']}
+    \   Set to dictionary   ${vol}  snapshotPoolUri     ${snapshotPoolUri}
+    \   ${resp} =   Fusion Api Create Storage Volume    body=${vol}
+    \   ${status}       Get From Dictionary     ${resp}     status_code
+    \   Run Keyword If  '${status}' == '202'    Log     The storage volume created successfully
+    \   Run Keyword If  '${status}' is not '202'    Fail    msg=The storage volume creation failed
+    \   ${task} =   Wait For Task   ${resp}     20s     2s
+    \   ${volUri} =     Get Storage Volume URI  ${vol['name']}
+    \   Run Keyword If  '${volUri}' is not '${EMPTY}'   Log     The Storage volume created successfully
+    \   Run Keyword If  '${volUri}' is '${EMPTY}'   Fail    The Storage volume creation Failed
+    \   Storage Volume Should Exist     ${vol['name']}
+    \   Log     SUCCESS-Created STORAGE VOLUME ${vol['name']}   console=yes
+
+Add Storage Volumes
+    [Documentation]  Add Storage Volumes to an appliance from a variable which contains a list of dicts with the entire payload
+    [Arguments]  ${volumes}
+    Log     Adding STORAGE VOLUME   console=yes
+    :FOR    ${vol}  IN  @{volumes}
+    \   ${storageSystemUri} =   Get Storage System URI  ${vol['storageSystemUri']}
+    \   Set to dictionary   ${vol}    storageSystemUri   ${storageSystemUri}
+    \   ${resp} =   Fusion Api Create Storage Volume    body=${vol}
+    \   ${status}       Get From Dictionary     ${resp}     status_code
+    \   Run Keyword If  '${status}' == '202'    Log     The storage volume added successfully
+    \   Run Keyword If  '${status}' is not '202'    Fail  msg=The storage volume addition failed
+    \   ${task} =   Wait For Task     ${resp}    20s   2s
+    \   ${volUri} =     Get Storage Volume URI  ${vol['storageSystemVolumeName']}
+    \   Run Keyword If  '${volUri}' is not '${EMPTY}'   Log  The Storage volume added successfully
+    \   Run Keyword If  '${volUri}' is '${EMPTY}'   Fail    The Storage volume addition Failed
+    \   Storage Volume Should Exist     ${vol['storageSystemVolumeName']}
+    \   Log     SUCCESS-Added STORAGE VOLUME    ${vol['storageSystemVolumeName']}   console=yes
+
+Add SAN Manager
+    [Documentation]    Adding San Managers to an appliance from a variable which contains a list of dicts
+    Log to console and logfile      Adding SAN MANAGER
+    [Arguments]                     ${san_managers}
+    :FOR    ${san_manager}  IN  @{san_managers}
+    \   ${san_manager_details}    Get From Dictionary           ${san_manager}            connectionInfo
+    \   ${san_manager_list_0}      Get From List                 ${san_manager_details}    0
+    \   ${san_manager_type}       Get From Dictionary           ${san_manager_list_0}     value
+    \   ${san_manager_list_1}      Get From List                 ${san_manager_details}    1
+    \   ${san_manager_name}       Get From Dictionary           ${san_manager_list_1}     value
+    \   ${uri}=         Get San Manager Provider Type URI           ${san_manager_type}
+    \   ${resp}=                  Fusion API Add SAN Manager    ${san_manager}            uri=${uri}
+    \   Sleep                     ${sleeptime}
+    \   ${status}                 Get From Dictionary           ${resp}                   status_code
+    \   Run Keyword If  '${status}' == '202'      Log   The San Manager ${san_manager_name} added successfully
+    \   Run Keyword If  '${status}' is not '202'  Fail  msg=The San Manager ${san_manager_name} fail to add
+
+Fusion Api Add Storage System
+    [Documentation]  Adds Storage Systems to an appliance from a variable which contains a list of dicts with the entire payload
+    [Arguments]  ${storage_systems}
+    Log     Add STORAGE SYSTEM  console=yes
+    :FOR    ${ssystems}  IN  ${storage_systems}
+    \   ${resp_connect} =   Fusion Api Create Storage System    body=${ssystems['credentials']}
+    \   Log     Connecting to add Storage System ${ssystems['name']}   console=yes
+    \   Sleep   30
+    \   Run Keyword If  '${resp_connect.status_code}' == '202'  Log     The Storage System ${ssystems['name']} connected successfully
+    \   Run Keyword and Continue on Failure     Run Keyword If  '${resp_connect.status_code}' is not '202'  Fail    msg=Failed to connect Storage System ${ssystems['name']}
+    \   Run Keyword If  '${resp_connect.status_code}' is not '202'  Continue For Loop
+    \   Log     Adding Storage System ${ssystems['name']}   console=yes
+    \   ${uri} =    Get Storage System URI  ${ssystems['name']}
+    \   Set to dictionary   ${ssystems}   uri   ${uri}
+    \   Fusion Api Storage System Update URIs for Managed Ports     ${ssystems['managedPorts']}
+    \   ${resp} =   Fusion Api Update Storage System     body=${ssystems}   uri=${uri}
+    \   ${resp_ss} =    Storage System Does Exist     ${ssystems['name']}
+    \   Run Keyword and Continue on Failure     Run Keyword If  '${resp_ss}'=='0'   Fail    msg=Storage System ${ssystems['name']} could not be added to the appliance
+    \   Run Keyword If  '${resp_ss}'=='1'   Log     SUCCESS-Added STORAGE SYSTEM ${ssystems['name']}    console=yes
+    \   Wait Until Keyword Succeeds     30 sec   5 sec      Fusion API Get Storage System    param=${ssystems['name']}
+
+Fusion Api Add Storage Pool
+    [Documentation]  Adds Storage Pools to an appliance from a variable which contains a list of dicts with the entire payload
+    [Arguments]  ${storage_pool}
+    Log     Add STORAGE POOL    console=yes
+    :FOR    ${spool}  IN  ${storage_pool}
+    \   Log     Adding Storage Pool ${spool['poolName']}    console=yes
+    \   ${uri} =    Get Storage System URI  ${spool['storageSystemUri']}
+    \   Set to dictionary   ${spool}   storageSystemUri   ${uri}
+    \   ${resp} =   Fusion Api Create Storage Pools     ${spool}
+    \   Sleep   30
+    \   ${resp_sp} =    Storage Pool Does Exist   ${spool['poolName']}
+    \   Run Keyword and Continue on Failure     Run Keyword If  '${resp_sp}'=='0'   Fail    msg=Storage Pool ${spool['poolName']} could not be added to the appliance
+    \   Run Keyword If  '${resp_sp}'=='1'   Log     SUCCESS-Added STORAGE POOL ${spool['poolName']}   console=yes
+
+
+#######################################
+# Update KEYWORDS
+#######################################
+
+Update Storage Volumes
+    [Documentation]  Update/edit Storage Volumes to an appliance from a variable which contains a list of dicts with the entire payload
+    [Arguments]  ${volumes}
+    Log  updating/editing STORAGE VOLUME  console=yes
+    :FOR    ${vol}  IN  @{volumes}
+    \   ${uri} =    Get Storage Volume URI  ${vol['uri']}
+    \   Set to dictionary   ${vol}  uri     ${uri}
+    \   ${snapshotPoolUri} =    Get Storage Pool URI    ${vol['snapshotPoolUri']}
+    \   Set to dictionary   ${vol}  snapshotPoolUri     ${snapshotPoolUri}
+    \   ${storageSystemUri} =   Get Storage System URI  ${vol['storageSystemUri']}
+    \   Set to dictionary   ${vol}  storageSystemUri    ${storageSystemUri}
+    \   ${resp} =   Fusion Api Update Storage Volume    body=${vol}     uri=${uri}
+    \   Log     ${resp}     console=yes
+    \   Should Contain  '${resp}'  '<Response [202]>'
+    \   Storage Volume Should Exist  ${vol['name']}
+    \   Log     SUCCESS-updated/edited STORAGE VOLUME ${vol['name']}    console=yes
+
+Edit SAN Manager
+    [Documentation]     Edit specified SAN Manager
+    Log to console and logfile      Updating Requested SAN MANAGER Details
+    [Arguments]    ${body}     ${uri}
+    ${resp}=            Fusion API Edit SAN Manager    ${body}      ${uri}
+    ${status}           Get From Dictionary            ${resp}    status_code
+    Return From Keyword If    '${Status}' == '202'     ${resp}
+    ${errorCode}        Get From Dictionary            ${resp}    errorCode
+    ${message}          Get From Dictionary            ${resp}    message
+    Fail    msg=Invalid response returned ${status} ${errorCode} ${message}
+
+Fusion Api Edit Storage System
+    [Documentation]  Update Storage Systems from a variable which contains a list of dicts with the entire payload
+    [Arguments]  ${storage_systems}
+    :FOR    ${ssystems}  IN  ${storage_systems}
+    \   Log     Updating STORAGE SYSTEM ${ssystems['name']}     console=yes
+    \   ${uri} =    Get Storage System URI  ${ssystems['name']}
+    \   Set to dictionary   ${ssystems}     uri     ${uri}
+    \   Fusion Api Storage System Update URIs for Managed Ports     ${ssystems['managedPorts']}
+    \   ${resp} =   Fusion Api Update Storage System    body=${ssystems}    uri=${uri}
+    \   Run Keyword If  '${resp.status_code}' == '202'  Log     The Storage System ${ssystems['name']} Updated successfully     console=yes
+    \   Run Keyword If  '${resp.status_code}' is not '202'  Fail    msg=Failed to Update Storage System ${ssystems['name']}
+
+#######################################
+# VALIDATION KEYWORDS
+#######################################
+
+Storage Volume Should Exist
+    [Documentation]  Check if storage Volume is present or not in the fusion appliance
+    [Arguments]  ${volume}
+    Log     verify existence for STORAGE VOLUME     console=yes
+    ${resp} =   Fusion Api Get Storage Volumes  param=?filter="'name'=='${volume}'"
+    ${status}       Get From Dictionary     ${resp}     status_code
+    Should Be True  '${status}' == '200'
+    Log     SUCCESS-STORAGE VOLUME ${volume} exists     console=yes
+
+Storage Volume Should Not Exist
+    [Documentation]  Check if storage Volume is  not in the fusion appliance
+    [Arguments]  ${volume}
+    Log     verify STORAGE VOLUME not present   console=yes
+    ${resp} =   Fusion Api Get Storage Volumes  param=?filter="'name'=='${volume}'"
+    ${status}       Get From Dictionary     ${resp}     status_code
+    Should Not Be True  '${status}' is not '200'
+    Log     SUCCESS-STORAGE VOLUME ${volume} don't exists   console=yes
+
+Verify SAN Manager
+    [Documentation]    Verify all SAN Manager provided in data variables with appliance
+    Log to console and logfile      Verify SAN Manager
+    [Arguments]    ${san_managers}
+    ${manager}=          Get San Manager    ${san_manager_name}
+    Log Dictionary       ${manager}
+    ${name}=             Get From Dictionary    ${manager}   name
+    ${santype}=          Get From Dictionary    ${manager}   providerDisplayName
+    ${connectionInfo}=   Get From Dictionary    ${manager}   connectionInfo
+    # compare variable\data  values to values returned from REST call
+    :FOR    ${san_manager}  IN  @{san_managers}
+    \   ${san_manager_details}    Get From Dictionary     ${san_manager}            connectionInfo
+    \   ${san_manager_details_row1}     Get From List           ${san_manager_details}    1
+    \   ${san_manager_name_data_file}    Get From Dictionary     ${san_manager_details_row1}        value
+    \   Continue For Loop If    '${san_manager_name_data_file}'!='${name}'
+    \   ${san_manager_details_row0}     Get From List           ${san_manager_details}    0
+    \   ${san_manager_san_type_data_file}    Get From Dictionary     ${san_manager_details_row0}        value
+    \   ${san_manager_details_row3}     Get From List           ${san_manager_details}    3
+    \   ${san_manager_user_name_data_file}    Get From Dictionary     ${san_manager_details_row3}        value
+    \   ${san_manager_details_row2}     Get From List           ${san_manager_details}    2
+    \   ${san_manager_san_port_data_file}    Get From Dictionary     ${san_manager_details_row2}        value
+    \   Should Be Equal as Strings    ${san_manager_name_data_file}              ${name}                          msg=${san_manager_name_data_file} did not match ${name}.
+    \   Should Be Equal as Strings    ${san_manager_san_type_data_file}          ${santype}                       msg=${san_manager_san_type_data_file} did not match ${santype}.
+    \   Should Be Equal as Strings    ${san_manager_user_name_data_file}         ${connectionInfo[2]['value']}    msg=${san_manager_user_name_data_file} did not match ${connectionInfo[2]['value']}.
+
+Storage System Does Exist
+    [Documentation]  Check whether Storage System is present in the fusion appliance or not, returns count as "1" if Storage System is present else returns "0"
+    [Arguments]    ${ssystem}
+    ${resp} =   Fusion Api Get Storage System   param=?filter="'name'=='${ssystem}'"
+    ${count}        Get From Dictionary     ${resp}     count
+    [Return]    ${count}
+
+Storage Pool Does Exist
+    [Documentation]  Check whether Storage Pool is present in the fusion appliance or not, returns count as "1" if Storage Pool is present else returns "0"
+    [Arguments]    ${spool}
+    ${resp} =   Fusion Api Get Storage Pools   param=?filter="'name'=='${spool}'"
+    ${count}        Get From Dictionary     ${resp}     count
+    [Return]    ${count}
+
+#######################################
+# COMMON KEYWORDS
+#######################################
+
+
+Get Storage Pool URI
+    [Arguments]     ${pool}
+    ${resp} =   Fusion Api Get Storage Pools    param=?filter="'name'=='${pool}'"
+    ${uri} =    Get From Dictionary     ${resp['members'][0]}   uri
+    [Return]    ${uri}
+
+Get Storage System URI
+    [Arguments]     ${system}
+    ${resp} =   Fusion Api Get Storage System   param=?filter="'name'=='${system}'"
+    ${uri} =    Get From Dictionary     ${resp['members'][0]}   uri
+    [Return]    ${uri}
+
+Get Storage Volume URI
+    [Arguments]     ${volume}
+    ${resp} =   Fusion Api Get Storage Volumes  param=?filter="'name'=='${volume}'"
+    ${uri} =    Get From Dictionary     ${resp['members'][0]}   uri
+    [Return]    ${uri}
+
+Get FC URI
+    [Arguments]     ${net}
+    ${resp} =   Fusion Api Get FC Networks  param=?filter="'name'=='${net}'"
+    ${uri} =    Get From Dictionary     ${resp['members'][0]}   uri
+    [Return]    ${uri}
+
+Log to console and logfile
+    [Arguments] ${data}     ${level}=INFO
+    Log     ${data}     ${level}
+    Log to console  ${data}
+
+Get San Manager
+    [Documentation]    Get SAN Manager from appliance by providing by Name
+    Log to console and logfile    Getting Requested SAN MANAGER Details
+    [Arguments]                   ${san_manager}
+    ${SANManagerCollection} =     Fusion API Get SAN Manager
+    ${count}=                     Get From Dictionary                ${SANManagerCollection}   count
+    Should not be Equal as Integers       ${count}                   0                         msg=No SAN Managers Found
+    @{members}=    Get From Dictionary    ${SANManagerCollection}    members
+    :FOR    ${member}    IN    @{members}
+    \    Log Dictionary          ${member}
+    \    ${name}=                Get From Dictionary    ${member}    name
+    \    ${type}=                Get From Dictionary    ${member}    type
+    \    Continue For Loop If    '${san_manager}'!='${name}'
+    \    Return From Keyword     ${member}
+    Fail    msg=Failed to find SAN Manager ${san_manager}
+
+Get San Manager Provider Type URI
+    [Documentation]    return the uri as per provided san manager type
+    [Documentation]    san_manager_type can be "Brocade Network Advisor", "Cisco", "Direct attach", "HP"
+    [Documentation]    Example:  Get San Manager URI  |Response|San Manager Type|
+    [Arguments]    ${san_manager_type}
+    ${provider}=   fusion_api_get_provider
+    ${members}=    Get From Dictionary    ${provider}    members
+    :FOR    ${member}    IN      @{members}
+    \   ${displayName}=          Get From Dictionary                   ${member}    displayName
+    \   ${deviceManagersUri}=    Get From Dictionary                   ${member}    deviceManagersUri
+    \   Continue For Loop If     '${displayName}'!='${san_manager_type}'
+    \   Return From Keyword      ${deviceManagersUri}
+
+Fusion Api Get Managed Port
+    [Documentation]     Get Managed Port for Storage System
+    [Arguments]     ${storage_systems_update}
+    :FOR    ${ssytemupdate}  IN  ${storage_systems_update}
+    \   ${uri} =    Get Storage System URI  ${ssytemupdate['name']}
+    \   ${resp} =   Fusion API Storage System Get Managed Ports     uri=${uri}
+
+Fusion Api Get Managed San URI
+    [Arguments]     ${fcsan}
+    ${resp} =   Fusion Api Get Managed San  param=?filter="'name'=='${fcsan}'"
+    ${uri} =    Get From Dictionary     ${resp['members'][0]}   uri
+    [Return]    ${uri}
+
+Fusion Api Storage System Update URIs for Managed Ports
+    [Arguments]     ${ssystems['managedPorts']}
+    :FOR    ${nUri}  IN  @{ssystems['managedPorts']}
+    \   ${actualNetworkUri} =     Get FC URI  ${nUri['actualNetworkUri']}
+    \   Set to dictionary   ${nUri}     actualNetworkUri     ${actualNetworkUri}
+    \   ${expectedNetworkUri} =   Get FC URI  ${nUri['expectedNetworkUri']}
+    \   Set To Dictionary   ${nUri}     expectedNetworkUri   ${expectedNetworkUri}
+    \   ${actualNetworkSanUri} =  Fusion Api Get Managed San URI  ${nUri['actualNetworkSanUri']}
+    \   Set To Dictionary   ${nUri}     actualNetworkSanUri  ${actualNetworkSanUri}
+
+#######################################
+# TEARDOWN WORFLOWS
+#######################################
+
+Remove All Storage Volumes
+    [Documentation]     Querys the appliance for all Storage Volumes and then removes them
+    Log     Removing STORAGE VOLUMES    console=yes
+    ${volumes} =    Fusion Api Get Storage Volumes
+    :FOR    ${vol}  IN  @{volumes['members']}
+    \   ${resp} =   Fusion Api Delete Storage Volume    uri=${vol['uri']}
+    \   ${task} =   Wait For Task   ${resp}     40s     2s
+    \   Storage Volume Should Not Exist     ${vol['name']}
+    \   Log     SUCCESS-Removed STORAGE VOLUMES ${vol['name']}  console=yes
+
+Remove San Manager
+    [Documentation]    Get SAN Manager from appliance by Name
+    Log to console and logfile      Removing SAN MANAGER
+    [Arguments]    ${san_managers}
+    :FOR    ${san_manager}  IN  @{san_managers}
+    \   ${san_manager_lists}         Get From Dictionary     ${san_manager}            connectionInfo
+    \   ${san_manager_dict}          Get From List           ${san_manager_lists}    1
+    \   ${san_manager_name}    Get From Dictionary     ${san_manager_dict}        value
+    \   ${resp} =    Fusion API Remove SAN Manager     ${san_manager_name}
+    \   Run Keyword If  '${resp.status_code}' == '200'      Log     The San Storage deleted successfully
+    \   Run Keyword If  '${resp.status_code}' is not '200'  Fail    The San Storage failed to delete
+
+Fusion Api Remove Storage System
+    [Documentation]  Removes specified Storage Systems from appliance
+    [Arguments]  ${storage_systems_update}
+    :FOR    ${sys}  IN  ${storage_systems_update}
+    \   ${uri} =    Get Storage System URI  ${sys['name']}
+    \   ${resp} =   Fusion Api Delete Storage System    ${uri}
+    \   Run Keyword If  '${resp.status_code}' == '202'  Log     Removing Storage System ${sys['name']}  console=yes
+    \   Run Keyword If  '${resp.status_code}' is not '202'  Fail    msg=Failed to remove Storage System ${sys['name']}
+    \   Sleep   10
+    \   ${resp_del} =   Storage System Does Exist     ${sys['name']}
+    \   Run Keyword and Continue on Failure     Run Keyword If  '${resp_del}'=='1'   Fail    msg=Storage System ${sys['name']} could not be removed from the appliance
+    \   Run Keyword If  '${resp_del}'=='0'   Log     SUCCESS-Removed STORAGE SYSTEM ${sys['name']}  console=yes
+
+Fusion Api Remove All Storage Systems
+    [Documentation]     Querys the appliance for all Storage Systems and then removes them
+    Log     Removing STORAGE SYSTEMS    console=yes
+    ${syss} =    Fusion Api Get Storage System
+    ${count}        Get From Dictionary     ${syss}     count
+    Run Keyword If  '${count}'=='0'     Fail    msg=No Storage System exist in the appliance
+    :FOR    ${sys}  IN  @{syss['members']}
+    \   ${uri} =    Get Storage System URI  ${sys['name']}
+    \   ${resp} =   Fusion Api Delete Storage System    ${uri}
+    \   Run Keyword If  '${resp.status_code}' == '202'  Log     Removing Storage System ${sys['name']}  console=yes
+    \   Run Keyword If  '${resp.status_code}' is not '202'  Fail    msg=Failed to remove Storage System ${sys['name']}
+    \   Sleep   10
+    \   ${resp_del} =   Storage System Does Exist     ${sys['name']}
+    \   Run Keyword and Continue on Failure     Run Keyword If  '${resp_del}'=='1'   Fail    msg=Storage System ${sys['name']} could not be removed from the appliance
+    \   Run Keyword If  '${resp_del}'=='0'   Log     SUCCESS-Removed STORAGE SYSTEM ${sys['name']}  console=yes
+
+Fusion Api Remove Storage Pool
+    [Documentation]  Removes specified Storage Pool from appliance
+    [Arguments]  ${storage_pool}
+    :FOR    ${spool}  IN  ${storage_pool}
+    \   ${uri} =    Get Storage Pool URI  ${spool['poolName']}
+    \   ${resp} =   Fusion Api Delete Storage Pool    ${uri}
+    \   Run Keyword If  '${resp.status_code}' == '202'  Log     Removing Storage Pool ${spool['poolName']}  console=yes
+    \   Run Keyword If  '${resp.status_code}' is not '202'  Fail    msg=Failed to remove Storage Pool ${spool['poolName']}
+    \   Sleep   10
+    \   ${resp_del} =   Storage Pool Does Exist     ${spool['poolName']}
+    \   Run Keyword and Continue on Failure     Run Keyword If  '${resp_del}'=='1'   Fail    msg=Storage Pool ${spool['poolName']} could not be removed from the appliance
+    \   Run Keyword If  '${resp_del}'=='0'   Log     SUCCESS-Removed STORAGE POOL ${spool['poolName']}  console=yes
+
+Fusion Api Remove All Storage Pools
+    [Documentation]     Querys the appliance for all Storage Pools and then removes them
+    Log     Removing STORAGE POOLS    console=yes
+    ${spools} =    Fusion Api Get Storage Pools
+    ${count}        Get From Dictionary     ${spools}     count
+    Run Keyword If  '${count}'=='0'     Fail    msg=No Storage Pool exist in the appliance
+    :FOR    ${spool}  IN  @{spools['members']}
+    \   ${uri} =    Get Storage Pool URI  ${spool['name']}
+    \   ${resp} =   Fusion Api Delete Storage Pool    ${uri}
+    \   Run Keyword If  '${resp.status_code}' == '202'  Log     Removing Storage Pool ${spool['name']}  console=yes
+    \   Run Keyword If  '${resp.status_code}' is not '202'  Fail    msg=Failed to remove Storage Pool ${spool['name']}
+    \   Sleep   10
+    \   ${resp_del} =   Storage Pool Does Exist     ${spool['name']}
+    \   Run Keyword and Continue on Failure     Run Keyword If  '${resp_del}'=='1'   Fail    msg=Storage Pool ${spool['name']} could not be removed from the appliance
+    \   Run Keyword If  '${resp_del}'=='0'   Log     SUCCESS-Removed STORAGE POOL ${spool['name']}  console=yes

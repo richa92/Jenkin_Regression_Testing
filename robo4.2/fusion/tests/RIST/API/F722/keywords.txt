@@ -1,0 +1,211 @@
+*** Settings ***
+Library				RoboGalaxyLibrary
+Library				FusionLibrary
+Library				OperatingSystem
+Library				BuiltIn
+Library				Collections
+Library				XML
+Library		        SSHLibrary
+Library				String
+Library				Dialogs
+Resource             ./../../../../Resources/api/fusion_api_resource.txt
+Resource             ../global_variables.robot
+
+*** Keywords ***
+Get Run Specific Data File Variables Login the Users And Validate Firmware Bundle
+    ${TESTMODE} =    Get Variable Value    ${TESTMODE}    ${None}
+    #Pass Execution If    '${TESTMODE}'=='${None}'    Will use default or command line data file ${DATA_FILE}
+    #Log Variables
+
+    Log To Console and Log File    \nTESTMODE:${TESTMODE}
+    Run Keyword If     '${TESTMODE}'=='wpst30'    Import Variables    ${CURDIR}/F722_HPSUT_FW_Update_wpst30.py
+    ...    ELSE    Run Keyword If    '${TESTMODE}'=='tbird14'    Import Variables    ${CURDIR}/F722_HPSUT_FW_Update_Tbird14.py
+    ...    ELSE    Run Keyword If    '${TESTMODE}'=='otherenclosure'    Import Variables    ./Some_Other_Data_File
+    #Log Variables
+
+    Fusion Api Login Appliance         ${APPLIANCE_IP}        ${admin_credentials}
+
+    Log To Console and Log File    TEST HARDWARE:${model}
+    ${Snap5Uri} =   Get Firmware Bundle By Version  ${SNAP5BaseLine}
+    Run Keyword If  '${model}'=='C7000'    Should Match    ${Snap5Uri}    ${SNAP5SPP}
+    ${Snap6Uri} =   Get Firmware Bundle By Version  ${SNAP6BaseLine}
+    Should Match    ${Snap6Uri}    ${SNAP6SPP}
+
+Clear Test Environtment
+    Log to console and logfile  Power Off Servers and remove all profiles
+    Run Keyword And Ignore Error    Wait For ALL Server Profile In Normal State
+    Run Keyword And Ignore Error    Power off ALL servers   PressAndHold
+    Run Keyword And Ignore Error    Wait For ALL Servers Complete Refresh
+    Run Keyword And Ignore Error    Remove All Server Profiles
+
+Update server firmware when create profile
+    [Arguments]    ${baseLine}    ${isForce}=${False}      ${method}=${HPSUT}
+    [Documentation]    Create server profile with firmware baseline
+    Clear Test Environtment
+    Log to console and logfile  Update server firmware with baseline ${baseLine} when create profile
+    ${profilelist} =    Generate profile body   ${createProfiles}   ${baseLine}     ${isForce}
+    ${resps} =   Add Server Profiles from variable   ${profilelist}
+    Validate Firmware Update Task   ${resps}    ${method}
+
+Update server firmware when edit profile
+    [Arguments]    ${baseLine}    ${isForce}=${False}    ${method}=${HPSUT}
+    [Documentation]    Edit server profile with firmware baseline
+    Log to console and logfile  Update server firmware with baseline ${baseLine} when edit profile
+    ${profilelist} =    Generate profile body   ${editProfiles}   ${baseLine}     ${isForce}
+    ${resps} =   Edit Server Profiles from variable   ${profilelist}
+    Validate Firmware Update Task   ${resps}    ${method}
+
+Update server firmware and config localstorage when create profile
+    [Arguments]    ${baseLine}    ${isForce}=${False}      ${method}=${HPSUT}
+    [Documentation]    Create server profile with firmware baseline
+    Clear Test Environtment
+    Log to console and logfile  Update server firmware with baseline ${baseLine} when create profile
+    ${profilelist} =    Generate profile body   ${createFullProfiles}   ${baseLine}     ${isForce}
+    ${resps} =   Add Server Profiles from variable   ${profilelist}
+    Validate Firmware Update Task   ${resps}    ${method}
+
+Generate profile body
+    [Arguments]    ${profiles}    ${baseLine}    ${isForce}=${False}
+    [Documentation]    Generate profile body
+    ${profilelist} =    Create List
+    :FOR    ${profile}    IN    @{profiles}
+    \    ${hardware} =   Get from Dictionary    ${profile}    serverHardwareUri
+    \    ${firmware} =     Get from Dictionary    ${profile}    firmware
+    \    Set to Dictionary    ${firmware}    firmwareBaselineUri    ${baseLine}
+    \    Set to Dictionary    ${firmware}    forceInstallFirmware    ${isForce}
+    \    Set to Dictionary    ${profile}    firmware    ${firmware}
+    \    append to list    ${profilelist}    ${profile}
+    \    Log to console and logfile      Creat profile body for ${hardware}
+    [Return]    ${profilelist}
+
+Create empty server profile
+    [Arguments]    ${profiles}
+    [Documentation]    Create empty server profile with given name
+    Clear Test Environtment
+    Log to console and logfile  Create empty server profile
+    ${profilelist} =    Create List
+    : FOR    ${profile}    IN    @{profiles}
+    \    ${name} =    Get From Dictionary        ${profile}    name
+    \    Set to Dictionary    ${emptyprofile}    name    ${name}
+    \    append to list    ${profilelist}    ${emptyprofile}
+    ${resps} =   Add Server Profiles from variable   ${profilelist}
+    :FOR    ${resp}    IN    @{resps}
+    \    ${task} =    Wait For Task     ${resp}     200s    2s
+    \    ${taskStatus} =    Get From Dictionary        ${task}    taskStatus
+    \    ${taskState} =    Get From Dictionary        ${task}    taskState
+    \    Log to console and logfile  ${taskStatus}
+    \    Log to console and logfile  ${taskState}
+
+Validate Firmware Update Method
+    [Arguments]    ${taskUri}    ${method}=${IP}
+    [Documentation]    Validate firmware update by HPE Intelligent Provisioning or HPSUT
+    Log to console and logfile  Validate Firmware Update Method
+    ${task} =    Get Task By Param   param=?filter='parentTaskUri'='${taskUri}'&sort=created:descending&count=1
+    Log to console and logfile  ${task}
+    ${multiprogress} =     Get From Dictionary        ${task}     progressUpdates
+    ${result} =    Run Keyword If     "${method}"=="${HPSUT}"   Validate Profile Task Without Intelligent Provisioning     ${multiprogress}
+    Run Keyword If  "${result}"!="${None}"     Should Match    ${result}    Expected
+    :FOR    ${progress}    IN    @{multiprogress}
+    \    ${status} =     Get From Dictionary        ${progress}     statusUpdate
+    \    ${words} =     Fetch From Left    ${status}    ${method}
+    \    ${status} =     Replace String  ${status}   \"  ${EMPTY}
+    \    ${words} =      Replace String  ${words}    \"  ${EMPTY}
+    \    Return From Keyword If    "${words}"!="${status}"    Expected
+    [Return]    Firmware Update is not by ${method}
+
+Validate Firmware Update Task
+    [Arguments]    ${resps}    ${method}
+    [Documentation]    Validate firmware task complete with expected method
+    Log to console and logfile  Validate firmware task complete with expected method:${method}
+    :FOR    ${resp}    IN    @{resps}
+    \    Log to console and logfile  ${resp}
+    \    ${task} =    Wait For Task     ${resp}     100min    5s
+    \    ${taskStatus} =    Get From Dictionary        ${task}     taskStatus
+    \    ${taskState} =    Get From Dictionary        ${task}     taskState
+    \    Log to console and logfile  ${taskStatus}
+    \    Log to console and logfile  ${taskState}
+    \    Should Match    ${taskState}    Completed
+    \    ${taskUri} =    Get From Dictionary        ${task}     uri
+    \    ${result} =    Validate Firmware Update Method     ${taskUri}     ${method}
+    \    Should Match    ${result}    Expected
+
+Validate Firmware Baseline Invalid
+    [Arguments]    ${task}
+    [Documentation]    Validate firmware baseline is invalid
+    Log to console and logfile  Validate firmware baseline is invalid
+    ${errorCode} =    Get From Dictionary        ${task['taskErrors'][0]}   errorCode
+    Should Match    ${errorCode}    FWBASELINE_NOT_FOUND
+
+Validate Firmware Baseline Invalid Task
+    [Arguments]    ${resps}
+    [Documentation]    Validate task include Firmware Baseline Invalid error
+    Log to console and logfile  Validate task include Firmware Baseline Invalid error
+    :FOR    ${resp}    IN    @{resps}
+    \    ${task} =    Wait For Task     ${resp}     10s    2s
+    \    ${taskStatus} =    Get From Dictionary        ${task}     taskStatus
+    \    ${taskState} =    Get From Dictionary        ${task}     taskState
+    \    Log to console and logfile  ${taskStatus}
+    \    Log to console and logfile  ${taskState}
+    \    Validate Firmware Baseline Invalid     ${task}
+
+Validate Profile Task Without Intelligent Provisioning
+    [Arguments]    ${multiprogress}
+    [Documentation]    Validate profile apply without HPE Intelligent Provisioning
+    :FOR    ${progress}    IN    @{multiprogress}
+    \    ${status} =     Get From Dictionary        ${progress}     statusUpdate
+    \    ${words} =     Fetch From Left    ${status}    ${IP}
+    \    ${status} =     Replace String  ${status}   \"  ${EMPTY}
+    \    ${words} =      Replace String  ${words}    \"  ${EMPTY}
+    \    Return From Keyword If    "${words}"!="${status}"    Firmware Update should not use ${IP}
+    [Return]    Expected
+
+Validate Profile Firmware Version
+    [Arguments]    ${profiles}  ${baseline}
+    [Documentation]    Validate if firmware update success
+    :FOR    ${profile}    IN    @{profiles}
+    \    ${hardware} =   Get from Dictionary    ${profile}    serverHardwareUri
+    \    ${model} =   Get from Dictionary    ${profile}    description
+    \    Log to console and logfile  ${hardware}
+    \    Power On Server    ${hardware}
+    \    ${expectedFirmwares} =     Get from Dictionary    ${firmwares}    ${baseline}
+    \    ${expectedFirmware} =     Get from Dictionary    ${expectedFirmwares}    ${model}
+    \    Wait Until Keyword Succeeds    600s    15s    Server Hardware Firmware Version Correct    ${hardware}    ${expectedFirmware}
+    \    Log to console and logfile  Firmware update success!
+
+Server Hardware Firmware Version Correct
+    [Arguments]    ${hardware}    ${expectedFirmware}
+    Set Log Level    TRACE
+    ${firmware} =   Get Server Hardware Firmware    ${hardware}
+    Validate Firmware Version   ${firmware}     ${expectedFirmware}
+
+Validate Firmware Version
+    [Arguments]    ${firmware}  ${expectedFirmware}
+    [Documentation]    Check if firmware version update to expected value
+    Log to console and logfile  Check if firmware version update to expected value
+    Log to console and logfile  Actual firmware:\n${firmware}
+    Log to console and logfile  Expected firmware:\n${expectedFirmware}
+    :FOR    ${checkFirmware}    IN    @{expectedFirmware}
+    \    ${name} =   Get from Dictionary     ${checkFirmware}    componentName
+    \    ${version} =   Get from Dictionary  ${checkFirmware}    componentVersion
+    \    ${hardwareVersion} =    Search Firmware Version     ${firmware}     ${name}
+    \    Should Be Equal     ${hardwareVersion}  ${version}  Firmware update failed,${name} should be ${version}, but actually ${hardwareVersion}
+    \    Log to console and logfile  ${name} validate success
+
+Search Firmware Version
+    [Arguments]    ${firmware}  ${name}
+    :FOR    ${component}    IN    @{firmware}
+    \    ${componentName} =   Get from Dictionary    ${component}    componentName
+    \    ${version} =   Get from Dictionary  ${component}    componentVersion
+    \    Return From Keyword If    "${name}"=="${componentName}"     ${version}
+    [Return]    Firmware ${name} not found!
+
+Clear Base Resources
+    [Documentation]   Delete base resources
+    Log To Console And Logfile    \nCleaning test environment before test...
+    Power off ALL servers    control=PressAndHold
+    Remove All Server Profiles
+    Remove All Server Profile Templates
+    Remove All LEs           ${True}
+    Remove All Enclosure Groups    ${True}
+    Remove All LIGs
+    Remove All Firmware Bundles

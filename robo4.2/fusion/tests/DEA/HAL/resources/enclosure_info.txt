@@ -1,0 +1,161 @@
+*** Settings ***
+Documentation
+...    enclosure_info.txt - Retrieve and return current Enclosure information
+...
+...    = Usage =
+...    | Resource | ../resources/enclosure_info.txt |
+...
+...    = Prerequisites =
+...    - Default 'Enclosure' variables have previously been imported.
+...      Example:
+...       | Variables | ../resources/variables.py | ${ENCLOSURE} |
+...       | Resource  | ../resources/defaults.txt | |
+...
+...    = Overview =
+...    This resource library operates on data returned from the HP OneView REST
+...    API GET https://{appl}/rest/enclosures or the Fusion Api Get Enclosure
+...    keyword. See the HP OneView API Reference for additional information.
+...
+...    This resource implements the following keywords:
+...      - Get Enclosure ${BayType} Count
+...      - Get Enclosure ${BayType} Info
+...      - Get Enclosure Bay ${BayType} ${BayNumber}
+...      - Get Enclosure Field ${FieldName} From ${BayType} ${BayNumber}
+...      - Get Absent Enclosure ${BayType} List
+...      - Get Present Enclosure ${BayType} List
+...      - Select Random Absent Enclosure ${BayType}
+...      - Select Random Present Enclosure ${BayType}
+...
+...    Where:
+...      - ${BayType}  Must be a valid bay type. One of: ciManagerBays,  deviceBays, fanBays, interconnectBays, managerBays or powerSupplyBays.
+...      - ${BayNumber}  is a valid bay number for this bay type.
+...      - ${FieldName}  is a valid key name from in the Enclosure Information.
+...
+...    TODO: Handles only single enclosure machines.
+
+Library      Collections
+Library      String
+Resource     ../resources/fusion_api.txt
+
+*** Variables ***
+@{BayTypes}     ciManagerBays    applianceBays    deviceBays    fanBays    managerBays    powerSupplyBays    interconnectBays
+
+*** Keywords ***
+Get Enclosure ${BayType} Count
+    [Documentation]    Return a count of the number of bay slots for the specified bay type.
+    List Should Contain Value    ${BayTypes}    ${BayType}
+    ...    Bay type ${BayType} is not valid. \nTry one of @{BayTypes}
+    # Generate the field name containing the count for this type of bay.
+    ${BayCount}    Replace String    ${BayType}    Bays    BayCount
+
+    # Special case for 'managerBays' count is in 'emBays'
+    #${BayCount}=    Set Variable If    '${BayType}'=='managerBays'    emBays    ${BayCount}
+    ${Enclosure_Info}    private__Get Updated Enclosure Info
+    [Return]    ${Enclosure_Info['${BayCount}']}
+
+Get Enclosure ${BayType} Info
+    [Documentation]    Returns the Enclosure Information for all of the specified bay.
+    ${Enclosure_Info}    private__Get Updated Enclosure Info
+    List Should Contain Value    ${BayTypes}    ${BayType}
+    ...    Bay type ${BayType} is not valid. \nTry one of @{BayTypes}
+    [Return]  ${Enclosure_Info['${BayType}']}
+
+Get Enclosure Bay ${BayType} ${BayNumber}
+    [Documentation]    Returns the Enclosure Information for the specified bay type
+    ...    in the specified bay slot.
+    ${Bays_Info}    Get Enclosure ${BayType} Info
+    ${BayIndex}    Evaluate    ${BayNumber} - 1
+    [Return]  ${Bays_Info[${BayIndex}]}
+
+Get Enclosure Field ${FieldName} From ${BayType} ${BayNumber}
+    [Documentation]    Returns the specified field, for the specified bay type, in the specified bay slot.
+    ${BayInfo}      Get Enclosure Bay ${BayType} ${BayNumber}
+    [Return]  ${BayInfo['${FieldName}']}
+
+Get ${PresentAbsent} Enclosure ${BayType} List
+    [Documentation]    Returns a list of either empty or populated bays for the specified bay type.
+    ${List}     Create List
+    ${Count}    Get Enclosure ${BayType} Count
+    ${Field}    Set Variable If    '${BayType}'!='interconnectBays'    devicePresence    empty
+
+    # Switch Present-Absent if considering 'empty' field vs 'presence' field.
+    ${PresentAbsent}    Convert To Lowercase    ${PresentAbsent}
+    ${PresentAbsent}    Run Keyword If    '${Field}'=='empty'
+    ...    Set Variable If    '${PresentAbsent}'=='absent'    present    absent
+    ...    ELSE    Set Variable    ${PresentAbsent}
+
+    :For    ${BayNumber}   In Range    1    ${Count}+1
+    \    ${Presence}    Get Enclosure Field ${Field} From ${BayType} ${BayNumber}
+    \    # Sometimes they use 'true' and 'false' instead of present and absent.
+    \    ${Presence}    Convert To String    ${Presence}
+    \    ${Presence}    Convert To Lowercase    ${Presence}
+    \    ${Presence}    Set Variable if    '${Presence}'=='true'     present    ${Presence}
+    \    ${Presence}    Set Variable if    '${Presence}'=='false'    absent    ${Presence}
+
+    \    Run Keyword If    '${Presence}'=='${PresentAbsent}'
+    \    ...    Append To List    ${List}    ${BayNumber}
+    [Return]    ${List}
+
+Select Random ${PresentAbsent} Enclosure ${BayType}
+    [Documentation]    Selects either a present or absent bay slot at random.
+    ...    Returns zero if no bays of that type were found.
+    @{List}=    Get ${PresentAbsent} Enclosure ${BayType} List
+    ${Length}    Get Length    ${List}
+    Return From Keyword If    ${Length}==0    0
+    # Select Random element
+    ${Index}    Evaluate    random.randint(0, ${Length}-1)    random
+    [Return]    ${List[${Index}]}
+
+Get Updated Enclosure Info
+    [Documentation]    Get Enclosure information and save in the global variable ${Enclosure_Info}.
+    ...    Other keywords in this library will expect this will have been set.
+    ...    In normal operation, this keyword should not be called. For Internal use.
+    [Arguments]
+    ...    ${Enclosure}=${ENCLOSURE}
+    ...    ${Force}=${False}
+
+    # Only fetch Enclosure Info when not previously made available AND If we're
+    # not forcing a refresh of our enclosure info.
+    # If 'force' option was supplied and clear the 'info set' flag so we'll get
+    # fresh/new information.
+    Run Keyword If    ${Force}!=${False}
+    ...    Set Global Variable    ${Enclosure_Info_Set}    ${False}
+
+    ${Enclosure_Info}    private__Get Updated Enclosure Info    ${Enclosure}
+    [Return]    ${Enclosure_Info}
+
+private__Get Updated Enclosure Info
+    [Documentation]
+    ...    Get Enclosure information and save in the global variable ${Enclosure_Info}.
+    ...    Other keywords in this library will expect this will have been set.
+    ...    In normal operation, this keyword should not be called.
+    ...    For Internal use. Users should call _*Get Updated Enclosure Info*_ directly.
+    [Arguments]    ${Enclosure}=${Enclosure}
+    #
+    # If Enclosure Info was previously set, just return with the current info.
+    #
+    ${Enclosure_Info_Set}    Get Variable Value    ${Enclosure_Info_Set}    ${False}
+    Set Global Variable    ${Enclosure_Info_Set}
+    Run Keyword If    ${Enclosure_Info_Set}!=${False}
+    ...    Return from Keyword    ${Enclosure_Info}
+    #
+    # Let's get fresh Enclosure Information
+    #
+    Login to Fusion via REST
+    ${Response}    Fusion Api Get Enclosures
+    Dictionary Should Contain Item    ${Response}    status_code    200
+    ...    msg=Get Enclosure did not return a valid status code ${Response}
+    #
+    # Check for a count of more than zero enclosures listed
+    #
+    Dictionary Should contain Key    ${Response}    count
+    ...    msg=Get Enclosure did not return a count ${Response}
+    Should Not Be True    ${Response['count']}=='0'    msg=No enclosures found
+    #++++
+    # TODO: We only handle a single enclosure systems at this point.
+    #++++
+    # Return the first member dictionary and set the 'info set' flag.
+    Set Global Variable    ${Enclosure_Info}        ${Response['members'][0]}
+    Set Global Variable    ${Enclosure_Info_Set}    ${True}
+    [Return]    ${Enclosure_Info}
+

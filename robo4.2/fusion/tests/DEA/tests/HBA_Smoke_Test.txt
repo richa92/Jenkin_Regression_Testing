@@ -1,0 +1,308 @@
+*** Settings ***
+Documentation     Test suite to verify HBA Smoke test
+...               pybot -L TRACE -i DEAANDAPIANDAutomatedANDHBA -v GIT_REPO_ROOT:/Users/Administrator/git 
+...               -v APPLIANCE_IP:<OV IP> -v FUSION_USERNAME:<UName> -v  FUSION_PASSWORD:<Pwd> -v HBA_Smoke_Test.txt
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/smoke_data_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Library           RoboGalaxyLibrary
+Library           FusionLibrary
+Library           MgmtFWLibrary
+Library           Collections
+Suite Setup       Run Keywords    Login to Fusion Via REST    AND    Clean UP Environment    AND    Setup Ethernet FC Environment
+Suite Teardown    Run Keywords    Clean UP Environment    AND    Logout of Fusion Via REST
+
+*** Test Cases ***
+    
+TC 01: Smoke Test for Quartz with profile in UEFI mode
+    [Documentation]    Verify smoke test for Quartz Mezz card with profile in UEFI mode
+    [Tags]    DEA    API    Automated    HBA
+    ${info}=    Get Server Info    ${Quartz_UEFI_bay}
+    ${mezz_list}=    Get Quartz Mezz Bay List    ${info}
+    Should Not Be Empty    ${mezz_list}    msg=No Quartz mezz adapter present in the servwe bay : ${Quartz_UEFI_bay}
+    
+    Set Test Variable    ${Test_Tag}    Quartz
+    Login to Fusion via SSH
+    Login to EM And Create Session
+    Power off server bay    ${Quartz_UEFI_bay}
+    
+    # Create Server profile with 2 connections , Ethernet and FC
+    Log to console and logfile    Creating server profile for bay : ${Quartz_UEFI_bay} with Ethernet and FC connection
+    ${server_profile_body}=    Build Server Profile body UEFI Mode    ${Quartz_UEFI_bay}    ${server_profiles_enet_fc[0]}
+    Create Server Profile    ${server_profile_body}
+    Log to console and logfile    Powering on server bay : ${Quartz_UEFI_bay} and wait for ${Server_Boot_Wait} seconds to boot
+    Power on server bay    ${Quartz_UEFI_bay}
+    Sleep    ${Server_Boot_Wait}
+    
+    #Login to iLO and get the Server OS IP to verify the network by pinging
+    Log to console and logfile    Verify network connection by pinging to OS IP after server boot
+    ${ilo_ip}=    Get Server iLO IP    ${Quartz_UEFI_bay}
+    ${status}=    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    iLO RIS Show Blade Firmware Table
+    ${os_ip}=    Wait for Server OS IP from iLO RIS
+    ${ping_status}=    Run And Return RC    ping ${os_ip} -n 1
+    ${ping_response}=    Run Keyword If    ${ping_status}==0    Set Variable    True
+    Should be True    ${ping_response}    msg=Unable to ping the server OS IP
+    
+    #Verify the Server hardware , type and port mmapping information
+    Log to console and logfile    Verifying Server Hardware, Type and Port mapping information for server bay : ${Quartz_UEFI_bay}
+    ${server_info}=    Get Server Info    ${Quartz_UEFI_bay}
+    ${mezz_list}=    Get Quartz Mezz Bay List    ${server_info}
+    Run Keyword And Ignore Error    Verify Server Harware Information    ${server_info}    On    ProfileApplied
+    Verify Mezz Port Information    ${server_info}    ${mezz_list}
+    Verify SHT Adapter Info    ${server_info}    ${mezz_list}
+    
+    #Verify SAN is still connected by changing the connection bandwidth
+    Log to console and logfile    Editting server profile for bay : ${Quartz_UEFI_bay} for online update with Ethernet BW change
+    Verify Connection BW Online Update UEFI Mode    ${Quartz_UEFI_bay}    ${os_ip}    ${requestedBW}    ${server_profiles_enet_fc[0]}
+    
+    #Efuse the blade and verify for Profile Applied back once inserted
+    Log to console and logfile    Efuse the server bay : ${Quartz_UEFI_bay} and wait for profile to be applied once discovered
+    EFuse Blade    EFuseOn    ${Quartz_UEFI_bay}
+    Sleep    20
+    EFuse Blade    EFuseOff    ${Quartz_UEFI_bay}
+    Sleep    150
+    Log to console and logfile    \t Waiting for Server in Bay:${Quartz_UEFI_bay} to reach state:ProfileApplied after Efuse
+    Wait Until Keyword Succeeds    15 min   20s    Device reached state    ${server_info['uri']}    ProfileApplied
+    Sleep    90     #wait time required after Profile Applied state to power on the server
+    Power on server bay    ${Quartz_UEFI_bay}
+    Sleep    ${Server_Boot_Wait}
+    ${ilo_ip}=    Get Server iLO IP    ${Quartz_UEFI_bay}
+    ${status}=    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    ${os_ip}=    Wait for Server OS IP from iLO RIS
+    ${ping_status}=    Run And Return RC    ping ${os_ip} -n 1
+    ${ping_response}=    Run Keyword If    ${ping_status}==0    Set Variable    True
+    Should be True    ${ping_response}    msg=Unable to ping the server OS IP
+    
+    #Verify profile can be removed
+    Log to console and logfile    Verifying profile can be removed for server bay : ${Quartz_UEFI_bay}
+    Power off server bay    ${Quartz_UEFI_bay}
+    Remove Server Profile Bay    ${Quartz_UEFI_bay}
+    ${profile_uri}=    Get Server Profile URI    ${Quartz_UEFI_bay}
+    Should Be Equal As Strings    ${profile_uri}    None
+    ${ping_status}=    Run And Return RC    ping ${os_ip} -n 1
+    ${ping_response}=    Run Keyword If    ${ping_status}==1    Set Variable    True
+    Should be True    ${ping_response}    msg=Able to ping the server OS IP after removal of server profile
+    Logout of iLO
+    Logout of Fusion Via SSH
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Logout of iLO    AND    Logout of Fusion Via SSH
+    
+TC 02: Smoke Test for Electron with profile in UEFI mode
+    [Documentation]     Verify smoke test for Electron Mezz card with profile in UEFI mode
+    [Tags]    DEA    API    Automated    HBA    QXCR1001472448
+    ${info}=    Get Server Info    ${Electron_UEFI_bay}
+    ${mezz_list}=    Get Electron Mezz Bay List    ${info}
+    Should Not Be Empty    ${mezz_list}    msg=No Electron mezz adapter present in the servwe bay : ${Electron_UEFI_bay}
+    Set Test Variable    ${Test_Tag}    Electron
+    Login to Fusion via SSH
+    Login to EM And Create Session
+    Power off server bay    ${Electron_UEFI_bay}
+    
+    # Create Server profile with 2 connections , Ethernet and FC
+    Log to console and logfile    Creating server profile for bay : ${Electron_UEFI_bay} with Ethernet and FC connection
+    ${server_profile_body}=    Build Server Profile body UEFI Mode     ${Electron_UEFI_bay}    ${server_profiles_enet_fc[0]}
+    Create Server Profile    ${server_profile_body}
+    Log to console and logfile    Powering on server bay : ${Electron_UEFI_bay} and wait for ${Server_Boot_Wait} seconds to boot
+    Power on server bay    ${Electron_UEFI_bay}
+    Sleep    ${Server_Boot_Wait}
+    
+    #Login to iLO and get the Server OS IP to verify the network by pinging
+    Log to console and logfile    Verify network connection by pinging to OS IP after server boot
+    ${ilo_ip}=    Get Server iLO IP    ${Electron_UEFI_bay}
+    ${status}=    Login to iLO ipv4     ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    iLO RIS Show Blade Firmware Table
+    ${os_ip}=    Wait for Server OS IP from iLO RIS
+    ${ping_status}=    Run And Return RC   ping ${os_ip} -n 1
+    ${ping_response}=    Run Keyword If    ${ping_status}==0    Set Variable     True
+    Should be True   ${ping_response}     msg=Unable to ping the server OS IP
+    
+    #Verify the Server hardware , type and port mmapping information
+    Log to console and logfile    Verifying Server Hardware, Type and Port mapping information for server bay : ${Electron_UEFI_bay}
+    ${server_info}=    Get Server Info    ${Electron_UEFI_bay}
+    ${mezz_list}=    Get Electron Mezz Bay List    ${server_info}
+    Verify Server Harware Information    ${server_info}    On    ProfileApplied
+    Verify Mezz Port Information    ${server_info}    ${mezz_list}
+    Verify SHT Adapter Info    ${server_info}    ${mezz_list}
+    
+    #Verify SAN is still connected by changing the connection bandwidth
+    Log to console and logfile    Editting server profile for bay : ${Electron_UEFI_bay} for online update with Ethernet BW change
+    Verify Connection BW Online Update UEFI Mode    ${Electron_UEFI_bay}    ${os_ip}    ${requestedBW}    ${server_profiles_enet_fc[0]}
+    
+    #Efuse the blade and verify for Profile Applied back once inserted
+    Log to console and logfile    Efuse the server bay : ${Electron_UEFI_bay} and wait for profile to be applied once discovered
+    EFuse Blade    EFuseOn    ${Electron_UEFI_bay}
+    Sleep    20
+    EFuse Blade    EFuseOff    ${Electron_UEFI_bay}
+    Sleep    150
+    Log to console and logfile      \t Waiting for Server in Bay:${Electron_UEFI_bay} to reach state:ProfileApplied after Efuse
+    Wait Until Keyword Succeeds     15 min   20s      Device reached state    ${server_info['uri']}    ProfileApplied
+    Sleep    90     #wait time required after Profile Applied state to power on the server
+    Power on server bay    ${Electron_UEFI_bay}
+    Sleep    ${Server_Boot_Wait}
+    ${ilo_ip}=    Get Server iLO IP    ${Electron_UEFI_bay}
+    ${status}=    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    ${os_ip}=    Wait for Server OS IP from iLO RIS
+    ${ping_status}=    Run And Return RC    ping ${os_ip} -n 1
+    ${ping_response}=    Run Keyword If    ${ping_status}==0    Set Variable    True
+    Should be True    ${ping_response}    msg=Unable to ping the server OS IP
+    
+    #Verify profile can be removed
+    Log to console and logfile    Verifying profile can be removed for server bay : ${Electron_UEFI_bay}
+    Power off server bay    ${Electron_UEFI_bay}
+    Remove Server Profile Bay    ${Electron_UEFI_bay}
+    ${profile_uri}=    Get Server Profile URI    ${Electron_UEFI_bay}
+    Should Be Equal As Strings    ${profile_uri}    None
+    ${ping_status}=    Run And Return RC    ping ${os_ip} -n 1
+    ${ping_response}=    Run Keyword If    ${ping_status}==1    Set Variable    True
+    Should be True    ${ping_response}    msg=Able to ping the server OS IP after removal of server profile
+    Logout of iLO
+    Logout of Fusion Via SSH
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Logout of iLO    AND    Logout of Fusion Via SSH
+
+TC 03: Smoke Test for Quartz with profile in Legacy mode
+    [Documentation]    Verify smoke test for Quartz Mezz card with profile in Legacy mode
+    [Tags]    DEA    API    Automated    HBA
+    ${info}=    Get Server Info    ${Quartz_Legacy_bay}
+    ${mezz_list}=    Get Quartz Mezz Bay List    ${info}
+    Should Not Be Empty    ${mezz_list}    msg=No Quartz mezz adapter present in the servwe bay : ${Quartz_Legacy_bay}
+    Set Test Variable    ${Test_Tag}    Quartz
+    Login to Fusion via SSH
+    Login to EM And Create Session
+
+    Power off server bay    ${Quartz_Legacy_bay}
+    
+    # Create Server profile with 2 connections , Ethernet and FC
+    Log to console and logfile    Creating server profile for bay : ${Quartz_Legacy_bay} with Ethernet and FC connection
+    ${server_profile_body}=    Build Server Profile body Legacy Mode    ${Quartz_Legacy_bay}    ${server_profiles_enet_fc[0]}
+    Create Server Profile    ${server_profile_body}
+    Log to console and logfile    Powering on server bay : ${Quartz_Legacy_bay} and wait for ${Server_Boot_Wait} seconds to boot
+    Power on server bay    ${Quartz_Legacy_bay}
+    Sleep    ${Server_Boot_Wait}
+    
+    #Login to iLO and get the Server OS IP to verify the network by pinging
+    Log to console and logfile    Verify network connection by pinging to OS IP after server boot
+    ${ilo_ip}=    Get Server iLO IP    ${Quartz_Legacy_bay}
+    ${status}=    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    iLO RIS Show Blade Firmware Table
+    ${os_ip}=    Wait for Server OS IP from iLO RIS
+    ${ping_status}=    Run And Return RC    ping ${os_ip} -n 1
+    ${ping_response}=    Run Keyword If    ${ping_status}==0    Set Variable    True
+    Should be True    ${ping_response}    msg=Unable to ping the server OS IP
+    
+    #Verify the Server hardware , type and port mmapping information
+    Log to console and logfile    Verifying Server Hardware, Type and Port mapping information for server bay : ${bay}
+    ${server_info}=    Get Server Info    ${Quartz_Legacy_bay}
+    ${mezz_list}=    Get Quartz Mezz Bay List    ${server_info}
+    Run Keyword And Ignore Error    Verify Server Harware Information    ${server_info}    On    ProfileApplied
+    Verify Mezz Port Information    ${server_info}    ${mezz_list}
+    Verify SHT Adapter Info    ${server_info}    ${mezz_list}
+    
+    #Verify SAN is still connected by changing the connection bandwidth
+    Log to console and logfile    Editting server profile for bay : ${Quartz_Legacy_bay} for online update with Ethernet BW change
+    Verify Connection BW Online Update Legacy Mode    ${Quartz_Legacy_bay}    ${os_ip}    ${requestedBW}    ${server_profiles_enet_fc[0]}
+    
+    #Efuse the blade and verify for Profile Applied back once inserted
+    Log to console and logfile    Efuse the server bay : ${Quartz_Legacy_bay} and wait for profile to be applied once discovered
+    EFuse Blade    EFuseOn    ${Quartz_Legacy_bay}
+    Sleep    20
+    EFuse Blade    EFuseOff    ${Quartz_Legacy_bay}
+    Sleep    150
+    Log to console and logfile    \t Waiting for Server in Bay:${Quartz_Legacy_bay} to reach state:ProfileApplied after Efuse
+    Wait Until Keyword Succeeds    15 min   20s    Device reached state    ${server_info['uri']}    ProfileApplied
+    Sleep    90     #wait time required after Profile Applied state to power on the server
+    Power on server bay    ${Quartz_Legacy_bay}
+    Sleep    ${Server_Boot_Wait}
+    ${ilo_ip}=    Get Server iLO IP    ${Quartz_Legacy_bay}
+    ${status}=    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    ${os_ip}=    Wait for Server OS IP from iLO RIS
+    ${ping_status}=    Run And Return RC    ping ${os_ip} -n 1
+    ${ping_response}=    Run Keyword If    ${ping_status}==0    Set Variable    True
+    Should be True    ${ping_response}    msg=Unable to ping the server OS IP
+    
+    #Verify profile can be removed
+    Log to console and logfile    Verifying profile can be removed for server bay : ${Quartz_Legacy_bay}
+    Power off server bay    ${Quartz_Legacy_bay}
+    Remove Server Profile Bay    ${Quartz_Legacy_bay}
+    ${profile_uri}=    Get Server Profile URI    ${Quartz_Legacy_bay}
+    Should Be Equal As Strings    ${profile_uri}    None
+    ${ping_status}=    Run And Return RC    ping ${os_ip} -n 1
+    ${ping_response}=    Run Keyword If    ${ping_status}==1    Set Variable    True
+    Should be True    ${ping_response}    msg=Able to ping the server OS IP after removal of server profile
+    Logout of iLO
+    Logout of Fusion Via SSH
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Logout of iLO    AND    Logout of Fusion Via SSH
+    
+TC 04: Smoke Test for Electron with profile in Legacy mode
+    [Documentation]     Verify smoke test for Electron Mezz card with profile in Legacy mode
+    [Tags]    DEA    API    Automated    HBA    QXCR1001472448
+    ${info}=    Get Server Info    ${Electron_Legacy_bay}
+    ${mezz_list}=    Get Electron Mezz Bay List    ${info}
+    Should Not Be Empty    ${mezz_list}    msg=No Electron mezz adapter present in the servwe bay : ${Electron_Legacy_bay}
+    Set Test Variable    ${Test_Tag}    Electron
+    Login to Fusion via SSH
+    Login to EM And Create Session
+    
+    Power off server bay    ${Electron_Legacy_bay}
+    
+    # Create Server profile with 2 connections , Ethernet and FC
+    Log to console and logfile    Creating server profile for bay : ${Electron_Legacy_bay} with Ethernet and FC connection
+    ${server_profile_body}=    Build Server Profile body Legacy Mode     ${Electron_Legacy_bay}    ${server_profiles_enet_fc[0]}
+    Create Server Profile    ${server_profile_body}
+    Log to console and logfile    Powering on server bay : ${Electron_Legacy_bay} and wait for ${Server_Boot_Wait} seconds to boot
+    Power on server bay    ${Electron_Legacy_bay}
+    Sleep    ${Server_Boot_Wait}
+    
+    #Login to iLO and get the Server OS IP to verify the network by pinging
+    Log to console and logfile    Verify network connection by pinging to OS IP after server boot
+    ${ilo_ip}=    Get Server iLO IP    ${Electron_Legacy_bay}
+    ${status}=    Login to iLO ipv4     ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    iLO RIS Show Blade Firmware Table
+    ${os_ip}=    Wait for Server OS IP from iLO RIS
+    ${ping_status}=    Run And Return RC   ping ${os_ip} -n 1
+    ${ping_response}=    Run Keyword If    ${ping_status}==0    Set Variable     True
+    Should be True   ${ping_response}     msg=Unable to ping the server OS IP
+    
+    #Verify the Server hardware , type and port mmapping information
+    Log to console and logfile    Verifying Server Hardware, Type and Port mapping information for server bay : ${Electron_Legacy_bay}
+    ${server_info}=    Get Server Info    ${Electron_Legacy_bay}
+    ${mezz_list}=    Get Electron Mezz Bay List    ${server_info}
+    Verify Server Harware Information    ${server_info}    On    ProfileApplied
+    Verify Mezz Port Information    ${server_info}    ${mezz_list}
+    Verify SHT Adapter Info    ${server_info}    ${mezz_list}
+    
+    #Verify SAN is still connected by changing the connection bandwidth
+    Log to console and logfile    Editting server profile for bay : ${Electron_Legacy_bay} for online update with Ethernet BW change
+    Verify Connection BW Online Update Legacy Mode    ${Electron_Legacy_bay}    ${os_ip}    ${requestedBW}    ${server_profiles_enet_fc[0]}
+    
+    #Efuse the blade and verify for Profile Applied back once inserted
+    Log to console and logfile    Efuse the server bay : ${Electron_Legacy_bay} and wait for profile to be applied once discovered
+    EFuse Blade    EFuseOn    ${Electron_Legacy_bay}
+    Sleep    20
+    EFuse Blade    EFuseOff    ${Electron_Legacy_bay}
+    Sleep    150
+    Log to console and logfile      \t Waiting for Server in Bay:${Electron_Legacy_bay} to reach state:ProfileApplied after Efuse
+    Wait Until Keyword Succeeds     15 min   20s      Device reached state    ${server_info['uri']}    ProfileApplied
+    Sleep    90     #wait time required after Profile Applied state to power on the server
+    Power on server bay    ${Electron_Legacy_bay}
+    Sleep    ${Server_Boot_Wait}
+    ${ilo_ip}=    Get Server iLO IP    ${Electron_Legacy_bay}
+    ${status}=    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    ${os_ip}=    Wait for Server OS IP from iLO RIS
+    ${ping_status}=    Run And Return RC    ping ${os_ip} -n 1
+    ${ping_response}=    Run Keyword If    ${ping_status}==0    Set Variable    True
+    Should be True    ${ping_response}    msg=Unable to ping the server OS IP
+    
+    #Verify profile can be removed
+    Log to console and logfile    Verifying profile can be removed for server bay : ${Electron_Legacy_bay}
+    Power off server bay    ${Electron_Legacy_bay}
+    Remove Server Profile Bay    ${Electron_Legacy_bay}
+    ${profile_uri}=    Get Server Profile URI    ${Electron_Legacy_bay}
+    Should Be Equal As Strings    ${profile_uri}    None
+    ${ping_status}=    Run And Return RC    ping ${os_ip} -n 1
+    ${ping_response}=    Run Keyword If    ${ping_status}==1    Set Variable    True
+    Should be True    ${ping_response}    msg=Able to ping the server OS IP after removal of server profile
+    Logout of iLO
+    Logout of Fusion Via SSH
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Logout of iLO    AND    Logout of Fusion Via SSH

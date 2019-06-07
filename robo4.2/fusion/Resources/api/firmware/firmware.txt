@@ -1,0 +1,202 @@
+*** Settings ***
+Library                RoboGalaxyLibrary
+Library                FusionLibrary
+Library                OperatingSystem
+Library                BuiltIn
+Library                Collections
+Library                XML
+Library                SSHLibrary
+Library                String
+Library                Dialogs
+
+*** Keywords ***
+Upload Firmware Bundle Async
+    [Documentation]    Upload firmware bundle (SPP) to an appliance from a local file patch
+    [Arguments]     ${filepatch}    ${VERIFY}=${FALSE}  ${STATUS_CODE}=202   ${MSG}=FWBASELINE_ALREADY_EXISTS
+    Log    Uploading Firmware Bundle:${filepatch}   console=True
+    ${_}   ${file} =    Split Path    ${filepatch}
+    ${resp} =  Fusion Api Upload Firmware Bundle   ${filepatch}
+    ${error_msg}=   Run Keyword If   "${resp['status_code']}" == "400"   Get From Dictionary        ${resp}    errorCode
+    Log    ${error_msg}    console=True
+    Return From Keyword If   '${error_msg}' == '${MSG}'
+    should be equal as integers  ${resp['status_code']}  ${STATUS_CODE}
+    Log    ${resp}   console=True
+    Wait For Task2  ${resp}  600
+    Return From Keyword If  ${VERIFY}==${FALSE}
+    Log    Verify Firmware Version Installed    console=True
+    ${getresp}=    Fusion Api Get Firmware Driver    param=?filter="name='${file}'"
+    Run Keyword If   ${getresp['count']} == 0   Fail    msg=\n No Firmware bundle found!!.Please upload the correct firmware bundle
+    :FOR    ${fw}    IN    @{getresp['members']}
+    \        ${version} =    Get From Dictionary        ${fw}    version
+    \        ${uri} =    Get From Dictionary        ${fw}    uri
+    \        Log  Firmware version:${version}    console=True
+
+Upload Firmware Bundle By List
+    [Documentation]    Upload each firmware bundle of list in sequence
+    [Arguments]     ${firmware_list}
+    :FOR    ${filepatch}  IN  @{firmware_list}
+    \       Log to Console And Logfile  Upload each firmware bundle of list in sequence
+    \       Upload Firmware Bundle By Curl    fw_absolute_path=${filepatch}
+
+Upload Firmware Bundle With Scopes Async
+    [Documentation]    Upload firmware bundle (SPP) to an appliance with scopes from a local file patch
+    [Arguments]     ${filepatch}    ${scopes}
+    ${resp} =    Upload Firmware Bundle With Scopes    ${filepatch}    ${scopes}
+    Wait For Task  ${resp}  600
+
+Upload Firmware Bundle With Scopes
+    [Documentation]    Upload firmware bundle (SPP) to an appliance with scopes from a local file patch
+    [Arguments]     ${filepatch}    ${scopes}
+    Log    Uploading Firmware Bundle ${filepatch}    console=true
+    ${headers} =    Fusion Api Get Headers
+    Set To Dictionary    ${headers}    initialScopeUris    ${scopes}
+    ${resp} =  Fusion Api Upload Firmware Bundle   ${filepatch}    headers=${headers}
+    [Return]    ${resp}
+
+Upload Firmware Bundle By Curl
+    [Documentation]    Upload firmware bundle to an appliance using curl CLI.
+    ...                The keyword "Fusion Api Upload Firmware Bundle" has the limitition of hard-coded read size of **8192 bytes**.
+    ...                This means that it will loop until the file has been read and your upload could take a while.
+    ...                So I wrote this keyword with "curl" to resolve the issue of upload speed.
+    ...                Example:
+    ...                   Upload Firmware Bundle By Curl  xsdfaweawfjk3l23  Z:\\firmware\\spp\xxx.iso  Scopes
+    ...                      Scopes should be a list:   ['Scope1', 'Scope2']
+    ...            ** NOTE: For Win32, please download the curl by yourself, and place it into environment variables. **
+    ...            ** Curl can't handle the negative SBAC testing, it will return 500 error for scope negative case.
+    ...               So, the keyword just for positive cases for SBAC part.
+    ...
+    ...              Ron Soto.  At some time in 4.20 the output returned from the curl command did not include a taskResource
+    ...              The taskUri was returned in a Locaion header.
+    ...              7/26/18 The keyword was modified to support this change.
+    ...                   -i included as a switch in the curl command
+    ...                   Get Regexp Matches changed and no longer need to call json.loads
+    ...                   Get Resource by URI then called to get taskResouce needed by WFT2
+
+    [Arguments]    ${fw_absolute_path}  ${User}=Administrator  ${Scopes_list}=${None}  ${VERBOSE}=False
+    Log    ${\n}Upload firmware bundle to appliance    console=True
+
+    ${sessionID}=     Get Current SessionID  ${User}
+    ${dir}  ${file}=    Split Path    ${fw_absolute_path}
+    @{words}=   Split String From Right   ${file}  .    1
+    ${name} =     Get From List    ${words}    0
+    # Process the special charactor based on product codes
+    ${name} =     Replace String    ${name}    .           _
+    ${name} =     Replace String    ${name}    ${SPACE}    _0
+    ${name} =     Replace String    ${name}    (           _1
+    ${name} =     Replace String    ${name}    )           _2
+    ${fw_uri}=    Catenate    /rest/firmware-drivers/${name}
+    ${resp}=    Get Firmware Bundle    ${fw_uri}
+    Should Be Equal As Strings    ${resp}    Firmware Not Found    msg=The firmware is already present in the firmware bundles repository.
+
+    ${Scopes}=     Run Keyword If    ${Scopes_list}!=${None}    Lookup Scope uris  ${Scopes_list}
+    ${command}=    Set Variable  curl -m 1200 -k -X POST -H "Accept:application/json" -H "Auth:${sessionID}" -H "uploadfilename:${file}" -H "X-Api-Version:${X-Api-Version}" -H "initialScopeUris:" -F file="@${fw_absolute_path}" -i https://${APPLIANCE_IP}/rest/firmware-bundles
+    ${command}=    Run Keyword If    '${Scopes}'!='${None}'   Replace String    ${command}    initialScopeUris:    initialScopeUris:${Scopes}
+    ...            ELSE    Set Variable  ${command}
+
+    ${rc}  ${output} =  Run And Return Rc And Output  ${command}
+    Run Keyword If  '${VERBOSE}'=='True'  Log    Run ${command} output is ${output}  console=True
+    Should Be Equal As Integers  ${rc}  0  msg=Return code of ${command} should be 0
+    ${taskUri} =    Get Regexp Matches    ${output}    Location:\\s*(.*)    1
+    ${task} =    Get Resource by URI    ${taskUri[0]}
+    Wait For Task2   ${task}    timeout=10m    interval=5
+
+Lookup Scope uris
+    [Documentation]    Processes the scopes string, getting the uris for scope
+    [Arguments]    ${Scopes}
+    Log    Get Scope information by name   console=True
+    ${uris}=    Set Variable   ${Empty}
+    :FOR    ${scope}    IN    @{Scopes}
+    \       ${uri}=    Get Scope URI By Name    ${scope}
+    \       ${uris}=    Run Keyword If    '${uris}'=='${Empty}'    Set Variable    ${uri}
+    \       ...         ELSE    Catenate    SEPARATOR=,   ${uris}  ${uri}
+    [Return]    ${uris}
+
+Get Firmware Bundle By Version
+    [Documentation]    Get Firmware Bundle By Version
+    [Arguments]        ${firmware_version}
+    Log    Get Firmware Bundle By Version ${firmware_version}    console=true
+    ${resp} =     Fusion Api Get Firmware Driver
+    Return From Keyword If  ${resp['count']}==0  Firmware Not Found
+    :FOR    ${fw}    IN    @{resp['members']}
+    \        ${version} =    Get From Dictionary        ${fw}    version
+    \        ${uri} =    Get From Dictionary        ${fw}    uri
+    \        Return From Keyword If  '${version}'=='${firmware_version}'  ${uri}
+    Log    Firmware version ${firmware_version} not found    console=true
+    [Return]    /rest/Firmware_${firmware_version}_Not_Found
+
+Get Firmware Bundle UUID By Version
+    [Documentation]    Get Firmware Bundle UUID By Version
+    [Arguments]        ${firmware_version}
+    Log    Get Firmware Bundle UUID By Version ${firmware_version}    console=true
+    ${resp} =     Fusion Api Get Firmware Driver
+    Return From Keyword If  ${resp['count']}==0  Firmware Not Found
+    :FOR    ${fw}    IN    @{resp['members']}
+    \        ${version} =    Get From Dictionary        ${fw}    version
+    \        ${uuid} =    Get From Dictionary        ${fw}    uuid
+    \        Return From Keyword If  '${version}'=='${firmware_version}'  ${uuid}
+    Log    Firmware version ${firmware_version} not found    console=true
+    [Return]    /rest/Firmware_${firmware_version}_Not_Found
+
+Get Firmware Bundle
+    [Documentation]    Get Firmware Bundle
+    [Arguments]        ${firmware}
+    ${resp} =     Fusion Api Get Firmware Driver  ${firmware}
+    Return From Keyword If  ${resp['status_code']} == 404  Firmware Not Found
+    [Return]    ${resp}
+
+Get Firmware Bundle URI
+    [Documentation]    Get Firmware Bundle URI by Name
+    [Arguments]  ${name}
+    Log    Getting FIRMWARE BUNDLE URI for ${name}
+    ${uri} =    Set Variable    /rest/firmwarebunlde_uri_${name}_not_found
+    ${resp} =    Fusion Api Get Firmware Driver
+    :FOR    ${spp}    IN    @{resp['members']}
+    \    ${uri} =    Set Variable If    '${spp['name']}'=='${name}'    ${spp['uri']}    ${uri}
+    [Return]    ${uri}
+
+Remove Firmware Bundle
+    [Documentation]    Remove Firmware Bundle
+    [Arguments]        ${firmware_bundle_uri}
+    Log    Remove SPP ${firmware_bundle_uri}    console=true
+    ${resp} =     Fusion Api Remove Firmware Driver  uri=${firmware_bundle_uri}
+    Log    Response Status Code: ${resp['status_code']}
+    [Return]    ${resp}
+
+Remove Firmware Bundle By Version
+    [Documentation]    Remove Firmware Bundle By Version
+    ...    For example, firmware_version=2017.07.0
+    [Arguments]        ${firmware_version}
+    Log    Remove SPP ${firmware_version}    console=true
+    ${firmware_bundle_uri} =    Get Firmware Bundle By Version    ${firmware_version}
+    ${resp} =     Fusion Api Remove Firmware Driver  uri=${firmware_bundle_uri}
+    [Return]    ${resp}
+
+Remove All Firmware Bundles
+    [Documentation]    Remove All Firmware Bundles
+    ${resplist} =  Create List
+    Log    Removing Firmware Bundles    console=true
+    ${spps} =     Fusion Api Get Firmware Driver
+    :FOR    ${spp}    IN    @{spps['members']}
+    \        ${resp} =     Remove Firmware Bundle        ${spp['uri']}
+    \       Log    Response Status Code: ${resp['status_code']}
+    \       append to list    ${resplist}    ${resp}
+    Wait For Task2    ${resplist}  timeout=60   interval=5
+    [Return]    ${resplist}
+
+Create Custom SPP
+    [Documentation]    Create Custom SPP
+    [Arguments]    ${name}    ${spp}    ${hotfixs}    ${scopes}
+    Log    Create Custom SPP with name: ${name}    console=true
+    ${payload} =  Create Dictionary    customBaselineName=${name}    baselineUri=${spp}    hotfixUris=${hotfixs}    initialScopeUris=${scopes}
+    ${resp} =  Fusion API Create Firmware Bundle    ${payload}
+    [Return]    ${resp}
+
+Get Firmware Bundle Version from custom SPP
+    [Documentation]    Get Firmware Bundle Version from custom SPP
+    [Arguments]  ${custom_spp_name}
+    ${resp} =    Fusion Api Get Firmware Driver
+    Return From Keyword If  ${resp['count']}==0  Firmware Not Found
+    :FOR  ${spp_name}  IN  @{resp['members']}
+    \    Run Keyword If  '${spp_name['name']}' != '${custom_spp_name}'  Continue For Loop
+    \    ${version} =    Get From Dictionary        ${spp_name}    version
+    [Return]    ${version}

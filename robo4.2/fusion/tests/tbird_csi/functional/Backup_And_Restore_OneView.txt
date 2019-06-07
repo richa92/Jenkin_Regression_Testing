@@ -1,0 +1,111 @@
+*** Settings ***
+Documentation
+...    = Usage =
+...        = Backup =
+...        pybot -v ENCLOSURE:<Enclosure Name> -i backup Backup_And_Restore_OneView.txt
+...        = Download =
+...        pybot -v ENCLOSURE:<Enclosure Name> [-v BACKUPFILE:<Backup File Name>] -i download Backup_And_Restore_OneView.txt
+...        = Upload =
+...        pybot -v ENCLOSURE:<Enclosure Name> -v BACKUPFILE:<Backup File Name> -i upload Backup_And_Restore_OneView.txt
+...        = Restore = 
+...        pybot -v ENCLOSURE:<Enclosure Name> -i restore Backup_And_Restore_OneView.txt
+...    
+...    = Variables =
+...    | ENCLOSURE | Required. Dictionary key from variables.py representing the desired enclosure. |
+...    | BACKUPFILE | Requires if Uploading. Optional if Downloading. File which contains the backup.
+
+Library           Collections
+Library           RoboGalaxyLibrary            # DVTs Robot Framework extensions
+Library           FusionLibrary                # DVTs Robot Framework extensions
+Variables         ../resources/variables.py    ${ENCLOSURE}
+Resource          ../../tbird_hal/resources/em_api.txt
+Resource          ../resources/defaults.txt
+Resource          ../../tbird_hal/resources/fusion_ssh.txt  # DVT fusion API extensions
+Resource          ../../tbird_hal/resources/fusion_api.txt  # DVT fusion API extensions
+Resource          ../../tbird_hal/resources/system_info.txt
+Resource          ../../tbird_hal/resources/enclosure_info.txt
+
+Suite Setup       Run Keywords
+...          Login To Fusion Via REST
+...          Login To Fusion Via SSH
+...          EM Api Create Session
+Suite Teardown    Logout Of Fusion Via REST
+
+*** Variables ***
+${username}		${FUSION_USERNAME}
+${password}		${FUSION_FACTORY_PASSWORD}
+${appl}			${FUSION_FQDN}
+
+*** Keywords ***
+Backup OneView
+  ${Response}=	Fusion Api Create Backup
+  Should Be Equal as Strings 		'${Response}'	'<Response [202]>'
+  ...			msg=Failed to Backup OneView
+
+Download Backup
+  [Arguments]	${filename}=None
+  ${Backup}	Fusion Api Get Backup
+  @{members}	Get From Dictionary	${Backup}	members
+  ${file}	Run Keyword If		'${filename}'=='None'
+  ...		Set Variable		${members[0]['id']}
+  ...		ELSE	Set Variable	${filename}
+  Fusion Api Download Backup	${members[0]['uri']}	${file}
+
+Upload Backup
+  [Arguments]	${filename}
+  ${Response}	Fusion Api Upload Backup	${filename}
+  Log		${Response}
+
+Restore OneView From Backup
+  ${Backup}	Fusion Api Get Backup
+  Log 		${Backup}
+  @{members}		Get From Dictionary	${Backup}		members
+  ${uri}=		Get From Dictionary	${members[0]}		uri
+  ${FQHostName}=	Get From Dictionary	${members[0]}		fullyQualifiedHostName
+  ${HostName}=		Get From Dictionary	${members[0]}		hostName
+  ${id}=		Get From Dictionary	${members[0]}		id
+
+  ${RestoreCode}	OperatingSystem.Get File	Restore_OneView_Template.txt
+  ${RestoreCode}	Replace String		${RestoreCode}		{uri}		${uri}
+  ${RestoreCode}	Replace String		${RestoreCode}		{FQHostName}	${FQHostName}
+  ${RestoreCode}	Replace String		${RestoreCode}		{HostName}	${HostName}
+  ${RestoreCode}	Replace String		${RestoreCode}		{id}		${id}
+  ${RestoreCode}	Replace String		${RestoreCode}		{appl}		${appl}
+  ${RestoreCode}	Replace String		${RestoreCode}		{userName}	${username}
+  ${RestoreCode}	Replace String		${RestoreCode}		{password}	${password}
+  			Create File		Restore_Code.txt	${RestoreCode}
+  			Run			python3 Restore_Code.txt > temp
+  ${lines}		Grep File		temp		[sessionId]
+  ${auth}		Remove String		${lines}	{\"sessionID\":\"	\"}
+
+  ${RestoreCodeFinal}	Grep File		Restore_Code.txt	\#*
+  ${RestoreCodeFinal}	Remove String		${RestoreCodeFinal}		\#
+
+  ${RestoreCodeFinal}	Replace String		${RestoreCodeFinal}	{authentication token}	${auth}
+  Log			${RestoreCodeFinal}
+  #Run			${RestoreCodeFinal}
+
+  Remove File		temp
+  Remove File		Restore_Code.txt
+
+*** Test Cases ***
+Backup
+  [Tags]	backup
+  [Documentation]	Creates a backup on OneView
+  Backup OneView
+
+Download Backup
+  [Tags]	download
+  [Documentation]	Downloads the current backup from OneView (CURRENTLY NOT WORKING)
+  Download Backup
+
+Upload Backup
+  [Tags]	upload
+  [Documentation]	Uploads a backup file to OneView
+  Log	${BACKUPFILE}
+  Upload Backup		${BACKUPFILE}
+
+Restore
+  [Tags]	restore
+  [Documentation]	Restores Oneview to state of the backup file currently on OneView. Requires backup on OneView.
+  Restore OneView From Backup

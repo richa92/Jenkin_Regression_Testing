@@ -1,0 +1,173 @@
+*** Settings ***
+Documentation     Contains keywords to assist in triage of large JSON structures that are unequal.
+...               The only keyword that should be used by a calling script is "Check Large JSON Structure".
+...               = Usage =
+...               | Resource | ../resources/check_large_json_structure.txt |
+Library           Collections
+Library           String
+Library           RoboGalaxyLibrary                    # DVTs Robot Framework extensions
+Library           json                                 # Easily parse JSON
+
+*** Variables ***
+@{Diff List}    @{EMPTY}
+
+*** Keywords ***
+
+Compare Nested Dictionary Keys
+    [Documentation]    Specifically compares keys on the current node of the dictionaries to make sure the list of keys is equal between the foundation of truth and the observed output.
+    [Arguments]    ${TruthFoundation}    ${Observed}    ${IgnoreKeys}    ${Spot}
+    # Obtain just the list of keys from the current dictionary we're in
+    ${TruthKeys}    Get Dictionary Keys    ${TruthFoundation}
+    ${ObservedKeys}    Get Dictionary Keys    ${Observed}
+    # Remove any items we're supposed to ignore
+    Remove Values From List    ${TruthKeys}    ${IgnoreKeys}
+    Remove Values From List    ${ObservedKeys}    ${IgnoreKeys}
+    # Compare the lists of keys to determine whether this level of the dictionaries match or not
+    ${Lists Equal Status}    ${Message}    Run Keyword And Ignore Error
+    ...    Lists Should Be Equal    ${TruthKeys}    ${ObservedKeys}    msg=The dictionary keys in node ${Spot} don't match.
+    Run Keyword Unless    '${Lists Equal Status}' == 'PASS'
+    ...    Append To List    ${Diff List}    ${Message}
+
+Compare Nested Lists
+    [Documentation]    This function doesn't really need to do anything except perhaps check if the list lengths are the same
+    [Documentation]    and return any differences.  The "Scan for Children" function will compare items in a list directly
+    [Documentation]    (as long as they are not iterable themselves) and return an error if they are not identical.
+    [Arguments]    ${TruthFoundation}    ${Observed}    ${IgnoreKeys}    ${Spot}
+
+    # Obtain just the list of keys from the current dictionary we're in
+    Log    Todo
+
+Scan For Children In List
+    [Documentation]    Iterates through a list to learn more about each item therein.
+    [Arguments]    ${TruthFoundation}    ${Observed}    ${IgnoreKeys}    ${Spot}
+    ${Length}    Get Length    ${Observed}
+    : For    ${Index}    In Range    0    ${Length}
+    \    ${ChildStatus}    ${Child}    Run Keyword And Ignore Error
+    \    ...    Get From List    ${Observed}    ${Index}
+    \    ${ExpectedStatus}    ${Expected}    Run Keyword And Ignore Error
+    \    ...    Get From List    ${TruthFoundation}    ${Index}
+    \    Run Keyword Unless    '${ChildStatus}' == 'PASS' and '${ExpectedStatus}' == 'PASS'
+    \    ...    Continue For Loop
+    # Find out if these nodes have children, and if not, find if they're the same
+    \    ${Result}    Scan For Children    ${Expected}    ${Child}    ${Index}
+    # We have either a list or a dictionary, so recurse on it
+    \    Run Keyword If    ${Result} == ${True}
+    ...      Check Large JSON Structure    ${Expected}    ${Child}    ${IgnoreKeys}    ${Spot} -> ${Index}
+
+Scan For Children In Dictionary
+    [Documentation]    Iterates through a dictionary to learn more about each item therein.
+    [Arguments]    ${TruthFoundation}    ${Observed}    ${IgnoreKeys}    ${Spot}
+    ${ObservedKeys}    Get Dictionary Keys    ${Observed}
+    : For    ${key}    in    @{ObservedKeys}
+    \    ${Ignore Key}    Run Keyword and Return Status
+    ...      List Should Contain Value    ${IgnoreKeys}    ${key}
+    \    Run Keyword If    ${Ignore Key}    Continue For Loop
+    \    ${ChildStatus}    ${Child}    Run Keyword And Ignore Error
+    ...      Get From Dictionary    ${Observed}    ${key}
+    \    ${ExpectedStatus}    ${Expected}    Run Keyword And Ignore Error
+    ...      Get From Dictionary    ${TruthFoundation}    ${key}
+    \    Run Keyword Unless    '${ChildStatus}' == 'PASS'
+    ...    Append To List    ${Diff List}    The observed values did not contain the key ${key} at node ${Spot}.
+    \    Run Keyword Unless    '${ExpectedStatus}' == 'PASS'
+    ...    Append To List    ${Diff List}    The Foundation of Truth did not contain the key ${key} at node ${Spot}.
+    \    Run Keyword If    '${ChildStatus}' == 'FAIL' or '${ExpectedStatus}' == 'FAIL'    Continue For Loop
+    # Find out if these nodes have children, and if not, find if they're the same
+    \    ${Result}    Scan For Children    ${Expected}    ${Child}    ${Spot} -> ${key}
+    # We have either a list or a dictionary, so recurse on it
+    \    Run Keyword If    ${Result} == ${True}
+    ...      Check Large JSON Structure    ${Expected}    ${Child}    ${IgnoreKeys}    ${Spot} -> ${key}
+
+Scan For Children
+    [Documentation]    Calls a Python keyword that determines if the two nodes are iterable and/or identical.
+    [Documentation]    Throws an error is nodes are not identical, or not the same types if iterable
+    [Documentation]    (e.g. one is a list and the other is a dictionary).
+    [Arguments]    ${Expected}    ${ObservedChild}    ${Spot}
+    ${Result}    Get Nodes Iterability And Top Level Identicality    ${ObservedChild}    ${Expected}
+    ${Iterable}    Get From Dictionary    ${Result}    iterable
+    ${Identical}    Get From Dictionary    ${Result}    identical
+    # Set the error message depending on if the two nodes' exact content should be identical, or just the data type
+    ${Message}    Set Variable    ${Empty}
+    ${Message}    Set Variable If
+    ...    ${Iterable} == ${True}    The Observed and Expected nodes at location ${Spot} are of different types.
+    ...    ${Iterable} != ${True}    Value at node ${Spot} does not match:\rObserved value: "${ObservedChild}"\rExpected value: "${Expected}"
+    # Compare how identical the nodes are
+    ${Comparison Status}    ${Error Message}    Run Keyword And Ignore Error
+    ...    Should Be True    ${Identical}    msg=${Message}
+    # Add an error to the list if there's a difference
+    Run Keyword Unless    '${Comparison Status}' == 'PASS'
+    ...    Append To List    ${Diff List}    ${Error Message}
+    [Return]    ${Iterable}
+
+Check Large JSON Structure
+    [Documentation]    Recursively compares leaf nodes across two dictionaries, or traverses down the data structure to find leaves.
+    [Documentation]    Input arguments:
+    [Documentation]    ${TruthFoundation}: your Foundation of Truth loaded as a JSON object
+    [Documentation]    ${Observed}: The data as reported by the SUT, also a JSON object
+    [Documentation]    ${IgnoreKeys}: A list of dictionary keys you don't want to have compared at any level, such as "uuid" or "enclosureUri"
+    [Documentation]    ${Spot}: Location in the JSON object's tree.  Default value is MAIN (indicating root node).
+    [Documentation]    Returns:
+    [Documentation]    ${Diff List}: A list of strings noting differences observed throughout the recursion.
+    [Arguments]    ${TruthFoundation}    ${Observed}    ${IgnoreKeys}=[]    ${Spot}=MAIN
+    # Find if there are keys present in the current JSON structure, and get them
+    ${KeysPresent}    Evaluate    isinstance(${Observed}, dict)
+    Run Keyword If    ${KeysPresent} == True
+    ...    Compare Nested Dictionary Keys    ${TruthFoundation}    ${Observed}    ${IgnoreKeys}    ${Spot}
+    # Find out if these keys have children, and if so, recurse
+    Run Keyword If    ${KeysPresent} == True
+    ...    Scan For Children In Dictionary     ${TruthFoundation}    ${Observed}    ${IgnoreKeys}    ${Spot}
+
+    # Otherwise, this is a list, so compare its count with the Foundation of Truth
+    Run Keyword Unless    ${KeysPresent} == True
+    ...    Compare Nested Lists    ${TruthFoundation}    ${Observed}    ${IgnoreKeys}    ${Spot}
+    # Find out if these keys have children, and if so, recurse
+    Run Keyword Unless    ${KeysPresent} == True
+    ...    Scan For Children In List     ${TruthFoundation}    ${Observed}    ${IgnoreKeys}    ${Spot}
+
+    [Return]    ${Diff List}
+
+Parse Dictionary Diffs
+    [Documentation]    Splits a list of diffs into known and unknown diffs in order to facilitate proper log leveling.
+    [Documentation]    Input arguments:
+    [Documentation]    ${Observed Diffs}: The list of diffs reportedby Check Large JSON Structure
+    [Documentation]    ${Known Diffs}: A List object containing known diffs represented as strings
+    [Documentation]    Returns:
+    [Documentation]    ${Warning List}: A list of strings noting differences observed in both Observed Diffs and Known Diffs.
+    [Documentation]    ${Error List}: A list of strings noting differences observed in Observed Diffs that are not documented in Known Diffs.
+    [Arguments]    ${Observed Diffs}    ${Known Diffs}
+    ${Warning List}    Create List
+    : FOR    ${diff}    IN    @{Known Diffs}
+    #    If the mismatch is still being observed, get its text
+    \    ${Error Present}    ${Message}    Run Keyword And Ignore Error
+    \    ...    List Should Contain Value    ${Observed Diffs}    ${diff}
+    #    Store the mismatch in the Warning list
+    \    Run Keyword If    '${Error Present}' == 'PASS'
+    \    ...    Append To List    ${Warning List}    ${diff}
+    #    Remove the mismatch from the list of observed errors
+    \    Run Keyword If    '${Error Present}' == 'PASS'
+    \    ...    Remove Values From List    ${Observed Diffs}    ${diff}
+    # The remaining items in Observed Diffs are unknown diffs (the Error List)
+    [Return]    ${Warning List}    ${Observed Diffs}
+
+Log Mismatch Warning
+    [Documentation]    Takes a list of strings and joins them together with "\r" (newline).  If the string is not empty, it is logged as a Warning.
+    [Documentation]    Input arguments:
+    [Documentation]    ${Item Under Test}: The name of whatever it is you're comparing output for (e.g. Enclosure, ICM bay 4)
+    [Documentation]    ${List}: The list of strings to display as a warning
+    [Arguments]    ${Item Under Test}    ${List}
+    ${ListStr}    Join List Into String    ${List}
+    ${Status}    ${Message}    Run Keyword And Ignore Error
+    ...    Should Be Empty    ${ListStr}
+    Run Keyword Unless    '${Status}' == 'PASS'
+    ...    Log    The following known issues were observed with ${Item Under Test}:\r${ListStr}    level=WARN
+
+Log Mismatch Failure
+    [Documentation]    Takes a list of strings and joins them together with "\r" (newline).  If the string is not empty, it is logged as a Failure.
+    [Documentation]    Input arguments:
+    [Documentation]    ${Item Under Test}: The name of whatever it is you're comparing output for (e.g. Enclosure, ICM bay 4)
+    [Documentation]    ${List}: The list of strings to display as a warning
+    [Arguments]    ${Item Under Test}    ${List}
+    ${ListStr}    Join List Into String    ${List}
+    ${Status}    ${Message}    Run Keyword And Ignore Error
+    ...    Should Be Empty    ${ListStr}
+    Run Keyword And Continue On Failure
+    ...    Should Be Equal As Strings    ${Status}    PASS    msg=The following failures were observed with ${Item Under Test}:\r${ListStr}

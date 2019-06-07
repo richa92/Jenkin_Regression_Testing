@@ -1,0 +1,93 @@
+*** Settings ***
+Documentation     Scalability Testing
+...               = Usage =
+...               cmdline: pybot -d ../logs  --timestampoutputs -vOV_IP:<your OV IP> scalability.txt
+
+Library               RoboGalaxyLibrary
+Library               FusionLibrary
+Library               ../lib/WPSTUtil.py
+
+Variables             ../resources/defaults.py
+Variables             ../resources/credentials_jason.py   scale-config-realAustin4
+Force Tags            OV200   Austin4
+
+Resource              ../resources/keywords.txt
+
+Suite Setup                     Suite Setup Tasks
+Test Setup                      Test Setup Tasks
+
+*** Variables ***
+${vcsim_config_file}      config/1k-config-simulator.txt
+${vcreal_config_file}      config/1k-config-real.txt
+${credential_path}    ${CURDIR}/../resources/credentials_jason.py
+${maxEnc}       39
+@{bayNumbers}              3   4
+
+*** Test Cases ***
+TC0--Clean OV And VC
+    [Tags]   CleanOV.CleanVC
+    CleanOV.CleanVC
+
+TC1--Scalability Testing 39 VC Simulator + 1 Real Enclosure
+    [Documentation]   Generate Compatibility Reports Using VCM Simulator
+    Import Variables   ${credential_path}   scale-config-sim   ${OV_IP}
+    Set Test Variable   ${IsCompare}   ${False}
+    @{commands}   Create List    /usr/local/vcm/etc/init.d/rcSvcm stop all >/dev/null 2>&1
+    ...   /usr/local/vcm/etc/init.d/rcSvcm start all >/dev/null 2>&1
+    Open SSH Connection And Execute Commands    ${VC_CREDENTIAL_DATA['vcmIpAddress']}   ${VC_CREDENTIAL_DATA['sshUsername']}    ${VC_CREDENTIAL_DATA['sshPassword']}   ${commands}
+    # We don't really have to do this. One pre-configured VCM Simulator is enough but this works with Simulator now as well.
+    Config VC    vc_config_file=${vcsim_config_file}   check_VC_mode=${False}
+    ${uriList} =   Create List
+    :FOR   ${i}   IN RANGE   0   ${maxEnc}
+    \       Log   ${OAVC_CREDENTIALS}
+    \       Set To Dictionary   ${OAVC_CREDENTIALS}   oaIpAddress   192.168.6.${i}
+    \       Log   ${OAVC_CREDENTIALS}
+    \       ${uri} =   Report.Write.Compare   saveConfig=${False}
+    \       Move File   dataFiles/${DATA_RPT}   dataFiles/${SAVE_RPT}.${i}
+    \       Append To List   ${uriList}   ${uri}
+
+    # [Documentation]   Configure Real Enclosure, Create Compatibility Report, Migrate, Perform OV Operation
+    ${cred_config} =   Create Dictionary
+    Set To Dictionary   ${cred_config}   scale-config-realAustin4   ${vcreal_config_file}
+    ${configs} =   Get Dictionary Keys   ${cred_config}
+    ${uriListRealEnc} =   Create List
+    Set Test Variable   ${IsCompare}   ${True}
+    :FOR   ${credential}   IN   @{configs}
+    \       Import Variables   ${credential_path}   ${credential}   ${OV_IP}
+    \       Import VC
+    # Detect, reset and sleep to workaround QXCR1001467844: Utah module in No Comm state after import enclosure
+    \       Check Interconnect In No Comm And Recover If Needed   ${bayNumbers}
+    \       Config VC        ${cred_config["${credential}"]}
+    \       ${realAustin4Uri} =   Report.Write.Compare   saveConfig=${False}
+    \       Append To List   ${uriListRealEnc}   ${realAustin4Uri}
+    \       Migrate.GetOVResources.Write.Compare
+    \       ${body} =   Create Dictionary   encrypt=${false}   errorCode=CI
+    \       ${response} =   Fusion Api Create Support Dump   ${body}
+    \       ${uri} =   Get From Dictionary   ${response}   uri
+    \       ${response} =   Fusion Api Download Support Dump   uri=${uri}   localfile=dataFiles/supportDump-${credential}.sdmp
+
+    # [Documentation]   Validates Existence Of VC Simulator Compatibility Reports By JSON Compare And Delete Resource Uris
+    ${uriListLength} =   Get Length   ${uriList}
+    # Lookup uri and compare response with previously generated reports
+    :FOR   ${j}   IN RANGE   0   ${uriListLength}
+    # \       ${response} =   Fusion Api Get Resource   ${uriList[${j}]}
+    # \       ${response} =   Fusion Api Get Compatibility Report   ${uriList[${j}]}   saveConfig=${False}
+    \       ${response}  ${resp_state}    Get Compatibility Report    ${uriList[${j}]}   saveConfig=${False}
+    \       Write JSONfile   ${response}   ${DATA_RPT}.${j}
+    \       Compare All with Expected   ${SAVE_RPT}.${j}   ${DATA_RPT}.${j}
+    :FOR   ${k}   IN RANGE   0   ${uriListLength}
+    \       Fusion Api Delete Resource   ${uriList[${k}]}
+
+    # [Documentation]   Delete Real Enclosures' Resource Uris
+    ${uriListRealEncLength} =   Get Length   ${uriListRealEnc}
+    :FOR   ${l}   IN RANGE   0   ${uriListRealEncLength}
+    \       Fusion Api Delete Resource   ${uriListRealEnc[${l}]}
+
+
+#TC2--8 enclosures migrate to OneView with maximum 8192 networks
+#   [Documentation]   Generate Test Compatibility Report
+#   
+#   [Documentation]   Migrate and perform JSON compare
+#   
+
+#TC3--Import 36 Enclosures Using Variable File Then Do TC1 For 4 Enclosures

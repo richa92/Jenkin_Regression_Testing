@@ -1,0 +1,136 @@
+*** Settings ***
+Library              FusionLibrary
+Library              RoboGalaxyLibrary
+Library              OperatingSystem
+Library              BuiltIn
+Library              copy
+Library              Collections
+Library              String
+Library              json
+Resource             ../../../../Resources/api/fusion_api_resource.txt
+Resource             ../000_OVF2300_C7000_original/keywords_mode_switch.txt
+Resource             ../000_OVF2300_C7000_original/keywords_ssh_commands.txt
+
+
+*** Variables ***
+${ssh_server_ip}            15.114.112.61
+${APPLIANCE_IP}             unknown
+${TBIRD_M1}                 unknown
+${TBIRD_M2}                 unknown
+${IS_HA_ENABLED}            unknown
+
+*** Keywords ***
+HA Nodes Are Synchronized
+    [Documentation]  check if HA Nodes Are Synchronized
+    ${response}=    Fusion Api Get Ha Nodes
+    ${node1}=    Get From Dictionary  ${response["members"][0]}  role
+    ${node2}=    Get From Dictionary  ${response["members"][1]}  role
+    ${node1_state}=    Get From Dictionary  ${response["members"][0]}  state
+    ${node2_state}=    Get From Dictionary  ${response["members"][1]}  state
+    ${node1_sync_percent}=    Get From Dictionary  ${response["members"][0]}  synchronizationPercentComplete
+    ${node2_sync_percent}=    Get From Dictionary  ${response["members"][1]}  synchronizationPercentComplete
+
+    Log To Console  *****************************
+    Log To Console  node1:${node1},node2:${node2},node1_state:${node1_state},node2_state:${node2_state},node1_sync_percent:${node1_sync_percent},node2_sync_percent:${node2_sync_percent}
+
+    Should Match Regexp  ${node1}  (Active|Standby)
+    Should Match Regexp  ${node2}  (Active|Standby)
+    Should Be Equal As Strings  ${node1_state}  OK
+    Should Be Equal As Strings  ${node2_state}  OK
+    Should Be Equal As Strings  ${node1_sync_percent}  100
+    Should Be Equal As Strings  ${node2_sync_percent}  100
+
+Wait Until HA Nodes Are Synchronized If Appliance Has 2 Nodes
+    [Documentation]  Wait Until HA Nodes Are Synchronized If Appliance Has 2 Nodes
+    ...                 ${IS_HA_ENABLED} is global variable import from Jenkins
+    Run Keyword If  "${IS_HA_ENABLED}"=="${True}"    Wait Until Keyword Succeeds  30 min  60 sec  HA Nodes Are Synchronized
+
+Force Reboot HA Node
+    [Documentation]  force reboot by crontab
+    [Arguments]  ${maintenance_ip}
+    Run Ssh Cmd  ${ssh_server_ip}  root  hpvse1  /root/automation_tools/sctest/crontab_send_reboot.sh ${maintenance_ip} root hpvse1
+    log to console  Reboot sent done! Sleep 3 minutes to wait.
+    Sleep  3 minutes
+
+Force Reboot HA Node Intermediately
+    [Documentation]  force reboot by intermediately
+    [Arguments]  ${maintenance_ip}
+    Run Ssh Cmd2  ${maintenance_ip}  root  hpvse1  reboot -f
+
+Get ${node} Node IP Address
+    [Documentation]  will return the right node IP address from maintenance1 or maintenance2 IP address
+    ...                ${TBIRD_M1}  is global variable for maintenance1 IP
+    ...                ${TBIRD_M2}  is global variable for maintenance2 IP
+    ...                ${node}=  Active  |  Standby
+    ${response}=    Fusion Api Get Ha Nodes
+    ${node1_bay}=    Get From Dictionary  ${response["members"][0]["location"]}  bay
+    ${node2_bay}=    Get From Dictionary  ${response["members"][1]["location"]}  bay
+    Run Keyword And Return If  "${node}"=="Active"  set variable if  "${node1_bay}"=="1"  ${TBIRD_M1}  ${TBIRD_M2}
+    Run Keyword And Return If  "${node}"=="Standby"  set variable if  "${node1_bay}"=="1"  ${TBIRD_M2}  ${TBIRD_M1}
+
+Node ${node} Crash Recovery To ${mode} Mode
+    [Documentation]   Crash Recovery when switching to the target mode
+    ...                 ${node}=  Active  |  Standby
+    ...                 ${mode}=  LEGACY  |  FIPS  |  CNSA
+    Log To Console  ${\n} ========== Node ${node} Crash Recovery To ${mode} Mode ==========
+    #exit if the current mode is target mode.
+    Login By IA User
+    Wait Until HA Nodes Are Synchronized If Appliance Has 2 Nodes
+    ${response}=    Fusion Api Get Current Security Mode
+    ${current_modename}=        Get From Dictionary  ${response}  modeName
+    Run Keyword If    "${current_modename}"=="${mode}"    Run Keyword And Return    Log To Console   ${\n}****** Current Mode = Target Mode, exit *****
+
+    #Set the correct Active/Standby Node IP address, exit if name is not correct.
+    ${active_node_ip}=    Get Active Node IP Address
+    ${standby_node_ip}=    Get Standby Node IP Address
+    ${crash_target_ip}=    Set Variable If
+    ...                     "${node}"=="Active"  ${active_node_ip}
+    ...                     "${node}"=="Standby"  ${standby_node_ip}
+    ...                     "${node}"!="Active" and "${node}"!="Standby"    FAILED_IP
+    Run Keyword If  "${crash_target_ip}"=="FAILED_IP"  FAIL    ${\n}!!!!!!!Failed to set target IP, check if node name:${node} is correct, exit!
+    Log To Console  Node:${node} IP is: ${crash_target_ip}
+
+    #Mode switch to target mode, sleep random seconds and force reboot the Active/Standby node.
+    ${random} =    Evaluate  random.randint(0, 10)  modules=random, sys
+    Switch Security Mode Without Waiting To:  ${mode}
+    Log To Console  ${\n}sleep time: ${random} seconds to do force reboot.
+    Sleep  ${random}
+    Force Reboot HA Node Intermediately  ${crash_target_ip}
+
+    #wait for appliance to be OK and HA synchronized, after that do the SSH check point.
+    Log To Console  ${\n}sleep 15 minutes for waiting appliance to be OK.
+    Sleep  900
+    Wait For Appliance State To Be OK
+    Login By IA User
+    Wait Until HA Nodes Are Synchronized If Appliance Has 2 Nodes
+    ${response1}=    Fusion Api Get Current Security Mode
+    ${current_modename1}=        Get From Dictionary  ${response1}  modeName
+    Synergy And VM SSH Check For Mode:  ${current_modename1}
+
+Node ${node} Crash Recovery
+    [Documentation]   Crash Recovery: active or standby node crashed, and it will be recovered.
+    ...                 After revocery, the node order will be changed if crashed node is the active one.
+    ...                 ${node}=  Active  |  Standby
+    Log To Console  ${\n} ========== Node ${node} Crash Recovery ==========
+    #Set the correct Active/Standby Node IP address, exit if name is not correct.
+    ${active_node_ip}=    Get Active Node IP Address
+    ${standby_node_ip}=    Get Standby Node IP Address
+    ${crash_target_ip}=    Set Variable If
+    ...                     "${node}"=="Active"  ${active_node_ip}
+    ...                     "${node}"=="Standby"  ${standby_node_ip}
+    ...                     "${node}"!="Active" and "${node}"!="Standby"    FAILED_IP
+    Run Keyword If  "${crash_target_ip}"=="FAILED_IP"  FAIL    ${\n}!!!!!!!Failed to set target IP, check if node name:${node} is correct, exit!
+    Log To Console  Node:${node} IP is: ${crash_target_ip}
+
+    #Force reboot node, wait for appliance to be OK and HA synchronized.
+    Force Reboot HA Node Intermediately  ${crash_target_ip}
+    Log To Console  ${\n}sleep 15 minutes for waiting appliance to be OK.
+    Sleep  900
+    Wait For Appliance State To Be OK
+    Login By IA User
+    Wait Until HA Nodes Are Synchronized If Appliance Has 2 Nodes
+
+    #check if the new active node IP is the original standby node IP.
+    ${active_node_ip_new}=    Get Active Node IP Address
+    ${standby_node_ip_new}=    Get Standby Node IP Address
+    Run Keyword If  "${node}"=="Active"    Should Be Equal As Strings  ${active_node_ip_new}  ${standby_node_ip}

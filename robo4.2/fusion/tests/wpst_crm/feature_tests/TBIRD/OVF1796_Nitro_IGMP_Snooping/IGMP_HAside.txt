@@ -1,0 +1,1257 @@
+*** Settings ***
+Documentation       OVF1796 - Nitro IGMP snooping feature testing with HA-Side configuration
+
+Library         json
+Library         FusionLibrary
+Library         RoboGalaxyLibrary
+Variables       data_variables.py
+Variables       data_variables_NITRO_RIG.py
+Library         Collections
+Library         ServerOperations
+Library         Dialogs
+Resource            ../../../../../Resources/api/fusion_api_resource.txt
+
+
+Suite Setup     Suite Setup Tasks
+Suite Teardown  Suite Teardown Tasks
+
+*** Variables ***
+@{ILO_IPS}
+****Test cases****
+1 OVF1796_API_TC_ASIDE - VERIFY IGMP SNOOPING IS DISABLED BY DEFAULT AND IGMP SNOOPING TIMEOUT INTERVAL DEFAULT VALUE IN THE LIG
+    [Documentation]     VERIFY IGMP SNOOPING IS DISABLED BY DEFAULT IN THE LIG
+    Set Log Level   TRACE
+    ${resp}    Fusion Api Login Appliance    ${appliance_ip}    ${admin_credentials}
+    Run Keyword If  '${resp[0]['status_code']}' != '200'  Fail    ELSE  Log    Successfully logged into the appliance
+
+    ${out}=    delete_route_DL_server    ${delete_route}
+    ${out1}=    dl_ipconfig    ipconfig    ${IP}
+    Log    ${out1}    console=true
+    ${out2}=    add_route_DL_server    ${out1}
+
+    ${start_in} =   Get Variable Value  ${enc_count}    1
+    Set Suite Variable  ${enc_count}    ${start_in}
+    Log    ${enc_count}    console=true
+
+
+    Set Suite Variable  ${LIG}  Enc${enc_count}-LIG_HA
+    Log    ${ligs['${LIG}']}    console=true
+
+    Set Suite Variable  ${EG}   Enc${enc_count}-EG
+    Log    ${EG}    console=true
+
+    Set Suite Variable  ${LE}   Enc${enc_count}-LE
+    Log    ${LE}    console=true
+
+    Set To Dictionary   ${les['${LE}']}    enclosureGroupUri   ${EG}
+    Log    ${les['${LE}']}    console=true
+
+    Set Suite Variable  ${SP}   Enc${enc_count}_server_profiles_HA
+    Log    ${Server_profiles['${SP}']}    console=true
+
+    ${resp}     Get LIG member    ${LIG}
+    Should Be Equal    ${resp['ethernetSettings']['enableIgmpSnooping']}   ${ethernet_setting_disable_igmp['enableIgmpSnooping']}
+    Should Be Equal    ${resp['ethernetSettings']['igmpIdleTimeoutInterval']}   ${ethernet_setting_disable_igmp['igmpIdleTimeoutInterval']}
+
+2 OVF1796_API_TC_HASIDE - VERIFY IGMP SNOOPING IS DISABLED BY DEFAULT AND IGMP SNOOPING TIMEOUT INTERVAL DEFAULT VALUE IN THE LI
+    [Documentation]     VERIFY IGMP SNOOPING IS DISABLED BY DEFAULT IN THE LI AFTER LE CREATION
+    ${resp}    Get LI member     ${les['${LE}']['name']}-${LIG}
+    ${LI_URI} =    Set Variable if    ${resp} != None    ${resp['uri']}    '/${LI} does not exist'
+    Should Be Equal As Strings  ${resp['consistencyStatus']}    CONSISTENT
+    Should Be Equal    ${resp['ethernetSettings']['enableIgmpSnooping']}   ${ethernet_setting_disable_igmp['enableIgmpSnooping']}
+    Should Be Equal    ${resp['ethernetSettings']['igmpIdleTimeoutInterval']}   ${ethernet_setting_disable_igmp['igmpIdleTimeoutInterval']}
+
+3 OVF1796_API_TC_HA - VERIFY MULTICAST TRAFFIC IS FLOODING TO ALL SERVER'S INTERFACES ON SAME VLAN WHEN IGMP SNOOPING IS DISABLED
+    # THIS TEST CASE SEND THE MULTICAST TRAFFIC FROM VLAN 10 AND SERVER'S HAVING VLAN 10 SHOULD RECEIVE THE MULTICAST TRAFFIC
+    # IT SHOULD RECEIVE THE TRAFFIC ON BOTH SCENARIOS WITH AND WITHOUT RUNNING MCRECEIVE
+    [Documentation]     VERIFY MULTICAST TRAFFIC IS FLOODING TO ALL SERVER'S INTERFACES ON SAME VLAN WHEN IGMP SNOOPING IS DISABLED
+    Log    "GET ILO IP ADDRESS OF THE SERVERS ..." ${\n}    console=true
+
+    :FOR    ${server}   IN  @{Server_profiles['${SP}']}
+    \   ${iloip} =     Get Server Hardware iLO IP      ${server['serverHardwareUri']}
+    \   Log    ${iloip}    console=True
+    \   Append to List  ${ILO_IPS}  ${iloip}
+
+    Log    "ILO IP DETAILS OF HPE SERVER BLADES ARE AS FOLLOWS"     console=True
+    Log    ${ILO_IPS}  console=True
+
+    # LOGIN TO THE ILO, GET THE VLAN-NETWORKS IP ADDRESS, LOGIN TO THE SERVER WITH VLAN-NETWORK IP AND LISTEN TO THE INTERFACE IS RECEIVING THE MULITCAST TRAFFIC
+
+    :FOR    ${ilo_ip}   IN  @{ILO_IPS}
+    \   Set To Dictionary   ${Ilo_details}  ilo_ip  ${ilo_ip}
+    \   Log    ${Ilo_details}    console=true
+    \   ${index}=   Get Index From List    ${ILO_IPS}  ${ilo_ip}
+    \   Log    ${index}    console=true
+    \   ${output}   ${IP}=      get_server_vlan_ip      ${linux_details}    ${Ilo_details}  ${module_file_path}     ${mcast_cmds['${index}']}   ${windows_server_cred}
+    \   Set To Dictionary   ${Server_network_ips_Aside}   ${index+1}  ${IP}
+
+    Log    "THE BLADE SERVER NETWORKS IP'S ARE AS FOLLOWS:"    console=true
+    Log    ${Server_network_ips_Aside}    console=true
+
+    # START THE MULTICAST TRAFFIC FROM THE DL SERVER OR JUMPSTATION OR TCS
+    Start Multicast Sender      ${msender}
+
+    # EXTRACT THE INTERFACE GUIDS OF THE SERVER AND CONVERT INTO DICT
+
+    ${server_keys}=     Get Dictionary Keys     ${Server_network_ips_Aside}
+
+    # Route All servers to single vlan
+    :FOR    ${sp_ip}    IN  @{server_keys}
+    \   ${index1}=  Get Index From List    ${server_keys}  ${sp_ip}
+    \   Set To Dictionary   ${windows_server}   win_ip  ${Server_network_ips_Aside[${index1+1}][0]}
+    \   ${output}=      delete_route      ${windows_server}    ${delete_route}
+    \   ${out}=    Run Keyword If  ${index1} ==1    add_route      ${windows_server}     ${Server_network_ips_Aside[${index1+1}][0]}
+    \   ${output}=      Run Keyword If  ${index1} ==0    add_route      ${windows_server}     ${Server_network_ips_Aside[${index1+1}][1]}
+    #\   ${output}=      Run Keyword If  ${index1} ==1    add_route      ${windows_server}     ${Server_network_ips[${index1+1}][0]}
+
+    # GET THE INTERFACE GUIDS OF THE SERVERS
+
+    :FOR    ${sp_ip}    IN  @{server_keys}
+    \   ${index1}=  Get Index From List    ${server_keys}  ${sp_ip}
+    \   Set To Dictionary   ${windows_server}   win_ip  ${Server_network_ips_Aside[${index1+1}][0]}
+    \   ${out}=    get_interface_guid    ${windows_server}   ${interface_guid_cmd}   ${sp_ip}
+    \   Log    ${out}    console=true
+
+    sleep   50    # Sleep for 50 seconds to get the interface guids and store in a file
+
+    # EXTRACT THE INTERFACE GUIDS OF THE SERVER AND CONVERT INTO DICT
+
+    Log    "The server GUIDS are as follows"    console=true
+    ${guids_server0}    extract_interface_guid  guid_for_server_1.txt
+    Set Suite Variable  ${server1_guids}    ${guids_server0}
+    Log    ${server1_guids}    console=true
+
+    ${guids_server1}    extract_interface_guid  guid_for_server_2.txt
+    Set Suite Variable  ${server2_guids}    ${guids_server1}
+    Log    ${server2_guids}    console=true
+
+    #${guids_server2}    extract_interface_guid  guid_for_server_3.txt
+    #Set Suite Variable  ${server3_guids}    ${guids_server2}
+    #Log    ${server3_guids}    console=true
+
+    # VERIFY THE MULTICAST TRAFFIC IS RECEIVED BY THE INTERFACES WHICH ARE HAVING THE VLAN 10
+    # IN THIS CASE SERVER 1, AND SERVER 3 SHOULD RECEIVE THE MULTICAST TRAFFIC SERVER 2 SHOULD NOT
+
+    :FOR    ${sp_ip}    IN  @{server_keys}
+    \   ${index1}=  Get Index From List    ${server_keys}  ${sp_ip}
+    \   Set To Dictionary   ${windows_server}   win_ip  ${Server_network_ips_Aside[${index1+1}][0]}
+    \   Log    "The server guid is "    console=true
+    \   Log    ${guids_server${index1}['${server1_guids_keys[0]}']}    console=true
+    \   ${output}=  capture interface traffic   ${windows_server}   ${wdump_cmds1['${index1}']}  ${guids_server${index1}['${server1_guids_keys[0]}']}    ${outputfile_guid_server[${index1}]}
+    \   sleep   180    # Sleep for 180 seconds to complete the multicast traffic generation
+    \   ${values}=  verify_mulitcast_traffic_received_by_interface  ${mcast_cmds['${index1}']}  ${outputfile_guid_server[${index1}]}
+    \   Log    "Output Value of verification detail whether the server ${Server_network_ips_Aside[${index1+1}][0]} receive or not received the multicast traffic "    console=true
+    \   Log    ${values}    console=true
+
+    \   Run Keyword If  ${index1} ==1 and '${values}' !="0"    fail    Server 8 ${Server_network_ips_Aside[${index1+1}][0]} interface is receiving the Multicast Traffic which is not expected
+    \   Run Keyword If  ${index1} ==0 and '${values}' !="0"    fail    Server 1 ${Server_network_ips_Aside[${index1+1}][0]} interface is not receiving the Multicast Traffic which is not expected
+    #\   Run Keyword If  ${index1} ==2 and '${values}' !="0"    fail    Server 3 ${Server_network_ips_Aside[${index1+1}][0]} interface is not receiving the Multicast Traffic which is not expected
+
+    \   Log    "Capturing the 2nd Interface of the server 1"    console=true
+    \   ${output}=  Run Keyword If  ${index1} ==0   capture interface traffic   ${windows_server}   ${wdump_cmds['${index1}']}  ${guids_server${index1}['${server1_guids_keys[2]}']}    ${outputfile_guid_server[${index1+10}]}
+    \   Run Keyword If  ${index1} ==0   sleep   140    # Sleep for 140 seconds to complete the multicast traffic generation
+    \   ${values}=  Run Keyword If  ${index1} ==0   verify_mulitcast_traffic_received_by_interface  ${mcast_cmds['${index1}']}  ${outputfile_guid_server[${index1+10}]}
+    \   Run Keyword If  ${index1} ==0   Log    "Output Value of verification detail whether the server    console=true ${Server_network_ips_Aside[${index1+1}][0]} receive or not received the multicast traffic "
+    \   Run Keyword If  ${index1} ==0   Log    ${values}    console=true
+    \   Run Keyword If  ${index1} ==0 and '${values}' !="1"    fail    Server 1 ${Server_network_ips_Aside[${index1+1}][0]} interface is not receiving the Multicast Traffic which is not expected
+
+    \   Log    "Capturing the 2nd Interface of the server 8"    console=true
+    \   ${output}=  Run Keyword If  ${index1} ==1   capture interface traffic   ${windows_server}   ${wdump_cmds['${index1}']}  ${guids_server${index1}['${server3_guids_keys[3]}']}    ${outputfile_guid_server[${index1+10}]}
+    \   Run Keyword If  ${index1} ==1   sleep   140    # Sleep for 140 seconds to complete the multicast traffic generation
+    \   ${values}=  Run Keyword If  ${index1} ==1   verify_mulitcast_traffic_received_by_interface  ${mcast_cmds['${index1}']}  ${outputfile_guid_server[${index1+10}]}
+    \   Run Keyword If  ${index1} ==1   Log    "Output Value of verification detail whether the server ${Server_network_ips_Aside[${index1+1}][0]} receive or not received the multicast traffic "    console=true
+    \   Run Keyword If  ${index1} ==1   Log    ${values}    console=true
+    \   Run Keyword If  ${index1} ==1 and '${values}' !="1"    fail    Server 2 ${Server_network_ips_Aside[${index1+1}][0]} interface is not receiving the Multicast Traffic which is not expected
+
+    # START LISTENING THE INTERFACES FOR ALL THE SERVERS SINCE THE MULTICAST TRAFFIC IS ALREADY SENT BY THE MSENDER
+    # START THE MCRECEIVE ON THE SERVER 1 VLAN INTERFACE 10 VERIFY THE MCRECEIVE IS WORKED FINE AND RECEIVED THE PACKET
+
+    Log    "START THE MCRECEIVE APPLICATION ON THE SERVER 1 WHICH HAS THE VLAN 10"    console=true
+
+    Set To Dictionary   ${Ilo_details}  ilo_ip  ${ILO_IPS[0]}
+    Log    ${mcast_cmds['0']}    console=true
+    #${output}  ${IP}=      get_server_vlan_ip      ${linux_details}    ${Ilo_details}  ${module_file_path}     ${mcast_cmds['0']}  ${windows_server_cred}  True
+    ${output}   ${IP}=      start_mcreceive     ${linux_details}    ${Ilo_details}  ${module_file_path}     ${mcast_cmds['0']}  ${windows_server_cred}  True
+    Log    "VERIFY THE MULITCAST TRAFFIC IS RECEIVED BY THE BLADES"    console=true
+    Sleep   20    #Wait for 20 seconds to receive Multicast traffic
+    ${m_output}=    verify multicast traffic    ${mcast_cmds['0']}
+    Log    ${m_output}    console=true
+    Run Keyword If  '${m_output}' != "0"   fail    Multicast Traffic is not received; if ${m_output} value is 1: - Multicast Group IP is not found, -1: - No Multicast traffic
+    ...         ELSE    Log    \n Successfully verified the multicast traffic !!!    console=true
+
+    Log    "THREADING - STARTING THE WINDUMP TO LISTEN ON THE INTERFACES"
+
+    :FOR    ${sp_ip}    IN  @{server_keys}
+    \   ${index1}=  Get Index From List    ${server_keys}  ${sp_ip}
+    \   Set To Dictionary   ${windows_server}   win_ip  ${Server_network_ips_Aside[${index1+1}][0]}
+    \   Log    "The server guid is "    console=true
+    \   Log    ${guids_server${index1}['${server1_guids_keys[0]}']}    console=true
+    \   ${output}=  capture interface traffic   ${windows_server}   ${wdump_cmds1['${index1}']}  ${guids_server${index1}['${server1_guids_keys[0]}']}    ${outputfile_guid_server[${index1}]}
+
+    \   Log    "Capturing the 2nd Interface of the server 1"    console=true
+    \   ${output}=  Run Keyword If  ${index1} ==0   capture interface traffic   ${windows_server}   ${wdump_cmds['${index1}']}  ${guids_server${index1}['${server1_guids_keys[2]}']}    ${outputfile_guid_server[${index1+10}]}
+
+    \   Log    "Capturing the 2nd Interface of the server 3"    console=true
+    \   ${output}=  Run Keyword If  ${index1} ==2   capture interface traffic   ${windows_server}   ${wdump_cmds['${index1}']}  ${guids_server${index1}['${server3_guids_keys[3]}']}    ${outputfile_guid_server[${index1+10}]}
+
+    sleep   300    # Wait for 300secs traffic generation to get completed
+    Log    "VERIFICATION DETAILS OF THE WINDUMP "    console=true
+
+    :FOR    ${sp_ip}    IN  @{server_keys}
+    \   ${index1}=  Get Index From List    ${server_keys}  ${sp_ip}
+    \   ${values}=  verify_mulitcast_traffic_received_by_interface  ${mcast_cmds['${index1}']}  ${outputfile_guid_server[${index1}]}
+    \   Log    "Output Value of verification detail whether the server ${Server_network_ips_Aside[${index1+1}][0]} receive or not received the multicast traffic "    console=true
+    \   Log    ${values}    console=true
+
+    \   Run Keyword If  ${index1} ==1 and '${values}' !="0"    fail    Server 2 ${Server_network_ips_Aside[${index1+1}][0]} interface is receiving the Multicast Traffic which is not expected
+
+    \   Run Keyword If  ${index1} ==0 and '${values}' !="0"    fail    Server 1 ${Server_network_ips_Aside[${index1+1}][0]} interface is not receiving the Multicast Traffic which is not expected
+
+    #\   Run Keyword If  ${index1} ==2 and '${values}' !="0"    fail    Server 3 ${Server_network_ips[${index1+1}][0]} interface is not receiving the Multicast Traffic which is not expected
+
+    \   ${values}=  Run Keyword If  ${index1} ==0   verify_mulitcast_traffic_received_by_interface  ${mcast_cmds['${index1}']}  ${outputfile_guid_server[${index1+10}]}
+    \   Run Keyword If  ${index1} ==0   Log    "Output Value of verification detail whether the server ${Server_network_ips_Aside[${index1+1}][0]} receive or not received the multicast traffic "    console=true
+    \   Run Keyword If  ${index1} ==0   Log    ${values}    console=true
+    \   Run Keyword If  ${index1} ==0 and '${values}' !="1"    fail    Server 1 ${Server_network_ips_Aside[${index1+1}][0]} interface is  receiving the Multicast Traffic which is not expected
+
+    \   ${values}=  Run Keyword If  ${index1} ==1   verify_mulitcast_traffic_received_by_interface  ${mcast_cmds['${index1}']}  ${outputfile_guid_server[${index1+10}]}
+    \   Run Keyword If  ${index1} ==1   Log    "Output Value of verification detail whether the server ${Server_network_ips_Aside[${index1+1}][0]} receive or not received the multicast traffic "    console=true
+    \   Run Keyword If  ${index1} ==1   Log    ${values}    console=true
+    \   Run Keyword If  ${index1} ==1 and '${values}' !="1"    fail    Server 3 ${Server_network_ips_Aside[${index1+1}][0]} interface is receiving the Multicast Traffic which is not expected
+
+4 OVF2496_API_TC_HA - ENABLE THE IGMP SNOOPING OPTION GLOBALLY AND TEST THE MULTICAST TRAFFIC IS RECEIVED BY THE SERVER INTERFACES WHO IS ASKING FOR IT AND OTHES SHOULD STOP AFTER THAT
+    [Documentation]     ENABLE THE IMGP SNOOPING OPTION GLOBALLY AND TEST THE MULTICAST TRAFFIC IS RECEIVED BY THE SERVER INTERFACES WHO IS ASKING FOR IT AND OTHES SHOULD STOP AFTER THAT
+    # ENABLE THE IGMP SNOOPING FROM THE LIG AND DO UPDATE FROM GROUP
+    # VERIFY BEFORE AND AFTER THE MCRECEIVE
+    Pause Execution
+    ${server_keys}=     Get Dictionary Keys     ${Server_network_ips_Aside}
+
+    # GET THE INTERFACE GUIDS OF THE SERVERS
+
+    :FOR    ${sp_ip}    IN  @{server_keys}
+    \   ${index1}=  Get Index From List    ${server_keys}  ${sp_ip}
+    \   Set To Dictionary   ${windows_server}   win_ip  ${Server_network_ips_Aside[${index1+1}][0]}
+    \   ${out}=    get_interface_guid    ${windows_server}   ${interface_guid_cmd}   ${sp_ip}
+    \   Log    ${out}    console=true
+
+    sleep   50    # Sleep for 50 seconds to get the interface guids and store in a file
+
+    # EXTRACT THE INTERFACE GUIDS OF THE SERVER AND CONVERT INTO DICT
+
+    Log   "The server GUIDS are as follows"    console=true
+    ${guids_server0}    extract_interface_guid  guid_for_server_1.txt
+    Set Suite Variable  ${server1_guids}    ${guids_server0}
+    Log   ${server1_guids}    console=true
+
+    ${guids_server1}    extract_interface_guid  guid_for_server_2.txt
+    Set Suite Variable  ${server2_guids}    ${guids_server1}
+    Log    ${server2_guids}    console=true
+
+    #${guids_server2}    extract_interface_guid  guid_for_server_3.txt
+    #Set Suite Variable  ${server3_guids}    ${guids_server2}
+    #Log    ${server3_guids}    console=true
+
+    Set Suite Variable  ${LIG}  Enc${enc_count}-LIG_HA
+    Log   ${ligs['${LIG}']}    console=true
+    Set Suite Variable  ${LE}   Enc${enc_count}-LE
+    Log    ${LE}    console=true
+
+    ${dict} =    Get From Dictionary     ${Edit_ligs}     ${LIG}
+    ${lig_body}=    Create List    ${dict}
+    ${resp}    Edit LIG    ${lig_body}
+    ${l} =  Get Length  ${resp}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    Log    ${resp[${x}]}    console=True
+    \    Run keyword unless  ${resp[${x}]['status_code']}== 202    Fail    "Unable to edit LIG"
+    \    ${task} =   Wait For Task   ${resp[${x}]}    5 min    15s
+    \    Run Keyword If  '${task['taskState']}' != 'Completed'    FAIL    ELSE    Log    LIG Edited Successfully!!    console=True
+
+    sleep   60
+    ${li_name}     Create Dictionary   name=${les['${LE}']['name']}-${LIG}
+    Update Logical Interconnect from Group    ${li_name}
+
+    Log    Verifying Interconnects In LI ${les['${LE}']['name']}-${LIG} console=True
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    :FOR    ${interconnect}    IN  @{resp['interconnects']}
+    \   Log    ${interconnect}    console=True
+    \   IC reached state    ${interconnect}   Configured
+
+    # VERIFY THE MULTICAST TRAFFIC IS RECEIVED BY THE INTERFACES WHICH ARE HAVING THE VLAN 10
+    # IN THIS CASE SERVER 1, AND SERVER 3 SHOULD RECEIVE THE MULTICAST TRAFFIC SERVER 2 SHOULD NOT
+
+    :FOR    ${sp_ip}    IN  @{server_keys}
+    \   ${index1}=  Get Index From List    ${server_keys}  ${sp_ip}
+    \   Set To Dictionary   ${windows_server}   win_ip  ${Server_network_ips_Aside[${index1+1}][0]}
+    \   Log    "The server guid is "    console=true
+    \   Log    ${guids_server${index1}['${server1_guids_keys[0]}']}    console=true
+    \   ${output}=  capture interface traffic   ${windows_server}   ${wdump_cmds1['${index1}']}  ${guids_server${index1}['${server1_guids_keys[0]}']}    ${outputfile_guid_server[${index1}]}
+    \   sleep   140    # Sleep for 140 seconds to complete the multicast traffic generation
+    \   ${values}=  verify_mulitcast_traffic_received_by_interface  ${mcast_cmds['${index1}']}  ${outputfile_guid_server[${index1}]}
+    \   Log    "Output Value of verification detail whether the server ${Server_network_ips_Aside[${index1+1}][0]} receive or not received the multicast traffic "    console=true
+    \   Log    ${values}    console=true
+    \   Run Keyword If  ${index1} ==1 and '${values}' !="0"    fail    Server 2 ${Server_network_ips_Aside[${index1+1}][0]} interface is receiving the Multicast Traffic which is not expected
+
+    \   Run Keyword If  ${index1} ==0 and '${values}' !="0"    fail    Server 1 ${Server_network_ips_Aside[${index1+1}][0]} interface is not receiving the Multicast Traffic which is not expected
+
+    #\   Run Keyword If  ${index1} ==2 and '${values}' !="0"    fail    Server 3 ${Server_network_ips_Aside[${index1+1}][0]} interface is not receiving the Multicast Traffic which is not expected
+
+    \   Log    "Capturing the 2nd Interface of the server 1"    console=true
+    \   ${output}=  Run Keyword If  ${index1} ==0   capture interface traffic   ${windows_server}   ${wdump_cmds['${index1}']}  ${guids_server${index1}['${server1_guids_keys[2]}']}    ${outputfile_guid_server[${index1+10}]}
+    \   Run Keyword If  ${index1} ==0   sleep   140    # Sleep for 140 seconds to complete the multicast traffic generation
+    \   ${values}=  Run Keyword If  ${index1} ==0   verify_mulitcast_traffic_received_by_interface  ${mcast_cmds['${index1}']}  ${outputfile_guid_server[${index1+10}]}
+    \   Run Keyword If  ${index1} ==0   Log    "Output Value of verification detail whether the server ${Server_network_ips_Aside[${index1+1}][0]} receive or not received the multicast traffic "    console=true
+    \   Run Keyword If  ${index1} ==0   Log    ${values}    console=true
+    \   Run Keyword If  ${index1} ==0 and '${values}' !="1"    fail    Server 1 ${Server_network_ips_Aside[${index1+1}][0]} interface is  receiving the Multicast Traffic which is not expected
+
+    \   Log    "Capturing the 2nd Interface of the server 3"    console=true
+    \   ${output}=  Run Keyword If  ${index1} ==1   capture interface traffic   ${windows_server}   ${wdump_cmds['${index1}']}  ${guids_server${index1}['${server3_guids_keys[3]}']}    ${outputfile_guid_server[${index1+10}]}
+    \   Run Keyword If  ${index1} ==1   sleep   140    # Sleep for 140 seconds to complete the multicast traffic generation
+    \   ${values}=  Run Keyword If  ${index1} ==1   verify_mulitcast_traffic_received_by_interface  ${mcast_cmds['${index1}']}  ${outputfile_guid_server[${index1+10}]}
+    \   Run Keyword If  ${index1} ==1   Log    "Output Value of verification detail whether the server ${Server_network_ips_Aside[${index1+1}][0]} receive or not received the multicast traffic "    console=true
+    \   Run Keyword If  ${index1} ==1   Log    ${values}    console=true
+    \   Run Keyword If  ${index1} ==1 and '${values}' !="1"    fail    Server 3 ${Server_network_ips_Aside[${index1+1}][0]} interface is  receiving the Multicast Traffic which is not expected
+
+    # START LISTENING THE INTERFACES FOR ALL THE SERVERS SINCE THE MULTICAST TRAFFIC IS ALREADY SENT BY THE MSENDER
+    # START THE MCRECEIVE ON THE SERVER 1 VLAN INTERFACE 10 VERIFY THE MCRECEIVE IS WORKED FINE AND RECEIVED THE PACKETS
+
+    Log    "START THE MCRECEIVE APPLICATION ON THE SERVER 1 WHICH HAS THE VLAN 10"    console=true
+
+    Set To Dictionary   ${Ilo_details}  ilo_ip  ${ILO_IPS[0]}
+    Log    ${mcast_cmds['0']}    console=true
+    #${output}  ${IP}=      get_server_vlan_ip      ${linux_details}    ${Ilo_details}  ${module_file_path}     ${mcast_cmds['0']}  ${windows_server_cred}  True
+    ${output}   ${IP}=      start_mcreceive     ${linux_details}    ${Ilo_details}  ${module_file_path}     ${mcast_cmds['0']}  ${windows_server_cred}  True
+    Log    "VERIFY THE MULITCAST TRAFFIC IS RECEIVED BY THE BLADES"    console=true
+    Sleep   20    #Wait for 20 seconds to receive Multicast traffic
+    ${m_output}=    verify multicast traffic    ${mcast_cmds['0']}
+    Log    ${m_output}    console=true
+    Run Keyword If  '${m_output}' != "0"   fail    Multicast Traffic is not received; if ${m_output} value is 1: - Multicast Group IP is not found, -1: - No Multicast traffic
+    ...         ELSE    Log    \n Successfully verified the multicast traffic !!!    console=true
+
+
+    Log    "THREADING - STARTING THE WINDUMP TO LISTEN ON THE INTERFACES"   console=true
+
+    :FOR    ${sp_ip}    IN  @{server_keys}
+    \   ${index1}=  Get Index From List    ${server_keys}  ${sp_ip}
+    \   Set To Dictionary   ${windows_server}   win_ip  ${Server_network_ips_Aside[${index1+1}][0]}
+    \   Log    "The server guid is "    console=true
+    \   Log    ${guids_server${index1}['${server1_guids_keys[0]}']}    console=true
+    \   ${output}=  capture interface traffic   ${windows_server}   ${wdump_cmds1['${index1}']}  ${guids_server${index1}['${server1_guids_keys[0]}']}    ${outputfile_guid_server[${index1}]}
+
+    \   Log   "Capturing the 2nd Interface of the server 1"    console=true
+    \   ${output}=  Run Keyword If  ${index1} ==0   capture interface traffic   ${windows_server}   ${wdump_cmds['${index1}']}  ${guids_server${index1}['${server1_guids_keys[2]}']}    ${outputfile_guid_server[${index1+10}]}
+
+    \   Log    "Capturing the 2nd Interface of the server 3"    console=truess
+    \   ${output}=  Run Keyword If  ${index1} ==1   capture interface traffic   ${windows_server}   ${wdump_cmds['${index1}']}  ${guids_server${index1}['${server3_guids_keys[3]}']}    ${outputfile_guid_server[${index1+10}]}
+
+    sleep   300    # Wait for 300secs traffic generation to get completed
+    Log    "VERIFICATION DETAILS OF THE WINDUMP "    console=true
+
+    :FOR    ${sp_ip}    IN  @{server_keys}
+    \   ${index1}=    Get Index From List    ${server_keys}    ${sp_ip}
+    \   ${values}=  verify_mulitcast_traffic_received_by_interface  ${mcast_cmds['${index1}']}  ${outputfile_guid_server[${index1}]}
+    \   Log    "Output Value of verification detail whether the server ${Server_network_ips_Aside[${index1+1}][0]} receive or not received the multicast traffic "    console=true
+    \   Log    ${values}    console=true
+
+    \   Run Keyword If  ${index1} ==1 and '${values}' !="1"    fail    Server 2 ${Server_network_ips_Aside[${index1+1}][0]} interface is receiving the Multicast Traffic which is not expected
+
+    \   Run Keyword If  ${index1} ==0 and '${values}' !="0"    fail    Server 1 ${Server_network_ips_Aside[${index1+1}][0]} interface is not receiving the Multicast Traffic which is not expected
+
+    #\   Run Keyword If  ${index1} ==2 and '${values}' !="1"    fail    Server 3 ${Server_network_ips_Aside[${index1+1}][0]} interface is receiving the Multicast Traffic which is not expected
+
+
+    \   ${values}=  Run Keyword If  ${index1} ==0   verify_mulitcast_traffic_received_by_interface  ${mcast_cmds['${index1}']}  ${outputfile_guid_server[${index1+10}]}
+    \   Run Keyword If  ${index1} ==0   Log   "Output Value of verification detail whether the server ${Server_network_ips_Aside[${index1+1}][0]} receive or not received the multicast traffic "
+    \   Run Keyword If  ${index1} ==0   Log    ${values}    console=true
+    \   Run Keyword If  ${index1} ==0 and '${values}' !="1"    fail    Server 1 ${Server_network_ips_Aside[${index1+1}][0]} interface is receiving the Multicast Traffic which is not expected
+
+
+    \   ${values}=  Run Keyword If  ${index1} ==1   verify_mulitcast_traffic_received_by_interface  ${mcast_cmds['${index1}']}  ${outputfile_guid_server[${index1+10}]}
+    \   Run Keyword If  ${index1} ==1   Log    "Output Value of verification detail whether the server ${Server_network_ips_Aside[${index1+1}][0]} receive or not received the multicast traffic "    console=true
+    \   Run Keyword If  ${index1} ==1   Log    ${values}    console=true
+    \   Run Keyword If  ${index1} ==1 and '${values}' !="1"    fail    Server 3 ${Server_network_ips_Aside[${index1+1}][0]} interface is receiving the Multicast Traffic which is not expected
+
+5 OVF2496_API_TC_HA - EDIT THE LI ENABLE IGMP SNOOPING WITH VLAN ID 10 VERIFY THE IGMP SNOOPING IS WORKING AS EXCPECTED ONE SERVER SHOULD ALL OTHER SERVERS SHOULD NOT RECEIVE MULITCAST TRAFFIC
+    [Documentation]     EDIT THE LI ENABLE IGMP SNOOPING WITH VLAN ID 10 VERIFY THE IGMP SNOOPING IS WORKING AS EXCPECTED ONE SERVER SHOULD ALL OTHER SERVERS SHOULD NOT RECEIVE MULITCAST TRAFFIC
+
+    ${server_keys}=     Get Dictionary Keys     ${Server_network_ips_Aside}
+
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    ${LI_URI} =    Set Variable if    ${resp} != None    ${resp['uri']}    '/${LI} does not exist'
+    Set To Dictionary   ${ethernet_setting_enable_igmp_per_vlan_10}    id  ${resp['ethernetSettings']['id']}
+    Set To Dictionary   ${ethernet_setting_enable_igmp_per_vlan_10}   dependentResourceUri    ${resp['ethernetSettings']['dependentResourceUri']}
+    ${resp}    Fusion Api Update Li Ethernet Settings      ${ethernet_setting_enable_igmp_per_vlan_10}    ${LI_URI}
+    Should Be Equal As Integers    ${resp['status_code']}  202
+    Wait For Task   ${resp}    timeout=30 m    interval=2 s
+    ${resp}    Get LI member   ${les['${LE}']['name']}-${LIG}
+    Should Be Equal As Strings  ${resp['consistencyStatus']}    NOT_CONSISTENT
+    Should Be Equal    ${resp['ethernetSettings']['igmpSnoopingVlanIds']}  ${ethernet_setting_enable_igmp_per_vlan_10['igmpSnoopingVlanIds']}
+    Should Be Equal    ${resp['ethernetSettings']['enableIgmpSnooping']}   ${ethernet_setting_enable_igmp_per_vlan_10['enableIgmpSnooping']}
+
+    Log    Verifying Interconnects In LI ${les['${LE}']['name']}-${LIG} console=True
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    :FOR    ${interconnect}    IN  @{resp['interconnects']}
+    \   Log    ${interconnect}    console=True
+    \   IC reached state    ${interconnect}   Configured
+
+    # GET THE INTERFACE GUIDS OF THE SERVERS
+
+    :FOR    ${sp_ip}    IN  @{server_keys}
+    \   ${index1}=  Get Index From List    ${server_keys}  ${sp_ip}
+    \   Set To Dictionary   ${windows_server}   win_ip  ${Server_network_ips_Aside[${index1+1}][0]}
+    \   ${out}=    get_interface_guid    ${windows_server}   ${interface_guid_cmd}   ${sp_ip}
+    \   Log    ${out}    console=true
+
+    sleep   50    # Sleep for 50 seconds to get the interface guids and store in a file
+
+    # EXTRACT THE INTERFACE GUIDS OF THE SERVER AND CONVERT INTO DICT
+
+    Log   "The server GUIDS are as follows"    console=true
+    ${guids_server0}    extract_interface_guid  guid_for_server_1.txt
+    Set Suite Variable  ${server1_guids}    ${guids_server0}
+    Log   ${server1_guids}    console=true
+
+    ${guids_server1}    extract_interface_guid  guid_for_server_2.txt
+    Set Suite Variable  ${server2_guids}    ${guids_server1}
+    Log    ${server2_guids}    console=true
+
+    #${guids_server2}    extract_interface_guid  guid_for_server_3.txt
+    #Set Suite Variable  ${server3_guids}    ${guids_server2}
+    #Log    ${server3_guids}    console=true
+
+
+    # VERIFY THE MULTICAST TRAFFIC IS RECEIVED BY THE INTERFACES WHICH ARE HAVING THE VLAN 10
+    # IN THIS CASE SERVER 1, AND SERVER 3 SHOULD RECEIVE THE MULTICAST TRAFFIC SERVER 2 SHOULD NOT
+
+    :FOR    ${sp_ip}    IN  @{server_keys}
+    \   ${index1}=  Get Index From List    ${server_keys}  ${sp_ip}
+    \   Set To Dictionary   ${windows_server}   win_ip  ${Server_network_ips_Aside[${index1+1}][0]}
+    \   Log    "The server guid is "    console=true
+    \   Log    ${guids_server${index1}['${server1_guids_keys[0]}']}    console=true
+    \   ${output}=  capture interface traffic   ${windows_server}   ${wdump_cmds1['${index1}']}  ${guids_server${index1}['${server1_guids_keys[0]}']}    ${outputfile_guid_server[${index1}]}
+    \   sleep   140    # Sleep for 140 seconds to complete the multicast traffic generation
+    \   ${values}=  verify_mulitcast_traffic_received_by_interface  ${mcast_cmds['${index1}']}  ${outputfile_guid_server[${index1}]}
+    \   Log    "Output Value of verification detail whether the server ${Server_network_ips_Aside[${index1+1}][0]} receive or not received the multicast traffic "    console=true
+    \   Log    ${values}    console=true
+    \   Run Keyword If  ${index1} ==1 and '${values}' !="0"    fail    Server 8 ${Server_network_ips_Aside[${index1+1}][0]} interface is receiving the Multicast Traffic which is not expected
+
+    \   Run Keyword If  ${index1} ==0 and '${values}' !="0"    fail    Server 1 ${Server_network_ips_Aside[${index1+1}][0]} interface is not receiving the Multicast Traffic which is not expected
+
+    #\   Run Keyword If  ${index1} ==2 and '${values}' !="0"    fail    Server 3 ${Server_network_ips[${index1+1}][0]} interface is not receiving the Multicast Traffic which is not expected
+
+    \   Log    "Capturing the 2nd Interface of the server 1"    console=true
+    \   ${output}=  Run Keyword If  ${index1} ==0   capture interface traffic   ${windows_server}   ${wdump_cmds['${index1}']}  ${guids_server${index1}['${server1_guids_keys[2]}']}    ${outputfile_guid_server[${index1+10}]}
+    \   Run Keyword If  ${index1} ==0   sleep   140    # Sleep for 140 seconds to complete the multicast traffic generation
+    \   ${values}=  Run Keyword If  ${index1} ==0   verify_mulitcast_traffic_received_by_interface  ${mcast_cmds['${index1}']}  ${outputfile_guid_server[${index1+10}]}
+    \   Run Keyword If  ${index1} ==0   Log    "Output Value of verification detail whether the server ${Server_network_ips_Aside[${index1+1}][0]} receive or not received the multicast traffic "    console=true
+    \   Run Keyword If  ${index1} ==0   Log    ${values}    console=true
+    \   Run Keyword If  ${index1} ==0 and '${values}' !="1"    fail    Server 1 ${Server_network_ips_Aside[${index1+1}][0]} interface is  receiving the Multicast Traffic which is not expected
+
+    \   Log    "Capturing the 2nd Interface of the server 8"    console=true
+    \   ${output}=  Run Keyword If  ${index1} ==1   capture interface traffic   ${windows_server}   ${wdump_cmds['${index1}']}  ${guids_server${index1}['${server3_guids_keys[3]}']}    ${outputfile_guid_server[${index1+10}]}
+    \   Run Keyword If  ${index1} ==1   sleep   140    # Sleep for 140 seconds to complete the multicast traffic generation
+    \   ${values}=  Run Keyword If  ${index1} ==1   verify_mulitcast_traffic_received_by_interface  ${mcast_cmds['${index1}']}  ${outputfile_guid_server[${index1+10}]}
+    \   Run Keyword If  ${index1} ==1   Log    "Output Value of verification detail whether the server ${Server_network_ips_Aside[${index1+1}][0]} receive or not received the multicast traffic "    console=true
+    \   Run Keyword If  ${index1} ==1   Log    ${values}    console=true
+    \   Run Keyword If  ${index1} ==1 and '${values}' !="1"    fail    Server 8 ${Server_network_ips_Aside[${index1+1}][0]} interface is  receiving the Multicast Traffic which is not expected
+
+    # START LISTENING THE INTERFACES FOR ALL THE SERVERS SINCE THE MULTICAST TRAFFIC IS ALREADY SENT BY THE MSENDER
+    # START THE MCRECEIVE ON THE SERVER 1 VLAN INTERFACE 10 VERIFY THE MCRECEIVE IS WORKED FINE AND RECEIVED THE PACKETS
+
+    Log    "START THE MCRECEIVE APPLICATION ON THE SERVER 1 WHICH HAS THE VLAN 10"    console=true
+
+    Set To Dictionary   ${Ilo_details}  ilo_ip  ${ILO_IPS[0]}
+    Log   ${mcast_cmds['0']}    console=true
+    #${output}  ${IP}=      get_server_vlan_ip      ${linux_details}    ${Ilo_details}  ${module_file_path}     ${mcast_cmds['0']}  ${windows_server_cred}  True
+    ${output}   ${IP}=      start_mcreceive     ${linux_details}    ${Ilo_details}  ${module_file_path}     ${mcast_cmds['0']}  ${windows_server_cred}  True
+    Log    "VERIFY THE MULITCAST TRAFFIC IS RECEIVED BY THE BLADES"    console=true
+    Sleep   20    #Wait for 20 seconds to receive Multicast traffic
+    ${m_output}=    verify multicast traffic    ${mcast_cmds['0']}
+    Log    ${m_output}    console=true
+    Run Keyword If  '${m_output}' != "0"   fail    Multicast Traffic is not received; if ${m_output} value is 1: - Multicast Group IP is not found, -1: - No Multicast traffic
+    ...         ELSE    Log    \n Successfully verified the multicast traffic !!!    console=true
+
+
+    Log    "THREADING - STARTING THE WINDUMP TO LISTEN ON THE INTERFACES"   console=true
+
+    :FOR    ${sp_ip}    IN  @{server_keys}
+    \   ${index1}=  Get Index From List    ${server_keys}  ${sp_ip}
+    \   Set To Dictionary   ${windows_server}   win_ip  ${Server_network_ips_Aside[${index1+1}][0]}
+    \   Log    "The server guid is "    console=true
+    \   Log    ${guids_server${index1}['${server1_guids_keys[0]}']}    console=true
+    \   ${output}=  capture interface traffic   ${windows_server}   ${wdump_cmds1['${index1}']}  ${guids_server${index1}['${server1_guids_keys[0]}']}    ${outputfile_guid_server[${index1}]}
+
+    \   Log    "Capturing the 2nd Interface of the server 1"    console=true
+    \   ${output}=  Run Keyword If  ${index1} ==0   capture interface traffic   ${windows_server}   ${wdump_cmds['${index1}']}  ${guids_server${index1}['${server1_guids_keys[2]}']}    ${outputfile_guid_server[${index1+10}]}
+
+    \   Log    "Capturing the 2nd Interface of the server 8"    console=true
+    \   ${output}=  Run Keyword If  ${index1} ==1   capture interface traffic   ${windows_server}   ${wdump_cmds['${index1}']}  ${guids_server${index1}['${server3_guids_keys[3]}']}    ${outputfile_guid_server[${index1+10}]}
+
+    sleep   300    # Wait for 300secs traffic generation to get completed
+    Log    "VERIFICATION DETAILS OF THE WINDUMP "    console=true
+
+    :FOR    ${sp_ip}    IN  @{server_keys}
+    \   ${index1}=    Get Index From List    ${server_keys}    ${sp_ip}
+    \   ${values}=  verify_mulitcast_traffic_received_by_interface  ${mcast_cmds['${index1}']}  ${outputfile_guid_server[${index1}]}
+    \   Log    "Output Value of verification detail whether the server ${Server_network_ips_Aside[${index1+1}][0]} receive or not received the multicast traffic "    console=true
+    \   Log    ${values}    console=true
+
+    \   Run Keyword If  ${index1} ==1 and '${values}' !="1"    fail    Server 8 ${Server_network_ips_Aside[${index1+1}][0]} interface is receiving the Multicast Traffic which is not expected
+
+    \   Run Keyword If  ${index1} ==0 and '${values}' !="0"    fail    Server 1 ${Server_network_ips_Aside[${index1+1}][0]} interface is not receiving the Multicast Traffic which is not expected
+
+    #\   Run Keyword If  ${index1} ==2 and '${values}' !="1"    fail    Server 3 ${Server_network_ips[${index1+1}][0]} interface is receiving the Multicast Traffic which is not expected
+
+
+    \   ${values}=  Run Keyword If  ${index1} ==0   verify_mulitcast_traffic_received_by_interface  ${mcast_cmds['${index1}']}  ${outputfile_guid_server[${index1+10}]}
+    \   Run Keyword If  ${index1} ==0   Log   "Output Value of verification detail whether the server ${Server_network_ips_Aside[${index1+1}][0]} receive or not received the multicast traffic "
+    \   Run Keyword If  ${index1} ==0   Log    ${values}    console=true
+    \   Run Keyword If  ${index1} ==0 and '${values}' !="1"    fail    Server 1 ${Server_network_ips_Aside[${index1+1}][0]} interface is receiving the Multicast Traffic which is not expected
+
+
+    \   ${values}=  Run Keyword If  ${index1} ==1   verify_mulitcast_traffic_received_by_interface  ${mcast_cmds['${index1}']}  ${outputfile_guid_server[${index1+10}]}
+    \   Run Keyword If  ${index1} ==1   Log    "Output Value of verification detail whether the server ${Server_network_ips_Aside[${index1+1}][0]} receive or not received the multicast traffic "    console=true
+    \   Run Keyword If  ${index1} ==1   Log    ${values}    console=true
+    \   Run Keyword If  ${index1} ==1 and '${values}' !="1"    fail    Server 8 ${Server_network_ips_Aside[${index1+1}][0]} interface is receiving the Multicast Traffic which is not expected
+
+6 OVF1796_API_TC_HA - EDIT THE IGMP SNOOPING AND CHANGE THE VLAN FROM 10 TO 20 , START THE MCAST RECEIVER ON THE SERVER SIDE SHOULD SEE THE MULTICAST TRAFFIC SHOULD FLOOD ON THE VLAN 10
+    [Documentation]     EDIT THE IGMP SNOOPING AND CHANGE THE VLAN FROM 10 TO 20 , START THE MCAST RECEIVER ON THE SERVER SIDE SHOULD SEE THE MULTICAST TRAFFIC SHOULD FLOOD ON THE VLAN 10
+    ${server_keys}=     Get Dictionary Keys     ${Server_network_ips_Aside}
+
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    ${LI_URI} =    Set Variable if    ${resp} != None    ${resp['uri']}    '/${LI} does not exist'
+    Set To Dictionary   ${ethernet_setting_enable_igmp_per_vlan_20}    id  ${resp['ethernetSettings']['id']}
+    Set To Dictionary   ${ethernet_setting_enable_igmp_per_vlan_20}   dependentResourceUri    ${resp['ethernetSettings']['dependentResourceUri']}
+    ${resp}    Fusion Api Update Li Ethernet Settings       ${ethernet_setting_enable_igmp_per_vlan_20}    ${LI_URI}
+    Should Be Equal As Integers    ${resp['status_code']}   202
+    ${task}=    Wait For Task   ${resp}    timeout=30 m    interval=2 s
+    Run Keyword If  '${task['taskState']}' != 'Completed'    FAIL    ELSE    Log    IGMP snooping in LI changed to vlan specific option successfully!!
+
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    Should Be Equal As Strings  ${resp['consistencyStatus']}    NOT_CONSISTENT
+    Should Be Equal    ${resp['ethernetSettings']['igmpSnoopingVlanIds']}   ${ethernet_setting_enable_igmp_per_vlan_20['igmpSnoopingVlanIds']}
+    Should Be Equal    ${resp['ethernetSettings']['enableIgmpSnooping']}    ${ethernet_setting_enable_igmp_per_vlan_20['enableIgmpSnooping']}
+
+    Log    Verifying Interconnects In LI ${les['${LE}']['name']}-${LIG} console=True
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    :FOR    ${interconnect}    IN  @{resp['interconnects']}
+    \   Log    ${interconnect}    console=True
+    \   IC reached state    ${interconnect}   Configured
+
+    sleep   50    # Sleep for 50 seconds to get the interface guids and store in a file
+
+    # EXTRACT THE INTERFACE GUIDS OF THE SERVER AND CONVERT INTO DICT
+
+    Log    "The server GUIDS are as follows"    console=true
+    ${guids_server0}    extract_interface_guid  guid_for_server_1.txt
+    Set Suite Variable  ${server1_guids}    ${guids_server0}
+    Log    ${server1_guids}    console=true
+
+    ${guids_server1}    extract_interface_guid  guid_for_server_2.txt
+    Set Suite Variable  ${server2_guids}    ${guids_server1}
+    Log    ${server2_guids}    console=true
+
+    #${guids_server2}    extract_interface_guid  guid_for_server_3.txt
+    #Set Suite Variable  ${server3_guids}    ${guids_server2}
+    #Log    ${server3_guids}       console=true
+
+    # VERIFY THE MULTICAST TRAFFIC IS RECEIVED BY THE INTERFACES WHICH ARE HAVING THE VLAN 10
+    # IN THIS CASE SERVER 1, AND SERVER 3 SHOULD RECEIVE THE MULTICAST TRAFFIC SERVER 2 SHOULD NOT
+
+    :FOR    ${sp_ip}    IN  @{server_keys}
+    \   ${index1}=  Get Index From List    ${server_keys}  ${sp_ip}
+    \   Set To Dictionary   ${windows_server}   win_ip  ${Server_network_ips_Aside[${index1+1}][0]}
+    \   Log    "The server guid is "    console=true
+    \   Log    ${guids_server${index1}['${server1_guids_keys[0]}']}    console=true
+    \   ${output}=  capture interface traffic   ${windows_server}   ${wdump_cmds1['${index1}']}  ${guids_server${index1}['${server1_guids_keys[0]}']}    ${outputfile_guid_server[${index1}]}
+    \   sleep   140    # Sleep for 140 seconds to complete the multicast traffic generation
+    \   ${values}=  verify_mulitcast_traffic_received_by_interface  ${mcast_cmds['${index1}']}  ${outputfile_guid_server[${index1}]}
+    \   Log    "Output Value of verification detail whether the server ${Server_network_ips_Aside[${index1+1}][0]} receive or not received the multicast traffic "    console=true
+    \   Log    ${values}    console=true
+    \   Run Keyword If  ${index1} ==1 and '${values}' !="0"    fail    Server 8 ${Server_network_ips_Aside[${index1+1}][0]} interface is receiving the Multicast Traffic which is not expected
+
+    \   Run Keyword If  ${index1} ==0 and '${values}' !="0"    fail    Server 1 ${Server_network_ips_Aside[${index1+1}][0]} interface is not receiving the Multicast Traffic which is not expected
+
+    #\   Run Keyword If  ${index1} ==2 and '${values}' !="0"    fail    Server 3 ${Server_network_ips[${index1+1}][0]} interface is not receiving the Multicast Traffic which is not expected
+
+    \   Log    "Capturing the 2nd Interface of the server 1"    console=true
+    \   ${output}=  Run Keyword If  ${index1} ==0   capture interface traffic   ${windows_server}   ${wdump_cmds['${index1}']}  ${guids_server${index1}['${server1_guids_keys[2]}']}    ${outputfile_guid_server[${index1+10}]}
+    \   Run Keyword If  ${index1} ==0   sleep   140    # Sleep for 140 seconds to complete the multicast traffic generation
+    \   ${values}=  Run Keyword If  ${index1} ==0   verify_mulitcast_traffic_received_by_interface  ${mcast_cmds['${index1}']}  ${outputfile_guid_server[${index1+10}]}
+    \   Run Keyword If  ${index1} ==0   Log    "Output Value of verification detail whether the server ${Server_network_ips_Aside[${index1+1}][0]} receive or not received the multicast traffic "    console=true
+    \   Run Keyword If  ${index1} ==0   Log    ${values}    console=true
+    \   Run Keyword If  ${index1} ==0 and '${values}' !="1"    fail    Server 1 ${Server_network_ips_Aside[${index1+1}][0]} interface is  receiving the Multicast Traffic which is not expected
+
+    \   Log    "Capturing the 2nd Interface of the server 8"    console=true
+    \   ${output}=  Run Keyword If  ${index1} ==1  capture interface traffic   ${windows_server}   ${wdump_cmds['${index1}']}  ${guids_server${index1}['${server3_guids_keys[3]}']}    ${outputfile_guid_server[${index1+10}]}
+    \   Run Keyword If  ${index1} ==1   sleep   140    # Sleep for 140 seconds to complete the multicast traffic generation
+    \   ${values}=  Run Keyword If  ${index1} ==1   verify_mulitcast_traffic_received_by_interface  ${mcast_cmds['${index1}']}  ${outputfile_guid_server[${index1+10}]}
+    \   Run Keyword If  ${index1} ==1   Log    "Output Value of verification detail whether the server ${Server_network_ips_Aside[${index1+1}][0]} receive or not received the multicast traffic "    console=true
+    \   Run Keyword If  ${index1} ==1   Log    ${values}    console=true
+    \   Run Keyword If  ${index1} ==1 and '${values}' !="1"    fail    Server 8 ${Server_network_ips_Aside[${index1+1}][0]} interface is  receiving the Multicast Traffic which is not expected
+
+    # START LISTENING THE INTERFACES FOR ALL THE SERVERS SINCE THE MULTICAST TRAFFIC IS ALREADY SENT BY THE MSENDER
+    # START THE MCRECEIVE ON THE SERVER 1 VLAN INTERFACE 10 VERIFY THE MCRECEIVE IS WORKED FINE AND RECEIVED THE PACKETS
+
+    Log    "START THE MCRECEIVE APPLICATION ON THE SERVER 1 WHICH HAS THE VLAN 10"    console=true
+
+    Set To Dictionary   ${Ilo_details}  ilo_ip  ${ILO_IPS[0]}
+    Log    ${mcast_cmds['0']}    console=true
+    #${output}  ${IP}=      get_server_vlan_ip      ${linux_details}    ${Ilo_details}  ${module_file_path}     ${mcast_cmds['0']}  ${windows_server_cred}  True
+    ${output}   ${IP}=      start_mcreceive     ${linux_details}    ${Ilo_details}  ${module_file_path}     ${mcast_cmds['0']}  ${windows_server_cred}  True
+    Log    "VERIFY THE MULITCAST TRAFFIC IS RECEIVED BY THE BLADES"    console=true
+    Sleep   20    #Wait for 20 seconds to receive Multicast traffic
+    ${m_output}=    verify multicast traffic    ${mcast_cmds['0']}
+    Log    ${m_output}    console=true
+    Run Keyword If  '${m_output}' != "0"   fail    Multicast Traffic is not received; if ${m_output} value is 1: - Multicast Group IP is not found, -1: - No Multicast traffic
+    ...         ELSE    Log    \n Successfully verified the multicast traffic !!!    console=true
+
+
+    Log    "THREADING - STARTING THE WINDUMP TO LISTEN ON THE INTERFACES"   console=true
+
+    :FOR    ${sp_ip}    IN  @{server_keys}
+    \   ${index1}=  Get Index From List    ${server_keys}  ${sp_ip}
+    \   Set To Dictionary   ${windows_server}   win_ip  ${Server_network_ips_Aside[${index1+1}][0]}
+    \   Log    "The server guid is "    console=true
+    \   Log    ${guids_server${index1}['${server1_guids_keys[0]}']}    console=true
+    \   ${output}=  capture interface traffic   ${windows_server}   ${wdump_cmds1['${index1}']}  ${guids_server${index1}['${server1_guids_keys[0]}']}    ${outputfile_guid_server[${index1}]}
+
+    \   Log    "Capturing the 2nd Interface of the server 1"    console=true
+    \   ${output}=  Run Keyword If  ${index1} ==0   capture interface traffic   ${windows_server}   ${wdump_cmds['${index1}']}  ${guids_server${index1}['${server1_guids_keys[2]}']}    ${outputfile_guid_server[${index1+10}]}
+
+    \   Log    "Capturing the 2nd Interface of the server 8"    console=true
+    \   ${output}=  Run Keyword If  ${index1} ==1   capture interface traffic   ${windows_server}   ${wdump_cmds['${index1}']}  ${guids_server${index1}['${server3_guids_keys[3]}']}    ${outputfile_guid_server[${index1+10}]}
+
+    sleep   300    # Wait for 300secs traffic generation to get completed
+    Log    "VERIFICATION DETAILS OF THE WINDUMP "    console=true
+
+    :FOR    ${sp_ip}    IN  @{server_keys}
+    \   ${index1}=    Get Index From List    ${server_keys}    ${sp_ip}
+    \   ${values}=  verify_mulitcast_traffic_received_by_interface  ${mcast_cmds['${index1}']}  ${outputfile_guid_server[${index1}]}
+    \   Log    "Output Value of verification detail whether the server ${Server_network_ips_Aside[${index1+1}][0]} receive or not received the multicast traffic "    console=true
+    \   Log    ${values}    console=true
+
+    \   Run Keyword If  ${index1} ==1 and '${values}' !="0"    fail    Server 8 ${Server_network_ips_Aside[${index1+1}][0]} interface is receiving the Multicast Traffic which is not expected
+
+    \   Run Keyword If  ${index1} ==0 and '${values}' !="0"    fail    Server 1 ${Server_network_ips_Aside[${index1+1}][0]} interface is not receiving the Multicast Traffic which is not expected
+
+    #\   Run Keyword If  ${index1} ==2 and '${values}' !="0"    fail    Server 3 ${Server_network_ips[${index1+1}][0]} interface is receiving the Multicast Traffic which is not expected
+
+
+    \   ${values}=  Run Keyword If  ${index1} ==0   verify_mulitcast_traffic_received_by_interface  ${mcast_cmds['${index1}']}  ${outputfile_guid_server[${index1+10}]}
+    \   Run Keyword If  ${index1} ==0   Log   "Output Value of verification detail whether the server ${Server_network_ips_Aside[${index1+1}][0]} receive or not received the multicast traffic "
+    \   Run Keyword If  ${index1} ==0   Log    ${values}    console=true
+    \   Run Keyword If  ${index1} ==0 and '${values}' !="1"    fail    Server 1 ${Server_network_ips_Aside[${index1+1}][0]} interface is receiving the Multicast Traffic which is not expected
+
+
+    \   ${values}=  Run Keyword If  ${index1} ==1   verify_mulitcast_traffic_received_by_interface  ${mcast_cmds['${index1}']}  ${outputfile_guid_server[${index1+10}]}
+    \   Run Keyword If  ${index1} ==1   Log    "Output Value of verification detail whether the server ${Server_network_ips_Aside[${index1+1}][0]} receive or not received the multicast traffic "    console=true
+    \   Run Keyword If  ${index1} ==1   Log    ${values}    console=true
+    \   Run Keyword If  ${index1} ==1 and '${values}' !="1"    fail    Server 8 ${Server_network_ips_Aside[${index1+1}][0]} interface is receiving the Multicast Traffic which is not expected
+
+#######################COMPLIANCE SCENARIOS##################
+
+7 OVF1796_API_TC_HASIDE - Enable IGMP SNOOPING GLOBALLY in LIG AND VERIFY THE COMPLIANCE ALERT IN LI
+    [Documentation]     Enable IGMP SNOOPING GLOBALLY AND VERIFY THE COMPLIANCE ALERT IN LI
+    ${dict} =    Get From Dictionary     ${Edit_ligs}     ${LIG}
+    ${lig_body}=    Create List    ${dict}
+    ${resp}    Edit LIG    ${lig_body}
+    ${l} =  Get Length  ${resp}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    Log    ${resp[${x}]}    console=True
+    \    Run keyword unless  ${resp[${x}]['status_code']}== 202    Fail    "Unable to Edit LIG"
+    \    ${task} =   Wait For Task   ${resp[${x}]}    5 min    15s
+    \    Run Keyword If  '${task['taskState']}' != 'Completed'    FAIL    ELSE    Log    LIG Edited Successfully!!    console=True
+
+    sleep   60
+
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    Run Keyword If    ${resp} != None    Set Global Variable    ${LI_URI}    ${resp['uri']}
+    Should Be Equal As Strings    ${resp['consistencyStatus']}    NOT_CONSISTENT
+    Should Be Equal    ${resp['ethernetSettings']['enableIgmpSnooping']}   ${ethernet_setting_enable_igmp_per_vlan_20['enableIgmpSnooping']}
+    Should Be Equal    ${resp['ethernetSettings']['igmpSnoopingVlanIds']}   ${ethernet_setting_enable_igmp_per_vlan_20['igmpSnoopingVlanIds']}
+
+    ${li_name}     Create Dictionary   name=${les['${LE}']['name']}-${LIG}
+    Update Logical Interconnect from Group    ${li_name}
+
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    Run Keyword If  ${resp} != None    Set Global Variable    ${LI_URI}    ${resp['uri']}
+    Should Be Equal As Strings  ${resp['consistencyStatus']}    CONSISTENT
+    Should Be Equal    ${resp['ethernetSettings']['enableIgmpSnooping']}   ${ethernet_setting_enable_igmp['enableIgmpSnooping']}
+    Should Be Equal    ${resp['ethernetSettings']['igmpSnoopingVlanIds']}   ${ethernet_setting_enable_igmp_li['igmpSnoopingVlanIds']}
+
+
+    sleep   30
+    Log    Verifying Interconnects In LI ${les['${LE}']['name']}-${LIG} console=True
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    :FOR    ${interconnect}    IN  @{resp['interconnects']}
+    \   Log    ${interconnect}    console=True
+    \   IC reached state    ${interconnect}   Configured
+
+8 OVF1796_API_TC_HASIDE - EDIT LI WITH IGMP SNOOPING DISABLED AND VERIFY THE COMPLIANCE ALERT IN LI
+    [Documentation]     EDIT LI WITH IGMP SNOOPING VLAN SPECIFIC AND VERIFY THE COMPLIANCE ALERT IN LI
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    ${LI_URI} =    Set Variable if    ${resp} != None    ${resp['uri']}    '/${LI} does not exist'
+    Set Suite Variable    ${before_ufg_igmp_flag}    ${resp['ethernetSettings']['enableIgmpSnooping']}
+    Set Suite Variable    ${before_ufg_igmp_vlanid}    ${resp['ethernetSettings']['igmpSnoopingVlanIds']}
+
+    Set To Dictionary   ${ethernet_setting_disable_igmp}   id  ${resp['ethernetSettings']['id']}
+    Set To Dictionary   ${ethernet_setting_disable_igmp}   dependentResourceUri    ${resp['ethernetSettings']['dependentResourceUri']}
+    ${resp}    Fusion Api Update Li Ethernet Settings      ${ethernet_setting_disable_igmp}   ${LI_URI}
+    Log    ${resp['status_code']}    console=true
+    Run Keyword If   ${resp['status_code']} != 202    FAIL    ELSE    Log    status code is ${resp['status_code']}
+    ${task} =    Wait For Task   ${resp}    5 min    15s
+    Run Keyword If  '${task['taskState']}' != 'Completed'    FAIL    ELSE    Log    IGMP snooping in LI changed to disabled option successfully!!
+
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    Run Keyword If    ${resp} != None    Set Global Variable    ${LI_URI}    ${resp['uri']}
+    Should Be Equal As Strings  ${resp['consistencyStatus']}    NOT_CONSISTENT
+
+    ${li_name}     Create Dictionary   name=${les['${LE}']['name']}-${LIG}
+    Update Logical Interconnect from Group    ${li_name}
+    sleep   60
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    Run Keyword If  ${resp} != None    Set Global Variable    ${LI_URI}    ${resp['uri']}
+    Should Be Equal As Strings  ${resp['consistencyStatus']}    CONSISTENT
+
+    Set Suite Variable    ${after_ufg_igmp_flag}    ${resp['ethernetSettings']['enableIgmpSnooping']}
+    Set Suite Variable    ${after_ufg_igmp_vlanid}    ${resp['ethernetSettings']['igmpSnoopingVlanIds']}
+    Should Be Equal    ${before_ufg_igmp_flag}    ${after_ufg_igmp_flag}
+    Should Be Equal    ${before_ufg_igmp_vlanid}    ${after_ufg_igmp_vlanid}
+    sleep   30
+    Log    Verifying Interconnects In LI ${les['${LE}']['name']}-${LIG} console=True
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    :FOR    ${interconnect}    IN  @{resp['interconnects']}
+    \   Log    ${interconnect}    console=True
+    \   IC reached state    ${interconnect}   Configured
+
+9 OVF1796_API_TC_HASIDE - Enable IGMP SNOOPING PER VLAN SPECIFIC in LIG AND VERIFY THE COMPLIANCE ALERT IN LI
+    [Documentation]     Enable IGMP SNOOPING PER VLAN SPECIFIC AND VERIFY THE COMPLIANCE ALERT IN LI
+    Set To Dictionary   ${Edit_ligs['${LIG}']}    ethernetSettings    ${ethernet_setting_enable_igmp_per_vlan}
+    ${dict} =    Get From Dictionary     ${Edit_ligs}     ${LIG}
+    ${lig_body}=    Create List    ${dict}
+    ${resp}    Edit LIG    ${lig_body}
+    ${l} =  Get Length  ${resp}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    Log    ${resp[${x}]}    console=True
+    \    Run keyword unless  ${resp[${x}]['status_code']}== 202    Fail    "Unable to Edit LIG"
+    \    ${task} =   Wait For Task   ${resp[${x}]}    5 min    15s
+    \    Run Keyword If  '${task['taskState']}' != 'Completed'    FAIL    ELSE    Log    LIG Edited Successfully!!    console=True
+    sleep   60
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    Run Keyword If    ${resp} != None    Set Global Variable    ${LI_URI}    ${resp['uri']}
+    Should Be Equal As Strings  ${resp['consistencyStatus']}    NOT_CONSISTENT
+    Should Be Equal    ${resp['ethernetSettings']['enableIgmpSnooping']}   ${ethernet_setting_enable_igmp['enableIgmpSnooping']}
+    Should Be Equal    ${resp['ethernetSettings']['igmpSnoopingVlanIds']}   ${ethernet_setting_enable_igmp_li['igmpSnoopingVlanIds']}
+
+    ${li_name}     Create Dictionary   name=${les['${LE}']['name']}-${LIG}
+    Update Logical Interconnect from Group    ${li_name}
+    sleep   60
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    Run Keyword If  ${resp} != None    Set Global Variable    ${LI_URI}    ${resp['uri']}
+    Should Be Equal As Strings  ${resp['consistencyStatus']}    CONSISTENT
+    Should Be Equal    ${resp['ethernetSettings']['enableIgmpSnooping']}   ${ethernet_setting_enable_igmp_per_vlan['enableIgmpSnooping']}
+    Should Be Equal    ${resp['ethernetSettings']['igmpSnoopingVlanIds']}   ${ethernet_setting_enable_igmp_per_vlan['igmpSnoopingVlanIds']}
+    sleep   30
+    Log    Verifying Interconnects In LI ${les['${LE}']['name']}-${LIG} console=True
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    :FOR    ${interconnect}    IN  @{resp['interconnects']}
+    \   Log    ${interconnect}    console=True
+    \   IC reached state    ${interconnect}   Configured
+
+10 OVF1796_API_TC_HASIDE - EDIT LI WITH IGMP SNOOPING GLOBALLY ENABLED AND VERIFY THE COMPLIANCE ALERT IN LI
+    [Documentation]     EDIT LI WITH IGMP SNOOPING GLOBALLY ENABLED AND VERIFY THE COMPLIANCE ALERT IN LI
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    ${LI_URI} =    Set Variable if    ${resp} != None    ${resp['uri']}    '/${LI} does not exist'
+    Set Suite Variable    ${before_ufg_igmp_flag}    ${resp['ethernetSettings']['enableIgmpSnooping']}
+    Set Suite Variable    ${before_ufg_igmp_vlanid}    ${resp['ethernetSettings']['igmpSnoopingVlanIds']}
+
+    Set To Dictionary   ${ethernet_setting_enable_igmp_li}   id  ${resp['ethernetSettings']['id']}
+    Set To Dictionary   ${ethernet_setting_enable_igmp_li}   dependentResourceUri    ${resp['ethernetSettings']['dependentResourceUri']}
+    ${resp}    Fusion Api Update Li Ethernet Settings      ${ethernet_setting_enable_igmp_li}   ${LI_URI}
+    Log    ${resp['status_code']}    console=true
+    Run Keyword If   ${resp['status_code']} != 202    FAIL    ELSE    Log    status code is ${resp['status_code']}
+    ${task} =    Wait For Task   ${resp}    5 min    15s
+    Run Keyword If  '${task['taskState']}' != 'Completed'    FAIL    ELSE    Log    IGMP snooping in LI changed to Global option successfully!!
+
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    Run Keyword If    ${resp} != None    Set Global Variable    ${LI_URI}    ${resp['uri']}
+    Should Be Equal As Strings  ${resp['consistencyStatus']}    NOT_CONSISTENT
+
+    ${li_name}     Create Dictionary   name=${les['${LE}']['name']}-${LIG}
+    Update Logical Interconnect from Group    ${li_name}
+    sleep   60
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    Run Keyword If  ${resp} != None    Set Global Variable    ${LI_URI}    ${resp['uri']}
+    Should Be Equal As Strings  ${resp['consistencyStatus']}    CONSISTENT
+    Set Suite Variable    ${after_ufg_igmp_flag}    ${resp['ethernetSettings']['enableIgmpSnooping']}
+    Set Suite Variable    ${after_ufg_igmp_vlanid}    ${resp['ethernetSettings']['igmpSnoopingVlanIds']}
+    Should Be Equal    ${before_ufg_igmp_flag}    ${after_ufg_igmp_flag}
+    Should Be Equal    ${before_ufg_igmp_vlanid}    ${after_ufg_igmp_vlanid}
+    sleep   30
+    Log    Verifying Interconnects In LI ${les['${LE}']['name']}-${LIG} console=True
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    :FOR    ${interconnect}    IN  @{resp['interconnects']}
+    \   Log    ${interconnect}    console=True
+    \   IC reached state    ${interconnect}   Configured
+
+11 OVF1796_API_TC_HASIDE - DELETE NETWORK FROM NETWORK PAGE WHICH IS ALREADY SPECIFIED IN IGMP SNOOPING VLAN IDS AND VALIDATE IGMP SNOOPING CHANGED TO GLOBAL OPTION AUTOMATICALLY BOTH IN LIG AND LI
+    [Documentation]     DELETE NETWORK FROM NETWORK PAGE WHICH IS ALREADY SPECIFIED IN IGMP SNOOPING VLAN IDS
+
+
+    ${resp}    Get LIG member     ${LIG}
+    ${LIG_URI} =    Set Variable if    ${resp} != None    ${resp['uri']}    '/${LI} does not exist'
+    Should Be Equal    ${resp['ethernetSettings']['igmpSnoopingVlanIds']}  ${ethernet_setting_enable_igmp_per_vlan['igmpSnoopingVlanIds']}
+    Should Be Equal    ${resp['ethernetSettings']['enableIgmpSnooping']}   ${ethernet_setting_enable_igmp_per_vlan['enableIgmpSnooping']}
+
+
+    ${resp}   Get LI member    ${les['${LE}']['name']}-${LIG}
+    ${LI_URI} =    Set Variable if    ${resp} != None    ${resp['uri']}    '/${LI} does not exist'
+    Should Be Equal As Strings    ${resp['consistencyStatus']}    CONSISTENT
+    Should Be Equal    ${resp['ethernetSettings']['igmpSnoopingVlanIds']}  ${ethernet_setting_enable_igmp_per_vlan['igmpSnoopingVlanIds']}
+    Should Be Equal    ${resp['ethernetSettings']['enableIgmpSnooping']}   ${ethernet_setting_enable_igmp_per_vlan['enableIgmpSnooping']}
+
+    :FOR    ${net}  IN   @{ethernet_network1}
+    \    ${resp}    Fusion Api Delete Ethernet Network    ${net['name']}
+    \    Should Be Equal As Integers     ${resp['status_code']}  202
+    \    ${task}    Wait For Task   ${resp}    timeout=10 m    interval=1 s
+    \    Run Keyword If  '${task['taskState']}' != 'Completed'    FAIL    ELSE    Log    Ethernet networks deleted successfully!!
+
+
+    ${resp}    Get LIG member     ${LIG}
+    ${LIG_URI} =    Set Variable if    ${resp} != None    ${resp['uri']}    '/${LI} does not exist'
+    Should Be Equal    ${resp['ethernetSettings']['igmpSnoopingVlanIds']}  ${ethernet_setting_enable_igmp_li['igmpSnoopingVlanIds']}
+    Should Be Equal    ${resp['ethernetSettings']['enableIgmpSnooping']}   ${ethernet_setting_enable_igmp_li['enableIgmpSnooping']}
+
+
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    ${LI_URI} =    Set Variable if    ${resp} != None    ${resp['uri']}    '/${LI} does not exist'
+    Should Be Equal As Strings    ${resp['consistencyStatus']}    CONSISTENT
+    Should Be Equal    ${resp['ethernetSettings']['igmpSnoopingVlanIds']}  ${ethernet_setting_enable_igmp_li['igmpSnoopingVlanIds']}
+    Should Be Equal    ${resp['ethernetSettings']['enableIgmpSnooping']}   ${ethernet_setting_enable_igmp_li['enableIgmpSnooping']}
+
+    ##ADD NETWORK T0 NETWORK PAGE and ADD NETWORKS TO US IN LIG AND UFG IN LI
+    ${resp}=    Add Ethernet Networks from variable    ${ethernet_network1}
+    ${l} =  Get Length  ${resp}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    Log    ${resp[${x}]}    console=True
+    \    Run keyword unless  ${resp[${x}]['status_code']}== 202    Fail    "Unable to Create Ethernet network"
+    \    ${task} =   Wait For Task   ${resp[${x}]}    5 min    15s
+    \    Run Keyword If  '${task['taskState']}' != 'Completed'    FAIL    ELSE    Log    Ethernet Networks Created Successfully!!    console=True
+
+
+    Set To Dictionary   ${Edit_ligs['${LIG}']}    ethernetSettings    ${ethernet_setting_enable_igmp_per_vlan}
+    ${dict} =    Get From Dictionary     ${Edit_ligs}     ${LIG}
+    ${lig_body}=    Create List    ${dict}
+    ${resp}    Edit LIG    ${lig_body}
+    ${l} =  Get Length  ${resp}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    Log    ${resp[${x}]}    console=True
+    \    Run keyword unless  ${resp[${x}]['status_code']}== 202    Fail    "Unable to Edit LIG"
+    \    ${task} =   Wait For Task   ${resp[${x}]}    5 min    15s
+    \    Run Keyword If  '${task['taskState']}' != 'Completed'    FAIL    ELSE    Log    LIG Edited Successfully!!    console=True
+
+    sleep   60
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    Run Keyword If    ${resp} != None    Set Global Variable    ${LI_URI}    ${resp['uri']}
+    Should Be Equal As Strings    ${resp['consistencyStatus']}    NOT_CONSISTENT
+    Should Be Equal    ${resp['ethernetSettings']['enableIgmpSnooping']}   ${ethernet_setting_enable_igmp_li['enableIgmpSnooping']}
+    Should Be Equal    ${resp['ethernetSettings']['igmpSnoopingVlanIds']}   ${ethernet_setting_enable_igmp_li['igmpSnoopingVlanIds']}
+
+    ${li_name}     Create Dictionary   name=${les['${LE}']['name']}-${LIG}
+    Update Logical Interconnect from Group    ${li_name}
+
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    Run Keyword If  ${resp} != None    Set Global Variable    ${LI_URI}    ${resp['uri']}
+    Should Be Equal As Strings  ${resp['consistencyStatus']}    CONSISTENT
+    Should Be Equal    ${resp['ethernetSettings']['enableIgmpSnooping']}   ${ethernet_setting_enable_igmp_per_vlan['enableIgmpSnooping']}
+    Should Be Equal    ${resp['ethernetSettings']['igmpSnoopingVlanIds']}   ${ethernet_setting_enable_igmp_per_vlan['igmpSnoopingVlanIds']}
+    sleep   30
+    Log    Verifying Interconnects In LI ${les['${LE}']['name']}-${LIG} console=True
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    :FOR    ${interconnect}    IN  @{resp['interconnects']}
+    \   Log    ${interconnect}    console=True
+    \   IC reached state    ${interconnect}   Configured
+
+
+###########################NEGATIVE SCENARIOS IN LIG########################################
+12 OVF1796_API_TC_HASIDE - EDIT IGMP SNOOPING VLAN ID AS VLAN WHICH IS NOT PRESENT IN UPLINKSET AND INTERNAL NETWORKS AND VALIDATE THE ERROR MESSAGE
+    [Documentation]     EDIT IGMP SNOOPING VLAN ID AS VLAN WHICH IS NOT PRESENT IN UPLINKSET AND INTERNAL NETWORKS
+
+    #Set To Dictionary   ${ethernet_setting_enable_igmp_per_vlan_neg}   igmpSnoopingVlanIds  ${network_not_in_internalNWs_us}
+    #Set To Dictionary   ${Edit_ligs['${LIG}']}    ethernetSettings    ${ethernet_setting_enable_igmp_per_vlan_neg}
+    ${dict} =    Get From Dictionary     ${Edit_ligs}     ${LIG}
+    Set To Dictionary   ${ethernet_setting_enable_igmp_per_vlan_neg}   igmpSnoopingVlanIds  ${network_not_in_internalNWs_us}
+    Set To Dictionary   ${dict}    ethernetSettings    ${ethernet_setting_enable_igmp_per_vlan_neg}
+    ${lig_body}=    Create List    ${dict}
+    ${resp}    Edit LIG    ${lig_body}
+    ${l} =  Get Length  ${resp}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    Log    ${resp[${x}]}    console=True
+    \    Run keyword unless  ${resp[${x}]['status_code']}== 202    Fail    "LIG is updated with vlan which is not present in uplinkset andd internal networks"
+    \    ${task} =   Wait For Task   ${resp[${x}]}    5 min    15s
+    \    Run Keyword if  '${task['taskErrors'][0]['errorCode']}' != '${errorcode}'    FAIL    ELSE    Log    task error is ${task['taskErrors'][0]['errorCode']}
+
+13 OVF1796_API_TC_HASIDE - EDIT IGMP SNOOPING IN LIG WITH INVALID-TUNNEL,UNTAGGED,FCOE VLANS AND VALIDATE THE ERROR MESSAGE
+    [Documentation]     EDIT IGMP SNOOPING IN LIG WITH INVALID-TUNNEL,UNTAGGED,FCOE VLANS AND VALIDATE THE ERROR MESSAGE
+    :FOR    ${vlan}  IN  @{negative_vlan}
+    #\    Set To Dictionary   ${ethernet_setting_enable_igmp_per_vlan_neg}   igmpSnoopingVlanIds  ${vlan}
+    #\    Set To Dictionary   ${Edit_ligs['${LIG}']}    ethernetSettings    ${ethernet_setting_enable_igmp_per_vlan_neg}
+    \    ${dict} =    Get From Dictionary     ${Edit_ligs}     ${LIG}
+    \    Set To Dictionary   ${ethernet_setting_enable_igmp_per_vlan_neg}   igmpSnoopingVlanIds  ${vlan}
+    \    Set To Dictionary   ${dict}    ethernetSettings    ${ethernet_setting_enable_igmp_per_vlan_neg}
+    \    ${lig_body}=    Create List    ${dict}
+    \    ${resp}    Edit LIG    ${lig_body}
+    \    Run keyword unless  ${resp[0]['status_code']}== 202    Fail    "LIG is updated with INVALID vlan"
+    \    ${task} =   Wait For Task   ${resp[0]}    5 min    15s
+    \    Log    ${task['taskErrors'][0]['errorCode']}
+    \    Run Keyword If  '${task['taskErrors'][0]['errorCode']}' == '${errorcode}' or '${task['taskErrors'][0]['errorCode']}' == '${errorcode1}'    log    \ntask error is ${task['taskErrors'][0]['errorCode']}
+
+14 OVF1796_API_TC_HASIDE - EDIT IGMP SNOOPING IN LIG WITH INVALID VLANS AND VALIDATE THE ERROR MESSAGE
+    [Documentation]     EDIT IGMP SNOOPING IN LIG WITH INVALID VLANS AND VALIDATE THE ERROR MESSAGE
+    :FOR    ${vlan}  IN  @{invalid_ids}
+    #\    Set To Dictionary   ${ethernet_setting_enable_igmp_per_vlan_neg}   igmpSnoopingVlanIds  ${vlan}
+    #\    Set To Dictionary   ${Edit_ligs['${LIG}']}    ethernetSettings    ${ethernet_setting_enable_igmp_per_vlan_neg}
+    \    ${dict} =    Get From Dictionary     ${Edit_ligs}     ${LIG}
+    \    Set To Dictionary   ${ethernet_setting_enable_igmp_per_vlan_neg}   igmpSnoopingVlanIds  ${vlan}
+    \    Set To Dictionary   ${dict}    ethernetSettings    ${ethernet_setting_enable_igmp_per_vlan_neg}
+    \    ${lig_body}=    Create List    ${dict}
+    \    ${resp}    Edit LIG    ${lig_body}
+    \    Run keyword unless  ${resp[0]['status_code']}== 202    Fail    "LIG is updated with INVALID vlan"
+    \    ${task} =   Wait For Task   ${resp[0]}    5 min    15s
+    \    Log    ${task['taskErrors'][0]['errorCode']}
+    \    Run Keyword If  '${task['taskErrors'][0]['errorCode']}' == '${errorcode}' or '${task['taskErrors'][0]['errorCode']}' == '${errorcode1}'    log    \ntask error is ${task['taskErrors'][0]['errorCode']}
+
+15 OVF1796_API_TC_HASIDE - DELETE NETWORK FROM US IN LIG WHICH IS ALREADY SPECIFIED IN IGMP SNOOPING VLAN IDS AND VALIDATE THE ERROR MESSAGE
+    [Documentation]     DELETE NETWORK FROM US IN LIG WHICH IS ALREADY SPECIFIED IN IGMP SNOOPING VLAN IDS
+
+    #Verify igmp snooing vlan id 10&30 is configured in LIG
+    ${resp}    Get LIG member     ${LIG}
+    Should Be Equal    ${resp['ethernetSettings']['enableIgmpSnooping']}   ${ethernet_setting_enable_igmp_per_vlan['enableIgmpSnooping']}
+    Should Be Equal    ${resp['ethernetSettings']['igmpSnoopingVlanIds']}   ${ethernet_setting_enable_igmp_per_vlan['igmpSnoopingVlanIds']}
+
+    ${dict} =    Get From Dictionary     ${Edit_lig_neg}     ${LIG}
+    ${lig_body}=    Create List    ${dict}
+
+    ${resp}    Edit LIG    ${lig_body}
+    ${l} =  Get Length  ${resp}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    Log    ${resp[${x}]}    console=True
+    \    Run keyword unless  ${resp[${x}]['status_code']}== 202    Fail    "LIG is updated with already specified vlan even after deleting the network from network page"
+    \    ${task} =   Wait For Task   ${resp[${x}]}    5 min    15s
+    \    Log    ${task['taskErrors'][0]['errorCode']}
+    \    Run Keyword if  '${task['taskErrors'][0]['errorCode']}' != '${errorcode}'    FAIL    ELSE    Log    task error is ${task['taskErrors'][0]['errorCode']}
+
+
+
+16 OVF1796_API_TC_HASIDE - VERIFY IGMP SNOOPING WITH NEGATIVE TIMEOUT INTERVALS IN LIG
+    [Documentation]    Verify IGMP snooping with negative timeout intervals in lIG
+
+    :FOR    ${intervals}  IN  @{TimeoutInterval_neg}
+    #\    Set To Dictionary  ${ethernet_settings_neg_timeintervals}   igmpIdleTimeoutInterval  ${intervals}
+    #\    Set To Dictionary   ${Edit_ligs['${LIG}']}    ethernetSettings    ${ethernet_settings_neg_timeintervals}
+    \    ${dict} =    Get From Dictionary     ${Edit_ligs}     ${LIG}
+    \    Set To Dictionary  ${ethernet_settings_neg_timeintervals}   igmpIdleTimeoutInterval  ${intervals}
+    \    Set To Dictionary   ${dict}    ethernetSettings    ${ethernet_settings_neg_timeintervals}
+    \    ${lig_body}=    Create List    ${dict}
+    \    ${resp}    Edit LIG    ${lig_body}
+    \    ${task} =   Wait For Task   ${resp[0]}    5 min    15s
+    \    Log    ${task['taskErrors'][0]['errorCode']}
+    \    Run Keyword If  '${task['taskErrors'][0]['errorCode']}' == '${errorcode2}'    Log    \ntask error is ${task['taskErrors'][0]['errorCode']}
+
+#########################NEGATIVE SCENARIOS IN LI####################################################
+
+17 OVF1796_API_TC_HASIDE - VERIFY IGMP SNOOPING WITH NEGATIVE TIMEOUT INTERVALS IN LI
+    [Documentation]    verify igmp snooping with negative timeout intervals in li
+    :FOR    ${intervals}  IN  @{TimeoutInterval_neg}
+    \    Set To Dictionary  ${ethernet_settings_neg_timeintervals}   igmpIdleTimeoutInterval  ${intervals}
+    \    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    \    ${LI_URI} =    Set Variable if    ${resp} != None    ${resp['uri']}    '/${LI} does not exist'
+    \    ${resp}    Fusion Api Update Li Ethernet Settings      ${ethernet_settings_neg_timeintervals}   ${LI_URI}
+    \    Log    ${resp}
+    \    Run keyword unless   ${resp['status_code']}== 400    Fail    "LI igmp snooping is updated with negative timeout intervals"
+
+18 OVF1796_API_TC_HASIDE - DELETE NETWORK FROM US IN LI WHICH IS ALREADY SPECIFIED IN IGMP SNOOPING VLAN IDS
+
+    [Documentation]     DELETE NETWORK FROM US IN LI WHICH IS ALREADY SPECIFIED IN IGMP SNOOPING VLAN IDS
+
+    ${resp}    Edit uplinkset    ${uplink_set['US_Vlan10']['name']}    ${neg_uplink_sets}   ${les['${LE}']['name']}-${LIG}
+    Log    ${resp}   console=true
+    ${task} =   Wait For Task   ${resp}    5 min    15s
+    Run Keyword If  '${task['taskState']}' != 'Completed'    FAIL    ELSE    Log    Uplinkset Edited Successfully!!    console=True
+    Sleep    1min
+    ${ulist}    Fusion Api Get Uplink Set   param=?filter="'name'=='${uplink_set['US_Vlan10']['name']}'
+    Run Keyword If  '${ulist['members'][0]['status']}' != 'Critical'    FAIL    Unexpected ${ulist['members'][0]['status']} Alert message !!    console=True
+    ${resp} =     Get LI member   ${les['${LE}']['name']}-${LIG}
+    Log    ${resp['internalNetworkUris']}
+    Set Suite Variable    ${internal_nw_uri}    ${resp['internalNetworkUris']}
+    ${uri}    Get Ethernet URI    ${ethernet_network[0]['name']}
+    Log    ${uri}
+    Run Keyword If  '${uri}' != '${internal_nw_uri[0]}'    FAIL    ELSE    Log    The network which is deleted in uplinkset is present in internal networks in LI    console=True
+
+19 OVF1796_API_TC_HASIDE- DELETE NETWORK FROM INTERNAL NETWORKS AND VALIDATE IGMP SNOOPING IS AUTOMATICALLY UPDATED TO GLOBAL BOTH IN LIG AND LI
+    [Documentation]    Delete network from internal networks and validate igmp snooping is automatically updated to global both in LIG and LI
+
+    ${resp}    Update Logical Interconnect Internal Network    ${les['${LE}']['name']}-${LIG}    ${internal_networks}
+    log    ${resp}    console=True
+    ${task}    Wait For Task   ${resp}    timeout=10 m    interval=1 s
+    Run Keyword If  '${task['taskState']}' != 'Completed'    FAIL    ELSE    Log    Internal networks deleted successfully!!    console=True
+
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    ${LI_URI} =    Set Variable if    ${resp} != None    ${resp['uri']}    '/${LI} does not exist'
+    Should Be Equal    ${resp['ethernetSettings']['enableIgmpSnooping']}    ${ethernet_setting_enable_igmp['enableIgmpSnooping']}
+    Should Be Equal    ${resp['ethernetSettings']['igmpSnoopingVlanIds']}    ${ethernet_setting_enable_igmp_per_vlan1['igmpSnoopingVlanIds']}
+
+    ${resp1}    Get LIG member     ${LIG}
+    Should Be Equal    ${resp1['ethernetSettings']['enableIgmpSnooping']}    ${ethernet_setting_enable_igmp['enableIgmpSnooping']}
+    Should Be Equal    ${resp1['ethernetSettings']['igmpSnoopingVlanIds']}    ${ethernet_setting_enable_igmp_per_vlan['igmpSnoopingVlanIds']}
+    ${li_name}     Create Dictionary   name=${les['${LE}']['name']}-${LIG}
+    Update Logical Interconnect from Group    ${li_name}
+    sleep   60
+
+20 OVF1796_API_TC_HASIDE - EDIT IGMP SNOOPING IN LI WITH INVALID VLANS AND VALIDATE THE ERROR MESSAGE
+    [Documentation]    EDIT IGMP SNOOPING IN LI WITH INVALID VLANS AND VALIDATE THE ERROR MESSAGE
+
+    :FOR    ${vlan}  IN  @{invalid_ids}
+    \    ${resp}    Get LI member     ${les['${LE}']['name']}-${LIG}
+    \    ${LI_URI} =    Set Variable if    ${resp} != None    ${resp['uri']}    '/${LI} does not exist'
+    \    ${res}    Set To Dictionary   ${ethernet_setting_enable_igmp_per_vlan_neg}   igmpSnoopingVlanIds  ${vlan}
+    \    ${resp}    Fusion Api Update LI Ethernet Settings    ${res}     ${LI_URI}
+    \    Should Be Equal  '${resp['errorCode']}'     '${errorcode3}'
+
+21 OVF1796_API_TC_HASIDE - EDIT IGMP SNOOPING IN LI WITH INVALID VLANS 1 to 19 AND VALIDATE THE ERROR MESSAGE
+    [Documentation]    EDIT IGMP SNOOPING IN LI WITH INVALID VLANS 1 to 19 AND VALIDATE THE ERROR MESSAGE
+    ${resp}    Get LI member     ${les['${LE}']['name']}-${LIG}
+    ${LI_URI} =    Set Variable if    ${resp} != None    ${resp['uri']}    '/${LI} does not exist'
+    ${res}    Set To Dictionary   ${ethernet_setting_enable_igmp_per_vlan_neg}   igmpSnoopingVlanIds  ${invalid_id}
+    Log    ${res}    console=true
+    ${resp}    Fusion Api Update LI Ethernet Settings    ${res}     ${LI_URI}
+    Run keyword unless   ${resp['status_code']}== 400    Fail    "LI is updated with Invalid vlan id's"
+
+
+22 OVF1796_API_TC_HASIDE - EDIT IGMP SNOOPING VLAN ID AS VLAN WHICH IS NOT PRESENT IN UPLINKSET AND INTERNAL NETWORKS AND VALIDATE THE ERROR MESSAGE IN LI
+    [Documentation]    EDIT IGMP SNOOPING VLAN ID AS VLAN WHICH IS NOT PRESENT IN UPLINKSET AND INTERNAL NETWORKS AND VALIDATE THE ERROR MESSAGE IN LI
+    ${resp}    Get LI member     ${les['${LE}']['name']}-${LIG}
+    ${LI_URI} =    Set Variable if    ${resp} != None    ${resp['uri']}    '/${LI} does not exist'
+    ${res}    Set To Dictionary   ${ethernet_setting_enable_igmp_per_vlan_neg}   igmpSnoopingVlanIds  ${network_not_in_internalNWs_us}
+    ${resp}    Fusion Api Update LI Ethernet Settings    ${res}     ${LI_URI}
+    Log    ${resp}    console=true
+    Run keyword unless   ${resp['status_code']}== 400    Fail    "LI is updated with which is not present in uplinkset and internal networks"
+
+23 OVF1796_API_TC_HASIDE - EDIT IGMP SNOOPING IN LI WITH INVALID-TUNNEL,UNTAGGED,FCOE VLANS AND VALIDATE THE ERROR MESSAGE
+    [Documentation]    EDIT IGMP SNOOPING IN LI WITH INVALID-TUNNEL,UNTAGGED,FCOE VLANS AND VALIDATE THE ERROR MESSAGE
+    :FOR    ${vlan}  IN  @{negative_vlan}
+    \    ${resp}    Get LI member     ${les['${LE}']['name']}-${LIG}
+    \    ${LI_URI} =    Set Variable if    ${resp} != None    ${resp['uri']}    '/${LI} does not exist'
+    \    ${res}    Set To Dictionary   ${ethernet_setting_enable_igmp_per_vlan_neg}   igmpSnoopingVlanIds  ${vlan}
+    \    ${resp}    Fusion Api Update LI Ethernet Settings    ${res}     ${LI_URI}
+    \    Run keyword unless   ${resp['status_code']}== 400    Fail    "Invalid vlan id's"
+
+24 OVF1796_API_TC_HASIDE - VERIFY LI IS CONSISTENT WHEN LIG AND LI IGMP SNOOPING VLAN ID'S SHOULD BE IN DIFFERENT ORDER AND DIFFERENT GROUPINGS
+   [Documentation]     VERIFY LI IS CONSISTENT WHEN LIG AND LI IGMP SNOOPING VLAN ID'S SHOULD BE IN DIFFERENT ORDER AND DIFFERENT GROUPINGS
+
+   ${urilist}=    Create list
+   ${ur}=    Create list
+   :FOR    ${x}    IN RANGE    ${start_vlan}  ${end_vlan}
+   \    ${uri} =    Get Ethernet URI        Net-Vlan_${x}
+   \    Append to list   ${urilist}    ${uri}
+    Log    ${urilist}
+    ${resp}    Get LIG member  ${LIG}
+    ${LIG_URI} =    Set Variable if    ${resp} != None    ${resp['uri']}    'LIG does not exist'
+    Set To Dictionary    ${resp}    internalNetworkUris    ${urilist}
+    Set To Dictionary    ${resp['ethernetSettings']}    enableIgmpSnooping    True
+    Set To Dictionary    ${resp['ethernetSettings']}    igmpSnoopingVlanIds    ${lig_vlan}
+
+    ${resp} =   Fusion Api Edit Lig    body=${resp}    uri=${LIG_URI}
+    Log    ${resp}
+    ${task} =   Wait For Task   ${resp}    5 min    15s
+    Run Keyword If  '${task['taskState']}' != 'Completed'    FAIL    ELSE    Log    LIG Updated Successfully!!
+
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    Should Be Equal As Strings    ${resp['consistencyStatus']}    NOT_CONSISTENT
+
+    ${li_name}     Create Dictionary   name=${les['${LE}']['name']}-${LIG}
+    Update Logical Interconnect from Group    ${li_name}
+
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    ${LI_URI} =    Set Variable if    ${resp} != None    ${resp['uri']}    'LIG does not exist'
+    ${in} =    Get From Dictionary      ${resp['ethernetSettings']}    igmpSnoopingVlanIds
+    Log    ${in}
+    ${resp1} =    Set To Dictionary    ${resp['ethernetSettings']}    igmpSnoopingVlanIds    ${li_vlan}
+    Log    ${resp1}
+
+    ${resp}    Fusion Api Update LI Ethernet Settings    ${resp1}    ${LI_URI}
+    Log    ${resp['status_code']}
+    Run Keyword If   ${resp['status_code']} != 202    FAIL    ELSE    Log   status code is ${resp['status_code']}
+    ${task} =    Wait For Task   ${resp}    5 min    15s
+    Run Keyword If  '${task['taskState']}' != 'Completed'    FAIL    ELSE    Log    LI changed to given VLAN Specific option successfully!!
+
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    Should Be Equal As Strings    ${resp['consistencyStatus']}    CONSISTENT
+
+###################################################BACKUP AND RESTORE####################################################################################
+
+25 OVF1796_API_TC_ASIDE - EDIT THE LI AND CHANGE THE IGMP SNOOPING PER VLAN SETTING TO ADD VLAND ID'S 10,30
+    [Documentation]     EDIT THE LI AND CHANGE THE IGMP PER VLAN SETTING TO ADD VLAND ID'S 10,30
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    ${LI_URI} =    Set Variable if    ${resp} != None    ${resp['uri']}    '/${LI} does not exist'
+    Set To Dictionary   ${ethernet_setting_enable_igmp_per_vlan}   id  ${resp['ethernetSettings']['id']}
+    Set To Dictionary   ${ethernet_setting_enable_igmp_per_vlan}   dependentResourceUri    ${resp['ethernetSettings']['dependentResourceUri']}
+    ${resp}    Fusion Api Update Li Ethernet Settings      ${ethernet_setting_enable_igmp_per_vlan}   ${LI_URI}
+    Log    ${resp['status_code']}
+    Should Be Equal As Integers    ${resp['status_code']}  202
+    ${task}=    Wait For Task   ${resp}    timeout=30 m    interval=2 s
+    Run Keyword If  '${task['taskState']}' != 'Completed'    FAIL    ELSE    Log    LI ethernet settings updated Successfully!!    console=True
+    ${resp}    Fusion Api Get Li   ${LI_URI}
+    Should Be Equal As Strings  ${resp['consistencyStatus']}    NOT_CONSISTENT
+    Should Be Equal    ${resp['ethernetSettings']['igmpSnoopingVlanIds']}  ${ethernet_setting_enable_igmp_per_vlan['igmpSnoopingVlanIds']}
+    Should Be Equal    ${resp['ethernetSettings']['enableIgmpSnooping']}   ${ethernet_setting_enable_igmp_per_vlan['enableIgmpSnooping']}
+    Set Suite Variable    ${before_ufg_igmp_flag}    ${resp['ethernetSettings']['enableIgmpSnooping']}
+    Set Suite Variable    ${before_ufg_igmp_vlanid}    ${resp['ethernetSettings']['igmpSnoopingVlanIds']}
+
+25_1 OVF1796_API_TC_ASIDE - CREATE BACKUP OF THE APPLIANCE
+    [Documentation]     CREATE BACKUP OF THE APPLIANCE
+    Create Backup
+
+25_2 OVF1796_API_TC_ASIDE - EDIT THE LI AND CHANGE THE IGMP SNOOPING VLAN SETTING TO GLOBAL
+    [Documentation]     EDIT THE LI AND CHANGE THE IGMP SNOOPING VLAN SETTING TO GLOBAL
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    ${LI_URI} =    Set Variable if    ${resp} != None    ${resp['uri']}    '/${LI} does not exist'
+    Set To Dictionary   ${ethernet_setting_enable_igmp}   id  ${resp['ethernetSettings']['id']}
+    Set To Dictionary   ${ethernet_setting_enable_igmp}   dependentResourceUri    ${resp['ethernetSettings']['dependentResourceUri']}
+    ${resp}    Fusion Api Update Li Ethernet Settings      ${ethernet_setting_enable_igmp}   ${LI_URI}
+    Log    ${resp['status_code']}
+    Should Be Equal As Integers    ${resp['status_code']}  202
+    ${task}=    Wait For Task   ${resp}    timeout=30 m    interval=2 s
+    Run Keyword If  '${task['taskState']}' != 'Completed'    FAIL    ELSE    Log    LI ethernet settings updated Successfully!!    console=True
+    ${resp}    Fusion Api Get Li   ${LI_URI}
+    Should Be Equal As Strings  ${resp['consistencyStatus']}    NOT_CONSISTENT
+    Should Be Equal    ${resp['ethernetSettings']['enableIgmpSnooping']}   ${ethernet_setting_enable_igmp['enableIgmpSnooping']}
+
+25_3 OVF1796_API_TC_ASIDE - RESTORE THE BACKUP FROM THE RECENT BACK-UP
+    [Documentation]     RESTORE THE BACKUP FROM THE RECENT BACK-UP
+    Restore Appliance
+
+25_4 OVF2496_API_TC_ASIDE - VERIFY THE NETWORKS ARE RESTORED AND IGMP VLAN SETTINGS ARE RESTORED
+    [Documentation]     Verify the networks are restored and IGMP vlan settings are restored
+    Fusion Api Login Appliance    ${appliance_ip}    ${admin_credentials}
+    sleep   60
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    Should Be Equal As Strings  ${resp['consistencyStatus']}    NOT_CONSISTENT
+    Should Be Equal    ${resp['ethernetSettings']['igmpSnoopingVlanIds']}  ${ethernet_setting_enable_igmp_per_vlan['igmpSnoopingVlanIds']}
+    Should Be Equal    ${resp['ethernetSettings']['enableIgmpSnooping']}   ${ethernet_setting_enable_igmp_per_vlan['enableIgmpSnooping']}
+    Set Suite Variable    ${after_ufg_igmp_flag}   ${resp['ethernetSettings']['enableIgmpSnooping']}
+    Set Suite Variable    ${after_ufg_igmp_vlanid}    ${resp['ethernetSettings']['igmpSnoopingVlanIds']}
+    Should Be Equal    ${before_ufg_igmp_flag}    ${after_ufg_igmp_flag}
+    Should Be Equal    ${before_ufg_igmp_vlanid}    ${after_ufg_igmp_vlanid}
+***keywords******
+Clean OV
+    [Documentation]  Clean OV
+    Power off ALL servers
+    Remove All Server Profiles
+    Remove All LEs
+    Remove All Enclosure Groups
+    Remove All LIGs
+    Remove All Ethernet Networks
+    Remove ALL FCoE Networks
+    Remove All FC Networks
+
+Suite Setup Tasks
+    [Documentation]  Suite Setup Tasks
+    Set Log Level   TRACE
+    ${resp}    Fusion Api Login Appliance    ${appliance_ip}    ${admin_credentials}
+    Run Keyword If  '${resp[0]['status_code']}' != '200'  Fail    ELSE  Log       Successfully logged into the appliance    console=True
+
+    Clean OV
+
+    ${start_in} =   Get Variable Value  ${enc_count}    1
+    Set Suite Variable  ${enc_count}    ${start_in}
+    Log    ${enc_count}    console=True
+
+    #Create Ethernet Networks
+    ${resp}    Add Ethernet Networks from variable    ${ethernet_network}
+    ${l} =  Get Length  ${resp}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    Log    ${resp[${x}]}    console=True
+    \    Run keyword unless  ${resp[${x}]['status_code']}== 202    Fail    "Unable to Create Ethernet network"
+    \    ${task} =   Wait For Task   ${resp[${x}]}    5 min    15s
+    \    Run Keyword If  '${task['taskState']}' != 'Completed'    FAIL    ELSE    Log    Ethernet Networks Created Successfully!!    console=True
+
+    Log    \nAdding BULK ETHERNET NETWORKS    console=True
+    Create Bulk Ethernet Networks    ${internal_network1}
+
+    #Create FCOE Networks
+    ${resp}     Add FCoE Networks from variable     ${fcoenets}
+    ${l} =  Get Length  ${resp}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    Log    ${resp[${x}]}    console=True
+    \    Run keyword unless  ${resp[${x}]['status_code']}== 202    Fail    "Unable to Create FCOE network"
+    \    ${task} =   Wait For Task   ${resp[${x}]}    5 min    15s
+    \    Run Keyword If  '${task['taskState']}' != 'Completed'    FAIL    ELSE    Log    FCOE Networks Created Successfully!!    console=True
+
+    Set Suite Variable  ${LIG}  Enc${enc_count}-LIG_HA
+    Add LIG from variable    ${ligs['${LIG}']}
+
+
+    Set Suite Variable  ${EG}   Enc${enc_count}-EG
+    ${resp}    Add Enclosure Group from variable    ${enc_group['${EG}']}
+    ${task} =   Wait For Task   ${resp}    5 min    15s
+    Run Keyword If  '${task['taskState']}' != 'Completed'    FAIL    ELSE    Log    EG Created Successfully!!    console=True
+
+    Set Suite Variable  ${LE}   Enc${enc_count}-LE
+    Log    ${LE}    console=True
+    Set Suite Variable  ${eg}   EG:Enc${enc_count}-EG
+    Set To Dictionary   ${les['${LE}']}    enclosureGroupUri   ${eg}
+    Add Logical Enclosure from variable    ${les['${LE}']}
+
+    Log    \n Verifying Interconnects In LI ${les['${LE}']['name']}-${LIG} console=True
+    ${resp}    Get LI member    ${les['${LE}']['name']}-${LIG}
+    :FOR    ${interconnect}    IN  @{resp['interconnects']}
+    \   Log    ${interconnect}    console=True
+    \   IC reached state    ${interconnect}   Configured
+
+    Set Suite Variable  ${SP}   Enc${enc_count}_server_profiles_HA
+    Log      ${Server_profiles['${SP}']}
+    ${resp}   Add Server Profiles from variable   ${Server_profiles['${SP}']}
+    ${l} =  Get Length  ${resp}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    Log    ${resp[${x}]}    console=True
+    \    ${task} =   Wait For Task   ${resp[${x}]}    10 min    15s
+    \    Run Keyword If  '${task['taskState']}' != 'Completed'    FAIL    ELSE    Log    Server profiles Created Successfully!!    console=True
+
+
+    Log    "Powering on the Server bays"    console=True
+
+    :FOR    ${server}    IN  @{Server_profiles['${SP}']}
+    \   Log    ${server['serverHardwareUri']}    console=True
+    \   Power on server     ${server['serverHardwareUri']}
+
+    Sleep   600    #Wait for the servers get powered on
+
+    #Verify the port status for interconnect 3 and interconnect 6
+    ${l} =  Get Length    ${up_ports_3}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \       Verify the port status for given interconnect and port    ${INTERCONNECTS[0]}    ${up_ports_3[${x}]}
+
+    ${l} =  Get Length    ${dw_ports_1}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \       Verify the port status for given interconnect and port    ${INTERCONNECTS[0]}    ${dw_ports_1[${x}]}
+
+    Verify the port status for given interconnect and port    ${INTERCONNECTS[1]}    ${up_ports_6}
+    ${l} =  Get Length    ${dw_ports_1}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \       Verify the port status for given interconnect and port    ${INTERCONNECTS[1]}    ${dw_ports_1[${x}]}
+
+Verify the port status for given interconnect and port
+   [Documentation]   Verify the port status for given interconnect and port
+   [Arguments]   ${interconnect_name}    ${port}
+   ${resp} =    Fusion Api Get Interconnect        param=?filter="'name'=='${interconnect_name}'"
+    ${ports} =    Get from Dictionary    ${resp['members'][0]}    ports
+    ${len} =    Get Length    ${ports}
+    Log to Console      ${len}  ${\n}
+
+    :FOR    ${z}    IN RANGE    0    ${len}
+    \    Exit For Loop If     '${ports[${z}]['portName']}' == '${port}'
+    ${u_portinfo} =    Copy Dictionary    ${ports[${z}]}
+    Log to Console  ${u_port_info}
+    Run Keyword If    '${u_portinfo['portStatus']}' != 'Linked'    fail    msg=Not found linked port in IC
+    ...         ELSE    Log to console and logfile  \n Successfully verified the linked state for given port in IC !!

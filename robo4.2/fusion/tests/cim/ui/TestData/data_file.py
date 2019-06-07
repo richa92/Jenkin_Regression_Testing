@@ -1,0 +1,1 @@
+admin_credentials = {'userName': 'BackupAdminUser', 'password': 'hpvse123'}

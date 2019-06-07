@@ -1,0 +1,76 @@
+*** Settings ***
+Documentation    test_ntp.txt - Validate that the EM has the correct time and NTP is working.
+...
+...    = USAGE =
+...    | pybot | -v ENCLOSURE:<name> | test_ntp.txt |
+...    = Variables =
+...    | ENCLOSURE | Required; Enclosure to use |
+
+Variables         ../resources/variables.py    ${ENCLOSURE}
+Resource          ../resources/defaults.txt
+Resource          ../resources/fusion_ssh.txt
+Resource          ../resources/em_api.txt
+Force Tags        HW
+
+Suite Setup       Login to Fusion via SSH
+Suite Teardown    Logout of Fusion via SSH
+
+*** Test Case ***
+
+Get EM Session
+    ${EM_IP}    ${EMSessionID}    EM Api Create Session
+    Set Suite Variable    ${Header}    "X-Auth-Token":"${EMSessionID}"
+
+    ${Active_EM}    Get Active EM Resource    ${Fusion_IP}    ${EM_IP}
+    Set Suite Variable    ${Active_EM}
+    Log    Active EM is: ${Active_EM}    console=True
+
+
+Run the TestNTP Function
+    # When problems occur, it can take over 10 minutes to timeout and get a response.
+    # So, if it's taking a long time it's likely going to fail.
+    Set Client Configuration    timeout=900    
+    ${Output}    Execute SSH Command
+    ...    curl -kiX POST -H ${Header} --data-ascii '{"Action":"TestNTP"}' https://${EM_IP}%${fusion_nic}${Active_EM}
+    # Reformat output into a dictionary (Remove the prompt it messes up loads).
+    Should Contain    ${Output}    HTTP/1.1 200 OK    values=False    msg=TestNTP did not run successfully.
+    Should Contain    ${Output}    Content-Length: 0
+
+
+Check status of NTP Service
+    ${Output}    Execute SSH Command
+    ...    curl -kX GET -H ${Header} --data-ascii '{"Action":"TestNTP"}' https://${EM_IP}%${fusion_nic}${Active_EM}
+
+    # Reformat output into a dictionary (Remove the prompt it messes up loads).
+    ${Output}    String.Fetch From Left    ${Output}    [root@
+    ${Output}    json.loads       ${Output}
+    # Pretty print it for debugging - Just to the log on on the console
+    ${NicelyFormattedJsonString}    json.dumps    ${Output}    indent=${4}    sort_keys=${True}
+    Log    ${NicelyFormattedJsonString}
+    
+    # Pull out "NTPInformation". It's all we're interested in.
+    ${NTPInformation}    Get From Dictionary    ${Output['Oem']['Hp']}    NTPInformation
+    # Pretty print it for the user    
+    ${NicelyFormattedJsonString}    json.dumps    ${NTPInformation}    indent=${4}    sort_keys=${True}
+    Log    \n${NicelyFormattedJsonString}    console=True
+
+    # Verify that NTP is enabled and the NTP Server IP is present
+    Should be Equal    ${NTPInformation['Enabled']}    ${True}
+    Should Not Be Empty    ${NTPInformation['PrimaryIpAddress']}
+
+    
+What time is it
+    ${Output}    Execute SSH Command    curl -kX GET -H ${Header} https://${EM_IP}%${fusion_nic}/rest/v1/Diags/GetTime
+    ${EMTime}    String.Fetch From Left    ${Output}    \r\n
+
+    ${Output}    Execute SSH Command    date +%Y-%m-%dT%H:%M:%S%z
+    ${CITime}    String.Fetch From Left    ${Output}    \r\n
+
+    Log    \nTime on the CI is: ${CITime}    console=True
+    Log    \nTime on the EM is: ${EMTime}    console=True
+    #Should Be Equal    ${EMTime}    ${CITime}
+
+    ${EMTimeInt}    evaluate    time.mktime(time.strptime("${EMTime}","%Y-%m-%dT%H:%M:%S+0000"))    time
+    ${CITimeInt}    evaluate    time.mktime(time.strptime("${CITime}","%Y-%m-%dT%H:%M:%S+0000"))    time
+    ${delta}    evaluate    abs(${EMTimeInt}-${CITimeInt})
+    Run Keyword If    ${delta} > 2    Fail    msg=Time on CI doesn't match time on EM

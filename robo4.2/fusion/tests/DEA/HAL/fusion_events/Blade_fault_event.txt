@@ -1,0 +1,145 @@
+*** Settings ***
+Documentation    Test suite to validate blade related events on OneView and FLM
+...    It covers testing of:
+...        BladeCommFault
+...        BladeCommFaultCleared 
+...        BladeConfigurationFault
+...        BladeConfigurationFaultCleared 
+...    = GENERIC USAGE =
+...    | pybot | -v ENC_SERIAL_NO:[enclosure serial #] | -v APPLIANCE_IP:<ipv4> | -v CIM_Linux_IP:<ipv4> |-v GIT_REPO_ROOT: | Blade_fault_event.txt |
+...    = Variables =
+...    | GIT_REPO_ROOT |      Required: Repo root path if NOT defined in environment variable this is mgmtfw root location|
+...    | ENC_SERIAL_NO |      Optional: If omitted, will use the 1st enclosure detected in OV |
+...    | APPLIANCE_IP |       Required: OneView IPv4 address |
+...    | CIM_Linux_IP |       Required:CI Manager ipv4 under test |
+
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Library           RoboGalaxyLibrary
+Library           MgmtFWLibrary
+Library           json
+
+Suite Setup       Configure Events Test Environment
+Suite Teardown    Run Keywords  Logout of EM RIS   AND    Logout of Fusion Via REST
+
+*** Test Case ***
+TC 01: Blade Event - Validate Blade Comm Fault And Blade Comm Fault Cleared Events
+    [Documentation]    This test is to verify events for blade status change event when failed/ok using CommFaultInjection
+    [Tags]    Blade    Alert    Events    FLM2.00    OV3.10    Automated
+    ${present_blade_list}=    Get List of Occupied Blade Bays
+    Should Not Be Empty    ${present_blade_list}    msg=No Blades present in the enlcosure
+    : FOR    ${blade_bay}    IN    @{present_blade_list}
+    \    Log    message=Failing the Blade for bay:${blade_bay} and verify failed status/alert event in diags audit log    console=True
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${Blade_Fault_Status}=    Set EM RIS CANmic Faults    ${Blade_Device}    ${blade_bay}    true
+    \    Should Be Equal As Strings    ${Blade_Fault_Status}    <Response [200]>
+    \    Sleep    8
+    \    Wait for Device Critical    ${Blade_Device}    ${blade_bay}
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_Blade_Critical}    ${Blade_Device}    ${blade_bay}    250
+    \    Verify Audit Log Alert Event    ${EL_Blade_CommFault}    ${Blade_Device}    ${blade_bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_CommFault}    ${last_fusion_event_id}
+    \    Log    message=Clearing Blade commfault injection for bay:${blade_bay} and verify ok status/alert event in diags audit log    console=True
+    \    ${Blade_Fault_Status}=    Set EM RIS CANmic Faults    ${Blade_Device}    ${blade_bay}    false
+    \    Should Be Equal As Strings    ${Blade_Fault_Status}    <Response [200]>
+    \    Sleep    5
+    \    Wait for Device OK    ${Blade_Device}    ${blade_bay}
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_Blade_OK}    ${Blade_Device}    ${blade_bay}    250
+    \    Verify Audit Log Alert Event    ${EL_Blade_CommFault_Cleared}    ${Blade_Device}    ${blade_bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_CommFault_Cleared}    ${last_fusion_event_id}
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Set EM RIS CANmic Faults    ${Blade_Device}    ${blade_bay}    false    AND
+    ...    EM Clear Blade Status    ${blade_bay}
+
+TC 02: Blade Event - Validate BladeConfigurationFault And BladeConfigurationFaultCleared Events
+    [Documentation]     Verify HH blade with mezz slot 1 Potassium mismatchLaneSpeed
+    [Tags]    Blade    Alert    Events    FLM2.00     FLM1.01    OV3.10    Automated    QXCR1001511438    OVD2721
+    ${present_list_icm}=    Get List of Occupied Interconnect Bays
+    should not be empty      ${present_list_icm}     No ICMs Found in the Enclosure
+    set test variable       ${present_list_icm}
+    ${affected_icm_list}=    Create List
+    ${icm_list}=    Create List     ${3}
+    Ekey Initialize ICM TP Test Case    Ethernet   ${icm_list}
+    ${blade_match_list}=    Ekey Initialize Blades TP Test Case     Blackbird    3      Ethernet
+    FRU_Init_File Cleanup
+    Fru_File Cleanup
+    ${ekey_blade_list}=    Create List
+    # Iterate through matching blade list and verify ekey configuration fault
+    : FOR    ${blade_bay}    IN    @{blade_match_list}
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    ${mezz_slot}=   Convert To Integer  3
+    \    ${mezz_type}=    Get Mezz Type By Slot Number   ${mezz_slot}  ${blade_bay}
+    \    set test variable     ${mezz_type}
+    \    Update Fru Utility config_data File    ${FLOATING_IP}    False
+    \    ${mezz_fru_filename}=    Get Fru Filename in FRU INIT FILE    ${GIT_REPO_ROOT}${FRU_UPDATE_ROOT}${FRU_JSON_Init_Filename}    ${mezz_type}
+    \    ${quartz_fru}=    Get Fru Filename in FRU INIT FILE    ${GIT_REPO_ROOT}${FRU_UPDATE_ROOT}${FRU_JSON_Init_Filename}    QUARTZ
+    \    Replace Text in FRU INIT FILE    ${GIT_REPO_ROOT}${FRU_UPDATE_ROOT}${FRU_JSON_Init_Filename}    ${mezz_fru_filename}    ${quartz_fru}
+    \    Replace Text in Mezz Update Config Data File    compaq    ${iLO_Admin_Password}
+    \    Perform Mezz FRU Update on Blade in Bay    ${blade_bay}
+    \    Insert Into List  ${ekey_blade_list}  -1  ${blade_bay}
+    \    Sort List  ${ekey_blade_list}
+    \    FRU_Init_File Cleanup
+    \    Fru_File Cleanup
+    \    RIS EM Efuse On Blade    ${blade_bay}
+    \    sleep    10
+    \    RIS EM Efuse Off Blade No Sleep    ${blade_bay}
+    \    Sleep  5
+    \    Build RIS Object Model at Root Level
+    \    Wait for Device Degraded    ${Blade_Device}    ${blade_bay}
+    \    Sleep  15
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_Blade_Warning}    ${Blade_Device}    ${blade_bay}    250
+    \    Verify Audit Log Alert Event    ${EL_Blade_Configuration_Fault}    ${Blade_Device}    ${blade_bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_Configuration_Fault}    ${last_fusion_event_id}
+    \    Sleep    30    # Wait for ICM configuration fault and verify blade list is correct.
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    ${em_event}=    em api get last event by message ID    ${EL_Interconnect_Configuration_Fault}
+    \    Should Not Be Empty    ${em_event}
+    \    ${mismatch_blade_list}=    Get Device List From Trap Message  ${em_event['message']['Events'][0]}    BladeList
+    \    Lists Should Be Equal    ${ekey_blade_list}  ${mismatch_blade_list}
+    Sleep    5
+    # Remove ICM and verify blade configuraton fault is cleared
+    : FOR    ${icm_bay}    IN    @{icm_list}
+    \    RIS EM Efuse On Interconnect    ${icm_bay}
+    \    Insert Into List  ${affected_icm_list}    -1    ${icm_bay}
+    Sleep    5
+    : FOR    ${blade_bay}    IN    @{blade_match_list}
+    \    ${last_fusion_event_id}=    get last fusion event ID
+    \    Wait for Device Ok    ${Blade_Device}    ${blade_bay}
+    \    Sleep  30    # Wait for clear event to be logged to audit log and OV activity page
+    \    #Verifying resource updated event in diags audit log with 50 recent entries
+    \    ${diags_50}    ${diags_auditlog_file_path}=    Get Diags Audit Log 50 Recent Entries
+    \    Set Test Variable    ${EM_Event_Logger}    ${diags_auditlog_file_path}
+    \    Verify Audit Log Status Change MessageID Event    ${EL_Blade_Ok}    ${Blade_Device}    ${blade_bay}    250
+    \    Verify Audit Log Alert Event    ${EL_Blade_Configuration_Fault_Cleared}    ${Blade_Device}    ${blade_bay}    250
+    \    Verify Fusion Event Sent By EM    ${EL_Blade_Configuration_Fault_Cleared}    ${last_fusion_event_id}
+    # Recover blade mezz fru
+    : FOR    ${blade_bay}    IN    @{blade_match_list}
+    \    Update Fru Utility config_data File    ${FLOATING_IP}    False
+    \    Replace Text in FRU INIT FILE    ${GIT_REPO_ROOT}${FRU_UPDATE_ROOT}${FRU_JSON_Init_Filename}    ${quartz_fru}     ${mezz_fru_filename}
+    \    Replace Text in Mezz Update Config Data File    compaq    ${iLO_Admin_Password}
+    \    Perform Mezz FRU Update on Blade in Bay    ${blade_bay}
+    \    Remove Values From List  ${ekey_blade_list}    ${blade_bay}
+    \    FRU_Init_File Cleanup
+    \    Fru_File Cleanup
+    \    RIS EM Efuse On Blade    ${blade_bay}
+    \    sleep    10
+    \    RIS EM Efuse Off Blade No Sleep    ${blade_bay}
+    \    Sleep  5
+    \    Build RIS Object Model at Root Level
+    \    Wait for Device Ok    ${Blade_Device}    ${blade_bay}
+    \    Sleep  10
+    # Insert ICM
+    : FOR    ${icm_bay}    IN    @{icm_list}
+    \    RIS EM Efuse Off Interconnect    ${icm_bay}
+    \    Remove Values From List    ${affected_icm_list}    ${icm_bay}
+    [Teardown]    Run Keyword If Test Failed    Restore Affected Blade and ICM    ${affected_icm_list}    ${ekey_blade_list}    ${quartz_fru}    ${mezz_fru_filename}

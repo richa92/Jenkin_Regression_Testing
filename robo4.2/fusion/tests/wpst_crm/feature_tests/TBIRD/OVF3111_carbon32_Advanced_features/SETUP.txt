@@ -1,0 +1,114 @@
+*** Settings ***
+Documentation    SuiteSetup
+Library    json
+Library    FusionLibrary
+Library    RoboGalaxyLibrary
+Library    Collections
+Library    String
+Library    BuiltIn
+Library    Dialogs
+Variables    data_variables.py
+Resource         ../../../../../Resources/api/fusion_api_resource.txt
+
+*** Keywords ***
+Presetup
+    [Documentation]    Creating presetup
+    Set Log Level    TRACE
+    ${Login_response}    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    Run keyword unless    ${Login_response[0]['status_code']}== 200    Fail    ${Login_response[0]['message']}
+    Log    Test Step-1 completed successfully    console=True
+
+#Create Fc netowrks
+    ${FC_uris}    Create List
+    Set To Dictionary    ${Fc_body}    fabricType    FabricAttach
+    :FOR    ${x}    IN RANGE    1    7
+    \    Set To Dictionary    ${Fc_body}    name    FC_${x}
+    \    ${resp}    Fusion Api Create Fc Network    ${Fc_body}
+    \    ${task} =  Wait For Task2    ${resp}    1m   5
+    \    Run keyword unless    ${resp['status_code']}== 202    Fail    ${resp['message']}
+    \    ${uri}    Get From Dictionary    ${resp['associatedResource']}    resourceUri
+    \    Append To List    ${FC_uris}    ${uri}
+    Set Global Variable    ${FC_uris}    ${FC_uris}
+
+#Creating LIG,EG,LE
+    Log    Creating LIG    console=True
+    ${Keys}    Get Dictionary Keys    ${Enc_bay_type}
+    ${Keys_length}    Get Length    ${Keys}
+    ${Values}    Get Dictionary Values    ${Enc_bay_type}
+    ${Values_length}    Get Length    ${Values}
+    ${LIG_name_list}    Create List
+    ${LIG_uri_list}    Create List
+    ${Current_position}    Set Variable    0
+    ${ictype_resp}    Fusion Api Get Interconnect Types    param=?filter="'name'=='${IC_model_name}'"
+    ${permittedInterconnectTypeUri}    Set Variable    ${ictype_resp['members'][0]['uri']}
+    Set To Dictionary    ${icmap_Redundant['interconnectMapEntryTemplates'][0]}    permittedInterconnectTypeUri    ${permittedInterconnectTypeUri}
+    Set To Dictionary    ${icmap_Redundant['interconnectMapEntryTemplates'][1]}    permittedInterconnectTypeUri    ${permittedInterconnectTypeUri}
+    Set To Dictionary    ${icmap_NonRedundantASide['interconnectMapEntryTemplates'][0]}    permittedInterconnectTypeUri    ${permittedInterconnectTypeUri}
+    Set To Dictionary    ${icmap_NonRedundantBSide['interconnectMapEntryTemplates'][0]}    permittedInterconnectTypeUri    ${permittedInterconnectTypeUri}
+
+    :FOR    ${x}    IN RANGE    0    ${Keys_length}
+    \    Set To Dictionary    ${icmap_Redundant['interconnectMapEntryTemplates'][0]['logicalLocation']['locationEntries'][0]}    relativeValue    ${IC_bay_set}
+    \    Run keyword if    '${Values[${x}]}' == 'Redundant'    Set To Dictionary    ${LIG_body}    interconnectMapTemplate    ${icmap_Redundant}
+    \    Run keyword if    '${Values[${x}]}' == 'NonRedundantASide'    Set To Dictionary    ${LIG_body}    interconnectMapTemplate    ${icmap_NonRedundantASide}
+    \    Run keyword if    '${Values[${x}]}' == 'NonRedundantBSide'    Set To Dictionary    ${LIG_body}    interconnectMapTemplate    ${icmap_NonRedundantBSide}
+    \    Set To Dictionary    ${LIG_body}    redundancyType    ${Values[${x}]}
+    \    Set To Dictionary    ${LIG_body}    name    ${LIG[${x}]}
+    \    ${resp_lig}    Fusion Api Create LIG    ${LIG_body}
+    \    Run keyword unless    ${resp_lig['status_code']} == 202    Fail    ${resp_lig['message']}
+    \    ${task}    Wait For Task    ${resp_lig}    200s    2s
+    \    ${resource}    Get From Dictionary    ${task['associatedResource']}    resourceName
+    \    Append To List    ${LIG_name_list}    ${resource}
+    \    ${resource_uri}    Get From Dictionary    ${task['associatedResource']}    resourceUri
+    \    Append To List    ${LIG_uri_list}    ${resource_uri}
+    \    Log    ${resource} created successfully    console=True
+
+    \    ${Current_position}    Run keyword if    '${Values[${x}]}' == 'Redundant'    Steps for Redundant bay type    ${Current_position}    ${resource_uri}    ELSE    Set Variable    ${Current_position}
+    \    Log    Current_position is ${Current_position}    console=True
+    \    ${Current_position}    Run keyword if    '${Values[${x}]}' == 'NonRedundantASide'    Steps for NonRedundantASide bay type    ${Current_position}    ${resource_uri}    ELSE    Set Variable    ${Current_position}
+    \    Log    Current_position is ${Current_position}    console=True
+    \    ${Current_position}    Run keyword if    '${Values[${x}]}' == 'NonRedundantBSide'    Steps for NonRedundantBSide bay type    ${Current_position}    ${resource_uri}    ELSE    Set Variable    ${Current_position}
+    \    Log    Current_position is ${Current_position}     console=True
+    ${Current_position}    Evaluate    ${Current_position}-1
+    :FOR    ${y}    IN RANGE    9    ${Current_position}    -1
+    \    Remove from List    ${interconnectBayMappings}    ${y}
+    Set Global Variable    ${LIG_name_list}    ${LIG_name_list}
+    Set Global Variable    ${LIG_uri_list}    ${LIG_uri_list}
+    ${Length}=    Get Length    ${LIG_uri_list}
+    Log    Creating EG    console=True
+    Set To Dictionary    ${EG_body}    name    EG
+    ${eg_resp}    Fusion Api Create Enclosure Group    ${EG_body}
+    Run keyword unless    ${eg_resp['status_code']} == 201    Fail    ${eg_resp['message']}
+    Set Global Variable    ${EG_uri}    ${eg_resp['uri']}
+    Log    EG created successfully    console=True
+    ${ENC1_uri}    Create List
+    Log    Creating LE    console=True
+    Set To Dictionary    ${les[0]}    enclosureGroupUri    ${EG_uri}
+    :FOR    ${x}    IN RANGE    0    ${enclosureCount}
+    \    ${enc_resp}    Fusion Api Get Enclosures    param=?filter="'name'=='${Enclosure_Name[${x}]}'"
+    \    Set Global Variable    ${ENC_${x}_uri}    ${enc_resp['members'][0]['uri']}
+    \    Log    The enclosure uri is ${ENC_${x}_uri}    console=True
+    \    Append To List    ${les[0]['enclosureUris']}    ${ENC_${x}_uri}
+    ${le_resp}    Fusion Api Create Logical Enclosure    ${les[0]}
+    ${task}    Wait For Task    ${le_resp}    400s    30s
+
+
+
+Steps for Redundant bay type    [Arguments]    ${Current_position_scope}    ${resource_uri}
+    [Documentation]    These steps are going to set icmap templates if the respective bay position is in Redundant bay type
+    Set To Dictionary    ${interconnectBayMappings[${Current_position_scope}]}    logicalInterconnectGroupUri    ${resource_uri}
+    ${Current_position_scope}    Evaluate    ${Current_position_scope}+1
+    Set To Dictionary    ${interconnectBayMappings[${Current_position_scope}]}    logicalInterconnectGroupUri    ${resource_uri}
+    ${Current_position_scope}    Evaluate    ${Current_position_scope}+1
+    [Return]    ${Current_position_scope}
+
+Steps for NonRedundantASide bay type    [Arguments]    ${Current_position_scope}    ${resource_uri}
+    [Documentation]    These steps are going to set icmap templates if the respective bay position is in NonRedundantASide bay type
+    Set To Dictionary    ${interconnectBayMappings[${Current_position_scope}]}    logicalInterconnectGroupUri    ${resource_uri}
+    ${Current_position_scope}    Evaluate    ${Current_position_scope}+1
+    [Return]    ${Current_position_scope}
+
+Steps for NonRedundantBSide bay type    [Arguments]    ${Current_position_scope}    ${resource_uri}
+    [Documentation]    These steps are going to set icmap templates if the respective bay position is in NonRedundantBSide bay type
+    Set To Dictionary    ${interconnectBayMappings[${Current_position_scope}]}    logicalInterconnectGroupUri    ${resource_uri}
+    ${Current_position_scope}    Evaluate    ${Current_position_scope}+1
+    [Return]    ${Current_position_scope}

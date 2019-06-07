@@ -1,0 +1,168 @@
+*** Settings ***
+Library                RoboGalaxyLibrary
+Library                FusionLibrary
+Library                OperatingSystem
+Library                BuiltIn
+Library                Collections
+Library                XML
+Library                SSHLibrary
+Library                String
+Library                Dialogs
+
+*** Keywords ***
+Add FCoE Networks from variable
+    [Documentation]    Adds FCoE networks to an appliance from a variable which contains a list of dicts with the entire payload
+    [Arguments]        ${networks}
+    ${responses} =  Create List
+    Log      Adding FCoE NETWORKS   console=True
+    :FOR    ${net}    IN    @{networks}
+    \       ${keys}=    Get Dictionary Keys     ${net}
+    \       ${skeys}=   Convert To String       ${keys}
+    \       ${count}=   Get Count               ${skeys}                    managedSanUri
+    \       ${managedSanUri}=       Set Variable If         ${count}==0     ${None}
+                                    ...                     ${count}>0      ${net['managedSanUri']}
+    \       ${keyword}=             Set Variable If         '${managedSanUri}'=='${None}'           NONE
+                                    ...                     '${managedSanUri}'!='${None}'           Common URI lookup by name
+    \       ${managedSanUri}=       Run Keyword If          '${managedSanUri}'!='${None}'
+                                    ...                     Run Keyword             ${keyword}      ${managedSanUri}
+    \       Run Keyword If          '${managedSanUri}'!='${None}'
+            ...                     Set To Dictionary          ${net}             managedSanUri           ${managedSanUri}
+
+    #       -Initial Scope process.
+    \       ${initialScopeUris}=    Pop From Dictionary  ${net}  initialScopeUris  default=${None}
+    \       ${scopeUris}=           Run Keyword If    ${initialScopeUris} != ${None}
+    \       ...                     Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    \       Run Keyword If          ${initialScopeUris} != ${None}
+    \       ...                     Set To Dictionary    ${net}  initialScopeUris  ${scopeUris}
+
+    \        ${resp} =     Fusion Api Create FCoE Network        body=${net}
+    \        Append To List   ${responses}  ${resp}
+    [Return]    ${responses}
+
+
+Add FCoE Networks from variable async
+    [Documentation]    Adds FCoE networks to an appliance from a variable which contains a list of dicts with the
+    ...  entire payload.  Also supports created and validating networks asyncronously.  Does not validate by default
+    [Arguments]     ${networks}    ${VERIFY}=${FALSE}  ${expected_networks}=@empty  ${STATUS_CODE}=202
+    ${tasks} =  Create Dictionary
+    ${actualNetworks} =  create list
+    Log  Adding FCOE NETWORKS   console=True
+    :FOR    ${net}  IN  @{networks}
+    #       -First, if $VERIFY, check if ${net} already exists.  Skip if it does
+    \       ${resp} =   Run Keyword If    ${VERIFY}    Get Resource    FCOE:${net['name']}
+    \       Run Keyword If    ${VERIFY}  Run Keyword If    ${resp['status_code']}==200
+            ...     Log  Network ${net['name']} exists      WARN
+    \       Run Keyword If    ${VERIFY}  Continue For Loop If  ${resp['status_code']}==200
+    #        -Get Managed SAN URI and replace it in the body for managedSanUri value
+    \        ${managedsan}=    Get From Dictionary        ${net}    managedSanUri
+    \        ${managedsanUri}=    Common URI Lookup by name    ${managedsan}
+    \        Set to Dictionary    ${net}    managedSanUri    ${managedsanUri}
+
+    #       Initial Scope process.
+    \       ${initialScopeUris}=    Pop From Dictionary  ${net}  initialScopeUris  default=${None}
+    \       ${scopeUris}=           Run Keyword If    ${initialScopeUris} != ${None}
+    \       ...                     Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    \       Run Keyword If          ${initialScopeUris} != ${None}
+    \       ...                     Set To Dictionary    ${net}  initialScopeUris  ${scopeUris}
+
+    #       -Add the network
+    \       Log  Adding network ${net['name']}
+    \       ${resp} =  Fusion Api Create FCoE Network   body=${net}
+    #       -If !$VERIFY, then go to the next network
+    \       continue for loop if  ${VERIFY}==${FALSE}
+    #       -Check the response code to ensure the network was created as expected
+    \       should be equal as integers  ${resp['status_code']}  ${STATUS_CODE}
+    \       Log  ${resp}  TRACE
+    #       -We need a way to track the responses for later verification.  Add info to a dict, then add the dict to a list
+    \       ${dict} =  create dictionary
+    \       set to dictionary   ${dict}  resp=${resp}
+    \       set to dictionary   ${dict}  name=${net['name']}
+     \       append to list  ${actualNetworks}  ${dict}
+     # If !{VERIFY}, then we're done
+    Return From Keyword If  ${VERIFY}==${FALSE}
+    Run Keyword If  ${VERIFY}  Log    ${tasks}  TRACE
+    # Iterate through the list of responses build in the last for loop
+    :FOR    ${net}  IN  @{actualNetworks}
+    #       -Wait for the network creation task to finish
+    \       Wait For Task2  ${net['resp']}
+    #       -Grab the correct network from the expected network listed that was passed in
+    \       ${expItem} =  Fusion Api Get Dict From List  ${expected_networks}  name  ${net['name']}
+    #       -If the network isn't in the list to validate, skip it
+    \       CONTINUE FOR LOOP IF  ${expItem}=={}
+    #       -Get the network resource and do the comparison
+    \       ${actItem} =  Get Resource    FCOE:${net['name']}
+    \       ${result} =  fusion api validate response follow   ${expItem}  ${actItem}  wordy=${TRUE}
+    \       Run keyword and continue on failure  should be equal  ${result}  ${TRUE}
+    \       Log  ${result}
+
+
+Create FCoE range
+    [Documentation]    Creates a range of FCoE networks based on range data provided
+    [Arguments]    ${range}
+    Set Log Level    TRACE
+    Log      Adding FCOE NETWORK RANGES   console=True
+    :FOR    ${x}    IN RANGE    ${range['start']}    ${range['end']}+1
+    \    ${body} =     Create Dictionary    name=${range['prefix']}${x}${range['suffix']}    vlanId=${x}     type=fcoe-networkV4
+    \    ${resp} =     Fusion Api Create Fcoe Network    body=${body}
+    #\    Wait For Task    ${resp}
+
+Get FCoE URI
+    [Documentation]    returns the uri for a given fcor network name
+    [Arguments]        ${net}
+    ${resp} =     Fusion Api Get FCoE Networks        param=?filter="'name'=='${net}'"
+    Return From Keyword If  ${resp['count']}==0  /rest/network_uri_${net}_not_found
+    ${uri} =     Get From Dictionary        ${resp['members'][0]}    uri
+    [Return]    ${uri}
+
+Get FCoE URIs
+    [Documentation]   returns a list of uris for a given list of fcoe network names
+	[Arguments]       ${netlist}
+	${urilist} =      Uris.get   FCOE    ${netlist}
+	[Return]	${urilist}
+
+Remove All FCoE Networks
+    [Documentation]    Querys the appliance for all FCoE networks and then removes them
+    Log      Removing FCoE NETWORKS    console=True
+    ${networks} =     Fusion Api Get FCoE Networks
+    :FOR    ${net}    IN    @{networks['members']}
+    \        ${resp} =     Fusion Api Delete FCoE Network        uri=${net['uri']}
+    \        ${task} =    Wait For Task     ${resp}     240s    2s
+
+Get All FCoE Netowrk Uris
+    [Documentation]    Get Resources Uris list and return it
+    ${resp} =    Fusion Api Get Fcoe Networks
+    ${memb_list} =    Get From Dictionary    ${resp}    members
+    ${uri_list} =    Create List
+    :FOR    ${memb}    IN    @{memb_list}
+    \       ${uri} =    Get From Dictionary    ${memb}    uri
+    \       Append To List    ${uri_list}    ${uri}
+    [Return]      ${uri_list}
+
+update fcoe network
+    [Documentation]  Update fcoe network information
+    [Arguments]      ${name}  ${body}
+    Log     Updating fcoe network    console=yes
+    ${resp}=  Create list
+    ${fcoe_resp}=    Fusion Api Get FCoE Networks		param=?filter="'name'=='${name}'"
+    ${uri}=   Set Variable    ${fcoe_resp['members'][0]["uri"]}
+    ${connTempUri}=    Set Variable    ${fcoe_resp['members'][0]["connectionTemplateUri"]}
+    ${uri}=   Get FCoE URI    ${name}
+    :FOR    ${data}  IN  @{body}
+    # Process connectionTemplateUri
+    \       ${connectionTemplateUri}=  Pop From Dictionary  ${data}  connectionTemplateUri  default=${None}
+    \       ${connectionuri}=   Run Keyword If      '${connectionTemplateUri}' != '${None}'
+    \       ...                 Get connectionTemplateUri   ${name}  type=fcoe
+    \       run keyword if      '${connectionTemplateUri}' != '${None}'
+    \       ...                 Set To Dictionary    ${data}  connectionTemplateUri  ${connectionuri}
+    \       ...                 ELSE
+    \       ...                 Set To Dictionary    ${data}  connectionTemplateUri  ${connTempUri}
+    # Process managedSanUri
+    \       ${managedSanUri}=    Pop From Dictionary    ${data}    managedSanUri  default=${None}
+    \       ${sanUri}=           Run Keyword If    '${managedSanUri}'!='${None}'
+    \       ...                  Common URI lookup by name    ${managedSanUri}
+    \       Run Keyword If      '${managedSanUri}'!='${None}'    Set To Dictionary   ${data}   managedSanUri  ${sanUri}
+
+    \       Set To Dictionary    ${data}  uri  ${uri}
+    \       Append To List   ${resp}  ${data}
+    ${resps} =  Fusion Api Edit Fcoe Network   body=${resp[0]}   uri=${uri}
+    [Return]   ${resps}

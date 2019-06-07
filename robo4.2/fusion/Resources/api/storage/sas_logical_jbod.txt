@@ -1,0 +1,144 @@
+*** Settings ***
+Library				RoboGalaxyLibrary
+Library				FusionLibrary
+Library				OperatingSystem
+Library				BuiltIn
+Library				Collections
+Library				XML
+Library		        SSHLibrary
+Library				String
+Library				Dialogs
+
+*** Keywords ***
+Get Sas Logical Jbod URI
+	[Documentation]	Get Sas Logical Jbod URI
+	[Arguments]		${SASLJBOD}
+	${resp} = 	Fusion Api Get Sas Logical Jbods 		param=?filter="'name' regex '${SASLJBOD}'"
+	Return From Keyword If  ${resp['count']}==0  /rest/sas_logical_jbod_uri_${SASLJBOD}_not_found
+	${uri} = 	Get From Dictionary		${resp['members'][0]}	uri
+	[Return]	${uri}
+
+Get Sas Logical Jbod New Name
+	[Documentation]	Get Sas Logical Jbod URI
+	[Arguments]		${SASLJBOD}
+	${resp} = 	Fusion Api Get Sas Logical Jbods 		param=?filter="'name' regex '${SASLJBOD}'"
+	${tmp_name} =  Run Keyword If    ${resp['count']}!=0    Get From Dictionary		${resp['members'][0]}	name
+	${new_name} =    set variable if  ${resp['count']}!=0    ${tmp_name}    ${SASLJBOD}
+	[Return]	${new_name}
+
+Set SasLjbodsUris
+	[Documentation]	Set  sasLogicalJBODUri if it exists in payload
+	[Arguments]		${saslogicaljbods}
+	${sasljbods} =  Create List
+	:FOR	${sasljbod}	IN	@{saslogicaljbods}
+	\	${status}=  	Run Keyword And Return Status   Dictionary Should Contain Key  ${sasljbod}  sasLogicalJBODUri
+	\	${ljbod} =  Run Keyword If    ${status}==True	Get From Dictionary  ${sasljbod}  sasLogicalJBODUri
+	\	${uri} =	Run Keyword If    ${status}==True	Common URI lookup by name    ${ljbod}
+	\	Set to Dictionary	${sasljbod}	sasLogicalJBODUri	${uri}
+	\   append to list  ${sasljbods}    ${sasljbod}
+	[Return]	${sasljbods}
+
+Add Logical JBODs Async
+	[Documentation]	Add a list of logical jbods and return the responses.
+	[Arguments]     ${ljbs}     ${ljb_status_code}=202
+    ${resplist} =  Create List
+    :FOR	${ljb}	IN	@{ljbs}
+    \   ${status} =  Check Resource Existing  SASLJBOD:${ljb['name']}
+    \   run keyword if  ${status}=='PASS'  Log  ljbod ${ljb['name']} already present in OneView  WARN
+    \   continue for loop if  ${status}=='PASS'
+    \	Log  Adding SAS Logical jbod ${ljb['name']}   console=True
+    \   ${resp} =  Add Logical JBOD  ${ljb}
+    \   Run Keyword If  ${resp['status_code']}!=${ljb_status_code}    Run Keyword And Continue On Failure     FAIL     Adding Logical JBOD ${ljb['name']} failed
+    \   Continue For Loop If    ${resp['status_code']}!=${ljb_status_code}
+    \   Append To List  ${resplist}  ${resp}
+	[Return]	${resplist}
+
+Add Logical JBOD
+	[Documentation]	Add Logical jbod and return the response.
+	...             {"name": "ljb1-sas", "type": SAS_LOGICAL_JBOD_TYPE, "description": "",
+	...              "sasLogicalInterconnectUri": "LE1-SASLIG1-1", "initialScopeUris": ['scope1'],
+    ...              "driveEnclosureUris": ['0000A66101, bay 1'], "numPhysicalDrives": 1, "minSizeGB": "600",
+    ...              "maxSizeGB": "600", "driveTechnology": {"deviceInterface": "SAS", "driveMedia": "HDD"},
+    ...              "eraseData": False}
+	[Arguments]		 ${ljbod}
+	${payload} =  copy dictionary  ${ljbod}
+	${name} =  Get From Dictionary  ${ljbod}  name
+	${de_list} =  Get From Dictionary  ${ljbod}  driveEnclosureUris
+	${de_uris} =    Get Drive Enclosure URIs	${de_list}
+	Set to Dictionary	${payload}	driveEnclosureUris	${de_uris}
+	${scope_list} =  Get From Dictionary  ${ljbod}  initialScopeUris
+	${scope_uris} =    Get Scope URIs By Name	${scope_list}
+	Set to Dictionary	${payload}	initialScopeUris	${scope_uris}
+	${sas_li} =  Get From Dictionary  ${ljbod}  sasLogicalInterconnectUri
+	${sas_li_uri} =	Get SAS LI URI    ${sas_li}
+	Set to Dictionary	${payload}	sasLogicalInterconnectUri	${sas_li_uri}
+	${resp} =   Fusion Api Post Sas Logical Jbods    body=${payload}
+	[Return]	${resp}
+
+Delete Logical JBODs Async
+    [Documentation]  Remove a list of Logical jbods.
+    ...             Remove Logical JBODs Async		{ljbs}
+    [Arguments]  ${ljbs}   ${force}=${False}	${status_code}=404
+    ${resplist} =   Create List
+    Log  Removing Logical JBODs  console=yes
+    :FOR	${ljb}	IN	@{ljbs}
+    \   ${status}  ${rtn} =  Run Keyword and Ignore Error  Get From Dictionary  ${ljb}  name
+    \   ${name} =  set variable if  '${status}'=='PASS'  ${rtn}  ${ljb['name']}
+    \   ${status} =  Check Resource Existing  SASLJBOD:${name}
+    \   run keyword if  ${status}=='FAIL'  Log  LJBOD ${name} Does not exist  WARN
+    \   continue for loop if  ${status}=='FAIL'
+    \   Log  Remove LJBOD ${name} console=yes
+    \   ${ljb_uri} =  Get Sas Logical Jbod URI  ${name}
+    \   ${headers} =  fusion api get headers
+    \   ${resp}=  Delete Resource    SASLJBOD:${ljb_uri}
+	\	Append To List    ${resplist}  ${resp}
+    [Return]  ${resplist}
+
+Patch Logical JBOD
+    [Documentation]  Patch logical jbod
+    ...              Example:
+    ...                Patch Logical JBOD  ${ljb}  op=replace  path=/name  value=newname
+    ...              Data Required:
+    ...                {"name":"ljb1","value":"ljb1-sas-name-changed"}
+    [Arguments]  ${ljb}  ${op}=replace  ${path}=/name  ${api}=${None}
+    ${name} =  get from dictionary  ${ljb}  name
+    ${value} =  get from dictionary  ${ljb}  value
+    Log     Patching LJBOD ${name} with op=${op} path=${path} and value=${value}   console=True
+    ${uri} =  Get Sas Logical Jbod URI  ${name}
+    ${dict} =    Create Dictionary    op=${op}    path=${path}    value=${value}
+    ${payload} =  Create List  ${dict}
+    ${resp} =  Fusion Api Patch SAS Logical Jbods  body=${payload}  uri=${uri}  api=${api}
+    [return]  ${resp}
+
+Delete Logical JBOD
+    [Documentation]  Remove a single Logical jbod.
+    ...             Delete Logical JBOD		{ljb}
+    [Arguments]  ${ljb}   ${force}=${False}	${status_code}=404
+    ${ljb_uri} =  Get Sas Logical Jbod URI  ${ljb}
+    ${resp}=  Delete Resource    SASLJBOD:${ljb_uri}
+    [return]  ${resp}
+
+Delete all Logical JBODs
+    [Documentation]  Delete all logical jbods
+    ${tasks} =   Create List
+    Log  Removing Logical JBODs  console=yes
+    ${ljbs} =     Fusion Api Get Sas Logical Jbods  param=?sort=name:ascending
+    :FOR    ${ljb}    IN    @{ljbs['members']}
+    \        ${resp} =     Delete Resource    SASLJBOD:${ljb['uri']}
+    \       Append To List    ${tasks}  ${resp}
+
+    :FOR    ${task}    IN    @{tasks}
+    \    Run Keyword And Continue on Failure  Wait For Task2  ${task}  timeout=240  interval=5
+
+Logical JBOD Attribute ${attribute} Should Have Value ${value}
+    [Documentation]    Check attribute of Logical JBOD
+    ...    Fail the test in case of attribute other than  the expected
+    ${jbods} =    Fusion Api Get Sas Logical Jbods
+    Run Keyword If  ${jbods['count']}=='0'  Fail  msg=No Logical JBOD found
+    ${res} =  Set Variable  ${empty}
+    :FOR  ${jbod}  IN  @{jbods['members']}
+    \  ${res} =  Run Keyword If  '${jbod['${attribute}']}' != '${value}'  Catenate  ${res}
+    ...  \nDrive Enclosure name [${jbod['name']}] Expected ${attribute} ${value} but found ${jbod['${attribute}']}
+    \  ...  ELSE  Set Variable  ${res}
+    ${count} =  Get Length  ${res}
+    Run Keyword If  '${count}' > '0'  Fail  ${res}

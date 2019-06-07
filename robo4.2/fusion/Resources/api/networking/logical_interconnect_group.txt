@@ -1,0 +1,411 @@
+*** Settings ***
+Library				RoboGalaxyLibrary
+Library				FusionLibrary
+Library				OperatingSystem
+Library				BuiltIn
+Library				Collections
+Library				XML
+Library		        SSHLibrary
+Library				String
+Library				Dialogs
+
+*** Keywords ***
+Add LIG from variable
+    [Documentation]  Adds an LIG to an appliance from a variable which contains a list of dicts with the entire payload
+    ...              scope process example:
+    ...                 'initialScopeUris': ['Scope:Test', 'Scope:Production']
+    [Arguments]  ${ligx}    ${VERIFY}=False    ${expected_lig1}=@empty  ${status_code}=202
+    Log   Adding LIG ${ligx['name']}  console=yes
+    ${ligx} =   Copy Dictionary  ${ligx}
+    ${name} =                       Get Variable Value  ${ligx['name']}
+    ${enclosureIndexes} =           Get Variable Value  ${ligx['enclosureIndexes']}
+    ${enclosureType} =              Get Variable Value  ${ligx['enclosureType']}
+    ${ethernetSettings} =           Get Variable Value  ${ligx['ethernetSettings']}
+    ${fcoeSettings} =               Get Variable Value  ${ligx['fcoeSettings']}
+    ${internalNetworkUris} =        Get Variable Value  ${ligx['internalNetworkUris']}
+    ${interconnectBaySet} =         Get Variable Value  ${ligx['interconnectBaySet']}
+    ${interconnectMapTemplate} =    Get Variable Value  ${ligx['interconnectMapTemplate']}
+    ${qosConfiguration} =           Get Variable Value  ${ligx['qosConfiguration']}
+    ${redundancyType} =             Get Variable Value  ${ligx['redundancyType']}
+    ${stackingMode} =               Get Variable Value  ${ligx['stackingMode']}
+    ${telemetryConfiguration} =     Get Variable Value  ${ligx['telemetryConfiguration']}
+    ${snmpConfiguration} =          Get Variable Value  ${ligx['snmpConfiguration']}
+    ${uplinkSets} =                 Get Variable Value  ${ligx['uplinkSets']}
+    ${downlinkSpeedMode} =          Get Variable Value  ${ligx['downlinkSpeedMode']}
+    ${consistencyCheckingForInternalNetworks} =   Get Variable Value   ${ligx['consistencyCheckingForInternalNetworks']}
+    ${sflowConfiguration} =         Get Variable Value  ${ligx['sflowConfiguration']}
+    ${sflowNetwork} =               Get Variable Value  ${sflowConfiguration['sflowNetwork']}   &{EMPTY}
+    ${sflowNetworkUri} =            Run Keyword If   ${sflowNetwork} != &{EMPTY}   Get Ethernet URI   ${sflowNetwork['name']}
+    Run Keyword If   '${sflowNetworkUri}' != '${Null}'   Run Keywords   Set To Dictionary   ${sflowNetwork}   uri=${sflowNetworkUri}   AND   Set To Dictionary   ${sflowConfiguration}   sflowNetwork=${sflowNetwork}
+    ${l} =  Get Length  ${uplinkSets}
+    :FOR  ${x}  IN RANGE  0  ${l}
+    \   ${networkType} =   Get From Dictionary   ${uplinkSets[${x}]}  networkType
+    \   ${networks} =    Get From Dictionary  ${uplinkSets[${x}]}  networkUris
+    \   Run Keyword If   '${networkType}' == 'Ethernet'  Continue For Loop
+    \   ${networkUris} =   Get FC Uris  ${networks}
+    \   Set to dictionary  ${uplinkSets[${x}]}  networkUris  ${networkUris}
+
+    :FOR	${x}	IN RANGE	0	${l}
+    \   ${networkType} = 	Get From Dictionary 	${uplinkSets[${x}]}	networkType
+    \   ${networks} = 		Get From Dictionary		${uplinkSets[${x}]}	networkUris
+    \   ${nativeNetworkUri} =   Get Variable Value     ${uplinkSets[${x}]['nativeNetworkUri']}
+    \   Run Keyword If 	'${networkType}' == 'FibreChannel'	Continue For Loop
+    \   ${networkUris} = 	Get FCoE Uris	${networks}
+    \   ${ethernetUris} =   Get Ethernet URIs   ${networks}
+    \   ${networkUris} =    combine lists   ${networkUris}  ${ethernetUris}
+    \   Set to dictionary	${uplinkSets[${x}]}	networkUris	    ${networkUris}
+    \   ${nativeNetworkUri} = 	Run Keyword If   '${nativeNetworkUri}' != 'None'    Get Ethernet Uri	${nativeNetworkUri}
+    \   Set to dictionary   ${uplinkSets[${x}]}	nativeNetworkUri     ${nativeNetworkUri}
+
+    # Process Internal URIs
+    ${internalNetworkUris} = 	Run Keyword If   ${internalNetworkUris} is not ${null}    Get Ethernet Uris	${internalNetworkUris}
+
+    ${body} = 	Fusion Api Create LIG Payload	name=${name}
+    ...                                         enclosureIndexes=${enclosureIndexes}
+    ...                                         enclosureType=${enclosureType}
+    ...                                         ethernetSettings=${ethernetSettings}
+    ...                                         fcoeSettings=${fcoeSettings}
+    ...                                         interconnectBaySet=${interconnectBaySet}
+    ...                                         interconnectMapTemplate=${interconnectMapTemplate}
+    ...                                         internalNetworkUris=${internalNetworkUris}
+    ...                                         qosConfiguration=${qosConfiguration}
+    ...                                         redundancyType=${redundancyType}
+    ...                                         stackingMode=${stackingMode}
+    ...                                         telemetryConfiguration=${telemetryConfiguration}
+    ...                                         snmpConfiguration=${snmpConfiguration}
+    ...                                         uplinkSets=${uplinkSets}
+    ...                                         downlinkSpeedMode=${downlinkSpeedMode}
+    ...                                         consistencyCheckingForInternalNetworks=${consistencyCheckingForInternalNetworks}
+    ...                                         sflowConfiguration=${sflowConfiguration}
+
+    # -Initial Scope process.
+    ${initialScopeUris}=  Get Variable Value  ${ligx['initialScopeUris']}
+    ${scopeUris}=       Run Keyword If    ${initialScopeUris} != ${None}
+    ...                 Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    Run Keyword If      ${initialScopeUris} != ${None}
+    ...                 Set To Dictionary    ${body}  initialScopeUris  ${scopeUris}
+
+    ${resp} = 	Fusion Api Create LIG	${body}
+    should be equal as integers  ${resp['status_code']}  ${status_code}
+    # TODO: Make timeout dynamic based on number of enclosures. Defaulting to 120.
+    ${task} =	Run Keyword If  ${resp['status_code']}==${status_code}   Wait For Task2	 ${resp}  120
+    ${uri} =    Run Keyword If    ${VERIFY}==True    Get LIG URI    ${name}
+    ${response} =     Run keyword If    ${VERIFY}==True    Fusion Api Get LIG    ${uri}
+    ${resp} =    Run Keyword If    ${VERIFY}==True    Fusion Api Validate Response Follow     ${expected_lig1}    ${response}    wordy=${TRUE}
+    [Return]	${resp}
+
+Add LIG from variable async
+    [Documentation]  Adds an LIG to an appliance from a variable which contains a list of dicts with the entire payload
+    [Arguments]  ${ligx}    ${status_code}=202
+    Log   Adding LIG ${ligx['name']}  console=yes
+    ${ligx} =   Copy Dictionary  ${ligx}
+    ${name} =                       Get Variable Value  ${ligx['name']}
+    ${enclosureIndexes} =           Get Variable Value  ${ligx['enclosureIndexes']}
+    ${enclosureType} =              Get Variable Value  ${ligx['enclosureType']}
+    ${ethernetSettings} =           Get Variable Value  ${ligx['ethernetSettings']}
+    ${fcoeSettings} =               Get Variable Value  ${ligx['fcoeSettings']}
+    ${internalNetworkUris} =        Get Variable Value  ${ligx['internalNetworkUris']}
+    ${interconnectBaySet} =         Get Variable Value  ${ligx['interconnectBaySet']}
+    ${interconnectMapTemplate} =    Get Variable Value  ${ligx['interconnectMapTemplate']}
+    ${qosConfiguration} =           Get Variable Value  ${ligx['qosConfiguration']}
+    ${redundancyType} =             Get Variable Value  ${ligx['redundancyType']}
+    ${stackingMode} =               Get Variable Value  ${ligx['stackingMode']}
+    ${telemetryConfiguration} =     Get Variable Value  ${ligx['telemetryConfiguration']}
+    ${snmpConfiguration} =          Get Variable Value  ${ligx['snmpConfiguration']}
+    ${uplinkSets} =                 Get Variable Value  ${ligx['uplinkSets']}
+    ${downlinkSpeedMode} =          Get Variable Value  ${ligx['downlinkSpeedMode']}
+    ${consistencyCheckingForInternalNetworks} =   Get Variable Value   ${ligx['consistencyCheckingForInternalNetworks']}
+    ${sflowConfiguration} =         Get Variable Value  ${ligx['sflowConfiguration']}
+    ${sflowNetwork} =               Get Variable Value  ${sflowConfiguration['sflowNetwork']}   &{EMPTY}
+    ${sflowNetworkUri} =            Run Keyword If   ${sflowNetwork} != &{EMPTY}   Get Ethernet URI   ${sflowNetwork['name']}
+    Run Keyword If   '${sflowNetworkUri}' != '${Null}'   Run Keywords   Set To Dictionary   ${sflowNetwork}   uri=${sflowNetworkUri}   AND   Set To Dictionary   ${sflowConfiguration}   sflowNetwork=${sflowNetwork}
+    ${l} =  Get Length  ${uplinkSets}
+    :FOR  ${x}  IN RANGE  0  ${l}
+    \   ${networkType} =   Get From Dictionary   ${uplinkSets[${x}]}  networkType
+    \   ${networks} =    Get From Dictionary  ${uplinkSets[${x}]}  networkUris
+    \   Run Keyword If   '${networkType}' == 'Ethernet'  Continue For Loop
+    \   ${networkUris} =   Get FC Uris  ${networks}
+    \   Set to dictionary  ${uplinkSets[${x}]}  networkUris  ${networkUris}
+
+    :FOR  ${x}  IN RANGE  0  ${l}
+    \   ${networkType} =     Get From Dictionary   ${uplinkSets[${x}]}  networkType
+    \   ${networks} =      Get From Dictionary   ${uplinkSets[${x}]}   networkUris
+    \   ${nativeNetworkUri} =   Get Variable Value     ${uplinkSets[${x}]['nativeNetworkUri']}
+    \   Run Keyword If    '${networkType}' == 'FibreChannel'    Continue For Loop
+    \   ${networkUris} =     Get FCoE Uris    ${networks}
+    \   ${ethernetUris} =   Get Ethernet URIs   ${networks}
+    \   ${networkUris} =    combine lists   ${networkUris}  ${ethernetUris}
+    \   Set to dictionary    ${uplinkSets[${x}]}    networkUris     ${networkUris}
+    \   ${nativeNetworkUri} =    Run Keyword If   '${nativeNetworkUri}' != 'None'    Get Ethernet Uri    ${nativeNetworkUri}
+    \   Set to dictionary   ${uplinkSets[${x}]}   nativeNetworkUri     ${nativeNetworkUri}
+
+    # Process Private VLAN Domains
+    :FOR  ${x}  IN RANGE  0  ${l}
+    \   ${status} =    Run Keyword and Return Status     Dictionary Should Contain Key    ${uplinkSets[${x}]}    privateVlanDomains
+    \   Continue For Loop If    '${status}' == 'False'
+    \   ${privatevlan}=        Get From Dictionary    ${uplinkSets[${x}]}    privateVlanDomains
+    \   ${privatevlanbody}=    Create LIG Private VLAN Payload    ${privatevlan}
+    \   Set to dictionary    ${uplinkSets[${x}]}    privateVlanDomains    ${privatevlanbody}
+
+    # Process Internal URIs
+    ${internalNetworkUris} =     Run Keyword If   ${internalNetworkUris} is not ${null}    Get Ethernet Uris    ${internalNetworkUris}
+
+    ${body} =    Fusion Api Create LIG Payload    name=${name}
+    ...                                         enclosureIndexes=${enclosureIndexes}
+    ...                                         enclosureType=${enclosureType}
+    ...                                         ethernetSettings=${ethernetSettings}
+    ...                                         fcoeSettings=${fcoeSettings}
+    ...                                         interconnectBaySet=${interconnectBaySet}
+    ...                                         interconnectMapTemplate=${interconnectMapTemplate}
+    ...                                         internalNetworkUris=${internalNetworkUris}
+    ...                                         qosConfiguration=${qosConfiguration}
+    ...                                         redundancyType=${redundancyType}
+    ...                                         stackingMode=${stackingMode}
+    ...                                         telemetryConfiguration=${telemetryConfiguration}
+    ...                                         snmpConfiguration=${snmpConfiguration}
+    ...                                         uplinkSets=${uplinkSets}
+    ...                                         downlinkSpeedMode=${downlinkSpeedMode}
+    ...                                         consistencyCheckingForInternalNetworks=${consistencyCheckingForInternalNetworks}
+    ...                                         sflowConfiguration=${sflowConfiguration}
+
+    # Initial Scope process.
+    ${initialScopeUris}=  Get Variable Value  ${ligx['initialScopeUris']}
+    ${scopeUris}=       Run Keyword If    ${initialScopeUris} != ${None}
+    ...                 Run Keyword for List  ${initialScopeUris}  Common URI lookup by name
+    Run Keyword If      ${initialScopeUris} != ${None}
+    ...                 Set To Dictionary    ${body}  initialScopeUris  ${scopeUris}
+
+
+    ${resp} =    Fusion Api Create LIG    ${body}
+    Run Keyword And Continue on Failure   should be equal as integers  ${resp['status_code']}  ${status_code}
+    [Return]    ${resp}
+
+Add LIG from list
+	[Documentation]  Add LIG from a list of LIG DTO
+    ...              Example:
+    ...                Add LIG from list  ${list}
+    ...              Data Required:
+    ...                List of LIG DTO
+    [Arguments]  ${list}
+    Log	 ${\n}Adding LIG from list
+    Run Keyword for List  ${list}  Add LIG from variable
+
+Build LIG body
+    [Documentation]  Build LIG body
+    [Arguments]     ${xlig}
+    ${xlig} =   Copy Dictionary     ${xlig}
+    ${uplinkSets} =     Copy List   ${xlig['uplinkSets']}
+    ${l} =  Get Length  ${uplinkSets}
+
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${networkType} =    Get From Dictionary     ${uplinkSets[${x}]}     networkType
+    \   ${networks} =       Get From Dictionary     ${uplinkSets[${x}]}     networkUris
+    \   Run Keyword If  '${networkType}' == 'Ethernet'      Continue For Loop
+    \   ${networkUris} =    Get FC Uris     ${networks}
+    \   Set to dictionary   ${uplinkSets[${x}]}     networkUris     ${networkUris}
+
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${networkType} =    Get From Dictionary     ${uplinkSets[${x}]}     networkType
+    \   ${networks} =       Get From Dictionary     ${uplinkSets[${x}]}     networkUris
+    \   ${status}  ${return} =  Run Keyword and Ignore Error  Get from Dictionary  ${uplinkSets[${x}]}  nativeNetworkUri
+    \   ${nativeNetworkUri}=   Run Keyword If  "${status}"=="PASS" and "${return}"!="${None}"
+    \   ...   Get Ethernet URI    ${return}
+    \   Run Keyword If  '${networkType}' == 'FibreChannel'  Continue For Loop
+    \   ${networkUris} =    Get FCoE Uris   ${networks}
+    \   ${ethernetUris} =   Get Ethernet URIs   ${networks}
+    \   ${networkUris} =    combine lists   ${networkUris}  ${ethernetUris}
+    \   Set to dictionary   ${uplinkSets[${x}]}     networkUris     ${networkUris}
+    \   Run Keyword If  "${status}"=="PASS" and "${return}"!="${None}"
+    \   ...   Set To Dictionary   ${uplinkSets[${x}]}   nativeNetworkUri   ${nativeNetworkUri}
+
+    # Process Private VLAN Domains
+    :FOR  ${x}  IN RANGE  0  ${l}
+    \   ${status} =    Run Keyword and Return Status     Dictionary Should Contain Key    ${uplinkSets[${x}]}    privateVlanDomains
+    \   Continue For Loop If    '${status}' == 'False'
+    \   ${privatevlan}=    Get From Dictionary    ${uplinkSets[${x}]}    privateVlanDomains
+    \   ${privatevlanbody}=    Create LIG Private VLAN Payload    ${privatevlan}
+    \   Set to dictionary    ${uplinkSets[${x}]}    privateVlanDomains    ${privatevlanbody}
+
+    ${name} =                       Get Variable Value  ${xlig['name']}
+    ${enclosureIndexes} =           Get Variable Value  ${xlig['enclosureIndexes']}
+    ${enclosureType} =              Get Variable Value  ${xlig['enclosureType']}
+    ${ethernetSettings} =           Get Variable Value  ${xlig['ethernetSettings']}
+    ${fcoeSettings} =               Get Variable Value  ${xlig['fcoeSettings']}
+    ${interconnectBaySet} =         Get Variable Value  ${xlig['interconnectBaySet']}
+    ${interconnectMapTemplate} =    Get Variable Value  ${xlig['interconnectMapTemplate']}
+    ${redundancyType} =             Get Variable Value  ${xlig['redundancyType']}
+    ${stackingMode} =               Get Variable Value  ${xlig['stackingMode']}
+    ${telemetryConfiguration} =     Get Variable Value  ${xlig['telemetryConfiguration']}
+    ${snmpConfiguration} =          Get Variable Value  ${xlig['snmpConfiguration']}
+    ${enclosureIndexes} =           Get Variable Value  ${xlig['enclosureIndexes']}
+    ${internalNetworkUris} =        Get Variable Value  ${xlig['internalNetworkUris']}
+    ${downlinkSpeedMode} =          Get Variable Value  ${xlig['downlinkSpeedMode']}
+    ${consistencyCheckingForInternalNetworks} =   Get Variable Value   ${xlig['consistencyCheckingForInternalNetworks']}
+    ${qosConfiguration} =           Get Variable Value  ${xlig['qosConfiguration']}
+    ${sflowConfiguration} =         Get Variable Value  ${xlig['sflowConfiguration']}
+    ${sflowNetwork} =               Get Variable Value  ${sflowConfiguration['sflowNetwork']}   &{EMPTY}
+    ${sflowNetworkUri} =            Run Keyword If   ${sflowNetwork} != &{EMPTY}   Get Ethernet URI   ${sflowNetwork['name']}
+    Run Keyword If   '${sflowNetworkUri}' != '${Null}'   Run Keywords   Set To Dictionary   ${sflowNetwork}   uri=${sflowNetworkUri}   AND   Set To Dictionary   ${sflowConfiguration}   sflowNetwork=${sflowNetwork}
+
+    ${internalNetworkUris} =     Run Keyword If   ${internalNetworkUris} is not ${null}    Get Ethernet Uris    ${internalNetworkUris}
+
+    ${body} =   Fusion Api Create LIG Payload   name=${name}
+    ...                                         enclosureIndexes=${enclosureIndexes}
+    ...                                         enclosureType=${enclosureType}
+    ...                                         ethernetSettings=${ethernetSettings}
+    ...                                         fcoeSettings=${fcoeSettings}
+    ...                                         interconnectBaySet=${interconnectBaySet}
+    ...                                         interconnectMapTemplate=${interconnectMapTemplate}
+    ...                                         internalNetworkUris=${internalNetworkUris}
+    ...                                         redundancyType=${redundancyType}
+    ...                                         stackingMode=${stackingMode}
+    ...                                         telemetryConfiguration=${telemetryConfiguration}
+    ...                                         snmpConfiguration=${snmpConfiguration}
+    ...                                         uplinkSets=${uplinkSets}
+    ...                                         downlinkSpeedMode=${downlinkSpeedMode}
+    ...                                         consistencyCheckingForInternalNetworks=${consistencyCheckingForInternalNetworks}
+    ...                                         qosConfiguration=${qosConfiguration}
+    ...                                         sflowConfiguration=${sflowConfiguration}
+
+    [Return]    ${body}
+
+Edit LIG
+    [Documentation]  Update LIG to update Uplink Sets etc.
+    [Arguments]     ${edit_lig}
+    ${response} =   Create List
+    :FOR    ${lig}  IN  @{edit_lig}
+    \   ${name} =    Get From Dictionary     ${lig}     name
+    \   ${lig_uri} =    Get LIG Uri     ${name}
+    \   ${body} =    Build LIG body      ${lig}
+    \   ${resp} =    Fusion Api Get Lig  ${lig_uri}
+    \   ${eTag} =    Get From Dictionary    ${resp}    eTag
+    \   ${resp} =    Fusion Api Edit LIG     ${body}    ${lig_uri}  etag=${eTag}
+    \   Append to List  ${response}     ${resp}
+    [return]    ${response}
+
+Add LIG
+    [Documentation]    add LIG
+    [Arguments]   ${lig}   ${notFoundStatusCodeList}=404
+    ${toAdd} =  Create List
+    ${responses}=    Create List
+    :FOR    ${ligx}    IN    @{lig}
+    \       ${resp} =   Get Resource  LIG:${ligx['name']}
+    \       ${statusCode}=  Convert To String  ${resp['status_code']}
+    \       ${status}=      Run Keyword And Return Status   List Should Contain Value  ${notFoundStatusCodeList}  ${statusCode}
+    \       Run Keyword If    ${status}==False    Log    LIG ${ligx['name']} is already added    WARN
+    \       Run Keyword If    ${status}==True    Append To List   ${toAdd}  ${ligx}
+    ${count}=    Get Length    ${toAdd}
+    Return From Keyword If    '${count}'=='0'
+    :FOR   ${add}   IN    @{toAdd}
+    \    ${responses}=    Add LIG from variable  ${add}
+    [Return]    ${responses}
+
+Add LIG async
+    [Documentation]  Add LIG's asynchronous. Returns responses in list.
+    ...              Example:
+    ...                Add LIG async  ${ligs}
+    ...              Handle the response in the test case using "Wait For Task2     ${responses}"
+    [Arguments]   ${lig}    ${VERIFY}=${FALSE}  ${expected_lig}=@empty   ${notFoundStatusCodeList}=404
+    ${toAdd} =  Create List
+    ${responses}=    Create List
+    :FOR    ${ligx}    IN    @{lig}
+    \       ${resp} =   Get Resource  LIG:${ligx['name']}
+    \       ${statusCode}=  Convert To String  ${resp['status_code']}
+    \       ${status}=      Run Keyword And Return Status   List Should Contain Value  ${notFoundStatusCodeList}  ${statusCode}
+    \       Run Keyword If    ${status}==False    Log    LIG ${ligx['name']} is already added    WARN
+    \       Run Keyword If    ${status}==True    Append To List   ${toAdd}  ${ligx}
+    ${count}=    Get Length    ${toAdd}
+    Return From Keyword If    '${count}'=='0'
+    :FOR   ${add}   IN    @{toAdd}
+    \    ${response}=    Add LIG from variable async  ${add}
+    \    Append to List  ${responses}  ${response}
+    log    ${responses}   console=True
+    Run Keyword If     ${responses} is not ${null}   Wait For Task2    ${responses}
+    Run Keyword If     ${VERIFY} == True    Verify Resources for List  ${expected_lig}
+    [Return]    ${responses}
+
+Process InterconnectMapTemplate
+    [Documentation]  Process InterconnectMapTemplate
+	[Arguments]		${icmap}
+	${l} = 	Get Length	${icmap['interconnectMapEntryTemplates']}
+	:FOR 	${x}	IN RANGE	0	${l}
+	\	${permittedInterconnectTypeUri} = 	Get From Dictionary	${icmap['interconnectMapEntryTemplates'][${x}]}	permittedInterconnectTypeUri
+	\	${permittedInterconnectTypeUri} = 	Get Interconnect Type URI	${permittedInterconnectTypeUri}
+	\	Set to dictionary	${icmap['interconnectMapEntryTemplates'][${x}]}	permittedInterconnectTypeUri		${permittedInterconnectTypeUri}
+	[Return]	${icmap}
+
+Get LIG member
+    [Documentation]    Get LIG member
+	[Arguments]		${lig}
+	${resp} = 	    Fusion Api Get LIG 		param=?filter="'name'=='${lig}'"
+	${member} = 	Get From List		${resp['members']}  0
+	[Return]	${member}
+
+Get LIG URI
+    [Documentation]   Get LIG URI
+	[Arguments]		${lig}
+	${resp} = 	Fusion Api Get LIG 		param=?filter="'name'=='${lig}'"
+    Return From Keyword If  ${resp['count']}==0  /rest/Logical_interconnect_group_${lig}_not_found
+	${uri} = 	Get From Dictionary		${resp['members'][0]}	uri
+	[Return]	${uri}
+
+Remove All LIGs
+    [Documentation]  Querys the appliance for all LIGs and then removes them
+    [Arguments]  ${VERIFY}=False  ${status_code}=404
+    Log     Removing LIGS    console=True
+    ${ligs} =  Fusion Api Get LIG
+    ${count}=    Convert To String  ${ligs['count']}
+    Run Keyword If  '${count}'=='0'   Log  LIG doesn't exists   WARN
+    ${response} =   Create List
+    :FOR  ${lig}  IN  @{ligs['members']}
+    \       ${resp} =  Fusion Api Delete LIG  uri=${lig['uri']}
+    \       Append to List  ${response}     ${resp}
+    Wait For Task2  ${response}  240  2
+    :FOR  ${lig}  IN  @{ligs['members']}
+    \       Continue For Loop If   ${VERIFY}==${FALSE}
+    \       ${resp} =  Fusion Api Get Resource  ${lig['uri']}
+    \       Run Keyword If  ${resp['status_code']}!=${status_code}  Run Keyword And Continue On Failure  FAIL  msg=LIG ${lig['name']} is not Deleted
+
+Get All Logical Interconnect Group Uris
+    [Documentation]    Get Resources Uris list and return it
+    ${resp} =    Fusion Api Get Lig
+    ${memb_list} =    Get From Dictionary    ${resp}    members
+    ${uri_list} =    Create List
+    :FOR    ${memb}    IN    @{memb_list}
+    \       ${uri} =    Get From Dictionary    ${memb}    uri
+    \       Append To List    ${uri_list}    ${uri}
+    [Return]      ${uri_list}
+
+All Logical Interconnect Groups State Should Be
+    [Documentation]     Logical Interconnect Group Should be in expected state
+    ...             Logical Interconnect Group State Should be Active
+    [Arguments]    ${state}=Active
+    ${ligs} =  Fusion Api Get LIG
+    # Make sure we get (more than zero) LIG listed
+    ${count}       Get From Dictionary    ${ligs}    count
+    Run Keyword If  '${count}'=='0'    Fail    msg=No LIG found
+    ${res} =  Set Variable  ${empty}
+    :FOR   ${lig}   IN    @{ligs['members']}
+    \  ${res} =  Run Keyword If  '${lig['state']}' != '${state}'  Catenate  ${res}
+    ...     \nLIG name [${lig['name']}] Expected state ${state} but found ${lig['state']}
+    \  ...  ELSE  Set Variable  ${res}
+    ${count} =  Get Length  ${res}
+    Run Keyword If  '${count}' > '0'  Fail  ${res}
+
+Create LIG Private VLAN Payload
+    [Documentation]    Creates private vlan dictionary for the create/edit LIG payload
+    [Arguments]    ${privatevlan}
+    ${l} =  Get Length  ${privatevlan}
+    :FOR    ${x}    IN RANGE  0  ${l}
+    \   ${status} =    Run Keyword and Return Status     Dictionary Should Contain Key    ${privatevlan[${x}]}    primaryNetwork
+    \   Continue For Loop If    '${status}' == 'False'
+    \   ${primarynetwork}=   Get From Dictionary    ${privatevlan[${x}]['primaryNetwork']}    uri
+    \   ${primarynetworkuri}=    Get Ethernet URI    ${primarynetwork}
+    \   Set To Dictionary    ${privatevlan[${x}]['primaryNetwork']}    uri    ${primarynetworkuri}
+    :FOR    ${x}    IN RANGE  0  ${l}
+    \   ${status} =    Run Keyword and Return Status     Dictionary Should Contain Key    ${privatevlan[${x}]}    isolatedNetwork
+    \   Continue For Loop If    '${status}' == 'False'
+    \   ${isolatedNetwork}=   Get From Dictionary    ${privatevlan[${x}]['isolatedNetwork']}    uri
+    \   ${isolatedNetworkuri}=    Get Ethernet URI    ${isolatedNetwork}
+    \   Set To Dictionary    ${privatevlan[${x}]['isolatedNetwork']}    uri    ${isolatedNetworkuri}
+    [return]    ${privatevlan}

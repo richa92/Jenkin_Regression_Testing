@@ -1,0 +1,611 @@
+| *** Settings *** |
+| Documentation | OVF650 - Hill trunking. |
+| Library | json |
+| Library | FusionLibrary |
+| Library | RoboGalaxyLibrary |
+| Library | Collections |
+| Library | String |
+| Library | BuiltIn |
+| Library | Dialogs |
+| Variables | data_variables.py |
+| Resource | ../../../resources/resource.txt |
+
+| *** Test cases *** |
+| Step1 Create SessionID through API |
+| | [Documentation] | Creating the session ID through rest calls |
+| | Set Log Level | TRACE |
+| | ${Login_response} | Fusion Api Login Appliance | ${APPLIANCE_IP} | ${admin_credentials} |
+| | Run keyword unless | ${Login_response[0]['status_code']}== 200 | Fail | ${Login_response[0]['message']} |
+| | Log | Test Step-1 completed successfully | console=True |
+
+| step2 Create Fc netowrks |
+| | [Documentation] | Creating the FC networks through rest calls |
+| | ${FC_uris} | Create List |
+| | Set To Dictionary | ${Fc_body} | fabricType | FabricAttach |
+| | :FOR | ${x} | IN RANGE | 1 | 3 |
+| | \ | Set To Dictionary | ${Fc_body} | name | FC_${x} |
+| | \ | ${resp} | Fusion Api Create Fc Network | ${Fc_body} |
+| | \ | Run keyword unless | ${resp['status_code']}== 202 | Fail | ${resp['message']} |
+| | \ | ${uri} | Get From Dictionary | ${resp['associatedResource']} | resourceUri |
+| | \ | Append To List | ${FC_uris} | ${uri} |
+| | Set Global Variable | ${FC_uris} | ${FC_uris} |
+
+| Step3 Creating LIG |
+| | [Documentation] | Creating the LIG through rest calls |
+| | ${enc_resp} | Fusion Api Import Server Hardware Type For Enclosure | ${Preview_body} | ${Preview_uri} |
+| | ${interconnectMapTemplate} | Set Variable | ${enc_resp['logicalInterconnectGroup']['interconnectMapTemplate']} |
+| | Set Global Variable | ${interconnectMapTemplate_Global} | ${interconnectMapTemplate} |
+| | Set To Dictionary | ${lig_body1} | interconnectMapTemplate | ${interconnectMapTemplate_Global} |
+| | Append To List | ${lig_body1['uplinkSets'][0]['networkUris']} | ${FC_uris[0]} |
+| | ${resp_lig} | Fusion Api Create LIG | ${lig_body1} |
+| | Run keyword unless | ${resp_lig['status_code']}== 202 | Fail | ${resp_lig['message']} |
+| | ${task} | Wait For Task | ${resp_lig} | 120s | 2s |
+| | ${uri} | Get From Dictionary | ${task['associatedResource']} | resourceUri |
+| | Set Global Variable | ${LIG_uri} | ${uri} |
+
+
+| Step4 Creating EG |
+| | [Documentation] | Creating EG through rest calls |
+| | ${Test_dict} | Create Dictionary |
+| | :FOR | ${x} | IN RANGE | 0 | 8 |
+| | \ | ${permittedInterconnectTypeUri} | Get From Dictionary |   ${interconnectMapTemplate_Global['interconnectMapEntryTemplates'][${x}]} | permittedInterconnectTypeUri |
+| | \ | Run Keyword If |  '${interconnectMapTemplate_Global['interconnectMapEntryTemplates'][${x}]['logicalLocation']['locationEntries'][0]['type']}'=='Bay'
+| | \ | ... | Set To Dictionary | ${Test_dict} |   ${interconnectMapTemplate_Global['interconnectMapEntryTemplates'][${x}]['logicalLocation']['locationEntries'][0]['relativeValue']} | ${permittedInterconnectTypeUri} |
+| | \ | Run Keyword If |   '${interconnectMapTemplate_Global['interconnectMapEntryTemplates'][${x}]['logicalLocation']['locationEntries'][1]['type']}'=='Bay'
+| | \ | ... | Set To Dictionary | ${Test_dict} |   ${interconnectMapTemplate_Global['interconnectMapEntryTemplates'][${x}]['logicalLocation']['locationEntries'][1]['relativeValue']} | ${permittedInterconnectTypeUri} |
+| | ${Keys} | Get Dictionary Keys | ${Test_dict} |
+| | ${Values} | Get Dictionary Values | ${Test_dict} |
+| | :FOR | ${y} | IN RANGE | 0 | 8 |
+| | \ | Set To Dictionary | ${eg_body1['interconnectBayMappings'][${y}]} | interconnectBay | ${Keys[${y}]} |
+| | \ | Run Keyword If | '${Values[${y}]}' != 'None' | Set To Dictionary | ${eg_body1['interconnectBayMappings'][${y}]} |   logicalInterconnectGroupUri | ${LIG_uri} |
+| | ${eg_resp} | Fusion Api Create Enclosure Group | ${eg_body1} |
+| | Run keyword unless | ${eg_resp['status_code']}== 201 | Fail | ${eg_resp['message']} |
+| | Set Global Variable | ${EG_uri} | ${eg_resp['uri']} |
+
+
+
+| Step5 Import enclosure |
+| | [Documentation] | Importing the enclosure through the rest calls |
+| | Set To Dictionary | ${enc_body1} | enclosureGroupUri | ${EG_uri} |
+| | ${resp_enc} | Fusion Api Add Enclosure | ${enc_body1} |
+| | Run keyword unless | ${resp_enc['status_code']}== 202 | Fail | ${resp_lig['message']} |
+| | ${task} | Wait For Task | ${resp_enc} | 600s | 30s |
+| | Log | Enclosure imported successfully | console=True |
+| | ${enc_resp} | Fusion Api Get Enclosures | param=?filter="'name'=='${Enclosure_Name[0]}'" |
+| | Set Global Variable | ${ENC_uri} | ${enc_resp['members'][0]['uri']} |
+
+
+| step6 Checking TrunkGroup and delete existing |
+| | [Documentation] | Checks the trunk group and deletes in the FC switch |
+| | ${show_command_output} | Check For Trunk Group in Brocade | ${FC_switch_details} | ${Trunk_Commands} |
+| | ${lines} | Get Lines Containing String | ${show_command_output} | ${no_trunk_message} |
+| | ${line_count} | Get Line Count | ${lines} |
+| | Pass Execution If | ${line_count} == 1 | No trunk groups available |
+| | ${TG_count} | ${TG_data} | Get the number of Trunk Group in switch | ${show_command_output} |
+| | :FOR | ${x} | IN RANGE | 0 | ${TG_count} |
+| | \ | @{lines} | Split String | ${TG_data[${x}]} | \n |
+| | \ | ${TG_number} | Evaluate | ${x}+1 |
+| | \ | ${Ports_count} | ${Master_port} | ${Ports_in_TG} | Check For Ports in Trunk Group | ${lines} | ${TG_number} |
+| | \ | Delete trunk group and release ports | ${FC_switch_details} | ${Trunk_Commands} | ${Ports_in_TG} |
+| | ${show_command_output} | Check For Trunk Group in Brocade | ${FC_switch_details} | ${Trunk_Commands} |
+| | ${lines} | Get Lines Containing String | ${show_command_output} | ${no_trunk_message} |
+| | ${line_count} | Get Line Count | ${lines} |
+| | Pass Execution If | ${line_count} == 1 | Trunk Groups deleted succeesfully | ELSE | FAIL |
+
+| step7(TC#1) Create US1 in bay5 with trunking enabled with 8 ports and trunking enabled on 8 ports on TOR in 1 HW trunk group |
+| | [Documentation] | Create US1 in bay5 with trunking enabled with 8 ports and trunking enabled on 8 ports on TOR in 1 HW trunk group.Objective of this test case is to validate that the maximum numbers of ports in 1 trunk group can form a trunk group |
+| | Create Trunk Group with ports | ${FC_switch_details} | ${Trunk_Commands} | ${FC_switch_ports['segment1']} |
+| | Sleep | 300s |
+| | :FOR | ${port} | IN | @{US_details[0]['Act_ports']} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[0]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}'!='None' | FAIL |
+
+| step8 Checking TrunkGroup and delete existing |
+| | [Documentation] | Checks the trunk group and deletes in the FC switch |
+| | ${show_command_output} | Check For Trunk Group in Brocade | ${FC_switch_details} | ${Trunk_Commands} |
+| | ${lines} | Get Lines Containing String | ${show_command_output} | ${no_trunk_message} |
+| | ${line_count} | Get Line Count | ${lines} |
+| | Pass Execution If | ${line_count} == 1 | No trunk groups available |
+| | ${TG_count} | ${TG_data} | Get the number of Trunk Group in switch | ${show_command_output} |
+| | :FOR | ${x} | IN RANGE | 0 | ${TG_count} |
+| | \ | @{lines} | Split String | ${TG_data[${x}]} | \n |
+| | \ | ${TG_number} | Evaluate | ${x}+1 |
+| | \ | ${Ports_count} | ${Master_port} | ${Ports_in_TG} | Check For Ports in Trunk Group | ${lines} | ${TG_number} |
+| | \ | Delete trunk group and release ports | ${FC_switch_details} | ${Trunk_Commands} | ${Ports_in_TG} |
+| | ${show_command_output} | Check For Trunk Group in Brocade | ${FC_switch_details} | ${Trunk_Commands} |
+| | ${lines} | Get Lines Containing String | ${show_command_output} | ${no_trunk_message} |
+| | ${line_count} | Get Line Count | ${lines} |
+| | Pass Execution If | ${line_count} == 1 | Trunk Groups deleted succeesfully | ELSE | FAIL |
+
+| step9(TC#2) Create US1 in bay 5 with 4 ports  and US2 in  bay 6 with 3 ports with trunking enabled in ULS and trunking disabled in TOR switch |
+| | [Documentation] | Create US1 in bay 5 with 4 ports  and US2 in  bay 6 with 3 ports with trunking enabled in ULS and trunking disabled in TOR switch.objective of this test case is to validate that ports in the uls are linked |
+| | Clear ULS in LIG | ${LIG_uri} |
+| | Create uls in LIG | ${LIG_uri} | ${fcmodes[0]} | ${FC_uris[0]} | ${US_details[0]['name']} | ${desiredSpeeds[0]} | ${US_details[0]['bay']} | ${US_details[0]['rel_ports'][0:4]} |
+| | Sleep | 30s |
+| | Create uls in LIG | ${LIG_uri} | ${fcmodes[0]} | ${FC_uris[1]} | ${US_details[1]['name']} | ${desiredSpeeds[0]} | ${US_details[1]['bay']} | ${US_details[1]['rel_ports']} |
+| | Sleep | 30s |
+| | LI update from Group | ${lig_body1['name']} |
+| | :FOR | ${port} | IN | @{US_details[0]['Act_ports'][0:4]} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[0]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}'=='None' | FAIL |
+
+
+| | :FOR | ${port} | IN | @{US_details[1]['Act_ports']} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[1]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}'=='None' | FAIL |
+
+| step10(TC#3) Create US1 in bay 5 with 4 ports and US2 in  bay 6 with 3 ports with trunking enabled in ULS and trunking enabled on 2 trunk groups on TOR in 2 HW trunk groups |
+| | [Documentation] | Create US1 in bay 5 with 4 ports and US2 in  bay 6 with 3 ports with trunking enabled in ULS and trunking enabled on 2 trunk groups on TOR in 2 HW trunk groups.objective of this test case is to validate that 2 trunk groups can be created and trunk formed for each trunked ULS |
+| | ${trunk_master_list} | Create List |
+| | Create Trunk Group with ports | ${FC_switch_details} | ${Trunk_Commands} | ${FC_switch_ports['segment1'][0:4]} |
+| | Create Trunk Group with ports | ${FC_switch_details} | ${Trunk_Commands} | ${FC_switch_ports['segment2']} |
+| | Sleep | 300s |
+| | :FOR | ${port} | IN | @{US_details[0]['Act_ports'][0:4]} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[0]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}'!='None' | FAIL |
+| | Append To List | ${trunk_master_list} | ${trunkMaster} |
+
+| | :FOR | ${port} | IN | @{US_details[1]['Act_ports']} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[1]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}'!='None' | FAIL |
+| | Append To List | ${trunk_master_list} | ${trunkMaster} |
+| | Set Global Variable | ${trunk_master_list} | ${trunk_master_list} |
+
+| step11(TC#4) Create US1 in bay 5 with 4 ports and US2 in  bay 6 with 3 ports with trunking enabled in ULS, each ULS ports set at 4GB/8GB/16GB, TOR set to Auto |
+| | [Documentation] | Create US1 in bay 5 with 4 ports and US2 in  bay 6 with 3 ports with trunking enabled in ULS, each ULS ports set at 4GB/8GB/16GB, TOR set to Auto.Objective of this test case is to validate that all ports in a trunked uplink set can have the port speeds changed to forced 4/8/16GB and come online |
+| | Edit desired speed in LI | ${US_details[0]['name']} | ${US_details[0]['Act_ports'][0:4]} | ${desiredSpeeds[1]} |
+| | Sleep | 60s |
+
+| | :FOR | ${port} | IN | @{US_details[0]['Act_ports'][0:4]} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[0]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}'!='None' | FAIL |
+
+| | :FOR | ${port} | IN | @{US_details[1]['Act_ports']} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[1]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}'!='None' | FAIL |
+
+| | Edit desired speed in LI | ${US_details[1]['name']} | ${US_details[1]['Act_ports']} | ${desiredSpeeds[2]} |
+| | Sleep | 60s |
+
+| | :FOR | ${port} | IN | @{US_details[0]['Act_ports'][0:4]} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[0]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}'!='None' | FAIL |
+
+| | :FOR | ${port} | IN | @{US_details[1]['Act_ports']} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[1]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}'!='None' | FAIL |
+
+| | Edit desired speed in LI | ${US_details[0]['name']} | ${US_details[0]['Act_ports'][0:4]} | ${desiredSpeeds[3]} |
+| | Sleep | 60s |
+| | :FOR | ${port} | IN | @{US_details[0]['Act_ports'][0:4]} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[0]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}'!='None' | FAIL |
+
+| | :FOR | ${port} | IN | @{US_details[1]['Act_ports']} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[1]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}'!='None' | FAIL |
+
+| step12(TC#5) Power off/on Hill with trunked ports enabled and trunks formed |
+| | [Documentation] | Power off/on Hill with trunked ports enabled and trunks formed.objective of this test case is to validate that when hill modules are powered off, then on, the trunk groups remain intact and come back online after power is restored. |
+| | Power Off/on ICM | ${oa_details['oa_ip']} | ${oa_details['username']} | ${oa_details['password']} | ${power_state_value[0]} | ${Trunking_Bays[0]} | ${Enclosure_Name[0]}, interconnect ${Trunking_Bays[0]} |
+| | Sleep | 60s |
+| | ${IC_state} | Get IC State | ${Enclosure_Name[0]}, interconnect ${Trunking_Bays[0]} |
+| | Run Keyword Unless | '${IC_state}'=='Maintenance' | FAIL |
+
+| | Power Off/on ICM | ${oa_details['oa_ip']} | ${oa_details['username']} | ${oa_details['password']} | ${power_state_value[1]} | ${Trunking_Bays[0]} | ${Enclosure_Name[0]}, interconnect ${Trunking_Bays[0]} |
+| | Sleep | 100s |
+| | Wait Until Keyword Succeeds | 600s | 20s | IC is in configured state | ${Enclosure_Name[0]} | ${Trunking_Bays[0]} |
+
+| | :FOR | ${port} | IN | @{US_details[0]['Act_ports'][0:4]} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[0]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}'!='None' | FAIL |
+
+| | :FOR | ${port} | IN | @{US_details[1]['Act_ports']} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[1]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}'!='None' | FAIL |
+
+| | Power Off/on ICM | ${oa_details['oa_ip']} | ${oa_details['username']} | ${oa_details['password']} | ${power_state_value[0]} | ${Trunking_Bays[1]} | ${Enclosure_Name[0]}, interconnect ${Trunking_Bays[1]} |
+| | Sleep | 60s |
+| | ${IC_state} | Get IC State | ${Enclosure_Name[0]}, interconnect ${Trunking_Bays[1]} |
+| | Run Keyword Unless | '${IC_state}'=='Maintenance' | FAIL |
+
+| | Power Off/on ICM | ${oa_details['oa_ip']} | ${oa_details['username']} | ${oa_details['password']} | ${power_state_value[1]} | ${Trunking_Bays[1]} | ${Enclosure_Name[0]}, interconnect ${Trunking_Bays[1]}
+| | Sleep | 100s |
+| | Wait Until Keyword Succeeds | 600s | 20s | IC is in configured state | ${Enclosure_Name[0]} | ${Trunking_Bays[1]} |
+
+| | :FOR | ${port} | IN | @{US_details[0]['Act_ports'][0:4]} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[0]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}'!='None' | FAIL |
+
+| | :FOR | ${port} | IN | @{US_details[1]['Act_ports']} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[1]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}'!='None' | FAIL |
+
+| step13(TC#6) Efuse(remove/insert)Hill with trunked ports |
+| | [Documentation] | Efuse(remove/insert)Hill with trunked ports.objective of this test case is to validate that when a hill is removed and re-inserted the trunk groups/ports come back online. |
+| | Efuse Hill | ${ENCLOSURE_IP} | ${oa_details['username']} | ${oa_details['password']} | ${interconnect_state[0]} | ${Trunking_Bays[0]} | ${Enclosure_Name[0]}, interconnect ${Trunking_Bays[0]} |
+| | Sleep | 60s |
+| | ${IC_state} | Get IC State | ${Enclosure_Name[0]}, interconnect ${Trunking_Bays[0]} |
+| | Run Keyword Unless | '${IC_state}'=='Absent' | FAIL |
+
+| | Efuse Hill | ${ENCLOSURE_IP} | ${oa_details['username']} | ${oa_details['password']} | ${interconnect_state[1]} | ${Trunking_Bays[0]} | ${Enclosure_Name[0]}, interconnect ${Trunking_Bays[0]} |
+| | Sleep | 160s |
+| | Wait Until Keyword Succeeds | 600s | 20s | IC is in configured state | ${Enclosure_Name[0]} | ${Trunking_Bays[0]} |
+
+| | :FOR | ${port} | IN | @{US_details[0]['Act_ports'][0:4]} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[0]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}'!='None' | FAIL |
+
+| | :FOR | ${port} | IN | @{US_details[1]['Act_ports']} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[1]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}'!='None' | FAIL |
+
+| | Efuse Hill | ${ENCLOSURE_IP} | ${oa_details['username']} | ${oa_details['password']} | ${interconnect_state[0]} | ${Trunking_Bays[1]} | ${Enclosure_Name[0]}, interconnect ${Trunking_Bays[1]} |
+| | Sleep | 60s |
+| | ${IC_state} | Get IC State | ${Enclosure_Name[0]}, interconnect ${Trunking_Bays[1]} |
+| | Run Keyword Unless | '${IC_state}'=='Absent' | FAIL |
+
+| | Efuse Hill | ${ENCLOSURE_IP} | ${oa_details['username']} | ${oa_details['password']} | ${interconnect_state[1]} | ${Trunking_Bays[1]} | ${Enclosure_Name[0]}, interconnect ${Trunking_Bays[1]} |
+| | Sleep | 160s |
+| | Wait Until Keyword Succeeds | 600s | 20s | IC is in configured state | ${Enclosure_Name[0]} | ${Trunking_Bays[1]} |
+
+| | :FOR | ${port} | IN | @{US_details[0]['Act_ports'][0:4]} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[0]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}'!='None' | FAIL |
+
+| | :FOR | ${port} | IN | @{US_details[1]['Act_ports']} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[1]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}'!='None' | FAIL |
+
+| step14(TC#7) Backup/Restore configuration with trunked ports |
+| | [Documentation] | Backup/Restore configuration with trunked ports.Objective of this test case is to validate that trunking configured is restored from a backup |
+| | ${Response} | Fusion Api Create Backup |
+| | Run keyword unless | ${Response['status_code']}== 202 | Fail | "Unable to Create Backup" |
+| | Sleep | 200s |
+| | Restore From Backup |
+| | Sleep | 60s |
+
+| | :FOR | ${port} | IN | @{US_details[0]['Act_ports'][0:4]} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[0]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}'!='None' | FAIL |
+
+| | :FOR | ${port} | IN | @{US_details[1]['Act_ports']} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[1]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}'!='None' | FAIL |
+
+| step15(TC#8) Disable/Enable trunked ports in each trunk group |
+| | [Documentation] | Disable/Enable trunked ports in each trunk group.objective of this test case is to validate that ports in a trunked uplink set can be disabled/enabled with no issues |
+| | :FOR | ${port} | IN | @{US_details[0]['Act_ports'][1:2]} |
+| | \ | ${task_resp} | Edit port status | ${Enclosure_Name[0]} | ${US_details[0]['bay']} | ${port} | false |
+| | :FOR | ${port} | IN | @{US_details[1]['Act_ports'][1:2]} |
+| | \ | ${task_resp} | Edit port status | ${Enclosure_Name[0]} | ${US_details[1]['bay']} | ${port} | false |
+| | Sleep | 60s |
+
+| | :FOR | ${port} | IN | @{US_details[0]['Act_ports'][1:2]} |
+| | \ | ${task_resp} | Edit port status | ${Enclosure_Name[0]} | ${US_details[0]['bay']} | ${port} | true |
+| | :FOR | ${port} | IN | @{US_details[1]['Act_ports'][1:2]} |
+| | \ | ${task_resp} | Edit port status | ${Enclosure_Name[0]} | ${US_details[1]['bay']} | ${port} | true |
+| | Sleep | 60s |
+
+| | :FOR | ${port} | IN | @{US_details[0]['Act_ports'][1:2]} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[0]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}'!='None' | FAIL |
+
+| | :FOR | ${port} | IN | @{US_details[1]['Act_ports'][1:2]} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[1]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}'!='None' | FAIL |
+
+| step16(TC#9) Disable/Enable all trunk ports in each trunk group |
+| | [Documentation] | Disable/Enable all trunk ports in each trunk group.objective of this test case is to validate that when all ports in a trunk group are disabled/re-enabled, the ports come back online and trunk is formed and no errors |
+| | :FOR | ${port} | IN | @{US_details[0]['Act_ports'][0:4]} |
+| | \ | ${task_resp} | Edit port status | ${Enclosure_Name[0]} | ${US_details[0]['bay']} | ${port} | false |
+| | :FOR | ${port} | IN | @{US_details[1]['Act_ports']} |
+| | \ | ${task_resp} | Edit port status | ${Enclosure_Name[0]} | ${US_details[1]['bay']} | ${port} | false |
+| | Sleep | 60s |
+
+| | :FOR | ${port} | IN | @{US_details[0]['Act_ports'][0:4]} |
+| | \ | ${task_resp} | Edit port status | ${Enclosure_Name[0]} | ${US_details[0]['bay']} | ${port} | true |
+| | :FOR | ${port} | IN | @{US_details[1]['Act_ports']} |
+| | \ | ${task_resp} | Edit port status | ${Enclosure_Name[0]} | ${US_details[1]['bay']} | ${port} | true |
+| | Sleep | 60s |
+
+| | :FOR | ${port} | IN | @{US_details[0]['Act_ports'][0:4]} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[0]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}'!='None' | FAIL |
+
+| | :FOR | ${port} | IN | @{US_details[1]['Act_ports']} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[1]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}'!='None' | FAIL |
+
+| step17(TC#10) Disable/Enable the master port in each trunk group |
+| | [Documentation] | Disable/Enable the master port in each trunk group.Objective of this test case is validate that when the master port is disabled or goes offline, the trunk group remains online and another port in the group becomes the master |
+
+| | ${trunk_master_list1} | Create List
+| | ${task_resp} | Edit port status | ${Enclosure_Name[0]} | ${US_details[0]['bay']} | ${trunk_master_list[0]} | false |
+| | ${task_resp} | Edit port status | ${Enclosure_Name[0]} | ${US_details[1]['bay']} | ${trunk_master_list[1]} | false |
+
+| | ${task_resp} | Edit port status | ${Enclosure_Name[0]} | ${US_details[0]['bay']} | ${trunk_master_list[0]} | true |
+| | ${task_resp} | Edit port status | ${Enclosure_Name[0]} | ${US_details[1]['bay']} | ${trunk_master_list[1]} | true |
+
+| | :FOR | ${port} | IN | @{US_details[0]['Act_ports'][0:4]} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[0]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}' != 'None' | FAIL |
+| | Append To List | ${trunk_master_list1} | ${trunkMaster} |
+
+| | :FOR | ${port} | IN | @{US_details[1]['Act_ports']} |
+| | \ | ${portStatus} | ${trunkMaster} | ${enabled} | Get port details | ${Enclosure_Name[0]} | ${US_details[1]['bay']} | ${port} |
+| | \ | Run Keyword Unless | '${portStatus}'=='Linked' | FAIL |
+| | \ | Run Keyword Unless | '${trunkMaster}'!='None' | FAIL |
+| | Append To List | ${trunk_master_list1} | ${trunkMaster} |
+
+
+| | Run Keyword Unless | '${trunk_master_list1[0]}'!=${trunk_master_list[0]} | FAIL |
+| | Run Keyword Unless | '${trunk_master_list1[1]}'!=${trunk_master_list[1]} | FAIL |
+
+| *** Keywords *** |
+
+| Create Trunk Group with ports | [Arguments] | ${FC_switch_details} | ${Trunk_Commands} | ${Ports_to_trunk} |
+| | [Documentation] | Creating Trunk Group with ports on switch |
+| | ${First_port} | Set Variable | ${Ports_to_trunk[0]} |
+| | ${Last_port} | Set Variable | ${Ports_to_trunk[-1]} |
+| | Open Connection | ${FC_switch_details['ip']} |
+| | Login | ${FC_switch_details['userName']} | ${FC_switch_details['password']} |
+| | Execute Command | ${Trunk_Commands[1]} ${First_port}-${Last_port} |
+| | Sleep | 3s |
+| | :FOR | ${y} | IN  | @{Ports_to_trunk} |
+| | \ | Execute Command | ${Trunk_Commands[3]} ${y} 1 |
+| | \ | Sleep | 3s |
+| | Execute Command | ${Trunk_Commands[5]} ${First_port}-${Last_port} -index ${First_port} |
+| | Sleep | 3s |
+| | Execute Command | ${Trunk_Commands[4]} ${First_port}-${Last_port} |
+| | Sleep | 3s |
+| | Close Connection |
+
+| Disable/Enable all trunk ports in each trunk group | [Arguments] | ${FC_switch_details} | ${Trunk_Commands} | ${Ports_to_trunk} |
+| | [Documentation] | Disable/Enable all trunk ports in each trunk group |
+| | ${First_port} | Set Variable | ${Ports_to_trunk[0]} |
+| | ${Last_port} | Set Variable | ${Ports_to_trunk[-1]} |
+| | Open Connection | ${FC_switch_details['ip']} |
+| | Login | ${FC_switch_details['userName']} | ${FC_switch_details['password']} |
+| | Execute Command | ${Trunk_Commands[1]} ${First_port}-${Last_port} |
+| | Sleep | 3s |
+| | Execute Command | ${Trunk_Commands[4]} ${First_port}-${Last_port} |
+| | Sleep | 3s |
+| | Close Connection |
+
+| Check For Trunk Group in Brocade | [Arguments] | ${FC_switch_details} | ${Trunk_Commands} |
+| | [Documentation] | Checking for the trunk group existence in switch |
+| | Log to console and logfile | Checking for trunk group details in the Brocade switch |
+| | Open Connection | ${FC_switch_details['ip']} |
+| | Login | ${FC_switch_details['userName']} | ${FC_switch_details['password']} |
+| | ${stdout} | Execute Command | ${Trunk_Commands[0]} |
+| | Log | Show command output is \n ${stdout} | console=True |
+| | Close Connection |
+| | [Return] | ${stdout} |
+
+| Get the number of Trunk Group in switch | [Arguments] | ${show_command_output} |
+| | [Documentation] | Getting the number of trunk groups in switch |
+| | @{words} | Split String | ${show_command_output} | ------------------------------------- |
+| | Log to console and logfile | The output splitted with dots is \n ${words} |
+| | Remove From List | ${words} | -1 |
+| | Remove From List | ${words} | 0 |
+| | ${group_count} | Get Length | ${words} |
+| | Log | The number of trunk groups present is ${group_count} | console=True |
+| | [Return] | ${group_count} | ${words} |
+
+| Check For Ports in Trunk Group | [Arguments] | ${Ports_data} | ${TG_number} |
+| | [Documentation] | Checking for the master port and port count in the trunk group |
+| | Remove From List | ${Ports_data} | -1 |
+| | Remove From List | ${Ports_data} | 0 |
+| | ${Ports_count} | Get Length | ${Ports_data} |
+| | Log | The number of ports present in TG${TG_number} is ${Ports_count} | console=True |
+| | ${Ports_list} | Create List |
+| | :FOR | ${y} | IN RANGE | 0 | ${Ports_count} |
+| | \ | ${data1} | Split String | ${Ports_data[${y}]} |
+| | \ | ${data2} | Get Length | ${data1} |
+| | \ | Append To List | ${Ports_list} | ${data1[-1]} |
+| | ${Master_port} | Set Variable | ${data1[-3]} |
+| | [Return] | ${Ports_count} | ${Master_port} | ${Ports_list} |
+
+| Delete trunk group and release ports | [Arguments] | ${FC_switch_details} | ${Trunk_Commands} | ${Ports_in_TG} |
+| | [Documentation] | Deleting the trunk group |
+| | ${First_port} | Set Variable | ${Ports_in_TG[0]} |
+| | ${Last_port} | Set Variable | ${Ports_in_TG[-1]} |
+| | Open Connection | ${FC_switch_details['ip']} |
+| | Login | ${FC_switch_details['userName']} | ${FC_switch_details['password']} |
+| | Execute Command | ${Trunk_Commands[1]} ${First_port}-${Last_port} |
+| | Sleep | 3s |
+| | Execute Command | ${Trunk_Commands[2]} ${First_port}-${Last_port} |
+| | Sleep | 3s |
+| | :FOR | ${y} | IN  | @{Ports_in_TG} |
+| | \ | Execute Command | ${Trunk_Commands[3]} ${y} 0 |
+| | \ | Sleep | 3s |
+| | Execute Command | ${Trunk_Commands[4]} ${First_port}-${Last_port} |
+| | Sleep | 3s |
+| | Close Connection |
+
+| Create uls in LIG | [Arguments] | ${LIG_uri} | ${fcmode} | ${FC_uri} | ${uls_name} | ${desiredSpeed} | ${IC_bay_set} | ${ports} |
+| | [Documentation] | Creating Uplinkset with network in LIG through rest calls
+| | ${port_list} | Create List |
+| | ${resp} | fusion_api_get_lig | uri=${LIG_uri}
+| | Set To Dictionary | ${lig_uls_body1} | fcMode | ${fcMode} |
+| | Set To Dictionary | ${lig_uls_body1} | name | ${uls_name} |
+| | Append To List | ${lig_uls_body1['networkUris']} | ${FC_uri} |
+| | ${ports_length} | Get Length | ${ports} |
+| | :FOR | ${x} | IN RANGE | 0 | ${ports_length} |
+| | \ | Set To Dictionary | ${logicalPortConfigInfos[${x}]} | desiredSpeed | ${desiredSpeed}
+| | \ | Set To Dictionary | ${logicalPortConfigInfos[${x}]['logicalLocation']['locationEntries'][0]} | relativeValue | ${IC_bay_set} |
+| | \ | ${tmp_list} | Create List |
+| | \ | ${tmp_var} | Copy Dictionary | ${logicalPortConfigInfos[${x}]} |
+| | \ | Set To Dictionary | ${tmp_var['logicalLocation']['locationEntries'][1]} | relativeValue | ${ports[${x}]} |
+| | \ | Append To List | ${port_list} | ${tmp_var} |
+| | Set To Dictionary | ${lig_uls_body1} | logicalPortConfigInfos | ${port_list} |
+| | Remove From Dictionary | ${resp} | headers |
+| | Remove From Dictionary | ${resp} | status_code |
+| | Append to List | ${resp['uplinkSets']} | ${lig_uls_body1} |
+| | ${resp1} | Fusion Api Edit Lig | ${resp} | ${LIG_uri} |
+| | ${task} | Wait For Task | ${resp1} | 20s | 2s |
+| | Remove From List | ${lig_uls_body1['networkUris']} | 0 |
+
+| Get port details | [Arguments] | ${Enc_name} | ${bay_num} | ${Port_num} |
+| | [Documentation] | Getting the port details of respective port number. |
+| | ${resp} | Fusion Api Get Interconnect | param=?filter="'name'=='${Enc_name}, interconnect ${bay_num}'" |
+| | ${ports} | Get Variable Value | ${resp['members'][0]['ports']} |
+| | :FOR | ${port} | IN | @{ports} |
+| | \ | Run Keyword If | '${port['portName']}' != '${Port_num}' | Continue For Loop |
+| | \ | ${portStatus} | Set Variable | ${port['portStatus']} |
+| | \ | ${trunkMaster} | Set Variable | ${port['fcPortProperties']['trunkMaster']} |
+| | \ | ${enabled} | Set Variable | ${port['enabled']} |
+| | \ | Exit For Loop |
+| | [Return] | ${portStatus} | ${trunkMaster} | ${enabled} |
+
+
+| Edit desired speed in LI | [Arguments] | ${uplinksetname} | ${ports} | ${desiredSpeed} |
+| | [Documentation] | Editing desired speed to 4G/8G/16G in LI |
+| | ${uplinksets} | Fusion Api Get Uplink Set | param=?filter="'name'=='${uplinksetname}'" |
+| | ${us} | Get From List | ${uplinksets['members']} | 0 |
+| | ${us_uri} | Get From Dictionary | ${us} | uri |
+| | ${ports_length} | Get Length | ${ports} |
+| | :FOR | ${x} | IN RANGE | 0 | ${ports_length} |
+| | \ | Set To Dictionary | ${uplinksets['members'][0]['portConfigInfos'][${x}]} | desiredSpeed | ${desiredSpeed} |
+| | ${resp} | Fusion Api Edit Uplink Set | body=${uplinksets['members'][0]} | uri=${us_uri} |
+| | ${task} | Wait For Task | ${resp} | 500s | 10s |
+
+| Power Off/on ICM |
+| | [Arguments] | ${OA_HOST} | ${OA_USER} | ${OA_PASS} | ${power_state_value} | ${interconnect_bay} | ${ICM_name} |
+| | [Documentation] | This keyword with powers on/off the ICM according to the passed power_state_value |
+| | SSHLibrary.Open Connection | ${OA_HOST} |
+| | SSHLibrary.Login | ${OA_USER} | ${OA_PASS} |
+| | Sleep | 10s |
+| | SSHLibrary.Write | ${power_state_value} interconnect  ${interconnect_bay} |
+| | Sleep | 30s |
+| | SSHLibrary.Close All Connections |
+| | ${resp} | Fusion Api Get Interconnect | param=?filter="'name'=='${ICM_name}'" |
+| | Log | The power state of ICM ${ICM_name} is ${resp['members'][0]['powerState']} | console=True |
+
+| Get IC State | [Arguments] | ${ICM_name} |
+| | [Documentation] | This keyword retrieves the current powerstate of the IC |
+| | ${resp} | Fusion Api Get Interconnect | param=?filter="'name'=='${ICM_name}'" |
+| | ${IC_state} | Get From Dictionary | ${resp['members'][0]} | state |
+| | [Return] | ${IC_state} |
+
+| Restore From Backup |
+| | [Documentation] | This keyword will perform restore from backup |
+| | ${status} | Set Variable | ${EMPTY} |
+| | ${Response} | Fusion Api Get Backup |
+| | Run keyword unless | ${Response['status_code']}== 200 | Fail | "Unable to Get the latest backup" |
+| | ${restore_body} | Create Dictionary | type=RESTORE |
+| | ... | uriOfBackupToRestore=${Response['members'][0]['uri']} |
+| | ${output} | Fusion Api Restore Backup | ${restore_body} |
+| | Log | ${output} | console=True |
+| | Sleep | 200sec |
+| | Run keyword unless | ${output['status_code']}== 202 | Fail | "Unable to perform the restore from backup operation" |
+| | ${restore_resp} | Fusion API Get Restore Status |
+| | Run keyword unless | ${restore_resp['status_code']}== 200 | Fail | "Unable to get the restore details" |
+| | :FOR | ${index} | IN RANGE | ${restore_resp['count']} |
+| | \ | Run Keyword If | '${restore_resp['members'][${index}]['backupIdToRestore']}' != '${Response['members'][0]['id']}' | Continue For Loop |
+| | \ | ${restore_id} | Set Variable | ${restore_resp['members'][${index}]['id']} |
+| | :FOR | ${index} | IN RANGE | 50 |
+| | \ | Sleep | 60sec
+| | \ | Log | "Restoring is in Progress..." | console=True |
+| | \ | ${resp} | Fusion API Get Restore Status | ${restore_id} |
+| | \ | Run keyword unless | ${resp['status_code']}== 200 | Fail | "Unable to get the restore id details" |
+| | \ | Run Keyword If | '${resp['restorePhase']}' != 'COMPLETED' | Continue For Loop |
+| | \ | ${status} | Set Variable | ${resp['status']} |
+| | \ | Run Keyword If | '${resp['restorePhase']}' == 'COMPLETED' | Exit For Loop |
+| | Should Be Equal | ${status} | SUCCEEDED |
+| | Log | "Exited from the for loop" | console=True |
+| | Sleep | 30 |
+| | ${resp} | Fusion Api Login Appliance | ${APPLIANCE_IP} | ${admin_credentials} |
+
+| IC is in configured state | [Arguments] | ${enc_name} | ${ic_num} |
+| | [Documentation] | This keyword will run until the IC state become configured state  |
+| | ${IC_state} | Get IC State | ${enc_name}, interconnect ${ic_num} |
+| | Run Keyword Unless | '${IC_state}'=='Configured' | FAIL |
+
+| Edit port status | [Arguments] | ${Enc_name} | ${bay_num} | ${Port_num} | ${enabled_mode} |
+| | [Documentation] | Editing the port either to disabled or enabled status |
+| | ${test_dict} | Create Dictionary |
+| | ${test_list} | Create List |
+| | ${resp} | Fusion Api Get Interconnect | param=?filter="'name'=='${Enc_name}, interconnect ${bay_num}'" |
+| | ${ports} | Get Variable Value | ${resp['members'][0]['ports']} |
+| | :FOR | ${port} | IN | @{ports} |
+| | \ | Run Keyword If | '${port['portName']}' != '${Port_num}' | Continue For Loop |
+| | \ | Set To Dictionary | ${test_dict} | associatedUplinkSetUri | ${port['associatedUplinkSetUri']} |
+| | \ | Set To Dictionary | ${test_dict} | interconnectName | ${port['interconnectName']} |
+| | \ | Set To Dictionary | ${test_dict} | portType | ${port['portType']} |
+| | \ | Set To Dictionary | ${test_dict} | portId | ${port['portId']} |
+| | \ | Set To Dictionary | ${test_dict} | type | ${port['type']} |
+| | \ | Set To Dictionary | ${test_dict} | portName | ${port['portName']} |
+| | \ | Set To Dictionary | ${test_dict} | capability | ${port['capability']} |
+| | \ | Set To Dictionary | ${test_dict} | configPortTypes | ${port['configPortTypes']} |
+| | \ | Set To Dictionary | ${test_dict} | enabled | ${enabled_mode} |
+| | \ | Exit For Loop |
+| | Append to List | ${test_list} | ${test_dict} |
+| | ${edit_resp} | Fusion Api Edit Interconnect Ports | ${test_list} | ${resp['members'][0]['uri']}
+| | Run keyword unless | ${edit_resp['status_code']} == 202 | Fail |
+| | ${task} | Wait For Task | ${edit_resp} | 600s | 20s |
+| | Remove From List | ${test_list} | 0 |
+| | [Return] | ${task} |
+
+| Clear ULS in LIG | [Arguments] | ${LIG_uri} |
+| | [Documentation] | This keyword will clear uplink sets in both LI and LIG |
+| | ${resp} | fusion_api_get_lig | uri=${LIG_uri} |
+| | Remove From Dictionary | ${resp} | headers |
+| | Remove From Dictionary | ${resp} | status_code |
+| | Set To Dictionary | ${resp} | uplinkSets | ${empty_list} |
+| | ${resp1} | Fusion Api Edit Lig | ${resp} | ${LIG_uri} |
+| | ${task} | Wait For Task | ${resp1} | 20s | 2s |
+
+| LI Update from group | [Arguments] | ${LIG_name} |
+| | [Documentation] | Performing LI Update from group |
+| | ${URI} | Get LI URI | ${ENCLOSURE_NAME[0]}-${LIG_name} |
+| | Set Global Variable | ${LI_URI} | ${URI} |
+| | ${li_resp} | Fusion Api Get Li | ${LI_URI} |
+| | ${resp_update} | Fusion Api Update From Group | ${LI_uri} |
+| | Run keyword If | '${resp_update['status_code']}' != '202' | Fail | ${resp_update['message']} |
+| | ${task} | Wait For Task | ${resp_update} | 600s | 30s |
+| | Log | \nLI updated from group successfully. | console=True |
+| | [Return] | ${task} |
+
+| Efuse Hill |
+| | [Arguments] | ${OA_HOST} | ${OA_USER} | ${OA_PASS} | ${interconnect_state} | ${interconnect_bay} | ${ICM_name} |
+| | [Documentation] | This keyword will remove and insert the interconnect according to the state |
+| | SSHLibrary.Open Connection | ${OA_HOST} |
+| | SSHLibrary.Login | ${OA_USER} | ${OA_PASS} |
+| | Sleep | 10s |
+| | SSHLibrary.Write | ++diag-- |
+| | Sleep | 10s |
+| | SSHLibrary.Write | efuse IOM ${interconnect_bay} ${interconnect_state} |
+| | Sleep | 5s |
+| | SSHLibrary.Write | q |
+| | Sleep | 5s |
+| | SSHLibrary.Close All Connections
+
+

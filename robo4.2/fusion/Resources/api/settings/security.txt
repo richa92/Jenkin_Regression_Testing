@@ -1,0 +1,211 @@
+*** Settings ***
+Library				RoboGalaxyLibrary
+Library				FusionLibrary
+Library				OperatingSystem
+Library				BuiltIn
+Library				Collections
+Library				XML
+Library		        SSHLibrary
+Library				String
+
+*** Keywords ***
+Get Appliance Ssh Access
+    [Documentation]   Get the default ssh access
+    Log To Console    Get ssh access from appliance
+    ${resp}=     Fusion Api Get Ssh Access
+    Return from keyword if  ${resp['status_code']}!=200  /bad_ssh_access_response
+    [Return]    ${resp}
+
+Edit Ssh Access
+    [Documentation]   Edit ssh access, contains disable orenable
+    [Arguments]       ${body}
+    Log To Console    Edit ssh access for appliance
+    ${resp}=          Fusion Api Edit Ssh Access  body=${body}
+    Wait For Task2    ${resp}    timeout=60   interval=5
+
+Remove Server Certificate By Aliasname
+    [Documentation]  Remove server certificate by aliasname
+    [Arguments]      ${aliasname}
+    ${resp}=      Fusion Api Delete Server Certificate  ${aliasname}
+    ${task}=      Wait For Task2  ${resp}      300     10
+    Log   Remove ${aliasname} successfully    console=True
+
+Remove Root Certificate By Aliasname
+    [Documentation]  Remove root certificate by aliasname
+    [Arguments]      ${aliasname}
+    ${resp}=      Fusion Api Revoke Certificate  ${aliasname}
+    ${task}=      Wait For Task2   ${resp}      300     10
+    Log   Remove root ${aliasname} certificate successfully    console=True
+
+Get Server Certificate Status By Aliasname
+    [Documentation]  Get remote server certificate trust status by GET /rest/certifciates/servers/aliasname
+    [Arguments]      ${aliasname}
+    ${resp}=   Fusion Api Get Server Certificate  ${aliasname}
+    [Return]    ${resp['certificateStatus']}
+    
+Create Cryptography Mode Compatibility Report
+    [Documentation]  Create compliance report for FIPS/CNSA mode
+    [Arguments]  ${current_mode}    ${target_mode}
+    ${body}       Create Dictionary             targetMode=${target_mode}
+     ...                                        currentMode=${current_mode}
+    ${response} =  Fusion Api Create Security Compatibility Report   body=${body}
+    Wait For Task2    ${response}    timeout=300    interval=15
+
+Get Cryptography Mode Compatibility Report
+   [Documentation]  View the existing compliance report
+   ${response} =  Fusion Api Get Security Compatibility Report
+   [Return]   ${response}
+
+Update Cryptography Mode Compatibility Report
+    [Documentation]  Update the existing compliance report
+    [Arguments]  ${current_mode}    ${target_mode}
+    ${body}       Create Dictionary             targetMode=${target_mode}
+    ...                                        currentMode=${current_mode}
+    ${response} =  Fusion Api Update Security Compatibility Report   body=${body}
+    Wait For Task2    ${response}    timeout=300    interval=15
+
+Delete Cryptography Mode Compatibility Report
+    [Documentation]  Delete the compliance report
+	${response} =  Fusion Api Delete Security Compatibility Report
+    Wait For Task2    ${response}    timeout=300    interval=15
+
+Get Current Cryptography Mode
+    [Documentation]  Get the current security mode of the appliance
+    ${resp} =   Fusion Api Get Current Security Mode
+    ${mode_name} =  Get From Dictionary   ${resp}    modeName
+    [Return]    ${mode_name}
+
+Edit Cryptography Mode
+    [Documentation]  Edit the security mode
+	[Arguments]  ${mode_name}
+	${security_mode}       Create Dictionary       modeName=${mode_name}
+    ${response} =  Fusion Api Change Security Mode     ${security_mode}
+    [Return]   ${response}
+
+Change Cryptography Mode
+    [Documentation]  Change the security mode of the appliance
+    [Arguments]  ${mode_name}    ${APPLIANCE_IP}    ${timeout}=20 min   ${interval}=30 s
+    ${resp_mode} =  Edit Cryptography Mode   ${mode_name}
+    Should Be Equal As Integers  ${resp_mode['status_code']}   202
+    Log    \n Appliance is rebooting .....    console=True
+    sleep  10m
+    Log    -- Waiting for OneView state to change to "STARTING"    console=True
+    ${desired_state} =  Set Variable  STARTING
+    Wait Until Keyword Succeeds     ${timeout}   ${interval}    Check Appliance State    ${APPLIANCE_IP}   ${desired_state}
+    Log    -- Waiting for OneView state to change to "OK"    console=True
+    ${desired_state} =  Set Variable  OK
+    Wait Until Keyword Succeeds     ${timeout}   ${interval}    Check Appliance State    ${APPLIANCE_IP}   ${desired_state}
+    sleep  2m
+    Fusion Api Login Appliance      ${APPLIANCE_IP}     ${admin_credentials}
+    Wait For Task2    ${resp_mode}    timeout=300    interval=15
+    ${curr_mode} =  Get Current Cryptography Mode
+    Should Be Equal   ${curr_mode}   ${mode_name}
+
+Import Multiple External CA Certificates
+    [Documentation]  Adding Multiple External Certificates  into OneView：
+    ...     The certs' issuer CA should be in trust store. If importing a cert chain, range the certs by path
+    ...                 certs =  [{"members":[{
+    ...                                     "type":"CertificateAuthorityInfo",
+    ...                                     "certificateDetails":{
+    ...                                         "base64Data":"base64certData1",
+    ...                                         "aliasName":"caAliasName1",
+    ...                                         "type":"CertificateDetailV2"
+    ...                                     }}],
+    ...                            "type":"CertificateAuthorityInfoCollection"
+    ...                            },
+    ...                            {"members":[{
+    ...                                     "type":"CertificateAuthorityInfo",
+    ...                                     "certificateDetails":{
+    ...                                         "base64Data":"base64certData1",
+    ...                                         "aliasName":"caAliasName1",
+    ...                                         "type" : "CertificateDetailV2"
+    ...                                     }}],
+    ...                            "type":"CertificateAuthorityInfoCollection"
+    ...                            }
+    ...             ]
+    [Arguments]      ${certs}   ${api}=${None}  ${status_code}=202
+    Log    \nAdding multiple external ca certificates into OneView Trust Store    console=Yes
+    ${respList} =  Create List
+    :FOR    ${cert}    IN      @{certs}
+    \   ${resp} =   Fusion Api Import External CA Certificates  ${cert}  api=${api}
+    \   Wait For Task2    ${resp}    10min    5    None Expected    Completed
+    \   Append To List      ${respList}     ${resp}
+    Log    All certificates have been imported into OneView Trust Store    console=Yes
+    [Return]    ${resplist}
+
+Delete Multiple CA Certificates
+    [Documentation]    Used to delete multiple ca certificates by name
+    [Arguments]     ${certs}
+    Log    \nRemoving multiple external ca certificates from OneView Trust Store    console=Yes
+    ${tasks} =  Create List
+    :For    ${cert}    IN      @{certs}
+    \   ${members} =   Get From Dictionary      ${cert}     members
+    \   ${certDetails} =  Get From Dictionary   ${members[0]}   certificateDetails
+    \   ${aliasName} =  Get From Dictionary   ${certDetails}    aliasName
+    \   ${resp} =   Fusion Api Revoke Certificate      ${aliasName}
+    \   Append To List    ${tasks}    ${resp}
+    :FOR    ${task}    IN    @{tasks}
+    \   Run Keyword And Continue on Failure    Wait For Task2    ${task}    50    5
+    Log    All certificates have been removed from OneView Trust Store    console=Yes
+    [Return]    ${tasks}
+
+Import AD Server Certificates
+    [Documentation]    Add AD server certificates before add AD directory according to cert body and certificate examples as below
+    ...    CERT_BODY = {'members': [{'type': "CertificateAuthorityInfo", 'certificateDetails': {'base64Data': '', 'aliasName': '', 'type': "CertificateDetailV2"}}],
+    ...                 'type': "CertificateAuthorityInfoCollection"
+    ...                }
+    ...    AD_CERTIFICATE = "-----BEGIN CERTIFICATE-----\nMIIFnzCCA4egAwIBAgIQNBy/lnhaPptAqtftwUlzzzANBgkqhkiG9w0BAQwFADBi\nMRMwEQYKCZImiZPyLGQBGRYDY29tMRMwEQYKCZImiZPyLGQBGRYDaHBlMRQwEgYK\nCZImiZPyLGQBGRYEc2hxYTEgMB4GA1UEAxMXc2hxYS1XSU4tSDMwOVVQSTFMTVYt\nQ0EwHhcNMTcwNzA0MDY0NzQ3WhcNMjIwNzA0MDY1NzQzWjBiMRMwEQYKCZImiZPy\nLGQBGRYDY29tMRMwEQYKCZImiZPyLGQBGRYDaHBlMRQwEgYKCZImiZPyLGQBGRYE\nc2hxYTEgMB4GA1UEAxMXc2hxYS1XSU4tSDMwOVVQSTFMTVYtQ0EwggIiMA0GCSqG\nSIb3DQEBAQUAA4ICDwAwggIKAoICAQCxX7hZIMiXx+jpYLsbWuMJQdB6bcEfLYGh\nOkSuL+9IAaLPqCsBHBGFf6Z6HSR97FgltDtec+Aa5vxylxeZdhNlYM3JqgPUaDe0\nD89DsOakmv+OELwpcY4HgRRJWMilHs+8r4PK+zRHztiLsrSD2z4yTVszJPlqprg6\n96LOnwCfq6CI2eS+FIKkp/hC5WPmzQ4rp0H5SvIIhk9NPRCuD8+hlT6sRRdeTXCy\n8A6+0bfgnGqjNz+qE4j4CFysQsFMK2Ny4ZpcjddOeFf8C1XFsFlpr29l6ktRYK5v\nBidTojCyxh6eCdE7xaQI3s4/XRYcFjawh7YL2Fugy4bce9hfKcmmAceCiyZV7FXX\nuFc6gu07xUPfb6ltilNP8tMwERtdDPpV8OepNxDRdMBe+UwE0onHAcn+3sLFHXL+\nlBmNrlrcrt9CbZ2rFWjd0Zo+JSq1q8/pD/i5ZdeX1XnO9Hrer/h5VXRPlNXAjOCE\nt7nlQTetyWJchwMMazp14L3aOPTdhZCXcXdXT/75pBfVO/mppuJFGuOG52K4Jgh1\nd0VHqv4R7xGxuaFH7INiZ7Xh5I1VRWfsIeqcnVemKaSZM2cGa7vR2I+dWRFR0i6B\nULWmFm01B7qGZkeNLy5FSoP5+mgXE8aSiceRRak3rRzC7WnzXQIp4Trdih1pvYoH\n7+I3r72/jwIDAQABo1EwTzALBgNVHQ8EBAMCAYYwDwYDVR0TAQH/BAUwAwEB/zAd\nBgNVHQ4EFgQUKLZOJ9mVixLqUcyv2mrJneka9rwwEAYJKwYBBAGCNxUBBAMCAQAw\nDQYJKoZIhvcNAQEMBQADggIBABgyry1JK7hJWsW5B1XQnOKh8ybcC2WJiHC7QXvI\n2KJs6QaVkFATmDsYNuiCcUYNghTGHjJsCd33+aDjjDOd+lVIkk3/Tm/i9BQ86P42\naMe7hCcCEkBy+1fi4QTWil4UlDgi0Q3OHgDkUPXXqdK398ZKj2Z9IKU1KiizuEId\n8XN0mp8DkWDS9IuczPPM32vSpHQksLZpYvH5i2Eid8kke+4k6or+eskLCh7piUEM\nm8ixXQfDYq2djD2mVO0Pe+yDmgj0VmRl0kqeQnIVACrv6cUa46HlrgnLo1KRZkiS\nL+3XZgBkPBMmfnxmFVWIF5FMazCQZIixuMrshcjktoZ5eYTii0xsPaJ9gqpKDbdy\nDlPkVBaJeIFS4ll2IFv9ysG18F6YCcgaW0PM8HGYlnhvKL9UuoASXoh5DxYsGDpH\n3Yw9dF49vw8OR5VFGcrsYjuWTz9iH1DWfqP+NeLp1lBIsTYnPLn4pSlSTbh0xMR8\nniJ31JYd+d0IZbPbgA57LlDOTdqjIQsevga6h0WTm0O7mlE7LTCx/pTPBZKdC7EV\nYd/DTZUvJW+/lHQktUhbdUM3xsEk0qSRlZScy90o9qWQLNEPyLo3mtjiOsG565BH\n4zM2N2NT6aNEfbLG3Tr+u3AXk7LknNGDdUrtlG2WPuFkOOwQ95njXWCMsh1Fs4S5\n8ZFy\n-----END CERTIFICATE-----\n"
+    [Arguments]     ${CERT_BODY}    ${AD_CERTIFICATE}    ${ALIAS_NAME}
+    Log   \n-Import AD directory CA certificate    console=True
+    ${cert_body}=  Generate Certifiate Payload    ${CERT_BODY}    ${AD_CERTIFICATE}    ${ALIAS_NAME}
+    ${resp}=  Fusion Api Import External CA Certificates    ${cert_body}
+    Wait For Task2       ${resp}     50    5
+
+Generate Certifiate Payload
+    [Documentation]   Generate Certifiate Payload according to the cert body and certificate examples as below
+    ...    CERT_BODY = {'members': [{'type': "CertificateAuthorityInfo", 'certificateDetails': {'base64Data': '', 'aliasName': '', 'type': "CertificateDetailV2"}}],
+    ...                 'type': "CertificateAuthorityInfoCollection"
+    ...                }
+    ...    AD_CERTIFICATE = "-----BEGIN CERTIFICATE-----\nMIIFnzCCA4egAwIBAgIQNBy/lnhaPptAqtftwUlzzzANBgkqhkiG9w0BAQwFADBi\nMRMwEQYKCZImiZPyLGQBGRYDY29tMRMwEQYKCZImiZPyLGQBGRYDaHBlMRQwEgYK\nCZImiZPyLGQBGRYEc2hxYTEgMB4GA1UEAxMXc2hxYS1XSU4tSDMwOVVQSTFMTVYt\nQ0EwHhcNMTcwNzA0MDY0NzQ3WhcNMjIwNzA0MDY1NzQzWjBiMRMwEQYKCZImiZPy\nLGQBGRYDY29tMRMwEQYKCZImiZPyLGQBGRYDaHBlMRQwEgYKCZImiZPyLGQBGRYE\nc2hxYTEgMB4GA1UEAxMXc2hxYS1XSU4tSDMwOVVQSTFMTVYtQ0EwggIiMA0GCSqG\nSIb3DQEBAQUAA4ICDwAwggIKAoICAQCxX7hZIMiXx+jpYLsbWuMJQdB6bcEfLYGh\nOkSuL+9IAaLPqCsBHBGFf6Z6HSR97FgltDtec+Aa5vxylxeZdhNlYM3JqgPUaDe0\nD89DsOakmv+OELwpcY4HgRRJWMilHs+8r4PK+zRHztiLsrSD2z4yTVszJPlqprg6\n96LOnwCfq6CI2eS+FIKkp/hC5WPmzQ4rp0H5SvIIhk9NPRCuD8+hlT6sRRdeTXCy\n8A6+0bfgnGqjNz+qE4j4CFysQsFMK2Ny4ZpcjddOeFf8C1XFsFlpr29l6ktRYK5v\nBidTojCyxh6eCdE7xaQI3s4/XRYcFjawh7YL2Fugy4bce9hfKcmmAceCiyZV7FXX\nuFc6gu07xUPfb6ltilNP8tMwERtdDPpV8OepNxDRdMBe+UwE0onHAcn+3sLFHXL+\nlBmNrlrcrt9CbZ2rFWjd0Zo+JSq1q8/pD/i5ZdeX1XnO9Hrer/h5VXRPlNXAjOCE\nt7nlQTetyWJchwMMazp14L3aOPTdhZCXcXdXT/75pBfVO/mppuJFGuOG52K4Jgh1\nd0VHqv4R7xGxuaFH7INiZ7Xh5I1VRWfsIeqcnVemKaSZM2cGa7vR2I+dWRFR0i6B\nULWmFm01B7qGZkeNLy5FSoP5+mgXE8aSiceRRak3rRzC7WnzXQIp4Trdih1pvYoH\n7+I3r72/jwIDAQABo1EwTzALBgNVHQ8EBAMCAYYwDwYDVR0TAQH/BAUwAwEB/zAd\nBgNVHQ4EFgQUKLZOJ9mVixLqUcyv2mrJneka9rwwEAYJKwYBBAGCNxUBBAMCAQAw\nDQYJKoZIhvcNAQEMBQADggIBABgyry1JK7hJWsW5B1XQnOKh8ybcC2WJiHC7QXvI\n2KJs6QaVkFATmDsYNuiCcUYNghTGHjJsCd33+aDjjDOd+lVIkk3/Tm/i9BQ86P42\naMe7hCcCEkBy+1fi4QTWil4UlDgi0Q3OHgDkUPXXqdK398ZKj2Z9IKU1KiizuEId\n8XN0mp8DkWDS9IuczPPM32vSpHQksLZpYvH5i2Eid8kke+4k6or+eskLCh7piUEM\nm8ixXQfDYq2djD2mVO0Pe+yDmgj0VmRl0kqeQnIVACrv6cUa46HlrgnLo1KRZkiS\nL+3XZgBkPBMmfnxmFVWIF5FMazCQZIixuMrshcjktoZ5eYTii0xsPaJ9gqpKDbdy\nDlPkVBaJeIFS4ll2IFv9ysG18F6YCcgaW0PM8HGYlnhvKL9UuoASXoh5DxYsGDpH\n3Yw9dF49vw8OR5VFGcrsYjuWTz9iH1DWfqP+NeLp1lBIsTYnPLn4pSlSTbh0xMR8\nniJ31JYd+d0IZbPbgA57LlDOTdqjIQsevga6h0WTm0O7mlE7LTCx/pTPBZKdC7EV\nYd/DTZUvJW+/lHQktUhbdUM3xsEk0qSRlZScy90o9qWQLNEPyLo3mtjiOsG565BH\n4zM2N2NT6aNEfbLG3Tr+u3AXk7LknNGDdUrtlG2WPuFkOOwQ95njXWCMsh1Fs4S5\n8ZFy\n-----END CERTIFICATE-----\n"
+    [Arguments]     ${CERT_BODY}    ${AD_CERTIFICATE}    ${ALIAS_NAME}
+    ${body} =    Copy Dictionary    ${CERT_BODY}
+    Set To Dictionary    ${body['members'][0]['certificateDetails']}  base64Data    ${AD_CERTIFICATE}
+    Set To Dictionary    ${body['members'][0]['certificateDetails']}  aliasName     ${ALIAS_NAME}
+    Log   \n-body:${ALIAS_NAME} ${body} ...    console=True
+    [Return]    ${body}
+
+Remove CA By Allias Name
+    [Arguments]    ${alias_name}=${None}
+    [Documentation]    Removes a specified CA by alias name
+    ${resp} =    Fusion Api Remove External CA Certificates    ${alias_name}
+    Wait For Task2    ${resp}
+
+Generate Certificate Signing Request
+    [Documentation]    Generate Certificate Signing Request
+    ...        CSRInfo =  {
+    ...                "type": "CertificateSigningRequest",    # the type should be 'CertificateDtoV2' for API version 500
+    ...                "country": "US",
+    ...                "state": "California",
+    ...                "locality": "Palo Alto",
+    ...                "organization": "Hewlett Packard Enterprise",
+    ...                "commonName": "ci-005056b40365.vse.rdlabs.hpecorp.net",    # The key value, kept Null if not confirmed
+    ...                "organizationalUnit":"",
+    ...                "alternativeName": "",
+    ...                "contactPerson": "",
+    ...                "email": "",
+    ...                "surname": "",
+    ...                "givenName": "",
+    ...                "initials": "",
+    ...                "dnQualifier": "",
+    ...                "unstructuredName": "",
+    ...                "challengePassword": "",
+    ...                "cnsaCertRequested": False
+    ...        }
+    [Arguments]        ${CSRInfo}
+    Log    Getting the current appliance certificate commonName    console=Yes
+    ${resp} =  Fusion Api Get Appliance Certificate
+    ${commonName} =  Get From Dictionary    ${resp}    commonName
+    Set to Dictionary    ${CSRinfo}    commonName    ${commonName}
+    ${resp} =  Fusion Api Generate Certificate Signing Request      ${CSRinfo}
+    ${csr} =  Get From Dictionary    ${resp}    base64Data
+    [Return]    ${csr}

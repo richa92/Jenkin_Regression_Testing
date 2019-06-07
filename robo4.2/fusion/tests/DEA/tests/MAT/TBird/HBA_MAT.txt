@@ -1,0 +1,312 @@
+*** Settings ***
+Documentation     Test suite to verify Smoke test for HBA mezz cards Electron, Quartz using UEFI and Legeacy mode
+...               | pybot | -v GIT_REPO_ROOT:<repo root path> | -v APPLIANCE_IP:<ipv4> |FUSION_USERNAME:<username>| FUSION_PASSWORD:<password> | 
+...               |iLO_UserName:<ilousername> | iLO_Password:<ilopassword>  | Adapter_Type:Electron | Adapter_Bay:<bay number> | Enclosures:<enclosure name>
+...               |ICM_Bay_FC1:<icm bay fc1> | ethernet_vlan_id:<vlan id> | FCoE_WWPN:<fcoe wwpn> | FC_WWPN: <fc wwpn> | HBA_MAT.txt
+...               = Variables =
+...               | GIT_REPO_ROOT | Required: Repo root path if NOT defined in environment variable|
+              
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/dea_variables.py
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/data_variables.py
+Variables         ${GIT_REPO_ROOT}/fusion/tests/DEA/variables/smoke_data_variables.py
+Variables         ${GIT_REPO_ROOT}/mgmtfw/tests/thunderbird/variables/tBird_variables.py
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/resource_all.txt
+Resource          ${GIT_REPO_ROOT}${EM_RESOURCE_ROOT}/thunderbird_all.txt
+Resource          ${GIT_REPO_ROOT}${RESOURCE_ROOT}/Altair_Resource.txt
+Library           RoboGalaxyLibrary
+Library           FusionLibrary
+Library           MgmtFWLibrary
+Library           AltairLibrary
+Library           Collections
+Suite Setup       Login to Fusion Via REST
+Suite Teardown    Logout of Fusion Via REST
+
+*** Test Cases ***
+
+TC 01: Smoke Test for HBA Mezz card with profile in UEFI mode
+    [Documentation]    Verify smoke test for  HBA Mezz card with profile in UEFI mode
+    [Tags]    PE    API    Automated    HBA    UEFI
+    Set Test Variable    ${Test_Tag}    ${Adapter_Type}
+    ${mezz_list}=    Get Adapter Mezz Bay List    ${Adapter_Bay}    ${Adapter_Type}
+    Should Not Be Empty    ${mezz_list}    msg=No ${Adapter_Type} mezz adapter present in the servwe bay : ${Adapter_Bay}
+    Power OFF Server Blade Bay    ${Adapter_Bay}
+    
+    #Remove Server from Altair using Server Serial number if exists
+    ${sn}=    Get Server SerialNumber    ${Adapter_Bay}
+    Altair API Login
+    Remove Server from Altair via SerialNumber    ${sn}
+    
+    # Create Server profile with 2 connections , Ethernet and FC
+    common.Log to console and logfile    Creating server profile for bay : ${Adapter_Bay} with Ethernet and FC connection
+    ${server_profile_body}=    Build Server Profile body SAN Storage  ${Adapter_Bay}  ${server_profiles_3par[0]}  ${pxe_enet_fc_connection}  ${bootmode_uefi}  ${boot_order_uefi_pxe}
+    Create Server Profile    ${server_profile_body}
+    
+   #Power On the server and wait for POST to be completed and server registeration in Altair
+    common.Log to console and logfile    Powering on server bay : ${Adapter_Bay} and wait for server to boot
+    Power ON Server Blade Bay    ${Adapter_Bay}
+    ${ilo_ip}=    Get Server iLO IP    ${Adapter_Bay}
+    Wait for iLO Server POST Complete    ${ilo_ip}
+    Wait for Server Register in Altair via SerialNumber     ${sn}
+    
+    #Deploy OS on the profile using Altair and wait for job to be completed
+    ${Server_URI}=    Altair API Get Server URI    ${sn}
+    ${OSBP_URI}=    Altair API Get OS BuildPlan URI    ${OS_Build_Plan}
+    ${data}    ${Deployjoburi}=    Altair API Run OS Buildplan    ${Server_URI}    ${OSBP_URI}
+    ${status}=    Is Altair Job Complete    ${Deployjoburi}
+    Should Be True    ${status}
+    
+    #Login to iLO and get the Server OS IP to verify the network by pinging
+    common.Log to console and logfile    Verify network connection by pinging to OS IP after server boot
+    ${ilo_ip}=    Get Server iLO IP    ${Adapter_Bay}
+    ${status}=    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    iLO RIS Show Blade Firmware Table
+    ${os_ip}=    Wait for Server OS IP from iLO RIS
+    ${ping_status}=    Run And Return RC    ping ${os_ip} -n 1
+    ${ping_response}=    Run Keyword If    ${ping_status}==0    Set Variable    True
+    Should be True    ${ping_response}    msg=Unable to ping the server OS IP
+    
+    #Verify the Server hardware , type and port mmapping information
+    common.Log to console and logfile    Verifying Server Hardware, Type and Port mapping information for server bay : ${Adapter_Bay}
+    ${server_info}=    Get Server Info    ${Adapter_Bay}
+    Run Keyword And Ignore Error    Verify Server Harware Information    ${server_info}    On    ProfileApplied
+    Verify Mezz Port Information    ${server_info}    ${mezz_list}
+    Verify SHT Adapter Info    ${server_info}    ${mezz_list}
+    
+    #Verify SAN is still connected by changing the connection bandwidth
+    common.Log to console and logfile    Editing server profile for bay : ${Adapter_Bay} for online update with Ethernet BW change
+    Verify Connection BW Online Update with 3PAR    ${Adapter_Bay}  ${os_ip}  ${server_profiles_3par[0]}  ${pxe_enet_fc_connection}  ${bootmode_uefi}  ${boot_order_uefi_pxe}  ${requestedBW}  ${FC_WWPN}
+    
+    #Efuse the blade and verify for Profile Applied back once inserted
+    Login to Fusion via SSH
+    Login to EM And Create Session
+    common.Log to console and logfile    Efuse the server bay : ${Adapter_Bay} and wait for profile to be applied once discovered
+    EFuse Blade    EFuseOn    ${Adapter_Bay}
+    Sleep    20
+    EFuse Blade    EFuseOff    ${Adapter_Bay}
+    Sleep    150
+    common.Log to console and logfile    \t Waiting for Server in Bay:${Adapter_Bay} to reach state:ProfileApplied after Efuse
+    Wait Until Keyword Succeeds    15 min   20s    Device reached state    ${server_info['uri']}    ProfileApplied
+    Sleep    90     #wait time required after Profile Applied state to power on the server
+    Power OFF Server Blade Bay    ${Adapter_Bay}
+    ${ilo_ip}=    Get Server iLO IP    ${Adapter_Bay}
+    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    ilo_ris_set_boot_order     Unknown.Unknown.1
+    Power ON Server Blade Bay    ${Adapter_Bay}
+    Wait for iLO Server POST Complete    ${ilo_ip}
+    ${status}=    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    ${os_ip}=    Wait for Server OS IP from iLO RIS
+    ${ping_status}=    Run And Return RC    ping ${os_ip} -n 1
+    ${ping_response}=    Run Keyword If    ${ping_status}==0    Set Variable    True
+    Should be True    ${ping_response}    msg=Unable to ping the server OS IP
+    
+    #Verify Server refresh
+    Refresh Server Hardware Bay    ${Adapter_Bay}
+    ${ilo_ip}=    Get Server iLO IP    ${Adapter_Bay}
+    ${status}=    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    ${os_ip}=    Wait for Server OS IP from iLO RIS
+    ${ping_status}=    Run And Return RC    ping ${os_ip} -n 1
+    ${ping_response}=    Run Keyword If    ${ping_status}==0    Set Variable    True
+    Should be True    ${ping_response}    msg=Unable to ping the server OS IP
+    Logout of iLO
+    
+   #Verify profile can be removed
+    common.Log to console and logfile    Verifying profile can be removed for server bay : ${Adapter_Bay}
+    Power OFF Server Blade Bay    ${Adapter_Bay}
+    Remove Server Profile Blade Bay    ${Adapter_Bay}
+    ${profile_uri}=    Get Server Hardware Profile URI    ${Adapter_Bay}
+    Should Be Equal As Strings    ${profile_uri}    None
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Power OFF Server Blade Bay    ${Adapter_Bay}    AND    Remove Server Profile Blade Bay    ${Adapter_Bay}
+    ...    AND    Logout of iLO    AND    Logout of Fusion Via SSH
+
+TC 02: Smoke Test for HBA Mezz card with profile in Legacy mode
+    [Documentation]    Verify smoke test for  HBA Mezz card with profile in Legacy mode
+    [Tags]    PE    API    Automated    HBA    Legacy
+    Set Test Variable    ${Test_Tag}    ${Adapter_Type}
+    ${mezz_list}=    Get Adapter Mezz Bay List    ${Adapter_Bay}    ${Adapter_Type}
+    Should Not Be Empty    ${mezz_list}    msg=No ${Adapter_Type} mezz adapter present in the servwe bay : ${Adapter_Bay}
+    Power OFF Server Blade Bay    ${Adapter_Bay}
+
+     #Remove Server from Altair using Server Serial number if exists
+    ${sn}=    Get Server SerialNumber    ${Adapter_Bay}
+    Altair API Login
+    Remove Server from Altair via SerialNumber    ${sn}
+
+    # Create Server profile with 2 connections , Ethernet and FC
+    common.Log to console and logfile    Creating server profile for bay : ${Adapter_Bay} with Ethernet and FC connection
+    ${server_profile_body}=    Build Server Profile body SAN Storage  ${Adapter_Bay}  ${server_profiles_3par[0]}  ${pxe_enet_fc_connection}  ${bootmode_legacy}  ${boot_order_legacy_pxe}
+    Create Server Profile    ${server_profile_body}
+
+    #Power On the server and wait for POST to be completed and server registeration in Altair
+    common.Log to console and logfile    Powering on server bay : ${Adapter_Bay} and wait for server to boot
+    Power ON Server Blade Bay    ${Adapter_Bay}
+    Sleep    ${Server_Boot_Wait}
+    ${ilo_ip}=    Get Server iLO IP    ${Adapter_Bay}
+    Wait for iLO Server POST Complete    ${ilo_ip}
+    Wait for Server Register in Altair via SerialNumber     ${sn}
+
+    #Deploy OS on the profile using Altair and wait for job to be completed
+    ${Server_URI}=    Altair API Get Server URI    ${sn}
+    ${OSBP_URI}=    Altair API Get OS BuildPlan URI    ${OS_Build_Plan}
+    ${data}    ${Deployjoburi}=    Altair API Run OS Buildplan    ${Server_URI}    ${OSBP_URI}
+    ${status}=    Is Altair Job Complete    ${Deployjoburi}
+    Should Be True    ${status}
+
+    #Login to iLO and get the Server OS IP to verify the network by pinging
+    common.Log to console and logfile    Verify network connection by pinging to OS IP after server boot
+    ${ilo_ip}=    Get Server iLO IP    ${Adapter_Bay}
+    ${status}=    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    iLO RIS Show Blade Firmware Table
+    ${os_ip}=    Wait for Server OS IP from iLO RIS
+    ${ping_status}=    Run And Return RC    ping ${os_ip} -n 1
+    ${ping_response}=    Run Keyword If    ${ping_status}==0    Set Variable    True
+    Should be True    ${ping_response}    msg=Unable to ping the server OS IP
+
+    #Verify the Server hardware , type and port mmapping information
+    common.Log to console and logfile    Verifying Server Hardware, Type and Port mapping information for server bay : ${Adapter_Bay}
+    ${server_info}=    Get Server Info    ${Adapter_Bay}
+    Run Keyword And Ignore Error    Verify Server Harware Information    ${server_info}    On    ProfileApplied
+    Verify Mezz Port Information    ${server_info}    ${mezz_list}
+    Verify SHT Adapter Info    ${server_info}    ${mezz_list}
+
+    #Verify SAN is still connected by changing the connection bandwidth
+    common.Log to console and logfile    Editing server profile for bay : ${Adapter_Bay} for online update with Ethernet BW change
+    Verify Connection BW Online Update with 3PAR    ${Adapter_Bay}  ${os_ip}  ${server_profiles_3par[0]}  ${pxe_enet_fc_connection}  ${bootmode_legacy}  ${boot_order_legacy_pxe}  ${requestedBW}  ${FC_WWPN}
+
+    #Efuse the blade and verify for Profile Applied back once inserted
+    common.Log to console and logfile    Efuse the server bay : ${Adapter_Bay} and wait for profile to be applied once discovered
+    Login to Fusion via SSH
+    Login to EM And Create Session
+    EFuse Blade    EFuseOn    ${Adapter_Bay}
+    Sleep    20
+    EFuse Blade    EFuseOff    ${Adapter_Bay}
+    Sleep    150
+    common.Log to console and logfile    \t Waiting for Server in Bay:${Adapter_Bay} to reach state:ProfileApplied after Efuse
+    Wait Until Keyword Succeeds    15 min   20s    Device reached state    ${server_info['uri']}    ProfileApplied
+    Sleep    90     #wait time required after Profile Applied state to power on the server
+    Power OFF Server Blade Bay    ${Adapter_Bay}
+    ${ilo_ip}=    Get Server iLO IP    ${Adapter_Bay}
+    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    ilo_ris_set_boot_order     Unknown.Unknown.1
+    Power ON Server Blade Bay    ${Adapter_Bay}
+    Sleep    ${Server_Boot_Wait}
+    Wait for iLO Server POST Complete    ${ilo_ip}
+    ${status}=    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    ${os_ip}=    Wait for Server OS IP from iLO RIS
+    ${ping_status}=    Run And Return RC    ping ${os_ip} -n 1
+    ${ping_response}=    Run Keyword If    ${ping_status}==0    Set Variable    True
+    Should be True    ${ping_response}    msg=Unable to ping the server OS IP
+
+    #Verify Server refresh
+    Refresh Server Hardware Bay    ${Adapter_Bay}
+    ${ilo_ip}=    Get Server iLO IP    ${Adapter_Bay}
+    ${status}=    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    ${os_ip}=    Wait for Server OS IP from iLO RIS
+    ${ping_status}=    Run And Return RC    ping ${os_ip} -n 1
+    ${ping_response}=    Run Keyword If    ${ping_status}==0    Set Variable    True
+    Should be True    ${ping_response}    msg=Unable to ping the server OS IP
+    Logout of iLO
+
+    #Verify profile can be removed
+    common.Log to console and logfile    Verifying profile can be removed for server bay : ${Adapter_Bay}
+    Power OFF Server Blade Bay    ${Adapter_Bay}
+    Remove Server Profile Blade Bay    ${Adapter_Bay}
+    ${profile_uri}=    Get Server Hardware Profile URI    ${Adapter_Bay}
+    Should Be Equal As Strings    ${profile_uri}    None
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Power OFF Server Blade Bay    ${Adapter_Bay}    AND    Remove Server Profile Blade Bay    ${Adapter_Bay}
+    ...    AND    Logout of iLO    AND    Logout of Fusion Via SSH
+    
+TC 03: Smoke Test for HBA Mezz card with profile in UEFI Optimized mode
+    [Documentation]    Verify smoke test for  HBA Mezz card with profile in UEFI Optimized mode
+    [Tags]    PE    API    Automated    HBA    UEFIOptimized
+    Set Test Variable    ${Test_Tag}    ${Adapter_Type}
+    ${mezz_list}=    Get Adapter Mezz Bay List    ${Adapter_Bay}    ${Adapter_Type}
+    Should Not Be Empty    ${mezz_list}    msg=No ${Adapter_Type} mezz adapter present in the servwe bay : ${Adapter_Bay}
+    Power OFF Server Blade Bay    ${Adapter_Bay}
+    
+    #Remove Server from Altair using Server Serial number if exists
+    ${sn}=    Get Server SerialNumber    ${Adapter_Bay}
+    Altair API Login
+    Remove Server from Altair via SerialNumber    ${sn}
+    
+    # Create Server profile with 2 connections , Ethernet and FC
+    common.Log to console and logfile    Creating server profile for bay : ${Adapter_Bay} with Ethernet and FC connection
+    ${server_profile_body}=    Build Server Profile body SAN Storage  ${Adapter_Bay}  ${server_profiles_3par[0]}  ${pxe_enet_fc_connection}  ${bootmode_uefioptimized}  ${boot_order_uefi_pxe}
+    Create Server Profile    ${server_profile_body}
+    
+   #Power On the server and wait for POST to be completed and server registeration in Altair
+    common.Log to console and logfile    Powering on server bay : ${Adapter_Bay} and wait for server to boot
+    Power ON Server Blade Bay    ${Adapter_Bay}
+    ${ilo_ip}=    Get Server iLO IP    ${Adapter_Bay}
+    Wait for iLO Server POST Complete    ${ilo_ip}
+    Wait for Server Register in Altair via SerialNumber     ${sn}
+    
+    #Deploy OS on the profile using Altair and wait for job to be completed
+    ${Server_URI}=    Altair API Get Server URI    ${sn}
+    ${OSBP_URI}=    Altair API Get OS BuildPlan URI    ${OS_Build_Plan}
+    ${data}    ${Deployjoburi}=    Altair API Run OS Buildplan    ${Server_URI}    ${OSBP_URI}
+    ${status}=    Is Altair Job Complete    ${Deployjoburi}
+    Should Be True    ${status}
+    
+    #Login to iLO and get the Server OS IP to verify the network by pinging
+    common.Log to console and logfile    Verify network connection by pinging to OS IP after server boot
+    ${ilo_ip}=    Get Server iLO IP    ${Adapter_Bay}
+    ${status}=    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    iLO RIS Show Blade Firmware Table
+    ${os_ip}=    Wait for Server OS IP from iLO RIS
+    ${ping_status}=    Run And Return RC    ping ${os_ip} -n 1
+    ${ping_response}=    Run Keyword If    ${ping_status}==0    Set Variable    True
+    Should be True    ${ping_response}    msg=Unable to ping the server OS IP
+    
+    #Verify the Server hardware , type and port mmapping information
+    common.Log to console and logfile    Verifying Server Hardware, Type and Port mapping information for server bay : ${Adapter_Bay}
+    ${server_info}=    Get Server Info    ${Adapter_Bay}
+    Run Keyword And Ignore Error    Verify Server Harware Information    ${server_info}    On    ProfileApplied
+    Verify Mezz Port Information    ${server_info}    ${mezz_list}
+    Verify SHT Adapter Info    ${server_info}    ${mezz_list}
+    
+    #Verify SAN is still connected by changing the connection bandwidth
+    common.Log to console and logfile    Editing server profile for bay : ${Adapter_Bay} for online update with Ethernet BW change
+    Verify Connection BW Online Update with 3PAR    ${Adapter_Bay}  ${os_ip}  ${server_profiles_3par[0]}  ${pxe_enet_fc_connection}  ${bootmode_uefioptimized}  ${boot_order_uefi_pxe}  ${requestedBW}  ${FC_WWPN}
+    
+    #Efuse the blade and verify for Profile Applied back once inserted
+    Login to Fusion via SSH
+    Login to EM And Create Session
+    common.Log to console and logfile    Efuse the server bay : ${Adapter_Bay} and wait for profile to be applied once discovered
+    EFuse Blade    EFuseOn    ${Adapter_Bay}
+    Sleep    20
+    EFuse Blade    EFuseOff    ${Adapter_Bay}
+    Sleep    150
+    common.Log to console and logfile    \t Waiting for Server in Bay:${Adapter_Bay} to reach state:ProfileApplied after Efuse
+    Wait Until Keyword Succeeds    15 min   20s    Device reached state    ${server_info['uri']}    ProfileApplied
+    Sleep    90     #wait time required after Profile Applied state to power on the server
+    Power OFF Server Blade Bay    ${Adapter_Bay}
+    ${ilo_ip}=    Get Server iLO IP    ${Adapter_Bay}
+    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    ilo_ris_set_boot_order     Unknown.Unknown.1
+    Power ON Server Blade Bay    ${Adapter_Bay}
+    Wait for iLO Server POST Complete    ${ilo_ip}
+    ${status}=    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    ${os_ip}=    Wait for Server OS IP from iLO RIS
+    ${ping_status}=    Run And Return RC    ping ${os_ip} -n 1
+    ${ping_response}=    Run Keyword If    ${ping_status}==0    Set Variable    True
+    Should be True    ${ping_response}    msg=Unable to ping the server OS IP
+    
+    #Verify Server refresh
+    Refresh Server Hardware Bay    ${Adapter_Bay}
+    ${ilo_ip}=    Get Server iLO IP    ${Adapter_Bay}
+    ${status}=    Login to iLO ipv4    ${ilo_ip}    ${iLO_UserName}    ${iLO_Password}
+    ${os_ip}=    Wait for Server OS IP from iLO RIS
+    ${ping_status}=    Run And Return RC    ping ${os_ip} -n 1
+    ${ping_response}=    Run Keyword If    ${ping_status}==0    Set Variable    True
+    Should be True    ${ping_response}    msg=Unable to ping the server OS IP
+    Logout of iLO
+    
+   #Verify profile can be removed
+    common.Log to console and logfile    Verifying profile can be removed for server bay : ${Adapter_Bay}
+    Power OFF Server Blade Bay    ${Adapter_Bay}
+    Remove Server Profile Blade Bay    ${Adapter_Bay}
+    ${profile_uri}=    Get Server Hardware Profile URI    ${Adapter_Bay}
+    Should Be Equal As Strings    ${profile_uri}    None
+    [Teardown]    Run Keyword If Test Failed    Run Keywords    Power OFF Server Blade Bay    ${Adapter_Bay}    AND    Remove Server Profile Blade Bay    ${Adapter_Bay}
+    ...    AND    Logout of iLO    AND    Logout of Fusion Via SSH
+    

@@ -1,0 +1,192 @@
+*** Settings ***
+Library				RoboGalaxyLibrary
+Library				FusionLibrary
+Library				OperatingSystem
+Library				BuiltIn
+Library				Collections
+Library				XML
+Library		        SSHLibrary
+Library				String
+Library				Dialogs
+
+*** Keywords ***
+LI ${li_name} ${attribute} should be ${value}
+    [Documentation]    Checks the ${li_name} LI ${attribute} matches the expected ${value}.
+    ...                example:   <LI name>   consistencyStatus    CONSISTENT
+    ${li_uri} =        Get LI URI    ${li_name}
+    ${resp} =          Get Resource by URI    ${li_uri}
+    ${actual} =        Get from dictionary    ${resp}   ${attribute}
+    should be equal    ${actual}    ${value}
+
+Get Logical Interconnects and Verify
+    [Documentation]  Get Logical Interconnects and Verify
+	${response} =  Fusion API Get LI
+	${status}  ${error_message} =  Run Keyword and Ignore Error  Get From Dictionary  ${response}  message
+	Dictionary Should Not Contain Key  ${response}  message  ${error_message}
+
+Get LI member
+    [Documentation]  Get LI member
+	[Arguments]		${li}
+	${resp} = 	    Fusion Api Get LI
+	${l} = 	Get Length	${resp['members']}
+	:FOR	${x}	IN RANGE	0	${l}
+	\ 	Run Keyword If 	'${resp['members'][${x}]['name']}' != '${li}'		Continue For Loop
+	\	${member} = 	Get From List		${resp['members']}  ${x}
+	[Return]	${member}
+
+Get LI URI
+    [Documentation]  Get LI URI
+	[Arguments]		${li}
+	${resp} = 	Fusion Api Get LI
+	#${count} =  Get From Dictionary  ${resp}  count
+	#Return from keyword if  $count==0  '/bad_logical_interconnect_uri'
+	#${uri} = 	Get From Dictionary  ${resp['members'][0]}  uri
+	#[Return]	${uri}
+	${count} =  Get From Dictionary  ${resp}  count
+	Return from keyword if  $count==0  'No logical interconnects were found'
+	${l} = 	Get Length	${resp['members']}
+	:FOR	${x}	IN RANGE	0	${l}
+	\	${uri} = 	Get From Dictionary		${resp['members'][${x}]}	uri
+	\ 	Run Keyword If 	'${resp['members'][${x}]['name']}' == '${li}'		Return From Keyword 	${uri}
+	Log  '/bad_logical_interconnect_uri'
+	[Return]	${False}
+
+
+Update Logical Interconnect from Group
+    [Documentation]  Update Logical interconnect from group
+    ...              Example:
+    ...                Update Logical interconnect from Group  ${dto}
+    ...              Data Required:
+    ...                Logical Enclosure DTO
+    [Arguments]  ${dto}   ${VERIFY}=False    ${timeout}=3000    ${interval}=10
+    ${name} =  Get From Dictionary  ${dto}  name
+    ${liuri} =  Get LI URI  ${name}
+    Log 	liuri:${liuri}
+    Log 	${\n}Update Logical Interconnect ${name} from group
+    ${respli} =  Get LI member  ${name}
+    Log 	${\n}Update Logical Interconnect ${liuri} from group if consistency-status is non-consistent
+    ${resp} =    Run keyword If    '${respli['consistencyStatus']}' == 'NOT_CONSISTENT'    Fusion Api Update From Group    ${liuri}
+    ...    ELSE IF        '${respli['consistencyStatus']}' == 'CONSISTENT'    Log     Logical Interconnect:${name} is already in Consistent state     ERROR
+    ${status}  ${task_uri} =  Run Keyword and Ignore Error  Get From Dictionary  ${resp['headers']}  location
+    Return From Keyword If    '${status}'=='FAIL'    ${resp}
+    Log  The task URI is ${task_uri}
+	${task} =  Fusion Api Get Task  uri=${task_uri}
+    Wait For Task2  ${task}  timeout=${timeout}  interval=${interval}
+    ${response} =    Run keyword If    '${VERIFY}'=='True'    Get LI member    ${name}
+	Run keyword If    '${VERIFY}'=='True'
+     ...    Run keyword If     '${response['consistencyStatus']}' == 'CONSISTENT'    Log     After updateFromGroup the Logical Interconnect:${name} is back to Consistent state
+    Run keyword If  '${VERIFY}'=='True'
+    ...    Run keyword If    '${response['consistencyStatus']}' == 'NOT_CONSISTENT'    Log     After updateFromGroup the Logical Interconnect:${name} is not back to Consistent state     ERROR
+
+Update Logical Interconnect Internal Network
+    [Documentation]  Update Logical interconnect internal network
+    ...              Example:
+    ...                Update Logical interconnect internal network  ${li_name}  ${dto}
+    ...              Data Required:
+    ...                logical interconnect name:  wpst33-LIG-wpst33
+    ...                internal network uri list:  ['ETH:eth1']
+    [Arguments]  ${li_name}   ${dto}
+    ${body} =   Create List
+    ${li_uri} =    Get LI URI    ${li_name}
+    ${body} =    Run Keyword For List    ${dto}    Common URI lookup by name
+    ${resp} =    Fusion Api Update Li Internal Networks    ${body}    ${li_uri}
+    [Return]     ${resp}
+
+Remove Given Logical Interconnect
+	[Documentation]	Querys the appliance for all Enclosures and then removes them and then verifies the removal of Logical interconnects as well
+	[Arguments]  ${encname}   ${liname}    ${VERIFY}=False    ${STATUS_CODE}=404
+	Log  	Removing LOGICAL INTERCONNECTS   console=True
+	#${encerror} =    Set Variable    '/bad_enclosure_uri'
+	${liuri} =  Get LI URI  ${liname}
+	Should Not Contain    ${liuri}    bad_logical_interconnect_uri    msg=${liuri}
+	${encuri} =    Get Enclosure URI    ${encname}
+	Should Not Contain    ${encuri}    bad_enclosure_uri    msg=${encuri}
+	${resp} = 	   Fusion Api Remove Enclosure		uri=${encuri}
+	${task} =	   Wait For Task 	${resp} 	240s	10s
+	${val} =       Create Dictionary   taskState=Completed
+	${result} =    Validate Response    ${task}	${val}
+	${liresponse} =    Run keyword If    '${VERIFY}'=='True'    	Fusion Api Get LI        param='${liuri}'
+    Run Keyword If	       '${VERIFY}'=='True' and '${liresponse['status_code']}' == '${STATUS_CODE}'     Log       Delete SUCCESS for LI:${liuri} and its Response:${liresponse}
+	...    ELSE IF         '${VERIFY}'=='True' and '${liresponse['status_code']}' != '${STATUS_CODE}'     Log       Deleted FAILED for URI:${liuri} and its Response:${liresponse}     ERROR
+
+
+Edit Telemetry Configurations for LI
+	[Documentation]	 	Edit the  LI for telemetry configuration
+	[Arguments]  		${dto}
+	Log  	Edit LI for telemetry configuration   console=True
+    ${dto} =    Copy Dictionary   ${dto}
+	${name} =  Get From Dictionary  ${dto}  name
+	${LIData}=  Get LI member  ${name}
+	${telemetryURI}=  Get From Dictionary  ${LIData['telemetryConfiguration']}  uri
+	${telemetryName}=  Get From Dictionary  ${LIData['telemetryConfiguration']}  name
+	Set to dictionary   ${dto}    uri  ${telemetryURI}
+	Set to dictionary   ${dto}    name  ${telemetryName}
+	${response}=  Fusion Api Update LI Telemetry Configuration   ${dto}   uri=${telemetryURI}
+	[Return]    ${response}
+
+Get Logical Interconnect Status
+    [Documentation]        Get the state for a given logical interconnect and return consistent state
+    ...                    Example:
+    ...                         Get Logical Interconnect Status  ${li_name}
+    [Arguments]        ${li}
+    ${resp} =     Fusion Api Get LI
+    ${count} =  Get From Dictionary  ${resp}  count
+    Return from keyword if  $count==0  'No logical interconnects were found'
+    ${l} =     Get Length    ${resp['members']}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    ${consistencyStatus} =  Run Keyword If     '${resp['members'][${x}]['name']}' == '${li}'       Get From Dictionary        ${resp['members'][${x}]}    consistencyStatus
+    \    Run Keyword if  '${consistencyStatus}' == 'NOT_CONSISTENT'    Exit for Loop
+    \    Run Keyword if  '${consistencyStatus}' == 'CONSISTENT'        Exit for Loop
+    [Return]    ${consistencyStatus}
+
+
+Check LI Status
+    [Documentation]        Get and check the state for a given logical interconnect and return consistent state
+    ...                    Example:
+    ...                         Get LI Status  ${li_name}     CONSISTENT
+    [Arguments]        ${li}     ${status}
+    ${resp} =     Fusion Api Get LI
+    ${count} =  Get From Dictionary  ${resp}  count
+    Return from keyword if  $count==0  'No logical interconnects were found'
+    ${l} =     Get Length    ${resp['members']}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    ${consistencyStatus} =  Run Keyword If     '${resp['members'][${x}]['name']}' == '${li}'       Get From Dictionary        ${resp['members'][${x}]}    consistencyStatus
+    \    Run Keyword if  '${consistencyStatus}' == 'NOT_CONSISTENT'    Exit for Loop
+    \    Run Keyword if  '${consistencyStatus}' == 'CONSISTENT'        Exit for Loop
+    Run Keyword if  '${consistencyStatus}' == 'None'     FAIL    'LI Consistency status is None'
+    Should Be Equal   ${consistencyStatus}   ${status}
+    [Return]    ${consistencyStatus}
+
+Logical Interconnect Consistency Status Should Be
+    [Documentation]         Runs the Check LI Status keyword and retries if it fails.
+    ...                     If the keyword does not succeed regardless of retries, this keyword fails. If the executed keyword passes, its return value is returned.
+    ...                     Example:
+    ...                          Logical Interconnect Consistency Status Should Be    ${li_name}    CONSISTENT
+    [Arguments]        ${li}    ${status}   ${timeout}=15s    ${retry_interval}=5
+    Wait Until Keyword Succeeds  ${timeout}    ${retry_interval}    Check LI Status   ${li}    ${status}
+
+Get All Logical Interconnect Uris
+    [Documentation]    Get Resources Uris list and return it
+    ${resp} =    Fusion Api Get Li
+    ${memb_list} =    Get From Dictionary    ${resp}    members
+    ${uri_list} =    Create List
+    :FOR    ${memb}    IN    @{memb_list}
+    \       ${uri} =    Get From Dictionary    ${memb}    uri
+    \       Append To List    ${uri_list}    ${uri}
+    [Return]      ${uri_list}
+
+PATCH LI should complete successfully
+    [arguments]    ${li}    ${body}
+    [Documentation]    Patch the LI as per body content
+    ...                This keyword can also be used to modify the LI downlink speed
+    ...                Example: If user want to change LI downlink speed to below supported speeds 
+    ...                'SPEED_10GB', 'SPEED_25GB', 'SPEED_50GB'
+    ...                PATCH LI should complete successfully    ${li_name}    ${li_edit_speed_50gb}
+    ...                Body - ${li_edit_speed_50gb} format is as below
+    ...                li_edit_speed_50gb = [{"op":"replace","path":"/downlinkSpeedMode","value":"SPEED_25_50GB"}]
+	${liuri}    Get LI URI   ${li}
+	${resp}    fusion_api_patch_li    uri=${liuri}   body=${body}
+    ${task}=    Wait For Task    ${resp}     600s    10s
+    ${valDict} =    Create Dictionary    status_code=${200}
+    ...                                  taskState=Completed
+    Validate Response   ${task}     ${valDict}

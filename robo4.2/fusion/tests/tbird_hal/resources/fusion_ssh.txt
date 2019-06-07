@@ -1,0 +1,335 @@
+*** Settings ***
+Documentation   Fusion SSH          keywords
+...             = Usage =
+...             | Resource | ../resources/fusion_ssh.txt |
+Library         Collections
+Library         String
+Library         SSHLibrary
+Library         json
+Library         OperatingSystem
+Library         RoboGalaxyLibrary   # DVTs Robot Framework extensions
+Library         FusionLibrary       # DVTs Robot Framework extensions
+Library         XML
+Resource        ../resources/defaults.txt    
+
+*** Variables ***
+${DCS_Package}    dcs
+${BACKSPACE}      \u0008
+${COMMAND END}    <enter>
+${READ DELAY}     0.5
+
+*** Keywords ***
+
+# -----------------------------------------------------------------------------
+#   FUSION BASH SHELL INTERFACE KEYWORDS
+# -----------------------------------------------------------------------------
+Login to Fusion via SSH
+    [Documentation]             Connect to Fusion VM Bash via SSH
+    ...                         Example:\n| Login to Fusion Via SSH | 10.0.12.106 | Administrator | hpvse123 |
+    [Arguments]                 ${IP}=${FUSION IP}      ${USERNAME}=${FUSION_SSH_USERNAME}
+    ...                         ${PASSWORD}=${FUSION_SSH_PASSWORD}    ${PROMPT}=${FUSION_PROMPT}              
+    ...                         ${TIMEOUT}=${FUSION_TIMEOUT}    ${ALIAS}=Fusion_SSH
+    Log Many                    ${IP}                   ${USERNAME}     ${PASSWORD}     ${PROMPT}   ${TIMEOUT}
+    Set Default Configuration   prompt=${PROMPT}        timeout=${TIMEOUT}
+    ${Id}=                      Open Connection         ${IP}    alias=${ALIAS}
+    ${Output}=                  Login                   ${USERNAME}     ${PASSWORD}
+    [Return]                    ${Id}
+
+Logout of Fusion Via SSH
+    [Documentation]     Exits the current Bash SSH session
+    ...                 Example:\n| Logout Of Fusion Via SSH |
+    Close Connection
+
+Execute SSH Command
+    [Documentation]     Executes given command on the Fusion SSH shell
+    ...                 Example:\n| Execute CLI Command | show enclosure list |
+    [Arguments]         ${Command}      ${PROMPT}=${FUSION PROMPT}
+    SSHLibrary.Write    ${Command}
+    ${Output}=          Read until      ${PROMPT}
+    [Return]            ${Output}
+
+# -----------------------------------------------------------------------------
+#   FUSION RIS COMMANDS ON BASH SHELL
+# -----------------------------------------------------------------------------
+
+Execute DCS API Command via CLI
+    [Documentation]     Executes a REST call via CLI
+    ...                 Example:\n| Execute CLI Command | show enclosure list |
+    [Arguments]         ${Type}     ${Path}     ${Body}=${None}     ${IP}=${EM IP}      ${PROMPT}=${FUSION PROMPT}    ${PROTOCOL}=https
+
+    # Execute CLI Command
+    Set Suite Variable      ${CMD}
+    ...                     curl -k -i -H "auth:X" -H "content-type:application/json" -H "Accept:application/json" --noproxy ${IP} -X ${Type} "${PROTOCOL}://${IP}${FUSION_NIC_SUFFIX}/${Path}"
+
+    # Build Body and append to command
+    ${Body}=            Run Keyword IF          ${Body} != ${None}
+    ...                 Evaluate                json.dumps(${Body})     json
+    Run Keyword If      ${Body} != ${None}
+    ...                 Set Suite Variable      ${CMD}                  ${CMD} -d '${Body}'
+    Log                 ${CMD}
+
+    # Append grep to command for easier parsing
+    Set Suite Variable      ${CMD}      ${CMD} | grep }
+    Log                     ${CMD}
+
+    ${Output}=      Execute CLI Command     ${CMD}      ${PROMPT}
+
+    # Get response from output
+    ${Lines}=               Split To Lines              ${Output}
+    Log List                ${Lines}
+    ${Number Of Lines}=     Get Length                  ${Lines}
+    Should be True          ${Number Of Lines} >= 7     msg=Output is too short. API call has likely failed.
+    ${Response}=            Get From List               ${Lines}    -2
+
+    # Conver response text into JSON Dictionary Structure
+    ${JSON}=            Evaluate    json.loads('''${Response}''')   json
+    Log Dictionary      ${JSON}
+
+    [Return]    ${JSON}
+
+# -----------------------------------------------------------------------------
+#   FUSION RESET
+# -----------------------------------------------------------------------------
+Reset Fusion Appliance to Factory Default
+    [Documentation]     Return the Fusion Appliance to the factory default state
+
+    # First, prevent the CIM iLo from being reset with a Fusion Factory Reset
+    Prevent CIM iLo Reset From Fusion Factory Reset
+
+    Login to Fusion via SSH
+    Set Default Configuration               timeout=900     # Some commands (below) take a long time
+    @{Commands}         Create List         /ci/bin/cic-factory-reset
+    ...                 /ci/bin/afterFactoryReset.sh        # ~12 minutes
+    :FOR                ${Command}          IN              @{Commands}
+    \                   ${stdout}           ${stderr}       ${rc}=      Execute Command     ${Command}      return_stderr=True
+    \                   ...                 return_rc=True
+    \                   Log                 ${stdout}
+    \                   Should Be Empty     ${stderr}       msg=Error returned: ${rc} ${stderr}
+    \                   Should Be Equal As Integers         ${rc}       0                   msg=non-zero return code ${rc}
+    Logout of Fusion Via SSH
+
+# -----------------------------------------------------------------------------
+#   FUSION DCS KEYWORDS
+# -----------------------------------------------------------------------------
+Get DCS Status
+    [Documentation]         Returns current state of DCS
+    Set Suite Variable      ${Command}      dcs status
+    ${stdout}               ${stderr}       ${rc}=      Execute Command     ${Command}      return_stderr=True
+    ...                     return_rc=True
+    Log                     ${stdout}
+    Log                     ${stderr}
+
+    # Verify messages
+    ${stdout}=      Split To Lines      ${stdout}
+    ${status}=      Get From List       ${stdout}               0
+    ${match}        ${group1}=          Should match Regexp     ${status}   (?im)DCS is (.*)
+    [Return]        ${group1}
+
+IsDCSInstalled
+    [Documentation]         Boolean.  Returns True if DCS is installed
+    Set Suite Variable      ${rtn}          ${False}
+    Set Suite Variable      ${Command}      yum list installed ${DCS_Package}
+    ${stdout}               ${stderr}       ${rc}=      Execute Command     ${Command}      return_stderr=True
+    ...                     return_rc=True
+    Log                     ${stdout}
+    Log                     ${stderr}
+
+    Run Keyword If          ${rc}==0        Set Suite Variable    ${rtn}    ${True}
+    [Return]    ${rtn}
+
+Get DCS Schematic
+    [Documentation]         Returns path of Schematic used by DCS
+    Set Suite Variable      ${Command}      dcs status
+    ${stdout}               ${stderr}       ${rc}=      Execute Command     ${Command}      return_stderr=True
+    ...                     return_rc=True
+    Log                     ${stdout}
+    Log                     ${stderr}
+
+    # Verify messages
+    ${match}    ${group1}=      Should match Regexp     ${stdout}   (?im).*Schematic used:\\s+(\\S+)
+    [Return]    ${group1}
+
+Start Tbird DCS
+    [Documentation]         Starts DCS process
+    [Arguments]             ${SCHEMATIC}=${TBIRD SCHEMATIC}
+
+    Set Suite Variable      ${Command}      dcs start /dcs/schematic/${SCHEMATIC} cold
+    ${stdout}               ${stderr}       ${rc}=      Execute Command     ${Command}      return_stderr=True
+    ...                     return_rc=True
+    Log                     ${stdout}
+    Log                     ${stderr}
+
+    # Verify messages
+    Should match Regexp     ${stdout}   (?im).*Schematic location : /dcs/schematic/${SCHEMATIC}
+    Should match Regexp     ${stdout}   (?im).*mode : cold
+    Should match Regexp     ${stdout}   (?im).*(DCS daemon is already running|Data Center Simulator started)
+    Should match Regexp     ${stdout}   (?im).*DCS daemon process id \\d+
+
+    [Return]                ${stdout}
+
+Stop DCS
+    [Documentation]         Stops DCS Process
+
+    Set Suite Variable      ${Command}      dcs stop
+    ${stdout}               ${stderr}       ${rc}=        Execute Command    ${Command}    return_stderr=True
+    ...                     return_rc=True
+    Log                     ${stderr}
+    Log                     ${stdout}
+
+    # Verify messages
+    ${match}    ${group1}=      Should match Regexp     ${stdout}   (?im).*(DCS Stopped .. Done !!|DCS daemon\\s+is not running)
+
+    [Return]    ${group1}
+
+Restart DCS
+    [Documentation]    Restart DCS using specific TBIRD Schematic
+    [Arguments]        ${SCHEMATIC}=${TBIRD SCHEMATIC}
+
+    # Validation of STOP and START of DCS occurs within the keywords.  No need to recheck success or failure
+    # here.
+    Stop DCS
+    ${stdout}=    Start Tbird DCS    ${TBIRD SCHEMATIC}
+    [Return]    ${stdout}
+
+# -----------------------------------------------------------------------------
+#   SET EM CREDENTIALS
+# -----------------------------------------------------------------------------
+Prepare Credentials File
+    [Documentation]     Prepare tbird-em-credentials.json to talk to the desired EM
+    Login to Fusion via SSH
+    ${stdout}           ${stderr}   ${rc}   Execute Command
+    ...                 echo '{"credentials":[{"id":"CUSTOM","ipAddr":"${EM IP}","user":"Administrator"}]}' > /ci/data/tbird/tbird-em-credentials.json
+    ...                 return_stderr=True
+    ...                 return_rc=True
+    Log                 ${stdout}
+    Should Be Empty     ${stderr}   msg=Could not make tbird-em-credentials.json: ${rc} ${stderr}
+    Should Be Equal As Integers     ${rc}   0   msg=non-zero return code ${rc}
+    Logout of Fusion Via SSH
+
+# -----------------------------------------------------------------------------
+#   CI DEVMODE DEVELOPER LOG MANAGEMENT
+# -----------------------------------------------------------------------------
+Clear CI Developer Logs
+    [Documentation]             Deletes all ciDebug.*.log files from a TBird appliance
+    [Arguments]                 ${IP}=${FUSION_IP}      ${USERNAME}=${FUSION_SSH_USERNAME}
+    ...                         ${PASSWORD}=${FUSION_SSH_PASSWORD}
+    Set Library Search Order    SSHLibrary
+
+    # Open an SSH connection to the TBird appliance and remove the files
+    ${Id}=              Open Connection             ${IP}
+    ${Output}=          Login                       ${USERNAME}         ${PASSWORD}
+    Execute Command     rm -f /ci/logs/ciDebug.*
+    @{Files}            List Files In Directory     .                   pattern=ciDebug.*
+    Run Keyword And Continue On Failure             Length Should Be    item=@{Files}   length=${0}
+    ...                 msg=Did not appear to delete all ciDebug log files.
+    Close Connection
+
+Save CI Developer Logs
+    [Documentation]             Saves the ciDebug.*.log files from a TBird appliance to the eml mount through Jenkins
+    [Arguments]                 ${IP}=${FUSION_IP}      ${USERNAME}=${FUSION_SSH_USERNAME}
+    ...                         ${PASSWORD}=${FUSION_SSH_PASSWORD}
+    Set Library Search Order    SSHLibrary
+
+    # 1. open an SFTP connection to the TBird appliance so we can save the files locally
+    ${Id}=          Open Connection             ${IP}
+    ${Output}=      Login                       ${USERNAME}     ${PASSWORD}
+    Get File        /ci/logs/ciDebug.*
+    Close Connection
+    # 2. rename the files locally
+    ${yyyy}         ${mmon}                     ${dd}           ${hh}   ${mmin}     ${ss}   Get Time
+    ...             year,month,day,hour,min,sec
+    ${Prefix}       Set Variable                ${yyyy}${mmon}${dd}-${hh}${mmin}${ss}-${IP}-
+    @{Files}        List Files In Directory     .               pattern=ciDebug.*
+    : For           ${File}                     in              @{Files}
+    \               Move File                   ${File}         ${Prefix}${File}
+    \               Set Suite Metadata          ${File}
+    \               ...                         http://jenkins.rsn.hp.com:8080/eml.usa.hp.com/eMgmt/HAL/${Prefix}${File}
+    # 3. put the files on EML by way of Jenkins
+    ${Id}=          Open Connection             jenkins.rsn.hp.com
+    ${Output}=      Login                       root            HPvse123
+    Put File        ${Prefix}ciDebug.*          /mnt/emlmount/eMgmt/HAL/
+    Close Connection
+    # 4. remove the local copies of the log files
+    Remove File     ${Prefix}ciDebug.*
+
+# -----------------------------------------------------------------------------
+#   WORKAROUND KEYWORDS
+# -----------------------------------------------------------------------------
+Modify credentials file for DCS CLI Workaround
+    # Open a new connection to Fusion Bash shell 
+    Switch Connection   Fusion_SSH
+
+    # Get current credentials and load into JSON structure
+    ${output}=      Execute SSH Command     cat ${EM Credentials File}
+    ${lines}=       Split to lines          ${output}
+    Log List        ${lines}
+    ${line}=        Get From List           ${lines}                    0
+    ${line}=        Fetch From Left         ${line}                     [root
+    ${JSON}=        Evaluate                json.loads('''${line}''')   json
+    Log             ${JSON}
+
+    # Move original credentials file
+    Execute SSH Command     mv ${EM Credentials File} ${EM Credentials File}.original
+
+    # Get Values from credentials file
+    ${credentials}=     Get From Dictionary     ${JSON}             credentials
+    ${credentials}=     Get From List           ${credentials}      0
+    ${fpw}=             Get From Dictionary     ${credentials}      fpw
+    ${id}=              Get From Dictionary     ${credentials}      id
+    ${ipAddr}=          Get From Dictionary     ${credentials}      ipAddr
+    ${pw}=              Get From Dictionary     ${credentials}      pw
+    ${sn}=              Get From Dictionary     ${credentials}      sn
+    ${user}=            Get From Dictionary     ${credentials}      user
+
+    # Write new credentials file
+    # fpw and pw field values are swapped.
+    ${Buffer}=              Execute SSH Command
+    ...     echo { \\"credentials\\":[{\\"fpw\\": \\"${pw}\\",\\"pw\\": \\"${fpw}\\",\\"sn\\": \\"${sn}\\",\\"id\\": \\"${id}\\",\\"ipAddr\\": \\"${ipAddr}\\",\\"user\\": \\"Administrator\\"}]} > ${EM Credentials File}
+    Execute SSH Command     cat ${EM Credentials File} | grep }| python -m json.tool
+
+    # Reboot DCS
+    Restart DCS
+
+Restore credentials file from DCS CLI Workaround
+    # Open a new connection to Fusion Bash shell
+    Switch Connection   Fusion_SSH
+
+    # Move original credentials file
+    Execute SSH Command     rm ${EM Credentials File}
+    Execute SSH Command     mv ${EM Credentials File}.original ${EM Credentials File}
+    Execute SSH Command     cat ${EM Credentials File}
+
+Prevent CIM iLo Reset From Fusion Factory Reset
+    Login To Fusion Via SSH
+    Execute SSH Command    mv /ci/etc/factory-reset.d/90ilo_factory_reset.sh /ci/etc/90ilo_factory_reset.sh.moved
+    Logout Of Fusion Via SSH
+
+Get Fusion Version
+    ${Command}=    Set Variable    cat /ci/etc/version
+    ${stdout}    ${stderr}    ${rc}=    Execute Command    ${Command}    return_stderr=True    return_rc=True}
+    Should Be Equal As Integers    ${rc}    0    msg=Failed to get Fusion Version.
+    Log To Console    \nFusion Version: ${stdout}
+
+Get iLO Version
+    [Arguments]    ${options}=${EMPTY}
+    [Documentation]    OPTIONS="-s ${IP} -u ${USERNAME} -p ${PASSWORD}"
+    ${stdout}    ${rc}=    Execute Command    /ci/bin/ilo_get_health.sh ${options} -t FIRMWARE_INFORMATION    return_rc=True
+
+    Log To Console    \niLO Versions:
+    ${ilo_fw_versions}    Create Dictionary
+    ${fw_info}=    Parse XML    ${stdout}
+    ${size}=    Get Length    ${fw_info}
+    :FOR     ${index}    IN RANGE    1    ${size}+1
+    \    ${index_fw_info}=    XML.Get Element    ${fw_info}    INDEX_${index}
+    \    ${name}=    XML.Get Element Attribute    ${index_fw_info}    VALUE    xpath=FIRMWARE_NAME
+    \    ${version}=    XML.Get Element Attribute    ${index_fw_info}    VALUE    xpath=FIRMWARE_VERSION
+    \    Log To Console    ${name}: ${version}
+    \    Set To Dictionary    ${ilo_fw_versions}    ${name}    ${version}
+    [Return]     ${ilo_fw_versions}
+
+Get NIC Version
+    ${Command}=    Set Variable    ethtool -i eth0
+    ${stdout}    ${stderr}    ${rc}=    Execute Command    ${Command}    return_stderr=True    return_rc=True}
+    Should Be Equal As Integers    ${rc}    0    msg=Failed to get NIC Version.
+    Log To Console    \nNIC Versions:\n ${stdout}
+    [Return]    ${stdout}

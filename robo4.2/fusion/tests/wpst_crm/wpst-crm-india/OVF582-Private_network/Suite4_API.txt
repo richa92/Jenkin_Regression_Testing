@@ -1,0 +1,1193 @@
+*** Settings ***
+Documentation     OVF582-TBird/Hafnium:Add Private Network Support.
+Library         Sdumpfunctions
+Library         OperatingSystem
+Library         FusionLibrary
+Library         Telnet
+Library         SSHLibrary
+Library         RoboGalaxyLibrary
+Library         Dialogs
+Library         data_variables
+Variables       data_variables.py
+Resource        ../../../resource/fusion_api_all_resource_files.txt
+Resource    OVAConfig.txt
+Force Tags    Buildup
+Suite Setup    Load Test Data and Open Browser
+# Suite Teardown      Suite Teardown
+
+*** Test Cases ***
+Initial Cleanup
+    [Documentation]    Returns appliance to a 'clean' state by removing all resources\enclosures
+    Log to console and logfile    [Cleanup]
+    Login to OneView via REST
+    Power off ALL Servers
+    Remove All Server Profiles
+    Remove All Logical Enclosures
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove All Network Sets
+    Remove ALL Ethernet Networks
+    Remove ALL FC Networks
+
+1 Initial Setup
+    [Documentation]    Creating setup
+    Set Log Level    TRACE
+    ${Login_resp}    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    Run keyword unless    ${Login_resp[0]['status_code']}== 200    Fail    "Unable to Login"
+
+    :For    ${Enet}    IN    @{Enet_default}
+    \    ${Enet1_resp}    Fusion Api Create Ethernet Network    ${Enet}
+    \    ${task} =   Wait For Task   ${Enet1_resp}     240s    2s
+    \    Run keyword unless    ${Enet1_resp['status_code']}== 202    Fail    "Unable to Create network"
+
+    ${body} =   Build LIG body      ${LIGS_TB['ligsup_A'][0]}
+    ${lig_resp}    Fusion Api Create LIG    ${body}
+    ${task} =   Wait For Task    ${lig_resp}    400s    2s
+    Log to Console    \n-LIG  created successfully
+
+    ${eg_resp}    Add Enclosure Group from variable    ${Enc_group}
+    Run Keyword If    '${eg_resp['status_code']}' != '201'  Fail    ELSE    log to console   \n-EG created successfully
+
+    ${le_resp}    Add Logical Enclosure from variable    ${Logical_Enclosure[0]}
+    Run Keyword If    '${le_resp['status_code']}' != '200'  Fail    ELSE    log to console   \n-LE created successfully
+
+    ${Server_resp1}    Add Server Profiles from variable    ${server_profileA1}
+    Log to console    \n-${server_profileA1[0]['name']} is created successfully.
+    ${Server_resp2}    Add Server Profiles from variable    ${server_profileA2}
+    Log to console    \n-${server_profileA2[0]['name']} is created successfully.
+
+    Power on server    ${server_profileA1[0]['serverHardwareUri']}
+    Log to console and logfile    \n-Server ${server_profileA1[0]['serverHardwareUri']} is powered on Successfully
+
+    Power on server    ${server_profileA2[0]['serverHardwareUri']}
+    Log to console and logfile    \n-Server ${server_profileA2[0]['serverHardwareUri']} is powered on Successfully
+    Log to console and logfile    \n-Waiting 10 mins for server to boot...
+
+    Sleep    10min
+
+OVF582_API_TC_72/95/79/107:Verify the Private Network configuration in redundant setup(A-side) when network is disabled_Verify the traffic flow between Non-lag and A-side_Verify the traffic flow between the servers via Downlinks of different PHYs(Private network is disabled)_Verify the traffic flow between the MLAG and A-side when private network feature is disabled
+    [Documentation]    verification of the private net config in redundant setup(A-side)_traffic flow Between non-lag and A-side_Between the servers via Downlinks of different PHYs_traffic flow between the MLAG and A-side when private network feature is disabled
+    Set Log Level    TRACE
+    ${Login_resp}    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    Run keyword unless    ${Login_resp[0]['status_code']}== 200    Fail    "Unable to Login"
+
+    Log to console    \n******** Validate the presence of LAG********
+    :For    ${x}    INRANGE    0    2
+    \    ${server_resp}    Fusion Api Get Server Profiles    param=?filter="'name'=='${server_profileA${x+1}[0]['name']}'"
+    \    ${Connections}    Get From Dictionary    ${server_resp['members'][0]['connectionSettings']}    connections
+    \    ${Len_of_connections}    Get Length    ${Connections}
+    \    ${value}    Validate Lag    ${Len_of_connections}    ${Connections}
+    \    Run Keyword If    '${value}' == 'None'    Log to console and logfile    \n-${server_profileA${x+1}[0]['name']} is Non-Lag..    ELSE    Fail
+
+    # validate the active ports of Potash connected with the server Profile
+    validate port status reason    ${interconnectname_1}    ${uplink_port_number[0]}    Active
+    validate port status reason    ${interconnectname_1}    ${uplink_port_number[1]}    Active
+    validate port status reason    ${interconnectname_4}    ${uplink_port_number[0]}    Active
+    validate port status reason    ${interconnectname_4}    ${uplink_port_number[1]}    Active
+
+    # Get the ICM list of the connected ports from the server Profile
+    ${Final_list_ICM}    Port Affinity MLAG    ${server_profileA1}    ${server_profileA2}
+    ${len_of_icm}    Get Length    ${Final_list_ICM}
+
+    # Get the incast and outcast packets of the ICMs
+    ${Inpacket}    Create List
+    ${Outpacket}    Create List
+    :For    ${x}    INRANGE    0    ${len_of_icm}
+    \    ${UnicastTraffic_Inpacket_1}    ${UnicastTraffic_Outpacket_1}    Get Inpackets and Outpackets    ${Final_list_ICM[${x}]}    ${stat}    ${uplink_port_number[0]}
+    \    Append to list    ${Inpacket}    ${UnicastTraffic_Inpacket_1}
+    \    Append to list    ${Outpacket}    ${UnicastTraffic_Outpacket_1}
+    Log to console    ${Inpacket}
+    Log to console    ${Outpacket}
+
+    # Get the valid ip list from servers for the traffic flow verification
+    ${ip}    Create List
+    :For    ${x}    INRANGE    0    2
+    \    ${ip_list}    Get Valid Server IP list    ${ilo${x+1}_details}    ${server${x+1}_details}    ${up_interface}    ${down_interface}    ${get_interface}
+    \    ${temp}    Convert To String    ${ip_list[0]}
+    \    Append to list    ${ip}    ${temp}
+    Log to console and logfile    Final list-${ip}
+
+    # verify the traffic flow between the servers when the Private network is disabled
+    Ping should be success    ${iLo1_details}    ${iLo2_details}    ${server1_details}    ${server2_details}    ${ip}
+
+    # Login to Administrator and navigate to interconnects page- To refresh the page and get the incast and outcast packets again
+    Log To Console    *********Log into Appliance as Administrator****************
+    ${user} =    Get Data By Property    ${TestData.users}    name    Administrator
+    fusion_ui_login_to_appliance    ${user[0].name}
+    Log to Console    Successfully logged in as Administrator
+    fusion_ui_navigate_to_interconnects_page
+    navigate
+    Sleep    20
+    navigate
+
+    # Get the incast and outcast packets of the ICMs
+    ${In_packets}    Create List
+    ${Out_packets}    Create List
+    :For    ${x}    INRANGE    0    ${len_of_icm}
+    \    ${In_packet_1}    ${Out_packet_1}    Get Inpackets and Outpackets    ${Final_list_ICM[${x}]}    ${stat}    ${uplink_port_number[0]}
+    \    Append to list    ${In_packets}    ${In_packet_1}
+    \    Append to list    ${Out_packets}    ${Out_packet_1}
+    Log to console    ${In_packets}
+    Log to console    ${Out_packets}
+
+    # compare the incast and outcast packets before and after navigate page - It should not be equal which conforms the Packet transferred and received
+    ${Len_of_packets}    Get Length    ${In_packets}
+    :For    ${x}    INRANGE    0    ${Len_of_packets}
+    \    Run Keyword If    '${Inpacket[${x}]}' == '${In_packets[${x}]}'    Fail    ELSE    Log to console and logfile    Packets are recieved
+    \    Run Keyword If    '${Outpacket[${x}]}' == '${Out_packets[${x}]}'    Fail    ELSE    Log to console and logfile    Packets are transferred
+
+###OVF582_API_TC_72/94/74/106:Verify the Private Network configuration in redundant setup(A-side) when private network is enabled_Verify the traffic flow between Non-lag and A-side(enabled)_Verify the traffic flow between the servers via Downlinks of different PHYs when private network is enabled_Verify the traffic flow between the MLAG and A-side when private network feature is enabled###
+
+    # Edit the network-enable the Private network checkbox in the networks page
+    ${Enet_resp}    Fusion Api Get Ethernet Networks    param=?filter="'name'=='${Enet_default[0]['name']}'"
+    ${Enet_uri}    Get Variable Value    ${Enet_resp['members'][0]['uri']}
+    ${Enet_CT}    Get Variable value    ${Enet_resp['members'][0]['connectionTemplateUri']}
+    ${Enet}    Copy Dictionary    ${Enet_default[0]}
+    Set To Dictionary    ${Enet}    privateNetwork    ${pnet_true}
+    Set To Dictionary    ${Enet}    connectionTemplateUri    ${Enet_CT}
+    ${Enet_1_edit}    Fusion Api Edit Ethernet Network    body=${Enet}    uri=${Enet_uri}
+    ${task} =   Wait For Task   ${Enet_1_edit}     240s    2s
+    Run Keyword If    '${Enet_1_edit['status_code']}' != '202'    Fail    ELSE    Log to console and logfile    \n-Network Edited Successfully..
+    Sleep    50
+    ${Validate_state_IC}    Get IC and Verify state    ${IC_Configured}
+    Sleep    50
+
+    ${Final_list_ICM}    Port Affinity MLAG    ${server_profileA1}    ${server_profileA2}
+    ${len_of_icm}    Get Length    ${Final_list_ICM}
+
+    # Get the incast and outcast packets of the ICMs
+    ${len_of_icm}    Get Length    ${Final_list_ICM}
+    ${Traffic_Inpacket_1}    Create List
+    ${Traffic_Outpacket_1}    Create List
+    :For    ${x}    INRANGE    0    ${len_of_icm}
+    \    ${UnicastTraffic_Inpacket_1}    ${UnicastTraffic_Outpacket_1}    Get Inpackets and Outpackets    ${Final_list_ICM[${x}]}    ${stat}    ${uplink_port_number[0]}
+    \    Append to list    ${Traffic_Inpacket_1}    ${UnicastTraffic_Inpacket_1}
+    \    Append to list    ${Traffic_Outpacket_1}    ${UnicastTraffic_Outpacket_1}
+    Log to console    ${Traffic_Inpacket_1}
+    Log to console    ${Traffic_Outpacket_1}
+
+    # Get the valid ip list from servers for the traffic flow verification
+    ${ip}    Create List
+    :For    ${x}    INRANGE    0    2
+    \    ${ip_list}    Get Valid Server IP list    ${ilo${x+1}_details}    ${server${x+1}_details}    ${up_interface}    ${down_interface}    ${get_interface}
+    \    ${temp}    Convert To String    ${ip_list[0]}
+    \    Append to list    ${ip}    ${temp}
+    Log to console and logfile    Final list-${ip}
+
+    # verify the traffic flow between the servers when the Private network is enabled
+    Ping should fail    ${iLo1_details}    ${iLo2_details}    ${server1_details}    ${server2_details}    ${ip}
+
+    # login to Administrator and navigate to some page-this is done to refresh the page and get the inpackets and outpackets
+    Log To Console    *********Log into Appliance as Administrator****************
+    ${user} =    Get Data By Property    ${TestData.users}    name    Administrator
+    fusion_ui_login_to_appliance    ${user[0].name}
+    Log to Console    Successfully logged in as Administrator
+    fusion_ui_navigate_to_interconnects_page
+    navigate
+    Sleep    100
+    navigate
+
+    # Get the incast and outcast packets of the ICMs
+    ${In_packets_1}    Create List
+    ${Out_packets_1}    Create List
+    :For    ${x}    INRANGE    0    ${len_of_icm}
+    \    ${In_packet_3}    ${Out_packet_3}    Get Inpackets and Outpackets    ${Final_list_ICM[${x}]}    ${stat}    ${uplink_port_number[0]}
+    \    Append to list    ${In_packets_1}    ${In_packet_3}
+    \    Append to list    ${Out_packets_1}    ${Out_packet_3}
+    Log to console    ${In_packets_1}
+    Log to console    ${Out_packets_1}
+
+    # compare the incast and outcast packets before and after navigate page - It should not be equal which conforms the Packet transferred and received
+    ${Len_of_packets}    Get Length    ${In_packets_1}
+    :For    ${x}    INRANGE    0    ${Len_of_packets}
+    \    Run Keyword If    '${Traffic_Inpacket_1[${x}]}' == '${In_packets_1[${x}]}'    Fail    ELSE    Log to console and logfile    Tried recieving packets.....
+    \    Run Keyword If    '${Traffic_Outpacket_1[${x}]}' == '${Out_packets_1[${x}]}'    Fail    ELSE    Log to console and logfile    Tried Sending Packets......
+
+OVF582_API_TC_90 Verify the traffic flow between the Servers(VP_Lag and A-side) when the private network is enabled
+    [Documentation]    With VP_LAG and A-side setup,verification of the traffic flow beteen the servers when the Private network is enabled
+    Set Log Level    TRACE
+    ${Login_resp}    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    Run keyword unless    ${Login_resp[0]['status_code']}== 200    Fail    "Unable to Login"
+
+    # Sleep    30
+    Power off server    ${server_profileA1[0]['serverHardwareUri']}
+
+    ${del_pro1}    Fusion Api Delete Server Profile    param=?filter="'name'=='${server_profileA1[0]['name']}'"
+    ${task} =   Wait For Task    ${del_pro1}    400s    2s
+
+    # Create LAG server Profile and Poweron Server
+    ${Server_resp1}    Add Server Profiles from variable    ${server_profileA1_Lag}
+    Log to console    \n-${server_profileA1_Lag[0]['name']} is created successfully.
+    Power on server    ${server_profileA1_Lag[0]['serverHardwareUri']}
+    Log to console and logfile    \n-Server ${server_profileA1_Lag[0]['serverHardwareUri']} is powered on Successfully
+    Log to console and logfile    \n-Waiting 10 mins for server to boot...
+    Sleep    10min
+
+    # Get the adapters list from the servers
+    ${adapter}    Get Valid Interface List    ${ilo1_details}    ${server1_details}    ${up_interface}    ${down_interface}
+    Log to console and logfile    ${adapter}
+    ${Len_of_adapter}    Get Length    ${adapter}
+    ${Adapterlist}    Create list
+    :FOR    ${x}    INRANGE    0    ${Len_of_adapter}
+    \    ${temp}    Convert To String    ${adapter[${x}]}
+    \    Append to list    ${Adapterlist}    ${temp}
+    Log to console and logfile    ${Adapterlist}
+
+    # Building commands for Bond creation
+    ${cmd_out}    Build Commands For Create Bonding    ${Adapter_1}    ${Adapter_2}    ${Create_bond}    ${Master_slave_1}    ${Master_slave_2}    ${Bond_slave_1}    ${Bond_slave_2}    ${Network_bond}    ${Master}    ${Modify_bond}    ${Modify_ip}    ${Modify_manual}    ${Adapterlist}    ${Bond_1}    ${space}    ${Ip_bond_1}    ${iLo1_details}    ${server1_details}
+
+    # Get the valid ips list form server and return the list
+    ${ip}    Create List
+    :For    ${x}    INRANGE    0    2
+    \    ${ip_list}    Get Valid Server IP list    ${ilo${x+1}_details}    ${server${x+1}_details}    ${up_interface}    ${down_interface}    ${get_interface}
+    \    ${temp}    Convert To String    ${ip_list[0]}
+    \    Append to list    ${ip}    ${temp}
+    Log to console and logfile    Final list-${ip}
+
+    # verify the traffic flow between the servers when the Private net is enabled-with LAG and A-side setup
+    Ping should fail    ${iLo1_details}    ${iLo2_details}    ${server1_details}    ${server2_details}    ${ip}
+
+####OVF582_API_TC_85:Verify the traffic flow between the Servers(VP_Lag and A-side) when the private network feature is disabled####
+
+    # Disable the Private network feature in networks page
+    ${Enet_resp}    Fusion Api Get Ethernet Networks    param=?filter="'name'=='${Enet_default[0]['name']}'"
+    ${Enet_uri}    Get Variable Value    ${Enet_resp['members'][0]['uri']}
+    ${Enet_CT}    Get Variable value    ${Enet_resp['members'][0]['connectionTemplateUri']}
+    ${Enet}    Copy Dictionary    ${Enet_default[0]}
+    Set To Dictionary    ${Enet}    privateNetwork    ${pnet_false}
+    Set To Dictionary    ${Enet}    connectionTemplateUri    ${Enet_CT}
+    ${Enet_1_edit}    Fusion Api Edit Ethernet Network    body=${Enet}    uri=${Enet_uri}
+    ${task} =   Wait For Task   ${Enet_1_edit}     240s    2s
+    Run Keyword If    '${Enet_1_edit['status_code']}' != '202'    Fail    ELSE    Log to console and logfile    \n-Network Edited Successfully..
+
+    Sleep    50
+    ${Validate_state_IC}    Get IC and Verify state    ${IC_Configured}
+    Sleep    50
+
+
+    # verify the traffic flow between the servers when the Private net is disabled-with LAG and A-side setup
+    Ping should be success    ${iLo1_details}    ${iLo2_details}    ${server1_details}    ${server2_details}    ${ip}
+
+OVF582_API_TC_86:Verify the traffic flow between VP-LAG and A-side of Same PHYs when private network feature is disabled
+    [Documentation]    Verification of the traffic flow between VP-LAG and A-side of Same PHYs when private network feature is disabled
+
+    Power off server    ${server_profileA2[0]['serverHardwareUri']}
+
+    # delete the Existing A-side setup server Profile
+    ${del_pro2}    Fusion Api Delete Server Profile    param=?filter="'name'=='${server_profileA2[0]['name']}'"
+    ${task} =   Wait For Task    ${del_pro2}    400s    2s
+
+    # create A-side server Profile with same PHYs ports as VP-LAG profile
+    ${Server_resp1}    Add Server Profiles from variable    ${server_profileA2_Edit}
+    Log to console    \n-${server_profileA2_Edit[0]['name']} is created successfully.
+    Power on server    ${server_profileA2_Edit[0]['serverHardwareUri']}
+    Log to console and logfile    \n-Server ${server_profileA2_Edit[0]['serverHardwareUri']} is powered on Successfully
+    Log to console and logfile    \n-Waiting 10 mins for server to boot...
+
+    Sleep    10mins
+
+
+    # Get the valid ip list from servers for traffic flow verification between the servers
+    ${ip}    Create List
+    :For    ${x}    INRANGE    0    2
+    \    ${ip_list}    Get Valid Server IP list    ${ilo${x+1}_details}    ${server${x+1}_details}    ${up_interface}    ${down_interface}    ${get_interface}
+    \    ${temp}    Convert To String    ${ip_list[0]}
+    \    Append to list    ${ip}    ${temp}
+    Log to console and logfile    Final list-${ip}
+
+    # Verify the traffic flow between VP-LAG and A-side of Same PHYs when private network feature is disabled
+    Ping should be success    ${iLo1_details}    ${iLo2_details}    ${server1_details}    ${server2_details}    ${ip}
+
+####OVF582_API_TC_91:Verify the traffic flow between VP-LAG and A-side of Same PHYs when private network feature is enabled####
+
+    # Edit networks-Enable the Private network checkbox in the networks page
+    ${Enet_resp}    Fusion Api Get Ethernet Networks    param=?filter="'name'=='${Enet_default[0]['name']}'"
+    ${Enet_uri}    Get Variable Value    ${Enet_resp['members'][0]['uri']}
+    ${Enet_CT}    Get Variable value    ${Enet_resp['members'][0]['connectionTemplateUri']}
+    ${Enet}    Copy Dictionary    ${Enet_default[0]}
+    Set To Dictionary    ${Enet}    privateNetwork    ${pnet_true}
+    Set To Dictionary    ${Enet}    connectionTemplateUri    ${Enet_CT}
+    ${Enet_1_edit}    Fusion Api Edit Ethernet Network    body=${Enet}    uri=${Enet_uri}
+    ${task} =   Wait For Task   ${Enet_1_edit}     240s    2s
+    Run Keyword If    '${Enet_1_edit['status_code']}' != '202'    Fail    ELSE    Log to console and logfile    \n-Network Edited Successfully..
+    Sleep    50
+
+    ${Validate_state_IC}    Get IC and Verify state    ${IC_Configured}
+    Sleep    50
+
+    # Verify the traffic flow between VP-LAG and A-side of Same PHYs when private network feature is enabled
+    Ping should fail    ${iLo1_details}    ${iLo2_details}    ${server1_details}    ${server2_details}    ${ip}
+
+    # Build commands for bond deletion
+    ${Del_bond}    Build Commands For Delete Bonding    ${Delete_Network_bond}    ${Delete_bond_slave_1}    ${Delete_bond_slave_2}    ${ilo1_details}    ${server1_details}    ${up_interface}    ${Bond_1}
+
+OVF582_API_TC_78:Verify the traffic flow between the servers via Downlinks of same PHYs when the Private network feature is enabled
+    [Documentation]    Verification of the traffic flow between the servers via Downlinks of same PHYs when the Private network feature is enabled
+    # Delete the LAG server Profile
+    Power off server    ${server_profileA1_Lag[0]['serverHardwareUri']}
+    ${del_pro1}    Fusion Api Delete Server Profile    param=?filter="'name'=='${server_profileA1_Lag[0]['name']}'"
+    ${task} =   Wait For Task    ${del_pro1}    400s    2s
+
+    # Create server profile of the same PHYs ports
+    ${Server_resp1}    Add Server Profiles from variable    ${server_profileA1}
+    Log to console    \n-${server_profileA1[0]['name']} is created successfully.
+    Power on server    ${server_profileA1[0]['serverHardwareUri']}
+    Log to console and logfile    \n-Server ${server_profileA1[0]['serverHardwareUri']} is powered on Successfully
+    Log to console and logfile    \n-Waiting 10 mins for server to boot...
+
+    Sleep    10mins
+
+    # Get the valid ip list from the servers for the traffic flow verification
+    ${ip}    Create List
+    :For    ${x}    INRANGE    0    2
+    \    ${ip_list}    Get Valid Server IP list    ${ilo${x+1}_details}    ${server${x+1}_details}    ${up_interface}    ${down_interface}    ${get_interface}
+    \    ${temp}    Convert To String    ${ip_list[0]}
+    \    Append to list    ${ip}    ${temp}
+    Log to console and logfile    Final list-${ip}
+
+    # Verify the traffic flow between the servers via Downlinks of same PHYs when the Private network feature is enabled
+    Ping should fail    ${iLo1_details}    ${iLo2_details}    ${server1_details}    ${server2_details}    ${ip}
+
+###OVF582_API_TC_83:Verify the traffic flow between the servers via Downlinks of same PHYs when the Private network feature is disabled###
+
+    # Edit network-Disable the Private network checkbox in the networks page
+    ${Enet_resp}    Fusion Api Get Ethernet Networks    param=?filter="'name'=='${Enet_default[0]['name']}'"
+    ${Enet_uri}    Get Variable Value    ${Enet_resp['members'][0]['uri']}
+    ${Enet_CT}    Get Variable value    ${Enet_resp['members'][0]['connectionTemplateUri']}
+    ${Enet}    Copy Dictionary    ${Enet_default[0]}
+    Set To Dictionary    ${Enet}    privateNetwork    ${pnet_false}
+    Set To Dictionary    ${Enet}    connectionTemplateUri    ${Enet_CT}
+    ${Enet_1_edit}    Fusion Api Edit Ethernet Network    body=${Enet}    uri=${Enet_uri}
+    ${task} =   Wait For Task   ${Enet_1_edit}     240s    2s
+    Run Keyword If    '${Enet_1_edit['status_code']}' != '202'    Fail    ELSE    Log to console and logfile    \n-Network Edited Successfully..
+    Sleep    50
+    ${Validate_state_IC}    Get IC and Verify state    ${IC_Configured}
+    Sleep    50
+
+    # Verify the traffic flow between the servers via Downlinks of same PHYs when the Private network feature is disabled
+    Ping should be success    ${iLo1_details}    ${iLo2_details}    ${server1_details}    ${server2_details}    ${ip}
+
+OVF582_API_TC_73/97/82/109:Verify the Private Network configuration in redundant setup(B-side) when the network is disabled_Verify the traffic flow between Non-lag and B-side_Verify the traffic flow between the servers via Downlinks of different PHYs(Private network is disabled)_Verify the traffic flow between the MLAG and B-side when private network feature is disabled
+    [Documentation]    Verification of the Private net config in redundant setup(B-side)_traffic flow Between Non-lag and B-side_Between the servers via Downlinks of different PHYs_traffic flow between the MLAG and B-side when private network feature is disabled
+
+    Set Log Level    TRACE
+    ${Login_resp}    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    Run keyword unless    ${Login_resp[0]['status_code']}== 200    Fail    "Unable to Login"
+
+    Power off server    ${server_profileA1[0]['serverHardwareUri']}
+    ${del_pro1}    Fusion Api Delete Server Profile    param=?filter="'name'=='${server_profileA1[0]['name']}'"
+    ${task} =   Wait For Task    ${del_pro1}    400s    2s
+    Power off server    ${server_profileA2_Edit[0]['serverHardwareUri']}
+    ${del_pro2}    Fusion Api Delete Server Profile    param=?filter="'name'=='${server_profileA2_Edit[0]['name']}'"
+    ${task} =   Wait For Task    ${del_pro2}    400s    2s
+
+    # create new server Profiles with B-side setup redundant and poweron the servers
+    ${Server_resp1}    Add Server Profiles from variable    ${server_profileB1}
+    Log to console    \n-${server_profileB1[0]['name']} is created successfully.
+    ${Server_resp2}    Add Server Profiles from variable    ${server_profileB2}
+    Log to console    \n-${server_profileB2[0]['name']} is created successfully.
+
+    Power on server    ${server_profileB1[0]['serverHardwareUri']}
+    Log to console and logfile    \n-Server ${server_profileB1[0]['serverHardwareUri']} is powered on Successfully
+
+    Power on server    ${server_profileB2[0]['serverHardwareUri']}
+    Log to console and logfile    \n-Server ${server_profileB2[0]['serverHardwareUri']} is powered on Successfully
+    Log to console and logfile    \n-Waiting 10 mins for server to boot...
+
+    Sleep    10min
+
+    Log to console    \n******** Validate the presence of LAG********
+    :For    ${x}    INRANGE    0    2
+    \    ${server_resp}    Fusion Api Get Server Profiles    param=?filter="'name'=='${server_profileB${x+1}[0]['name']}'"
+    \    ${Connections}    Get From Dictionary      ${server_resp['members'][0]['connectionSettings']}    connections
+    \    ${Len_of_connections}    Get Length    ${Connections}
+    \    ${value}    Validate Lag    ${Len_of_connections}    ${Connections}
+    \    Run Keyword If    '${value}' == 'None'    Log to console and logfile    \n-${server_profileB${x+1}[0]['name']} is Non-Lag..    ELSE    Fail
+
+    # validate status of connected Ports of potash in the server
+    validate port status reason    ${interconnectname_1}    ${uplink_port_number[0]}    Active
+    validate port status reason    ${interconnectname_1}    ${uplink_port_number[1]}    Active
+    validate port status reason    ${interconnectname_4}    ${uplink_port_number[0]}    Active
+    validate port status reason    ${interconnectname_4}    ${uplink_port_number[1]}    Active
+
+    # Get the ICM list of the connected ports from the server Profile
+    ${Final_list_ICM}    Port Affinity MLAG    ${server_profileB1}    ${server_profileB2}
+    ${len_of_icm}    Get Length    ${Final_list_ICM}
+
+    # Get the incast and outcast packets of the ICMs
+    ${Inpacket_2}    Create List
+    ${Outpacket_2}    Create List
+    :For    ${x}    INRANGE    0    ${len_of_icm}
+    \    ${UnicastInpacket_1}    ${UnicastOutpacket_1}    Get Inpackets and Outpackets    ${Final_list_ICM[${x}]}    ${stat}    ${uplink_port_number[0]}
+    \    Append to list    ${Inpacket_2}    ${UnicastInpacket_1}
+    \    Append to list    ${Outpacket_2}    ${UnicastOutpacket_1}
+
+    Log to console    ${Inpacket_2}
+    Log to console    ${Outpacket_2}
+
+    # Get the valid ip list from servers for the traffic flow verification
+    ${ip}    Create List
+    :For    ${x}    INRANGE    0    2
+    \    ${ip_list}    Get Valid Server IP list    ${ilo${x+1}_details}    ${server${x+1}_details}    ${up_interface}    ${down_interface}    ${get_interface}
+    \    ${temp}    Convert To String    ${ip_list[0]}
+    \    Append to list    ${ip}    ${temp}
+    Log to console and logfile    Final list-${ip}
+
+    # verify the traffic flow between the servers when the Private network is disabled
+    Ping should be success    ${iLo1_details}    ${iLo2_details}    ${server1_details}    ${server2_details}    ${ip}
+
+    # Login to Administrator and navigate to interconnects page- To refresh the page and get the incast and outcast packets again
+    Log To Console    *********Log into Appliance as Administrator****************
+    ${user} =    Get Data By Property    ${TestData.users}    name    Administrator
+    fusion_ui_login_to_appliance    ${user[0].name}
+    Log to Console    Successfully logged in as Administrator
+    fusion_ui_navigate_to_interconnects_page
+    navigate
+    Sleep    20
+    navigate
+
+    # Get the incast and outcast packets of the ICMs
+    ${In_packets_2}    Create List
+    ${Out_packets_2}    Create List
+    :For    ${x}    INRANGE    0    ${len_of_icm}
+    \    ${In_packet_1}    ${Out_packet_1}    Get Inpackets and Outpackets    ${Final_list_ICM[${x}]}    ${stat}    ${uplink_port_number[0]}
+    \    Append to list    ${In_packets_2}    ${In_packet_1}
+    \    Append to list    ${Out_packets_2}    ${Out_packet_1}
+
+    Log to console    ${In_packets_2}
+    Log to console    ${Out_packets_2}
+
+    # compare the incast and outcast packets before and after navigate page - It should not be equal which conforms the Packet transferred and received
+    ${Len_of_packets}    Get Length    ${In_packets_2}
+    :For    ${x}    INRANGE    0    ${Len_of_packets}
+    \    Run Keyword If    '${Inpacket_2[${x}]}' == '${In_packets_2[${x}]}'    Fail    ELSE    Log to console and logfile    Packets are recieved
+    \    Run Keyword If    '${Outpacket_2[${x}]}' == '${Out_packets_2[${x}]}'    Fail    ELSE    Log to console and logfile    Packets are transferred
+
+####OVF582_API_TC_73/96/77/108:Verify the Private Network configuration in redundant setup(B-side) when the network is enabled_Verify the traffic #####flow between Non-lag and B-side(enabled)_Verify the traffic flow between the servers via Downlinks of different PHYs when private network is #####enabled_Verify the traffic flow between the MLAG and B-side when private network feature is enabled
+
+    # Edit the network-enable the Private networks checkbox in the networks page
+    ${Enet_resp}    Fusion Api Get Ethernet Networks    param=?filter="'name'=='${Enet_default[0]['name']}'"
+    ${Enet_uri}    Get Variable Value    ${Enet_resp['members'][0]['uri']}
+    ${Enet_CT}    Get Variable value    ${Enet_resp['members'][0]['connectionTemplateUri']}
+    ${Enet}    Copy Dictionary    ${Enet_default[0]}
+    Set To Dictionary    ${Enet}    privateNetwork    ${pnet_true}
+    Set To Dictionary    ${Enet}    connectionTemplateUri    ${Enet_CT}
+    ${Enet_1_edit}    Fusion Api Edit Ethernet Network    body=${Enet}    uri=${Enet_uri}
+    ${task} =   Wait For Task   ${Enet_1_edit}     240s    2s
+    Run Keyword If    '${Enet_1_edit['status_code']}' != '202'    Fail    ELSE    Log to console and logfile    \n-Network Edited Successfully..
+    Sleep    50
+    ${Validate_state_IC}    Get IC and Verify state    ${IC_Configured}
+    Sleep    50
+
+    # Get the ICM list of the connected ports from the server Profile
+    ${Final_list_ICM}    Port Affinity MLAG    ${server_profileB1}    ${server_profileB2}
+
+    # Final list of the ICM
+    ${len_of_icm}    Get Length    ${Final_list_ICM}
+    ${Inpacket_3}    Create List
+    ${Outpacket_3}    Create List
+
+    # Get the incast and outcast packets of the ICMs
+    :For    ${x}    INRANGE    0    ${len_of_icm}
+    \    ${UnicastInpacket_3}    ${UnicastOutpacket_3}    Get Inpackets and Outpackets    ${Final_list_ICM[${x}]}    ${stat}    ${uplink_port_number[1]}
+    \    Append to list    ${Inpacket_3}    ${UnicastInpacket_3}
+    \    Append to list    ${Outpacket_3}    ${UnicastOutpacket_3}
+
+    Log to console    ${Inpacket_3}
+    Log to console    ${Outpacket_3}
+
+    # verify the traffic flow between the servers when the private network is enabled
+    Ping should fail    ${iLo1_details}    ${iLo2_details}    ${server1_details}    ${server2_details}    ${ip}
+
+    # Refresh the page and get the incast and putcast packets to check the packet flow
+    Log To Console    *********Log into Appliance as Administrator****************
+    ${user} =    Get Data By Property    ${TestData.users}    name    Administrator
+    fusion_ui_login_to_appliance    ${user[0].name}
+    Log to Console    Successfully logged in as Administrator
+    fusion_ui_navigate_to_interconnects_page
+    navigate
+    Sleep    20
+    navigate
+
+    # Get the incast and outcast packets of the ICMs
+    ${In_packets_3}    Create List
+    ${Out_packets_3}    Create List
+    :For    ${x}    INRANGE    0    ${len_of_icm}
+    \    ${In_packet_1}    ${Out_packet_1}    Get Inpackets and Outpackets    ${Final_list_ICM[${x}]}    ${stat}    ${uplink_port_number[1]}
+    \    Append to list    ${In_packets_3}    ${In_packet_1}
+    \    Append to list    ${Out_packets_3}    ${Out_packet_1}
+
+    Log to console    ${In_packets_3}
+    Log to console    ${Out_packets_3}
+
+    # compare the incast and outcast packets before and after navigate page - It should not be equal which conforms the Packet transferred and received
+    ${Len_of_packets}    Get Length    ${In_packets_3}
+    :For    ${x}    INRANGE    0    ${Len_of_packets}
+    \    Run Keyword If    '${Inpacket_3[${x}]}' == '${In_packets_3[${x}]}'    Fail    ELSE    Log to console and logfile    Tried sending packets
+    \    Run Keyword If    '${Outpacket_3[${x}]}' == '${Out_packets_3[${x}]}'    Fail    ELSE    Log to console and logfile    Tried sending packets
+
+*** Keywords ***
+
+Get Inpackets and Outpackets
+    [Documentation]    Get statistics of Inpackets and Outpackets of the ICM by portname
+    [Arguments]    ${ICM_1}    ${stat}    ${uplink_port_name}
+    ${icUri}        Get IC URI    ${ICM_1}
+    ${ic_uri_statistics} =        catenate    ${icUri}/${stat}/${uplink_port_name}
+
+    ${statistics_data}    Fusion Api Get Interconnect    ${ic_uri_statistics}
+    Log to console    \n${statistics_data['commonStatistics']}
+    ${In_packets}    Get from Dictionary    ${statistics_data['commonStatistics']}    rfc1213IfInUcastPkts
+    ${Out_packets}    Get from Dictionary    ${statistics_data['commonStatistics']}    rfc1213IfOutUcastPkts
+    Log to console    ${ICM_1}:${uplink_port_name}
+    Log to console    In-packets:${In_packets}
+    Log to console    Out-packets:${Out_packets}
+    [Return]    ${In_packets}    ${Out_packets}
+
+Validate Lag
+    [Documentation]    Validate LAG configuration is present in the server Profile
+    [Arguments]    ${count}    ${Connections}
+    :For    ${x}    INRANGE    0    ${count}
+    \    ${connection}    Copy Dictionary   ${Connections[${x}]}
+    \    Dictionary Should Contain Key    ${connection}    lagName
+    \    ${value}    Get Variable Value    ${Validate_net['lagName']}
+    [Return]    ${value}
+
+Port Affinity Status
+    [Documentation]    verify the port affinity status of the interconnect and return the ICM list
+    [Arguments]    ${count}    ${Connections}
+    ${ICM}    Create List
+    :For    ${x}    INRANGE    0    ${count}
+    \    ${connection}    Copy Dictionary   ${Connections[${x}]}
+    \    Dictionary Should Contain Key    ${connection}    interconnectUri
+    \    ${IC_Uri}    Get Variable Value    ${connection['interconnectUri']}
+    \    ${IC_resp}    Fusion Api Get Interconnect    uri=${IC_Uri}
+    \    ${Fetch_IC_name}    Get Variable Value    ${IC_resp['name']}
+    \    Append to List    ${ICM}    ${Fetch_IC_name}
+
+    ${ICM_list}    Remove Duplicates    ${ICM}
+
+    [Return]    ${ICM_list}
+
+Login to OneView via REST
+    [Documentation]     Login to the appliance with the cred
+    [Tags]  add   POSITIVE
+    Set Log Level    TRACE
+    ${resp}     Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+
+Verify Interconnect State
+    [Documentation]    Verify the interconnect state
+    ...             Example:
+    ...             Verify Interconnect State    ${interconnectname_1}    ${IC_Configured}
+    [Arguments]        ${interconnectname_1}        ${IC_Configured}
+    Log to Console    Verify interconnect
+    ${ic} =    Get IC    ${interconnectname_1}
+    ${State} =    Get From IC    ${ic}    state
+    Log to Console and logfile    ${State}
+    Log to console and logfile    Interconnect state is ${interconnectname_1}:${State}
+    Should Be Equal As Strings    ${State}    ${IC_Configured}
+
+
+validate port status reason
+    [Documentation]   validate port status reason attribute of the ICM
+    ...             Example:
+    ...             validate port status reason    ${icm}   ${portname}   ${state}
+    [Arguments]   ${icm}   ${portname}   ${state}
+    ${ic}=   Get IC URI    ${icm}
+    ${resp}=    fusion_api_get_interconnect_ports    uri=${ic}
+    :FOR   ${port}  IN   @{resp['members']}
+    \    run keyword if    '${port['portName']}' != '${portname}'   Continue For Loop
+    \    should match    ${port['portStatusReason']}   ${state}
+    \    Log to console and logfile    Port Status ${port['portStatusReason']} matches expected ${state}
+
+Get IC
+    [Documentation]    Get IC by name
+    ...             Example:
+    ...             Get IC    ${ICM_NAME}
+    [Arguments]        ${ICM_NAME}
+    ${resp} =   fusion api get interconnect
+    Log        ${resp}
+    ${ics} =     Get From Dictionary     ${resp}    members
+    ${l} =     Get Length    ${ics}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \   ${ic} =     Get From List   ${ics}    ${x}
+    \     Exit For Loop If     '${ic['name']}' == '${ICM_NAME}'
+    [Return]    ${ic}
+
+Get from IC
+    [Documentation]    Get from IC returns the element of the ic response
+    ...             Example:
+    ...             Get from IC    ${ic}        ${element}
+    [Arguments]        ${ic}    ${element}
+    ${return} =     Get From Dictionary     ${ic}   ${element}
+    [Return]    ${return}
+
+Ping should be success
+    [Documentation]    Verify the traffic pass between two linux servers are allowed
+    ...             Example:
+    ...             Ping should be success    ${iLo1_details}    ${iLo2_details}    ${server1_details}    ${server2_details}    ${ips}
+    [Arguments]        ${iLo1_details}    ${iLo2_details}    ${server1_details}    ${server2_details}    ${ips}
+    Log to console and logfile    \n*** Verifying the connectivity between the servers ***
+    ${out} =    Login to linux server via iLo    ${iLo1_details}    ${server1_details}    ${ips[1]}
+    Should Contain    ${out}    ttl=
+    Should Contain    ${out}    0% packet loss
+
+    ${out} =    Login to linux server via iLo    ${iLo2_details}    ${server2_details}    ${ips[0]}
+    Should Contain    ${out}    ttl=
+    Should Contain    ${out}    0% packet loss
+
+Ping should fail
+    [Documentation]    Verify the traffic pass between two windows servers are blocked
+    ...             Example:
+    ...             Ping should fail    ${iLo1_details}    ${iLo2_details}    ${server1_details}    ${server2_details}    ${ips}
+    [Arguments]    ${iLo1_details}    ${iLo2_details}    ${server1_details}    ${server2_details}    ${ips}
+    Log to console and logfile    \n*** Verifying the connectivity between the servers ***
+    ${out} =    Login to linux server via iLo    ${iLo1_details}    ${server1_details}    ${ips[1]}
+    Should Not Contain    ${out}    ttl=
+
+
+    ${out} =    Login to linux server via iLo    ${iLo2_details}    ${server2_details}    ${ips[0]}
+    Should Not Contain    ${out}    ttl=
+
+validate port status
+    [Documentation]    validate the port status of the ICM
+    [Arguments]   ${icm}   ${portname}   ${state}
+    ${ic}=   Get IC URI   ${icm}
+    ${resp}=   fusion_api_get_interconnect_ports   uri=${ic}
+    :FOR   ${port}  IN   @{resp['members']}
+    \    run keyword if    '${port['portName']}' != '${portname}'    Continue For Loop
+    \    should match  ${port['portStatus']}   ${state}
+    \    Log to console and logfile    Port Status ${port['portStatus']} matches expected ${state}
+
+Disable port
+    [Documentation]   Disabling the uplink port of ICM
+    [Arguments]    ${icm}    ${port_number}
+    ${ic_uri} =   Get IC URI    ${icm}
+    Log to console    ${ic_uri}
+    ${resp} =     Get IC Port    uri=${ic_uri}   port=${port_number}
+    Log to console and logfile    \n${resp}
+    Set to Dictionary   ${resp}   enabled    ${false}
+    ${body} =    Create List
+    Append to list    ${body}    ${resp}
+
+    ${resp} =     fusion api edit interconnect ports   uri=${ic_uri}   body=${body}
+    ${task} =       Wait For Task   ${resp}     7 min   15s
+    ${valDict} =    Create Dictionary   status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response    ${task}     ${valDict}
+    Sleep    60
+
+Enable port
+    [Documentation]   Enabling the uplink port of ICM
+    [Arguments]    ${icm}    ${port_number}
+    ${ic_uri} =   Get IC URI    ${icm}
+    Log to console    ${ic_uri}
+    ${resp} =     Get IC Port    uri=${ic_uri}   port=${port_number}
+    Log to console and logfile    \n${resp}
+    Set to Dictionary   ${resp}   enabled    ${true}
+    ${body} =    Create List
+    Append to list    ${body}    ${resp}
+
+    ${resp} =     fusion api edit interconnect ports   uri=${ic_uri}   body=${body}
+    ${task} =       Wait For Task   ${resp}     7 min   15s
+    ${valDict} =    Create Dictionary   status_code=${200}
+    ...                                 taskState=Completed
+    Validate Response    ${task}    ${valDict}
+    Sleep    60
+
+Get IC Port
+    [Documentation]    Getting IC Port details and return the Portname
+    [Arguments]     ${uri}  ${port}
+    ${resp} =   fusion api get interconnect ports    uri=${uri}
+    ${ics} =     Get From Dictionary     ${resp}    members
+    :FOR    ${ic}   IN      @{ics}
+    \   ${return} =    Run Keyword If    '${ic['portName']}' == '${port}'        set variable     ${ic}
+    \   Exit for loop if    '${ic['portName']}' == '${port}'
+    [Return]    ${return}
+
+Port Affinity MLAG
+    [Documentation]    Get the ICM list of the MLAG port affinity status from the server profile
+    [Arguments]    ${server_profile_1}    ${server_profile_2}
+    ${Profile1_ICM}    Create List
+    ${Profile2_ICM}    Create List
+    :For    ${x}    INRANGE    0    2
+    \    ${server_resp}    Fusion Api Get Server Profiles    param=?filter="'name'=='${server_profile_${x+1}[0]['name']}'"
+    \    ${Connections}    Get From Dictionary      ${server_resp['members'][0]['connectionSettings']}    connections
+    \    ${Len_of_connections}    Get Length    ${Connections}
+    \    ${IC_List}    Port Affinity Status    ${Len_of_connections}    ${Connections}
+    \    Append to List    ${Profile${x+1}_ICM}    ${IC_List}
+    Log to console and logfile    ${Profile1_ICM}
+    Log to console and logfile    ${Profile2_ICM}
+
+    ${Len_of_ICM1_list}    Get Length    ${Profile1_ICM[0]}
+    ${Len_of_ICM2_list}    Get Length    ${Profile2_ICM[0]}
+    ${ICM}    Create List
+    :For    ${x}    INRANGE    0    ${Len_of_ICM1_list}
+    \    ${Pro1_ICM_Value}    Get From List    ${Profile1_ICM[0]}    ${x}
+    \    Append to list    ${ICM}    ${Pro1_ICM_Value}
+
+    :For    ${x}    INRANGE    0    ${Len_of_ICM2_list}
+    \    ${Pro2_ICM_Value}    Get From List    ${Profile2_ICM[0]}    ${x}
+    \    Append to list    ${ICM}    ${Pro2_ICM_Value}
+
+    Log to console and logfile    ${ICM}
+    ${Final_list_ICM}    Remove Duplicates    ${ICM}
+    Log to console and logfile    ${Final_list_ICM}
+
+    [Return]    ${Final_list_ICM}
+
+Ping from external host
+    [Documentation]    Pinging from external host to server
+    [Arguments]    ${server_ip}    ${file_path}    ${Text_file}
+    ${file} =    file_exists    ${file_path}
+    Log to console and logfile    ${file}
+    Run Keyword If    '${file}' == 'False'    No file exist in the same name    ELSE    removefile    ${file_path}
+    startthread    ${server_ip}    5    ${Text_file}
+    ${contents}=    OperatingSystem.Get File    ${Text_file}
+    [Return]    ${contents}
+
+Build Commands For Create Bonding
+    [Documentation]    Building commands for bond creation or teaming the adapters
+    [Arguments]    ${Adapter_1}    ${Adapter_2}    ${Create_bond}    ${Master_slave_1}    ${Master_slave_2}    ${Bond_slave_1}    ${Bond_slave_2}    ${Network_bond}    ${Master}    ${Modify_bond}    ${Modify_ip}    ${Modify_manual}    ${Adapterlist}    ${Bond}    ${space}    ${Ip_bond}    ${ilo_details}    ${server_details}
+    ${Network_adapter_1}    Replace String Using Regexp   ${Adapter_1}    adapter1    ${Adapterlist[0]}
+    ${Network_adapter_2}    Replace String Using Regexp   ${Adapter_2}    adapter2    ${Adapterlist[1]}
+    ${Network_bond_1}    Replace String Using Regexp   ${Create_bond}    bond-name    ${Bond}
+    ${Add_connection_1}    Replace String Using Regexp   ${Master_slave_1}    connection-name-1    ${Adapterlist[0]}
+    ${Add_connection_2}    Replace String Using Regexp   ${Master_slave_2}    connection-name-2    ${Adapterlist[1]}
+    ${Up_connection_1}    Replace String Using Regexp   ${Bond_slave_1}    connection-name-1    ${Adapterlist[0]}
+    ${Up_connection_2}    Replace String Using Regexp   ${Bond_slave_2}    connection-name-2    ${Adapterlist[1]}
+    ${Up_bond}    Replace String Using Regexp   ${Network_bond}    bond-name    ${Bond}
+    ${Bond_name}    Replace String Using Regexp    ${Master}    bond-name    ${Bond}
+    ${connection_1}    catenate    ${Add_connection_1}/${Bond_name}
+    ${bond_connection_1}    Replace String Using Regexp    ${connection_1}    /    ${space}
+    ${connection_2}    catenate    ${Add_connection_2}/${Bond_name}
+    ${bond_connection_2}    Replace String Using Regexp    ${connection_2}    /    ${space}
+    ${Assign_adapter}    Replace String Using Regexp    ${Modify_bond}    bond-name    ${Bond}
+    ${Assign_ip}    Replace String Using Regexp    ${Modify_ip}    ip-address    ${Ip_bond}
+    ${Combine_ip_adapter}    catenate    ${Assign_adapter}/${Assign_ip}
+    ${Assign_ip_adapter}    Replace String Using Regexp    ${Combine_ip_adapter}    /    ${space}
+    ${Assign_ip_netmask}    Replace String Using Regexp    ${Modify_manual}    netmask    ${Netmask}
+    ${Assign_ip_address}    catenate    ${Assign_ip_adapter}/${Assign_ip_netmask}
+    #${Up_interface}    Replace String Using Regexp    ${interface_up}    interface-name    ${Bond}
+    #${Down_interface}    Replace String Using Regexp    ${down_interface}    interface-name    ${Bond}
+    Log to console and logfile    ${Network_adapter_1}
+    Log to console and logfile    ${Network_adapter_2}
+    Log to console and logfile    ${Network_bond_1}
+    Log to console and logfile    ${bond_connection_1}
+    Log to console and logfile    ${bond_connection_2}
+    Log to console and logfile    ${Up_connection_1}
+    Log to console and logfile    ${Up_connection_2}
+    Log to console and logfile    ${Up_bond}
+    Log to console and logfile    ${Assign_ip_address}
+    #Log to console and logfile    ${Down_interface}
+    #Log to console and logfile    ${Up_interface}
+
+    Log to console and logfile    *********Network bonding is about start*********
+    ${cmd_out}    Create Network Bonding    ${ilo_details}    ${server_details}    ${Network_adapter_1}    ${Network_adapter_2}    ${Network_bond_1}    ${bond_connection_1}    ${bond_connection_2}    ${Up_connection_1}    ${Up_connection_2}    ${Up_bond}    ${Assign_ip_address}
+    [Return]    ${cmd_out}
+
+Build Commands For Delete Bonding
+    [Documentation]    Build commands to delete the created Bond
+    [Arguments]    ${Delete_Network_bond}    ${Delete_bond_slave_1}    ${Delete_bond_slave_2}    ${ilo_details}    ${server_details}    ${up_interface}    ${Bond}
+    ${Delete_bond}    Replace String Using Regexp   ${Delete_Network_bond}    bond-name    ${Bond}
+    Log to console and logfile    ${Delete_bond}
+    ${cmd_out}    Delete Network Bonding    ${ilo_details}    ${server_details}    ${Delete_bond}
+    ${ip_adapter}    Get Server IP Linux    ${ilo_details}    ${server_details}
+    ${ret}    Get Regexp Matches    ${ip_adapter}    \\d+:\\s+(.*):\\s+<BROADCAST
+    ${flag_list} =    Create List
+    ${length} =     Get Length  ${ret}
+    :FOR    ${x}    IN RANGE    0   ${length}
+    \    Append To List   ${flag_list}    ${ret[${x}]}
+    ${length} =     Get Length    ${flag_list}
+    ${Adapter_name} =    Create List
+    :FOR    ${x}    IN RANGE    0   ${length}
+    \    ${ret}    ${match}    Should Match Regexp    ${flag_list[${x}]}    \\d+:\\s+(.*):\\s+<BROADCAST
+    \    Log to console   values ${match}
+    \    Append To List   ${Adapter_name}    ${match}
+    Remove Values From List    ${Adapter_name}    virbr0-nic
+    ${Len_of_adapter}    Get Length    ${Adapter_name}
+    ${Adapterlist}    Create list
+    :FOR    ${x}    INRANGE    0    ${Len_of_adapter}
+    \    ${temp}    Convert To String    ${Adapter_name[${x}]}
+    \    Append to list    ${Adapterlist}    ${temp}
+    Log to console and logfile    ${Adapterlist}
+    ${Delete_connection_1}    Replace String Using Regexp   ${Delete_bond_slave_1}    connection-name-1    ${Adapterlist[0]}
+    ${Delete_connection_2}    Replace String Using Regexp   ${Delete_bond_slave_2}    connection-name-2    ${Adapterlist[1]}
+    ${Network_adapter_1}    Replace String Using Regexp   ${up_interface}    interface-name    ${Adapterlist[0]}
+    ${Network_adapter_2}    Replace String Using Regexp   ${up_interface}    interface-name    ${Adapterlist[1]}
+    Log to console and logfile    ${Delete_connection_1}
+    Log to console and logfile    ${Delete_connection_2}
+    ${cmd}    Delete Network Slave    ${ilo_details}    ${server_details}    ${Delete_connection_1}    ${Delete_connection_2}    ${Network_adapter_1}    ${Network_adapter_2}
+
+    [Return]    ${cmd}
+
+Login to linux server via iLo
+    [Documentation]    Ping server via iLo
+    [Arguments]         ${ilo_details}    ${server_details}    ${ip}
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=40s
+    ${login}    SSHLibrary.Login    ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Write    ${server_details['username']}
+    Sleep    10sec
+    SSHLibrary.Write    ${server_details['password']}
+    Sleep    5sec
+    SSHLibrary.Read Until    ~]#
+    SSHLibrary.write    ping -c 4 ${ip}
+    Sleep    20sec
+    ${cmd_out}    SSHLibrary.Read
+    Log to console and logfile    ${cmd_out}
+    SSHLibrary.Write    exit
+    Sleep    15sec
+    SSHLibrary.Close All Connections
+    [Return]    ${cmd_out}
+
+Get Server IP Linux
+    [Documentation]    Gets the adapter list of the server.
+    [Arguments]         ${linux_ilo_details}    ${linux_server_details}
+    SSHLibrary.Open Connection     ${linux_ilo_details['ilo_ip']}     prompt=>     timeout=40s
+    ${login}    SSHLibrary.Login               ${linux_ilo_details['username']}     ${linux_ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    20sec
+    SSHLibrary.Read
+    Sleep    5sec
+    SSHLibrary.Write     ${linux_server_details['username']}
+    Sleep    10sec
+    SSHLibrary.Write     ${linux_server_details['password']}
+    Sleep    10sec
+    SSHLibrary.Read
+    SSHLibrary.Write     ip addr
+    Sleep    20sec
+    ${stdout}    SSHLibrary.Read
+    Log to console and logfile    ${stdout}
+    SSHLibrary.Write    exit
+    Sleep    15sec
+    SSHLibrary.Close All Connections
+    [Return]    ${stdout}
+
+
+Get IP and Adapter
+    [Documentation]    Get IP and adapter from the server
+    [Arguments]         ${ip_adapter}
+    ${ret}    Get Regexp Matches    ${ip_adapter}    inet (\\d+.\\d+.\\d+.\\d+)\\/\\d+\\s+brd.*(\\w+)
+    ${match} =    Create List
+    ${length1} =    Get Length  ${ret}
+    :FOR    ${x}    IN RANGE    0   ${length1}
+    \    Append To List   ${match}    ${ret[${x}]}
+    ${length} =     Get Length  ${match}
+    ${Ip_List} =    Create List
+    ${Adapter_name} =    Create List
+    :FOR    ${x}    IN RANGE    0   ${length}
+    \    ${Ret}    ${match1}    ${match2}    Should Match Regexp    ${match[${x}]}    inet (\\d+.\\d+.\\d+.\\d+)\\/\\d+\\s+brd.*(\\w+)
+    \    Log to console   values ${match[${x}]}
+    \    Append To List   ${Ip_List}    ${match1}
+    \    ${Adapter_list}    Fetch From Right        ${Ret}      global
+    \    ${temp}    Remove Whitespace    ${Adapter_list}
+    \    Append To List   ${Adapter_name}    ${temp}
+
+    Log to console  final list ${Ip_List}
+    Log to console   final list2 ${Adapter_name}
+    [Return]    ${Ip_List}    ${Adapter_name}
+
+Get Server IP
+    [Documentation]    Get the server ip list from the ifconfig output
+    [Arguments]         ${ip_adapter}
+    ${ret}    Get Regexp Matches    ${ip_adapter}    inet (\\d+.\\d+.\\d+.\\d+)\\/\\d+\\s+brd.*(\\w+)
+    ${match} =    Create List
+    ${length1} =    Get Length  ${ret}
+    :FOR    ${x}    IN RANGE    0   ${length1}
+    \    Append To List   ${match}    ${ret[${x}]}
+    ${length} =     Get Length  ${match}
+    ${Ip_List} =    Create List
+    ${Adapter_name} =    Create List
+    :FOR    ${x}    IN RANGE    0   ${length}
+    \    ${Ret}    ${match1}    Should Match Regexp    ${match[${x}]}    inet (\\d+.\\d+.\\d+.\\d+)\\/\\d
+    \    Log to console   values ${match[${x}]}
+    \    Append To List   ${Ip_List}    ${match1}
+    Log to console  final list ${Ip_List}
+    [Return]    ${Ip_List}
+
+Create Network Bonding
+    [Documentation]    Team the adapters in the server.
+    [Arguments]         ${ilo_details}    ${server_details}    ${Network_adapter_1}    ${Network_adapter_2}    ${Network_bond_1}    ${bond_connection_1}    ${bond_connection_2}    ${Up_connection_1}    ${Up_connection_2}    ${Up_bond}    ${Assign_ip_address}
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=40s
+    ${login}    SSHLibrary.Login    ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Write    ${server_details['username']}
+    Sleep    10sec
+    SSHLibrary.Write    ${server_details['password']}
+    Sleep    10sec
+    SSHLibrary.Read Until    ~]#
+    SSHLibrary.Write    ${Network_adapter_1}
+    Sleep    10sec
+    SSHLibrary.Write    ${Network_adapter_2}
+    Sleep    10sec
+    SSHLibrary.Write    ${Network_bond_1}
+    Sleep    10sec
+    SSHLibrary.Write    ${bond_connection_1}
+    Sleep    10sec
+    SSHLibrary.Write    ${bond_connection_2}
+    Sleep    10sec
+    SSHLibrary.Write    ${Up_connection_1}
+    Sleep    10sec
+    SSHLibrary.Write    ${Up_connection_2}
+    Sleep    10sec
+    SSHLibrary.Write    ${Assign_ip_address}
+    Sleep    10sec
+    SSHLibrary.Write    ${Up_bond}
+    Sleep    10sec
+    SSHLibrary.Write    ${Up_interface}
+    Sleep    10sec
+    SSHLibrary.Write    ip addr
+    Sleep    15sec
+    ${stdout}    SSHLibrary.Read
+    Log to console and logfile    ${stdout}
+    SSHLibrary.Write    exit
+    Sleep    15sec
+    SSHLibrary.Close All Connections
+    [Return]    ${stdout}
+
+Delete Network Bonding
+    [Documentation]    Delete the network bond created in the server.
+    [Arguments]         ${ilo_details}    ${server_details}    ${Delete_bond}
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=40s
+    ${login}    SSHLibrary.Login    ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Write    ${server_details['username']}
+    Sleep    10sec
+    SSHLibrary.Write    ${server_details['password']}
+    Sleep    10sec
+    SSHLibrary.Read Until    ~]#
+    SSHLibrary.Write    ${Delete_bond}
+    Sleep    10sec
+    SSHLibrary.Write    ip addr
+    Sleep    10sec
+    ${stdout}    SSHLibrary.Read
+    Log to console and logfile    ${stdout}
+    SSHLibrary.write    exit
+    Sleep    15sec
+    SSHLibrary.Close All Connections
+    [Return]    ${stdout}
+
+Delete Network Slave
+    [Documentation]    Delete the network bond slave in the server.
+    [Arguments]         ${ilo_details}    ${server_details}    ${Delete_connection_1}    ${Delete_connection_2}    ${Network_adapter_1}    ${Network_adapter_2}
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=40s
+    ${login}    SSHLibrary.Login    ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Write    ${server_details['username']}
+    Sleep    10sec
+    SSHLibrary.Write    ${server_details['password']}
+    Sleep    10sec
+    SSHLibrary.Read Until    ~]#
+    SSHLibrary.Write    ${Delete_connection_1}
+    Sleep    10sec
+    SSHLibrary.Write    ${Delete_connection_2}
+    Sleep    10sec
+    SSHLibrary.Write    ${Network_adapter_1}
+    Sleep    10sec
+    SSHLibrary.Write    ${Network_adapter_2}
+    Sleep    10sec
+    SSHLibrary.Write    ip addr
+    Sleep    20sec
+    ${stdout}    SSHLibrary.Read
+    Log to console and logfile    ${stdout}
+    SSHLibrary.Write    exit
+    Sleep    15sec
+    SSHLibrary.Close All Connections
+    [Return]    ${stdout}
+
+Get Valid Server IP list
+    [Documentation]    Get the only the valid ip of the one or more servers
+    ...             Example:
+    ...             Get Valid Server IP list    ${ilo_details}    ${server_details}    ${up_interface}    ${down_interface}    ${get_interface}
+    [Arguments]    ${ilo_details}    ${server_details}    ${up_interface}    ${down_interface}    ${get_interface}
+    ${Adapter_list}    Get Valid Interface List    ${ilo_details}    ${server_details}    ${up_interface}    ${down_interface}
+    ${ifconfig_output_list}    Create List
+    ${Len_of_adapter}    Get Length    ${Adapter_list}
+    :For    ${x}    INRANGE    0    ${Len_of_adapter}
+    \    ${ifconfig_name}    Replace String Using Regexp    ${get_interface}    interface-name    ${Adapter_list[${x}]}
+    \    ${Ip_output}    Get Valid Server IP    ${ilo_details}    ${server_details}    ${ifconfig_name}
+    \    Log to console and logfile    ${Ip_output}
+    \    Append to list    ${ifconfig_output_list}    ${Ip_output}
+    ${temp_list}    Convert To String    ${ifconfig_output_list}
+
+    ${ret}    Get Regexp Matches    ${temp_list}    inet (\\d+.\\d+.\\d+.\\d+)\\s+netmask
+    ${match} =    Create List
+    ${length1} =    Get Length  ${ret}
+    :FOR    ${x}    IN RANGE    0   ${length1}
+    \    Append To List   ${match}    ${ret[${x}]}
+    ${length} =     Get Length  ${match}
+    ${Ip_List} =    Create List
+    :FOR    ${x}    IN RANGE    0   ${length}
+    \    ${Ret}    ${match1}    Should Match Regexp    ${match[${x}]}    inet (\\d+.\\d+.\\d+.\\d+)\\s+netmask
+    \    Log to console   values ${match[${x}]}
+    \    Append To List   ${Ip_List}    ${match1}
+    Log to console and logfile    ${Ip_List}
+    [Return]    ${Ip_List}
+
+Get Valid Interface List
+    [Documentation]    Get the all the interface of the server and return only the required server
+    ...             Example:
+    ...             Get Valid Interface List    ${ilo_details}    ${server_details}    ${up_interface}    ${down_interface}
+    [Arguments]    ${ilo_details}    ${server_details}    ${up_interface}    ${down_interface}
+    ${ip_adapter}    Get Server IP Linux    ${ilo_details}    ${server_details}
+    ${ret}    Get Regexp Matches    ${ip_adapter}    \\d+:\\s+(.*):\\s+<BROADCAST
+    ${ret_1}    Get Regexp Matches    ${ip_adapter}    \\d+:\\s+(.*):\\s+<NO-CARRIER
+    ${Interface_list} =    Create List
+    ${length} =     Get Length  ${ret}
+    :FOR    ${x}    IN RANGE    0   ${length}
+    \    Append To List   ${Interface_list}    ${ret[${x}]}
+    ${length} =     Get Length    ${Interface_list}
+    ${Adapter_name} =    Create List
+    :FOR    ${x}    IN RANGE    0   ${length}
+    \    ${ret}    ${match}    Should Match Regexp    ${Interface_list[${x}]}    \\d+:\\s+(.*):\\s+<BROADCAST
+    \    Log to console   values ${match}
+    \    Append To List   ${Adapter_name}    ${match}
+    Remove Values From List    ${Adapter_name}    virbr0-nic
+
+    ${Len_of_adapter}    Get Length    ${Adapter_name}
+    ${Adapter_list}    Create list
+    :FOR    ${x}    INRANGE    0    ${Len_of_adapter}
+    \    ${temp}    Convert To String    ${Adapter_name[${x}]}
+    \    Append to list    ${Adapter_list}    ${temp}
+    Log to console and logfile    ${Adapter_list}
+
+    ${Len_of_adapter_list}    Get Length    ${Adapter_list}
+    :FOR    ${x}    INRANGE    0    ${Len_of_adapter_list}
+    \    ${ifup_adapter}    Replace String Using Regexp   ${up_interface}    interface-name    ${Adapter_list[${x}]}
+    \    Up the Interface    ${ilo_details}    ${server_details}    ${ifup_adapter}
+
+    ${Non_Interface_list} =    Create List
+    ${length} =     Get Length  ${ret_1}
+    :FOR    ${x}    IN RANGE    0   ${length}
+    \    Append To List   ${Non_Interface_list}    ${ret_1[${x}]}
+
+    ${length} =     Get Length    ${Non_Interface_list}
+    ${Non_Adapter_name} =    Create List
+    :FOR    ${x}    IN RANGE    0   ${length}
+    \    ${ret}    ${match}    Should Match Regexp    ${Non_Interface_list[${x}]}    \\d+:\\s+(.*):\\s+<NO-CARRIER
+    \    Log to console   values ${match}
+    \    Append To List   ${Non_Adapter_name}    ${match}
+    Remove Values From List    ${Non_Adapter_name}    virbr0
+
+    ${Len_of_non_adapter}    Get Length    ${Non_Adapter_name}
+    ${Non_Adapter_list}    Create list
+    :FOR    ${x}    INRANGE    0    ${Len_of_non_adapter}
+    \    ${temp}    Convert To String    ${Non_Adapter_name[${x}]}
+    \    Append to list    ${Non_Adapter_list}    ${temp}
+    Log to console and logfile    ${Non_Adapter_list}
+
+    ${Len_of_non_adapter_list}    Get Length    ${Non_Adapter_list}
+    :FOR    ${x}    INRANGE    0    ${Len_of_non_adapter_list}
+    \    ${ifdown_adapter}    Replace String Using Regexp   ${down_interface}    interface-name    ${Non_Adapter_list[${x}]}
+    \    Down the Interface    ${ilo_details}    ${server_details}    ${ifdown_adapter}
+
+    [Return]    ${Adapter_list}
+
+Get Valid Server IP
+    [Documentation]    Get the only the valid ip of the server
+    ...             Example:
+    ...             Get Valid Server IP    ${ilo_details}    ${server_details}    ${ifconfig_adapter_name}
+    [Arguments]         ${ilo_details}    ${server_details}    ${ifconfig_adapter_name}
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=40s
+    ${login}    SSHLibrary.Login    ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Write    ${server_details['username']}
+    Sleep    10sec
+    SSHLibrary.Write    ${server_details['password']}
+    Sleep    10sec
+    SSHLibrary.Read Until    ~]#
+    SSHLibrary.write    ${ifconfig_adapter_name}
+    Sleep    10sec
+    ${cmd_out}    SSHLibrary.Read
+    SSHLibrary.Close All Connections
+    [Return]    ${cmd_out}
+
+Down the Interface
+    [Documentation]    Disconnect the interface/off the interface inside server
+    ...             Example:
+    ...             Down the Interface    ${ilo_details}    ${server_details}    ${ifdown_adapter}
+    [Arguments]         ${ilo_details}    ${server_details}    ${ifdown_adapter}
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=40s
+    ${login}    SSHLibrary.Login    ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Write    ${server_details['username']}
+    Sleep    10sec
+    SSHLibrary.Write    ${server_details['password']}
+    Sleep    10sec
+    SSHLibrary.Read Until    ~]#
+    SSHLibrary.write    ${ifdown_adapter}
+    Sleep    15sec
+    SSHLibrary.Write    exit
+    Sleep    15sec
+    SSHLibrary.Close All Connections
+
+Get IC and Verify state
+    [Documentation]    Get the IC details and verify the interconnect state for each ICM
+    [Arguments]    ${IC_Configured}
+    ${IC_output}    Fusion Api Get Interconnect
+    ${Num_IC}    Get Variable Value    ${IC_output['count']}
+    :For    ${x}    INRANGE    0    ${Num_IC}
+    \    Wait Until Keyword Succeeds    650s   35 s    Verify Interconnect State    ${IC_output['members'][${x}]['name']}    ${IC_Configured}
+
+Up the Interface
+    [Documentation]    Up the interface/connect the interface inside server
+    ...             Example:
+    ...             Up the Interface    ${ilo_details}    ${server_details}    ${ifup_adapter}
+    [Arguments]         ${ilo_details}    ${server_details}    ${ifup_adapter}
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=40s
+    ${login}    SSHLibrary.Login    ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Write    ${server_details['username']}
+    Sleep    10sec
+    SSHLibrary.Write    ${server_details['password']}
+    Sleep    10sec
+    SSHLibrary.Read Until    ~]#
+    SSHLibrary.write    ${ifup_adapter}
+    Sleep    10sec
+    SSHLibrary.Write    exit
+    Sleep    15sec
+    SSHLibrary.Close All Connections
+
+Cleanup For Suite
+    [Documentation]    Returns appliance to a 'clean' state by removing all resources\enclosures
+    Log to console and logfile    [Cleanup]
+    Login to OneView via REST
+    Power off ALL Servers
+    Remove All Server Profiles
+    Remove All Logical Enclosures
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove All Network Sets
+    Remove ALL Ethernet Networks
+    Remove ALL FC Networks

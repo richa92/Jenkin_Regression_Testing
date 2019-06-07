@@ -1,0 +1,270 @@
+*** Settings ***
+Library             RoboGalaxyLibrary
+Library             FusionLibrary
+Library             OperatingSystem
+Library             BuiltIn
+Library             Collections
+Library             SSHLibrary
+Library             String
+Library               helper.py
+
+*** Variables ***
+${FUSION_NIC}     bond0
+
+*** Keywords ***
+# -----------------------------------------------------------------------------
+#   EM KEYWORDS
+# -----------------------------------------------------------------------------
+lldpcli show neighbors
+    [Documentation]    Retrieves the active EM IPv6 LL address
+    Set Log Level    TRACE
+    ${EM_IP} =  Execute SSH Command     lldpcli show neighbors
+    ${m}    ${EM_IP} =  Should Match Regexp     ${EM_IP}    (?im)MgmtIP:\\s*(\\S*:\\S*:\\S*:\\S*:\\S*:\\S*)
+    [Return]    ${EM_IP}
+
+Get EM IP
+    [Documentation]    Retrieves the EM IPv6 LL address.
+    ...      If ${enc_serial} is supplied, the EM IPv6 for that enclosure is returned.
+    ...      Otherwise, the active EM IPv6 LL address is returned.
+    [Arguments]    ${enc_serial}=${null}
+    Set Log Level    TRACE
+    ${EM_IP} =    Run Keyword If    '${enc_serial}' is 'None'    lldpcli show neighbors
+    ...           ELSE    Execute SSH Command     /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${enc_serial} -o i
+    ${m}    ${EM_IP} =  Should Match Regexp     ${EM_IP}    (?im)(\\S*:\\S*:\\S*:\\S*:\\S*:\\S*)
+    # new handling to add brackets for newest curl versions (4.00 pb39+)
+    ${cv} =   Get curl version
+    ${EM_IP} =   add_brackets_for_latest_curl   ${cv}   ${EM_IP}%${FUSION_NIC}
+    Set Suite Variable    ${EM_IP}
+    log to console     \nEM IP: ${EM_IP}
+    [Return]    ${EM_IP}
+
+Get curl version
+    [Documentation]    Retrieves the active CIM curl version and adds or removes brackets. New version of curl handle IPv6 with []
+    Set Log Level    TRACE
+    ${curl} =    Execute SSH Command     curl --version | python -c 'print [int(x) for x in raw_input().split(" ", 2)[1].split(".")]'
+    [Return]    ${curl}
+
+Get EM Enclosures
+    [Documentation]    Get EM enclosures
+    # Get EM enclosures
+    ${EM_ENCS} =   Execute SSH Command     /ci/bin/tbird/appliance-hal.sh list-enclosures
+    @{ignore last} =     Split to lines  ${EM_ENCS}  ${null}   -1
+    ${EM_ENCS} =        Create List     @{ignore last}
+    Set Suite Variable    ${EM_ENCS}
+    log to console     Enclosures: ${EM_ENCS}
+    [Return]    ${EM_ENCS}
+
+Get EM Token
+    [Documentation]    Get EM token
+    [Arguments]     ${enc_serial}
+    # Get EM token
+    ${EM_TOKEN} =  Execute SSH Command     /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${enc_serial} -o token
+    ${EM_TOKEN}    Should Match Regexp    ${EM_TOKEN}    (?i)\\S*
+    Set Suite Variable    ${EM_TOKEN}   ${EM_TOKEN}
+    log to console     EM TOKEN: ${EM_TOKEN}
+    [Return]    ${EM_TOKEN}
+
+Get EM Sessions
+    [Documentation]    Get EM sessions
+    # Get Sessions using session Id to test that everything is working
+    ${Header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    ${Output}    Execute SSH Command
+    ...    curl -ikX GET --tlsv1 https://${EM_IP}/rest/v1/Sessions -H ${Header}
+    Should Contain    ${Output}    "Name": "Sessions Collection"
+    ...    msg=Get Sessions action failed \n${Output}
+
+EFuse ICM
+    [Documentation]    Perform an efuse action on a ICM bay. Action = EFuseOff | EFuseOn
+    ...    Depends on Get EM IP and Get EM Token as in:
+    ...    Get EM IP    ${enc}
+    ...    Get EM Token    ${enc}
+    ...    Efuse ICM   ${action}     ${bay}
+
+    [Arguments]    ${Action}    ${BayNumber}
+    ${Header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    ${Data}      Set Variable    {"Action":"${Action}"}
+    Log    \t Issuing ${Action} for ICM:${BayNumber}    console=true
+    ${Output}    Execute SSH Command
+    ...    curl -ikX POST --tlsv1 -H ${Header} --data-ascii '${data}' https://${EM_IP}/rest/v1/InterconnectBays/${BayNumber}
+    Should Contain    ${Output}    { "Action": "${Action}" }
+    ...    msg=EFuse action failed \n${Output}
+
+EFuse Blade
+    [Documentation]    Perform an efuse action on a Server Hardware bay. Action = EFuseOff | EFuseOn
+    ...    Depends on Get EM IP and Get EM Token as in:
+    ...    Get EM IP    ${enc}
+    ...    Get EM Token    ${enc}
+    ...    Efuse Blade   ${action}     ${bay}
+
+    [Arguments]    ${Action}    ${BayNumber}
+    ${Header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    ${Data}      Set Variable    {"Action":"${Action}"}
+    Log    \t Issuing ${Action} for Server:${BayNumber}    console=true
+    ${Output}    Execute SSH Command
+    ...    curl -ikX POST --tlsv1 -H ${Header} --data-ascii '${data}' https://${EM_IP}/rest/v1/BladeBays/${BayNumber}
+    Should Contain    ${Output}    { "Action": "${Action}" }
+    ...    msg=EFuse action failed \n${Output}
+
+EM Diags Fault Injection
+    [Documentation]    Inject faults. Where InjectionType is one of: FruFaultInjection,
+    ...    EmSwitchFaultInjection, EmSwitchPortFaultInjection, BladeManagerFaultInjection,
+    ...    CommFaultInjection, FanFaultInjection, PSFaultInjection.
+    ...    usage for FanFaultInjection:
+    ...    URI format: /rest/v1/Diags/FanFaultInjection/<slotID>/<faultType>[/<bool>]
+    ...    Where:
+    ...      slotID    = Valid fan slot number.
+    ...      faultType = [Fan1 | Fan2 | EFuse]
+    ...      bool      = true to inject fault, false to clear fault
+    ...                    NOTE: Boolean is not valid for EFuse faultType.
+    ...    usage for PSFaultInjection:
+    ...    URI format: /rest/v1/Diags/PSFaultInjection/<slotID>/<faultType>/<bool>
+    ...    Where:
+    ...      slotID    = Valid Power Supply slot number.
+    ...      faultType = [PS_OK | AC_OK ]
+    ...      bool      = true to inject fault, false to clear fault
+    [Arguments]    ${injection_type}    ${slot_id}    ${fault_type}    ${inject}=''
+    ${Header}    Set Variable    x-auth-token:${EM_TOKEN}
+    ${Output}    Execute SSH Command
+    ...    curl -ksS -H ${Header} https://${EM_IP}%${fusion_nic}/rest/v1/Diags/${injection_type}/${slot_id}/${fault_type}/${inject}
+    Should Contain    ${Output}    successfully
+    [Return]    ${Output}
+
+EM Diags Get Audit Log Events
+    [Documentation]    Fetch Diag Audit Log Events.
+    ...    (Assumes an SSH connection with curl is currently open)
+    ...    Returns a list of (dictionary) entries and EventID of the latest event encountered.
+    [Arguments]    ${IP}=${EM_IP}    ${Nic}=${FUSION_NIC}
+    ...            ${origin_filter}=/rest/v1    ${starting_event_id}=0
+    Set Suite Variable    ${last_event_id}    ${starting_event_id}
+    ${em_audit_events_list}    Create List
+
+    # Get the most recent entries from the audit (RIS events) log.
+    ${Header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    ${Output}    Execute SSH Command
+    ...       curl -ksS --tlsv1 -H ${Header} https://${EM_IP}%${FUSION_NIC}/rest/v1/Diags/AuditLog/10
+
+    # Remove CLI prompt from buffer.  It messes up loads.
+    ${Output}    String.Fetch From Left    ${Output}    [root@
+
+    # Break the output into an (easier to handle) list of lines. One line per event.
+    @{Lines}    Split To Lines    ${Output}
+    : FOR    ${Line}    IN    @{Lines}
+    # Reformat event/line (string) into a json dictionary
+    \    ${Event}    json.loads    ${Line}
+    # Select only the most recent events - skip any before that.
+    \    ${EventID}    Get From Dictionary    ${Event}    EventID
+    # EventID's are of the form n-nnn.  Only compare at the portion after the dash.
+    \    ${tmpEventID}             Fetch From Right    ${EventID}    -
+    \    ${tmpStarting_EventID}    Fetch From Right    ${starting_event_id}    -
+    \    Run Keyword If    ${${tmpStarting_EventID}}>=${${tmpEventID}}    Continue For Loop
+    # Remember the last EventID encountered
+    \    ${tmpLast_EventID}    Fetch From Right    ${Last_EventID}    -
+    \    Run Keyword If    ${${tmpEventID}}>=${${tmpLast_EventID}}    Set Suite Variable    ${last_event_id}    ${EventID}
+    # Filter out any unrelated events (e.g., I'm only interested in fan events)
+    # Example: ${origin_filter} = '/rest/v1/FanBays/${bayNumber}'
+    \    ${origin_of_condition}    Get From Dictionary    ${Event}    OriginOfCondition
+    \    ${found}    Run Keyword And Return Status
+    \    ...    Should Match Regexp    ${origin_of_condition}    ${origin_filter}
+    \    Run Keyword If    '${found}'=='False'    Continue For Loop
+    # Add event (dictionary) into 'List of EM Audit Events'
+    \    Append to List    ${em_audit_events_list}    ${Event}
+    [Return]    ${em_audit_events_list}    ${last_event_id}
+
+Get FLM Factory IPv6
+    [Documentation]  Returns the physical LinkLocal address of the FLM (1 or 2)
+    ...    Depends on previously obtined ${EM_IP} and ${EM_TOKEN}
+    [Arguments]  ${which}
+    ${header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    ${output}    Execute SSH Command    curl -ik -X GET https://${EM_IP}/rest/v1/EnclosureManagerNICs/${which} -H ${header}
+
+    ${ipv6} =    Get Regexp Matches    ${output}    fe80::(([0-9|a-z]){4}:){3}([0-9|a-z]){4}
+
+    Log    \n${ipv6}    console=true
+    [Return]    ${ipv6}
+
+Factory Reset Active FLM
+    [Documentation]  Simulates Front Panel Press Hold.  You must pass in the ACTIVE FLM
+    ...    Depends on ${EM_IP} and ${EM_TOKEN}
+    [Arguments]
+    ${header}    Set Variable    "X-Auth-Token":"${EM_TOKEN}"
+    Log    Executing: curl -ik -X GET https://${EM_IP}/rest/v1/Diags/PressEnclosureResetButton/FactoryReset -H ${header}    console=true
+
+    ${output}    Execute SSH Command    curl -ik -X GET https://${EM_IP}/rest/v1/Diags/PressEnclosureResetButton/FactoryReset -H ${header}
+
+    Log    \n${output}    console=true
+    [Return]    ${output}
+
+Get FLM Factory Password
+    [Documentation]  Returns the Factory Reset Password for the FLM
+    [Arguments]    ${flm_ipv6}
+    ${output}    Execute SSH Command
+    ...    curl -ik -X GET https://[${flm_ipv6}%${FUSION_NIC}]/rest/v1/Diags/FactoryPassword
+
+    ${output} =    Replace String Using Regexp    ${output}    \\[root.*#?    ${EMPTY}
+    @{lines} =    Split String    ${output}
+    ${pwd} =    Get From List    ${lines}    -1
+    Log    \n${pwd}    console=true
+    [Return]    ${pwd}
+
+Get Session From Factory Password
+    [Documentation]  Returns a session token for the the given Factory Reset Password
+    [Arguments]  ${flm_ipv6}    ${password}
+    ${output}    Execute SSH Command
+    ...    curl -ik -X POST https://[${flm_ipv6}%${FUSION_NIC}]/rest/v1/Sessions -H "Content-type: application/json" -d '{"UserName":"Administrator","Password":"${password}"}' | grep Auth
+
+    ${output} =    Replace String Using Regexp    ${output}    (\\[root.*#?|^$)    ${EMPTY}
+    @{lines} =    Split String    ${output}
+    ${session} =    Get From List    ${lines}    -1
+
+    Log    \n${session}    console=true
+    [Return]  ${session}
+
+Is This FLM Active
+    [Documentation]  Return IPv6 of this Active FLM or "no" if it is not Active
+    [Arguments]    ${flm_ipv6}    ${session}
+
+    ${header}    Set Variable    "X-Auth-Token":"${session}"
+
+    ${output}    Execute SSH Command
+    ...    curl -ik -X GET https://[${flm_ipv6}%${FUSION_NIC}]/rest/v1/EnclosureManager/1 -H ${header}
+
+    ${role} =    Get Regexp Matches    ${output}    "Role": "(\\w*)"    1
+    ${length} =    Get Length    ${role}
+    Return from keyword if    ${length}==0    Not Authorized
+
+    Log    \nRole: ${role[0]}    console=true
+
+    ${length} =    Get Length    ${role}
+    ${return} =    Set Variable if    ${length}==0 or '${role[0]}'=='Standby'    No    ${role[0]}
+    [Return]    ${return}
+
+Factory Reset ICM
+    [Documentation]  Factory Reset ICM
+    ...    Depends on Get EM IP and Get EM Token as in:
+    ...    Get EM IP  ${enc}
+    ...    Get EM Token  ${enc}
+    ...    Factory Reset ICM  ${bay}
+    [Arguments]  ${BayNumber}
+    ${Header}  Set Variable  "X-Auth-Token":"${EM_TOKEN}"
+    ${Data}  Set Variable  {"Action":"ResetToFactory"}
+    Log  \t Issuing factory reset for ICM:${BayNumber}  console=True
+    ${Output}  Execute SSH Command
+    ...    curl -ikX POST --tlsv1 -H ${Header} --data-ascii '${data}' https://${EM_IP}/rest/v1/InterconnectManager/${BayNumber}
+    Should Contain  ${Output}  200 OK
+    ...    msg=Factory reset failed on ${BayNumber}\n${Output}
+
+EFuse CIM
+    [Documentation]    Perform an efuse action on a CIM bay. Action = EFuseReset | EFuseOff | EFuseOn
+    ...    Depends on Get EM IP and Get EM Token as in:
+    ...    Get EM IP    ${enc}
+    ...    Get EM Token    ${enc}
+    ...    Efuse CIM   ${action}     ${bay}
+
+    [Arguments]    ${Action}    ${BayNumber}
+    ${Header}   Set Variable   "X-Auth-Token":"${EM_TOKEN}"
+    ${Data}     Set Variable   {"Action":"${Action}"}
+    Log    \t Issuing ${Action} for CIM:${BayNumber}
+    ${Output}    Execute SSH Command
+    ...    curl -g -x "" -k -i -H ${Header} --data-ascii '${data}' https://${EM_IP}/rest/v1/CIManagerBays/${BayNumber}
+    Should Contain    ${Output}    { "Action": "${Action}" }
+    ...    msg=EFuse action failed \n${Output}

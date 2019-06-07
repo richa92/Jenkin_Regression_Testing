@@ -1,0 +1,240 @@
+*** Settings ***
+Documentation      04_138_Functionality(Enclosure-37)
+Library            json
+Library            FusionLibrary
+Library            RoboGalaxyLibrary
+Variables          data_variables.py
+Resource           ../../../resources/resource.txt
+Library            SSHLibrary
+Library            Telnet
+Library            ServerOperations
+Library            OperatingSystem
+Library            Process
+
+*** Variables ***
+${module_file_path}       ${CURDIR}\\performio.py
+${module_file_path1}      ${CURDIR}\\GetDisks.py
+${module_file_path2}      ${CURDIR}\\FetchIO.py
+
+***Test cases***
+1 Login
+    [Documentation]    Login appliance
+    Set Log Level    TRACE
+    ${resp}    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    Run Keyword If  '${resp[0]['status_code']}' != '200'    Fail    ELSE  Log to console  \nSuccessfully logged into the appliance
+
+Initial Cleanup
+    [Documentation]    Initial Cleanup
+    Clean OV
+
+2 Set a WWN range in settings page
+    [Documentation]    Set a WWN range in settings page
+    ${resp1}=    Fusion API Get Pool     ${pooluri[0]['wwn']}
+    ${wwn_values}=    Fusion API Get Pool     ${resp1['rangeUris'][0]}
+    Log to console and Logfile    ${wwn_values['uri']}
+    ${resp2}    fusion_api_delete_vwwn_range    uri=${wwn_values['uri']}
+    Run Keyword If  '${resp2['status_code']}' != '204'  Fail    ELSE    log to console  \nwwn Range deleted Successfully
+    ${resp} =    Fusion Api Create Vwwn Range    ${wwn_range_body_4_138}
+    Run Keyword If  '${resp['status_code']}' != '200'  Fail    ELSE  log to console  \nwwn Range generated Successfully
+
+3 creating Networks
+    [Documentation]    creating Networks
+    ${resp}    Fusion Api Create Fc Network    ${fc_network}
+    Run Keyword If  '${resp['status_code']}' != '202'    Fail    ElSE    Log to console Fc Network created successfully
+    ${resp1}    Fusion Api Create Ethernet Network    ${Ethernet_network}
+    Run Keyword If  '${resp1['status_code']}' != '202'    Fail    ElSE    Log to console Ethernet Network created successfully
+
+4 creating EG and LIG with Uplink Set
+    [Documentation]    Creating EG and LIG with Uplink Set
+    ${enc_resp}=    Fusion Api Import Server Hardware Type For Enclosure    ${Preview_body_37}    ${Preview_uri}
+    Log to console and logfile    ${enc_resp}
+    ${interconnectMapTemplate}      Set Variable    ${enc_resp['logicalInterconnectGroup']['interconnectMapTemplate']}
+    Set Global Variable   ${interconnectMapTemplate_Global}    ${interconnectMapTemplate}
+    Set To Dictionary    ${lig_37}    interconnectMapTemplate    ${interconnectMapTemplate_Global}
+    ${resp_lig} =   Fusion Api Create LIG   ${lig_37}
+    Run keyword unless  ${resp_lig['status_code']}== 202    Fail    ${resp_lig['message']}
+    ${task} =   Wait For Task   ${resp_lig}     120s    2s
+    Log to console and logfile    LIG created successfully
+    ${uri} =    Get From Dictionary    ${task['associatedResource']}    resourceUri
+    Set Global Variable    ${LIG_uri}    ${uri}
+    Log to console and logfile    ${LIG_uri}
+
+    ${Test_dict} =    Create Dictionary
+    :FOR    ${x}    IN RANGE    0    8
+    \    ${permittedInterconnectTypeUri} =    Get From Dictionary    ${interconnectMapTemplate_Global['interconnectMapEntryTemplates'][${x}]}   permittedInterconnectTypeUri
+    \    Run Keyword If    '${interconnectMapTemplate_Global['interconnectMapEntryTemplates'][${x}]['logicalLocation']['locationEntries'][0]['type']}'=='Bay'    Set To Dictionary    ${Test_dict}    ${interconnectMapTemplate_Global['interconnectMapEntryTemplates'][${x}]['logicalLocation']['locationEntries'][0]['relativeValue']}    ${permittedInterconnectTypeUri}
+    \    Run Keyword If    '${interconnectMapTemplate_Global['interconnectMapEntryTemplates'][${x}]['logicalLocation']['locationEntries'][1]['type']}'=='Bay'    Set To Dictionary    ${Test_dict}    ${interconnectMapTemplate_Global['interconnectMapEntryTemplates'][${x}]['logicalLocation']['locationEntries'][1]['relativeValue']}    ${permittedInterconnectTypeUri}
+    Log to console and logfile    ${Test_dict}
+
+    ${Keys}=    Get Dictionary Keys    ${Test_dict}
+    Log to console and logfile    ${Keys}
+    ${Values}=    Get Dictionary Values    ${Test_dict}
+    Log to console and logfile    ${Values}
+    :FOR    ${y}    IN RANGE    0    8
+    \    Set To Dictionary    ${eg_body_37['interconnectBayMappings'][${y}]}    interconnectBay    ${Keys[${y}]}
+    \    Run Keyword If    '${Values[${y}]}' != 'None'    Set To Dictionary    ${eg_body_37['interconnectBayMappings'][${y}]}    logicalInterconnectGroupUri    ${LIG_uri}
+
+    ${eg_resp}=    Fusion Api Create Enclosure Group    ${eg_body_37}
+    Run keyword unless  ${eg_resp['status_code']}== 201    Fail    ${eg_resp['message']}
+    Set Global Variable    ${EG_uri}    ${eg_resp['uri']}
+    Log to console and logfile    EG created successfully
+
+5 Edit Lig to add networks
+    [Documentation]    Edit Lig to add networks
+    ${Test_list} =    Create List
+    ${sh_resp}    Fusion Api Get Fc Networks    param=?filter="'name'=='${fc_network['name']}'"
+    Set Global Variable    ${a_uri}    ${sh_resp['members'][0]['uri']}
+    Log to console and logfile    ${a_uri}
+    Append To List    ${lig_37['uplinkSets'][1]['networkUris']}    ${a_uri}
+    ${sh1_resp}       Fusion Api Get Ethernet Networks    param=?filter="'name'=='${Ethernet_network['name']}'"
+    Set Global Variable    ${a1_uri}    ${sh1_resp['members'][0]['uri']}
+    Log to console and logfile    ${a1_uri}
+    Append To List    ${lig_37['uplinkSets'][0]['networkUris']}    ${a1_uri}
+    ${resp}=    Fusion Api Edit Lig    ${lig_37}    ${LIG_uri}
+    Run Keyword If  '${resp['status_code']}' != '202'    Fail    ElSE    Log to console and logfile    LIG edited successfully
+    ${task}=    Wait For Task   ${resp}    140s    2s
+
+
+6 Importing Enclosure
+    [Documentation]    Importing Enclosure
+    Set To Dictionary    ${encs_37}    enclosureGroupUri    ${EG_uri}
+    ${resp_enc}=    Fusion Api Add Enclosure    ${encs_37}
+    Run keyword unless  ${resp_enc['status_code']}== 202    Fail    ${resp_lig['message']}
+    ${task} =   Wait For Task   ${resp_enc}     500s    50s
+    Log to console and logfile    Enclosure imported successfully
+
+7 creating Server Profile
+    [Documentation]    creating Server Profile
+    ${sp_resp} =    Fusion Api Get Server Hardware    param=?filter="'name'=='${Enclosure_Name_37}, bay ${server_138}'"
+    Set Global Variable    ${sp_uri}    ${sp_resp['members'][0]['uri']}
+    Log to console and logfile    ${sp_uri}
+    Set to Dictionary    ${SP_body1}    serverHardwareUri    ${sp_uri}
+    Set to Dictionary    ${SP_body1}    enclosureGroupUri    ${sp_resp['members'][0]['serverGroupUri']}
+    Set to Dictionary    ${SP_body1}    serverHardwareTypeUri    ${sp_resp['members'][0]['serverHardwareTypeUri']}
+    Set to Dictionary    ${SP_body1['connections'][0]}    networkUri    ${a1_uri}
+    Set to Dictionary    ${SP_body1['connections'][1]}    networkUri    ${a_uri}
+    ${lp_resp} =    Fusion Api Create Server Profile    ${SP_body1}
+    Run Keyword If  '${lp_resp['status_code']}' != '202'    Fail    ElSE    Log to console and logfile    \nServer profile created successfully
+    ${task} =   Wait For Task    ${lp_resp}     300s    30s
+    ${body}    Create Dictionary    powerState=On
+    ...                             powerControl=MomentaryPress
+    ${resp}    Fusion Api Edit Server Hardware Power State     body=${body}    uri=${sp_uri}
+    Run Keyword If    '${resp['status_code']}' != '202'    Fail    ElSE    Log to console and logfile    \nServer profile Powered On Successfully
+    ${task}    Wait For Task    ${resp}    240s    10s
+    Sleep    ${Server_power_on_sleep_time}
+
+8 Checking the LUN Count Before Fireware Activation
+    [Documentation]    Checking the LUN Count Before Fireware Activation
+    ${disk_count}=    lun_discovery    ${linux_details}    ${ilo_details}    ${server_details1}    ${module_file_path1}
+    ${len}    Get Length    ${disk_count}
+    ${count}    Evaluate    ${len}-1
+    Log to console and logfile    COUNT OF LUN : ${count}
+    Run keyword If    '${count}' != '0'    Log to console  \nSuccessfully verified lun availability      ELSE     Fail
+    sleep    10s
+
+9 Editing LI to STAGE the Firmware
+    [Documentation]    Editing LI to STAGE the Firmware
+    ${fm_resp}    Fusion Api Get Firmware Driver
+    Set Global Variable    ${fm_uri}    ${fm_resp['members'][0]['uri']}
+    ${st1_resp}    Fusion Api Get Li
+    Set Global Variable    ${LI_uri}    ${st1_resp['members'][0]['uri']}
+    Log to console and logfile    ${LI_uri}
+    Set to Dictionary    ${stage_body_4_138}    sppUri    ${fm_uri}
+    ${resp}    Fusion Api Li Upgrade Firmware   ${stage_body_4_138}    ${LI_uri}
+    Log to console and logfile    ${resp}
+    Run Keyword If    '${resp['status_code']}' != '202'    Fail    ElSE    Log to console and logfile    \nFirmware is Staging Successfully
+    ${task}    Wait For Task    ${resp}    500s    10s
+    Log to console and logfile    \nFirmware Staged Successfully
+
+
+10 Editing LI to activate Firmware
+    [Documentation]    Editing LI to activate Firmware
+    ${li_uri} =     Get LI URI    ${Enclosure_Name_37}-${lig_37['name']}
+    Set Global Variable    ${LI_uri}    ${li_uri}
+    ${resp}    Fusion Api Get Interconnect    param=?filter="'name'=='${Enclosure_Name_37}, interconnect ${interconnect1}'
+    Set Global Variable    ${ic_uri}    ${resp['members'][0]['uri']}
+    Log to console and logfile    ${ic_uri}
+    Set to Dictionary    ${activate_body_4_138['interconnects'][0]}    interconnectUri    ${ic_uri}
+    Set to Dictionary    ${activate_body_4_138}    sppUri    ${fm_uri}
+    ${resp1}    Fusion Api Li Upgrade Firmware    ${activate_body_4_138}    ${LI_uri}
+    Wait Until Keyword Succeeds    360s    2s    Verify Interconnect State   ${interconnectname_1 }    ${IC_Adding}
+    ${disk_count}=    lun_discovery    ${linux_details}    ${ilo_details}    ${server_details1}    ${module_file_path1}
+    ${len}    Get Length    ${disk_count}
+    ${count1}    Evaluate    ${len}-1
+    Log to console and logfile    COUNT OF LUN : ${count1}
+    Run keyword If    '${count1}' == '0'    Log to console  \nSuccessfully verified lun availability      ELSE    Fail
+    Log to console and logfile   \nActivated firmware for interconnect 1
+    sleep    300s
+
+
+11 Checking the LUN Count After Fireware Activation
+    [Documentation]    Checking the LUN Count After Fireware Activation
+    ${disk_count}=    lun_discovery    ${linux_details}    ${ilo_details}    ${server_details1}    ${module_file_path1}
+    ${len}    Get Length    ${disk_count}
+    ${count}    Evaluate    ${len}-1
+    Log to console and logfile    COUNT OF LUN : ${count}
+    Run keyword If    '${count}' !='0'     Log to console  \nSuccessfully verified lun availability      ELSE     Fail
+    #####Final Cleanup######
+    Clean OV
+*** Keywords ***
+GET IC STATE
+    [Documentation]    Get Interconnect State
+    [Arguments]   ${LI_uri}   ${IC_List}
+    ${IC_body}=   Create List
+    ${get_response} =    Fusion Api Get Li    ${LI_uri}    param=/firmware
+    Log to console and logfile    ${get_response['interconnects']}
+    ${IC_Name} =    Get From Dictionary      ${get_response['interconnects'][0]}     interconnectName
+    Log to console and logfile    ${IC_Name}
+    ${resp} =   Run Keyword If  '${IC_Name}' == '${IC_List}'    Append To List    ${IC_body}     ${get_response['interconnects'][${x}]}
+    ELSE     Log to console  interconnect name is ${IC_Name}
+    Log to console and logfile    ${IC_body}
+    ${Interconnect_state} =    Get From Dictionary      ${IC_body[0]}     state
+    Log to console and logfile    ${Interconnect_state}
+    Should Be Equal As Strings    ${Interconnect_state}    ${ICM_state}
+    Sleep    60s
+
+
+
+Verify Interconnect State
+    [Documentation]    Verify Interconnect State
+    Fusion Api Login Appliance         ${APPLIANCE_IP}        ${admin_credentials}
+    [Arguments]        ${interconnectname_1}        ${POWER_STATE}
+    Log to Console    inside verify interconnect
+    ${ic}    Get IC    ${interconnectname_1}
+    ${State} =    Get From IC      ${ic}    state
+    Log to Console and logfile    ${State}
+    ${interconnectname_1}:${State}
+    Should Be Equal As Strings    ${State}    ${POWER_STATE}
+
+Get IC
+    [Documentation]    Get Interconnect
+    [Arguments]        ${ICM_NAME}
+    ${resp} =   fusion api get interconnect
+    Log        ${resp}
+    ${ics} =     Get From Dictionary     ${resp}    members
+    ${l} =     Get Length    ${ics}
+    :FOR    ${x}    IN RANGE    0    ${l}
+    \    ${ic} =     Get From List   ${ics}    ${x}
+    \     Exit For Loop If     '${ic['name']}' == '${ICM_NAME}'
+    [Return]    ${ic}
+
+Get from IC
+    [Documentation]    Get From Interconnect
+    [Arguments]     ${ic}   ${element}
+    ${return} =     Get From Dictionary     ${ic}   ${element}
+    [Return]    ${return}
+
+Clean OV
+    [Documentation]    Cleans the appliance
+    Log to console    \nCleaning the OV
+    Power off ALL Servers
+    Remove All Server Profiles
+    Remove ALL Enclosures
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove ALL Ethernet Networks
+    Remove ALL FC Networks
+    Remove ALL FCoE Networks
+    Remove ALL Network Sets
+    Remove ALL Users
+    Remove ALL Users

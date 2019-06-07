@@ -1,0 +1,255 @@
+*** Settings ***
+Library				RoboGalaxyLibrary
+Library				FusionLibrary
+Library				OperatingSystem
+Library				BuiltIn
+Library				Collections
+Library				XML
+Library		        SSHLibrary
+Library				String
+Library				Dialogs
+Library             ./StorageHelpers.py
+
+*** Variables ***
+${refresh_timeout}        180
+${reset_timeout}          240
+${interval}                 2
+
+*** Keywords ***
+Get Random Actual Drive Enclosure Name
+    [Documentation]  Get Random Actual Drive Enclosure Name
+    ${all_DE} =    Fusion Api Get Drive Enclosure
+    ${count} =    Get From Dictionary    ${all_DE}    count
+    ${random_DE} =    Evaluate    random.randint(0, ${count - 1})    modules=random
+    ${name} =    Get From Dictionary    ${all_DE['members'][${random_DE}]}    name
+    [Return]  ${name}
+
+Power Random Drive Enclosure On and Off
+    [DOCUMENTATION]  Toggle the Power, Verify, Return To Orignal Power State and Verify for a Random Drive Enclosure
+    ${name} =  Get Random Actual Drive Enclosure Name
+    Fusion API Power Drive Enclosure On and Off by Name  ${name}
+
+Toggle Verify uidState and powerState Drive Enclosures
+    [DOCUMENTATION]    For each DE, Toggle the Power, Verify, Return To Orignal Power State and Verify
+    ...                Toggle the UID, Verify, Return To Original UID state and Verify
+    [ARGUMENTS]  ${all_DE}
+
+    :FOR    ${de}    IN    @{all_DE['members']}
+    \    ${name} =   Get From Dictionary    ${de}    name
+    \    ${uidState} =   Get From Dictionary    ${de}    uidState
+    \    ${powerState} =   Get From Dictionary    ${de}    powerState
+    \    ${uri} =    Get From Dictionary    ${de}    uri
+    \    Log    ${\n}    console=True
+    \    Log    name:${name} uidState:${uidState} powerState:${powerState} uri:${uri}    console=True
+    \    Fusion API Power Drive Enclosure On and Off by Name  ${name}
+    \    Fusion API Toggle Drive Enclosure UID On and Off by Name  ${name}
+
+Get Drive Enclosure
+    [Documentation]  Get Drive Enclosure
+	[Arguments]		${name}
+	${resp} = 	Fusion Api Get Drive Enclosure  param=?filter="'name'=='${name}'"
+	Log    ${resp}  TRACE
+    ${status}  ${error_message} =  Run Keyword and Ignore Error  Get From Dictionary  ${resp}  message
+    Dictionary Should Not Contain Key  ${resp}  message  ${error_message}
+	${count} =  Get From Dictionary  ${resp}  count
+	Return from keyword if  $count==0  ${resp}
+	[Return]	${resp['members'][0]}
+
+Get Drive Enclosures and verify
+    [Documentation]  Get Drive Enclosures and verify
+    ${resp} =   Fusion Api Get Drive Enclosure
+    Log    ${resp}  TRACE
+    ${status}  ${error_message} =  Run Keyword and Ignore Error  Get From Dictionary  ${resp}  message
+    Dictionary Should Not Contain Key  ${resp}  message  ${error_message}
+    ${count} =  Get From Dictionary  ${resp}  count
+    Run Keyword If  $count==0  Fail  Fail: Get Drive Enclosures found no Drive Enclosures
+    [Return]    ${resp['members'][0]}
+
+Get Drive Enclosure URI
+    [Documentation]  Get Drive Enclosure URI
+	[Arguments]		${de}
+	${resp} = 	Fusion Api Get Drive Enclosure		param=?filter="'name'=='${de}'"
+	${uri} = 	Get From Dictionary		${resp['members'][0]}	uri
+	[Return]	${uri}
+
+Get Drive Enclosure URIs
+    [Documentation]  Get Drive Enclosure URIs
+	[Arguments]		${driveEnclosurList}
+	${urilist} = 	Create List
+	:FOR	${de}	IN	@{driveEnclosurList}
+	\	${resp} = 	Fusion Api Get Drive Enclosure		param=?filter="'name'=='${de}'"
+	\	${uri} = 	Get From Dictionary		${resp['members'][0]}	uri
+	\	Append To List	${urilist}	${uri}
+	[Return]	${urilist}
+
+Refresh Drive Enclosure
+    [DOCUMENTATION]    Causes a Refresh of a Drive Enclosure
+    [Arguments]  ${name}
+    # PUT {"refreshState":"RefreshPending","powerState":"On"}
+    Log    DE to Refresh: ${name}
+    ${uri} =  Get Drive Enclosure URI  ${name}
+
+    &{putPayload} =    Create Dictionary    refreshState=RefreshPending
+    ${response} =    Fusion API Put Drive Enclosure    ${putPayload}    ${uri}
+    ${status}  ${error_message} =  Run Keyword and Ignore Error  Get From Dictionary  ${response}  message
+    Dictionary Should Not Contain Key  ${response}  message  ${error_message}
+    ${task_uri} =  Get From Dictionary    ${response['headers']}    location
+	Log    \nThe task URI is ${task_uri}
+	${task} =    Fusion Api Get Task    uri=${task_uri}
+	# Call Wait For Task2 with a taskResource
+    Wait For Task2    ${task}    ${refresh_timeout}    ${interval}    #VERBOSE=True
+
+Refresh Drive Enclosure By Name
+    [Documentation]  Refresh Drive Enclosure By Name
+    [Arguments]  ${name}
+    ${de_uri} =    Common URI lookup by name    DE:${name}
+    ${body} =    Create Dictionary    refreshState=RefreshPending
+    ${resp} =    Fusion API Put Drive Enclosure    body=${body}    uri=${de_uri}    param=/refreshState
+    [Return]    ${resp}
+
+Refresh Random Drive Enclosure
+    [DOCUMENTATION]    Causes a Refresh of a random Drive Enclosure
+    # PUT {"refreshState":"RefreshPending"}
+    ${all_DE} =    Fusion Api Get Drive Enclosure
+    ${count} =    Get From Dictionary    ${all_DE}    count
+    ${random_DE} =    Evaluate    random.randint(0, ${count - 1})    modules=random
+
+    ${name} =    Get From Dictionary    ${all_DE['members'][${random_DE}]}    name
+    Refresh Drive Enclosure    ${name}
+
+Reset Drive Enclosure
+    [DOCUMENTATION]    Causes a Reset of a Drive Enclosure
+    [Arguments]  ${name}
+    # PATCH [{op: "replace", path: "/deviceResetState", value: "Reset"}]
+
+    ${uri} =  Get Drive Enclosure URI  ${name}
+
+    Log To Logfile    DE to Reset: ${name} ${uri}
+
+    @{patchPayload} =    Create List
+    ${reset} =    Create Dictionary    op=replace    path=/deviceResetState    value=Reset
+    Append To List    ${patchPayload}    ${reset}
+    ${response} =    Fusion API Patch Drive Enclosure    ${patchPayload}    ${uri}
+    ${status}  ${error_message} =  Run Keyword and Ignore Error  Get From Dictionary  ${response}  message
+    Dictionary Should Not Contain Key  ${response}  message  ${error_message}
+    # Call Wait For Task2 with the full response which also contains the response headers.
+    Wait For Task2    ${response}    ${reset_timeout}    ${interval}    #VERBOSE=True
+
+Reset Random Drive Enclosure
+    [DOCUMENTATION]    Causes a Reset of a Random Drive Enclosure
+    # PATCH [{op: "replace", path: "/deviceResetState", value: "Reset"}]
+    ${all_DE} =    Fusion Api Get Drive Enclosure
+    ${count} =    Get From Dictionary    ${all_DE}    count
+    ${random_DE} =    Evaluate    random.randint(0, ${count - 1})    modules=random
+
+    ${name} =    Get From Dictionary    ${all_DE['members'][${random_DE}]}    name
+    Reset Drive Enclosure    ${name}
+
+Verify Drive Enclosure
+    [Documentation]  Verify drive enclosure DTO with the expected one specified in the data file
+    ...              **kwargs are used to add key value pair to the expected DTO
+    ...              Example:
+    ...                Verify Drive Enclosure  ${expected_dto}
+    ...                Verify Drive Enclosure  ${expected_dto}  state=Monitored
+    ...              Data Required:
+    ...                Expected enclosure DTO
+    [Arguments]  ${expected_dto}  &{kwargs}
+    ${name} =  Get From Dictionary  ${expected_dto}  name
+    Log    ${\n}[Verifying Drive Enclosure ${name}]
+    ${new_expected_dto} =  Add Key Value to DTO  ${expected_dto}  &{kwargs}
+    Log    ${\n}[The new expected Drive Enclosure is ${new_expected_dto}]  TRACE
+	${dto} =  Get Drive Enclosure  ${name}
+	${validate_status} =  Fusion api validate response follow  ${new_expected_dto}  ${dto}  wordy=${True}
+    Run Keyword If  '${validate_status}'=='False'  Fail  Validate Enclosure ${name} failed
+
+Verify Drive Enclosures from list
+    [Documentation]  Verify Drive enclosure DTOs with the expected ones specified in the data file
+    ...              **kwargs are used to add key value pair to the expected DTO
+    ...              Example:
+    ...                Verify Drive Enclosures from a list ${list}
+    ...                Verify Drive Enclosures from a list ${list}  state=Monitored
+    ...              Data Required:
+    ...                List of expected Drive enclosure DTO
+    [Arguments]  ${list}  &{kwargs}
+    Log    ${\n}[Verifying Drive enclosures]
+    Run Keyword for List with kwargs  ${list}  Verify Drive Enclosure  &{kwargs}
+
+Get Random Expected Drive Enclosure
+    [Documentation]  Get Random Expected Drive Enclosure
+    [Arguments]  ${expected_drive_enclosure_list}
+
+    ${number_of_drive_enclosures} =  Get Length  ${expected_drive_enclosure_list}
+    Log  ${\n}Number of expected drive enclosures: ${number_of_drive_enclosures}    console=True
+    ${random_index} =  Evaluate  random.randint(0, ${number_of_drive_enclosures - 1})    modules=random
+    ${random_drive_enclosure} =  Get From List  ${expected_drive_enclosure_list}  ${random_index}
+    [Return]  ${random_drive_enclosure}
+
+Verify Random Drive Enclosure
+    [Documentation]  Verify Random Drive Enclosure
+    [Arguments]  ${expected_drive_enclosure_list}
+
+    ${expected_drive_enclosure} =  Get Random Expected Drive Enclosure  ${expected_drive_enclosure_list}
+    ${expected_drive_enclosure_name} =  Get From Dictionary  ${expected_drive_enclosure}  name
+    Log  ${\n}Random expected Drive Enclosure name: ${expected_drive_enclosure_name}    console=True
+    ${actual_drive_enclosure} =  Get Drive Enclosure  ${expected_drive_enclosure_name}
+    Log    ${\n}Actual Drive Enclosure:${actual_drive_enclosure}    console=True
+    ${validate_status} =  Fusion API Validate Response Follow  ${expected_drive_enclosure}  ${actual_drive_enclosure}  wordy=${True}
+    Run Keyword If  '${validate_status}'=='False'  Fail  Validate Enclosure ${expected_drive_enclosure_name} failed
+
+Verify Drive Enclosure Count
+    [DOCUMENTATION]    Compares the number of Drive Enclosures with a number of expected DE.  Returns all DE.
+    [ARGUMENTS]  ${expected_number_of_DE}
+
+    ${all_DE} =    Fusion Api Get Drive Enclosure
+
+    ${number_of_DE} =    Get From Dictionary    ${all_DE}    count
+
+    Should Be Equal As Integers    ${expected_number_of_DE}    ${number_of_DE}
+
+    return from keyword    ${all_DE}
+
+Patch Drive Enclosure
+    [Documentation]  Patch Drive Enclosure
+    ...              Example:
+    ...                Patch Drive Enclosure  ${dto}  op=replace  path=/uidState  value=Off timeout=60  interval=5
+    ...              Data Required:
+    ...                Drive Enclosure DTO
+    [Arguments]  ${dto}  ${op}=replace  ${path}=/uidState  ${value}=/off  ${timeout}=60  ${interval}=5
+    ${name} =  Get From Dictionary  ${dto}  name
+    Log    ${\n}Patching Drive Enclosure ${name} with op=${op} path=${path} and value=${value}
+    ${uri} =  Common URI Lookup by name    DE:${name}
+    ${dict} =  Create Dictionary  op=${op}  path=${path}  value=${value}
+    ${list} =  Create List  ${dict}
+    ${resp} =  Fusion API Patch Drive Enclosure  ${list}  ${uri}
+    Wait For Task2    ${resp}    timeout=30    interval=5
+
+Turn Drive Enclosure UID Off from list
+    [Documentation]  Turn Drive Enclosure UID Off from list
+    ...              Example:
+    ...                Turn Drive Enclosure UID Off from list  ${DE}
+    ...              Data Required:
+    ...                List of Drive Enclosure
+    [Arguments]  ${de}
+    Run Keyword for List with kwargs  ${de}  Patch Drive Enclosure  op=replace  path=/uidState  value=Off  timeout=60  interval=5
+
+Turn Drive Enclosure UID On from list
+    [Documentation]  Turn Drive Enclosure UID On from list
+    ...              Example:
+    ...                Turn Drive Enclosure UID On from list  ${DE}
+    ...              Data Required:
+    ...                List of Drive Enclosure
+    [Arguments]  ${de}
+    Run Keyword for List with kwargs  ${de}  Patch Drive Enclosure  op=replace  path=/uidState  value=On  timeout=60  interval=5
+
+Drive Enclosure Attribute ${attribute} Should Have Value ${value}
+    [Documentation]    Check attribute of Drive Enclosure
+    ...    Fail the test in case of attribute other than  the expected
+    ${des} =    Fusion Api Get Drive Enclosure
+    Run Keyword If  ${des['count']}=='0'  Fail  msg=No Drive Enlcosure found
+    ${res} =  Set Variable  ${empty}
+    :FOR  ${de}  IN  @{des['members']}
+    \  ${res} =  Run Keyword If  '${de['${attribute}']}' != '${value}'  Catenate  ${res}
+    ...  \nDrive Enclosure name [${de['name']}] Expected ${attribute} ${value} but found ${de['${attribute}']}
+    \  ...  ELSE  Set Variable  ${res}
+    ${count} =  Get Length  ${res}
+    Run Keyword If  '${count}' > '0'  Fail  ${res}

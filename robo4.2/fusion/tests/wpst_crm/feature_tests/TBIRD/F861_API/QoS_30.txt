@@ -1,0 +1,144 @@
+*** Settings ***
+Documentation		TearDown using FusionLibrary API keywords
+Variables		data_variables.py
+Resource        OVAConfig.txt
+Library			json
+Library			FusionLibrary
+Library			RoboGalaxyLibrary
+Library			Collections
+Library			SSHLibrary
+Library			String
+Resource		resource.txt
+Suite Setup			Load Test Data and Open Browser
+Suite Teardown	Suite Teardown
+
+*** Variables ***
+${APPLIANCE_IP}		15.245.131.222
+
+
+*** Test Cases ***
+
+1. Login to Appliance
+	[Tags]  add   POSITIVE
+	Set Log Level    TRACE
+	Fusion Api Login Appliance    ${APPLIANCE_IP}        ${admin_credentials}
+
+2. Create LiG with QoS type CustomwithFcoe
+    ${body} =   Build LIG body     ${LIGS_TB[0]}
+	${qosConfiguration} =   Get From Dictionary   ${QoS_Fcoe}  qosConfiguration
+	Set to dictionary	${body}     qosConfiguration    ${qosConfiguration}
+	log to console		replaced body is:${body}
+	${resp} = 	Fusion Api Create LIG	${body}
+	${task} =   Wait For Task    ${resp} 	200s	2s
+	log to console		response is:${resp}
+	Run Keyword If	'${resp['status_code']}' != '202'	fail    ELSE    Log to Console  \n-LIG  created successfully
+
+3. Create EG
+	${Resp} =	Add Enclosure Group from variable		${enc_group}
+	Run Keyword If  '${Resp['status_code']}' != '201'  Fail    ELSE  Log to Console   \n-created EG successfully
+
+4. Creating LE
+	${Resp} =	Add Logical Enclosure from variable     ${Logical_Enclosure[0]}
+	Run Keyword If  '${Resp['status_code']}' != '202'  Fail    ELSE  Log to Console   \n-created LE successfully
+	Interconnect ping	${IC_IP}
+
+5. Fetching values from UI
+	Log To Console    *********Log into Appliance as Administrator****************
+    ${user} =    Get Data By Property    ${TestData.users}    name    Administrator
+    fusion_ui_login_to_appliance    ${user[0].name}
+    Log to Console    Successfully logged in as Administrator
+	@{resp}=	fusion_ui_get_qos_class_values	@{TestData.li_16}
+	Log To Console		${resp}
+	Log To Console		${resp[0]}
+	Log To Console		${resp[1]}
+	${conns} =  Create List
+	${l} = 	Get Length	${resp[0]}
+	Log to console	length is ${l}
+	:FOR	${x}	IN RANGE	0	${l}
+
+	\	${c}=	Create List	${resp[0][${x}]}	${resp[1][${x}]}
+
+	\   append to list  ${conns}    ${c}
+	Log to console	${conns}
+	sort list  ${conns}
+	Log to console	${conns}
+
+	#SHOW QUEUE COMMAND OUTPUT
+	Interconnect ping	${IC_IP}
+	Open SNMP Client and Login		${IC_IP}
+	${a}=  Write  ${command}
+	Log to console		${a}
+	${Id} =  Read Until    ${prompt}
+    Log to console		${Id}
+	@{lines}=   Split To Lines		${Id}	18	50
+    Log to console	${lines}
+	Remove Values From List 	${lines} 	${EMPTY}
+	Log to console	${lines}
+	${l} = 	Get Length	${lines}
+	${output} =  Create List
+
+	:FOR	${x}	IN RANGE	0	${l}-1
+	\	Log to console	${x}
+	\	${a}=	Split String	${lines[${x}]}
+	\	${out}=	Create List	${a[1]}	${a[4]}
+	\	Log to console	${out}
+	\	append to list  ${output}    ${out}
+	Log to console	${output}
+	Lists Should Be Equal	${conns}	${output}
+
+6. verifying QoS values in LIG
+	${Resp} =    Fusion Api Get Lig     param=?filter="'name'=='${LIGS_TB[0]['name']}'"
+    ${Resp1} =     Copy List    ${Resp['members'][0]['qosConfiguration']['activeQosConfig']['qosTrafficClassifiers']}
+    ${Resp2} =     Copy List    ${QoS_Fcoe['qosConfiguration']['activeQosConfig']['qosTrafficClassifiers']}
+    Run Keyword If        '${Resp['members'][0]['qosConfiguration']['activeQosConfig']['configType']}' != '${QoS_Fcoe['qosConfiguration']['activeQosConfig']['configType']}' or '${Resp['members'][0]['qosConfiguration']['activeQosConfig']['uplinkClassificationType']}' != '${QoS_Fcoe['qosConfiguration']['activeQosConfig']['uplinkClassificationType']}' or '${Resp['members'][0]['qosConfiguration']['activeQosConfig']['downlinkClassificationType']}' != '${QoS_Fcoe['qosConfiguration']['activeQosConfig']['downlinkClassificationType']}'  Fail    ELSE  log to console   \n-Successfully got the QoS details
+    Check Qos values    ${Resp1}    ${Resp2}
+
+7. Editing Li with QoS type CustomwithoutFcoe
+    ${resp} =    Fusion Api Get Li
+	${uri} =     Get From Dictionary        ${resp['members'][0]}    uri
+	${respl} =	 Fusion Api Update qos aggregated configuration		body=${QoS_NoFcoe['qosConfiguration']}	uri=${uri}
+    log to console	Editing Li with QoS ${respl}
+	${task} =	Wait For Task 	${respl} 	900s	2s
+    #Sleep	7 min
+	Run Keyword If	'${respl['status_code']}' != '202'   Fail    ELSE    Log to Console  \n-LI  Edited successfully
+
+8. verifying QoS values in LI
+    ${Resp} =    Fusion Api Get Li
+	${Resp1} = 	Copy List	${Resp['members'][0]['qosConfiguration']['activeQosConfig']['qosTrafficClassifiers']}
+	${Resp2} = 	Copy List	${QoS_NoFcoe['qosConfiguration']['activeQosConfig']['qosTrafficClassifiers']}
+    Run Keyword If		'${Resp['members'][0]['qosConfiguration']['activeQosConfig']['configType']}' != '${QoS_NoFcoe['qosConfiguration']['activeQosConfig']['configType']}' or '${Resp['members'][0]['qosConfiguration']['activeQosConfig']['uplinkClassificationType']}' != '${QoS_NoFcoe['qosConfiguration']['activeQosConfig']['uplinkClassificationType']}' or '${Resp['members'][0]['qosConfiguration']['activeQosConfig']['downlinkClassificationType']}' != '${QoS_NoFcoe['qosConfiguration']['activeQosConfig']['downlinkClassificationType']}'  Fail    ELSE  log to console   \n-Successfully got the QoS details
+	Check Qos values	${Resp1}	${Resp2}
+    log to console	Successfully verified the QoS values
+
+9. Editing Lig with QoS type CustomwithoutFcoe
+    ${resp} =    Fusion Api Get Lig     param=?filter="'name'=='${LIGS_TB[0]['name']}'"
+    ${uri} =     Get From Dictionary        ${resp['members'][0]}    uri
+	${body} =   Build LIG body     ${LIGS_TB[0]}
+	${lig} = 	    Get LIG Member      ${LIG1}
+	${lig_uri} =    Get LIG Uri         ${LIG1}
+	${qosConfiguration} =   Get From Dictionary   ${QoS_NoFcoe}  qosConfiguration
+	Set to dictionary	${body}     qosConfiguration    ${qosConfiguration}
+	${resp} = 	Fusion Api Edit LIG	body=${body}	uri=${lig_uri}
+	${task} =	Wait For Task 	${resp} 	120s	2s
+	Run Keyword If	'${resp['status_code']}' != '202'   fail    ELSE    Log to Console  \n-LIG  created successfully
+
+10.verifying QoS values in LIG
+    ${Resp} =	Fusion Api Get Lig     param=?filter="'name'=='${LIGS_TB[0]['name']}'"
+	${Resp1} = 	Copy List	${Resp['members'][0]['qosConfiguration']['activeQosConfig']['qosTrafficClassifiers']}
+	${Resp2} = 	Copy List	${QoS_NoFcoe['qosConfiguration']['activeQosConfig']['qosTrafficClassifiers']}
+    Run Keyword If		'${Resp['members'][0]['qosConfiguration']['activeQosConfig']['configType']}' != '${QoS_NoFcoe['qosConfiguration']['activeQosConfig']['configType']}' or '${Resp['members'][0]['qosConfiguration']['activeQosConfig']['uplinkClassificationType']}' != '${QoS_NoFcoe['qosConfiguration']['activeQosConfig']['uplinkClassificationType']}' or '${Resp['members'][0]['qosConfiguration']['activeQosConfig']['downlinkClassificationType']}' != '${QoS_NoFcoe['qosConfiguration']['activeQosConfig']['downlinkClassificationType']}'  Fail    ELSE  log to console   \n-Successfully got the QoS details
+	Check Qos values	${Resp1}	${Resp2}
+    log to console	Successfully verified the QoS values
+
+***Keywords***
+###SNMP Keywords###
+Open SNMP Client and Login
+	[Arguments]         ${SSH_SNMP_IP}=localhost   ${SSH_USER}=netop
+    Open Connection     ${SSH_SNMP_IP}     timeout=180s
+    Set Suite variable  ${SSH_PASS}     netoppwd
+    Login               ${SSH_USER}     ${SSH_PASS}
+	log to console    Logged into the Snmp client : ${SSH_SNMP_IP}
+Interconnect ping
+	[Arguments]		${host}
+    ${Output}=    Run    ping -n 4 ${host}
+    Log to console and logfile    ${Output}

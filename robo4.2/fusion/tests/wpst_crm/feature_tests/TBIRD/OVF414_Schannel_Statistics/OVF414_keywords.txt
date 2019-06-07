@@ -1,0 +1,574 @@
+*** Settings ***
+Documentation    OVF414_keywords
+Library             RoboGalaxyLibrary
+Library             FusionLibrary
+Library             OperatingSystem
+Library             BuiltIn
+Library             Collections
+Library             SSHLibrary
+Library             String
+Library             Telnet
+
+*** Variables ***
+${APPLIANCE_IP}     ${None}
+${eth}    Ethernet
+
+*** Keywords ***
+Check Sampling value in LIG
+    [Documentation]    Check Sampling value in LIG
+    [Arguments]     ${lig_name}
+    ${resp}    Fusion Api Get Lig     param=?filter="'name'=='${lig_name}'"
+    Log to Console      ${resp}
+    ${telemetryConf}    Get From Dictionary    ${resp['members'][0]}    telemetryConfiguration
+    ${sampleCount}    Get From Dictionary    ${telemetryConf}    sampleCount
+    ${sampleInterval}    Get From Dictionary    ${telemetryConf}    sampleInterval
+    [Return]    ${sampleCount}    ${sampleInterval}
+
+Check Sampling value in LI
+    [Documentation]    Check Sampling value in LI
+    [Arguments]     ${li_name}
+    ${liuri}    Get LI URI    ${li_name}
+    ${resp}    Fusion Api Get LI    ${liuri}
+    Log to Console      ${resp}
+    ${telemetryConf}    Get From Dictionary    ${resp}    telemetryConfiguration
+    ${sampleCount_li}    Get From Dictionary    ${telemetryConf}    sampleCount
+    ${sampleInterval_li}    Get From Dictionary    ${telemetryConf}    sampleInterval
+    [Return]    ${sampleCount_li}    ${sampleInterval_li}
+
+Get LI Telemetry Configuration
+    [Documentation]  Gets the LI Telemetry Configuration Details
+    [Arguments]     ${li_name}
+    ${LI_edit}    Get LI member    ${li_name}
+    ${Telemetry_uri}    Get From Dictionary    ${LI_edit['telemetryConfiguration']}     uri
+    ${TelemetryConfiguration}    Get From Dictionary    ${LI_edit}    telemetryConfiguration
+    [Return]    ${Telemetry_uri}    ${TelemetryConfiguration}
+
+Get Server Ip Windows
+    [Documentation]    Gets the valid ip of the server.
+    [Arguments]         ${ilo_details}
+    Log to Console    \nstdout is ${ilo_details}
+    ${serverip_List}=   Create List
+    ${serverip_List1}=   Create List
+    SSHLibrary.Open Connection     ${ilo_details['ilo_ip']}     prompt=>     timeout=20s
+    ${login}    SSHLibrary.Login               ${ilo_details['username']}     ${ilo_details['password']}
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     stop /system1/oemhp_VSP1
+    SSHLibrary.Read Until Prompt
+    SSHLibrary.Write     vsp
+    Sleep    5sec
+    SSHLibrary.Read Until    SAC>
+    Sleep    5sec
+    SSHLibrary.Write    i
+    Sleep    5sec
+    ${stdout}    SSHLibrary.Read
+    Log to Console    \nstdout is ${stdout}
+    ${cmd_output}=    Get Regexp Matches    ${stdout}    Ip=10\\.\\d+\\.\\d+\\.\\d+
+    Log to Console    \nstdout is ${cmd_output}
+    ${ip_list_new}    Create List
+    ${len}    Get Length    ${cmd_output}
+    :FOR    ${x}    IN RANGE    ${len}
+    \    ${ip_lists}    Remove String    ${cmd_output[${x}]}    Ip=
+    \    Log to console    ip is ${ip_lists}
+    \    Append To List   ${ip_list_new}    ${ip_lists}
+    Log to Console    \n IP's are is ${ip_list_new}
+    ${cmd_output1}=    Get Regexp Matches    ${stdout}    Gateway=10\\.\\d+\\.\\d+\\.\\d+
+    Log to Console    \nstdout is ${cmd_output1}
+    ${gateway_ip}    Remove String    ${cmd_output1[0]}    Gateway=
+    SSHLibrary.Close All Connections
+    [Return]    ${ip_list_new}    ${gateway_ip}
+
+Perform an Update From Group LI
+    [Documentation]    Perform an Update From Group LI
+    [Arguments]     ${liuri}    ${timeout}=5 min    ${interval}=15s
+    ${resp} =       Fusion Api Update From Group   uri=${li_uri}
+    Run Keyword If  ${resp['status_code']} !=202    fail    Update from group
+    ${task} =       Wait For Task   ${resp}     ${timeout}      ${interval}
+
+Get gateway ip of the server and passing traffic
+    [Documentation]    Get gateway ip of the server and passing traffic
+    [Arguments]    ${gateway_ip}    ${server_ip}    ${ping_cmd1}    ${server_details}    ${name}
+    #${server_ip}    ${gateway_ip}    Get Server Ip Windows    ${ilo_details}
+
+    ${ping_cmd}    Replace String Using Regexp    ${ping_cmd1}    'gateway_ip'      ${gateway_ip}
+    Log to console    ${ping_cmd}
+    ${out}    execute_traffic    ${server_ip}    ${server_details['username']}    ${server_details['password']}    ${ping_cmd}
+    Log to console    \n Pinging started Successfully ${out}
+    Sleep    20
+    ${contents}    OperatingSystem.Get File    ${name}
+    Should Contain    ${contents}    TTL=
+    Sleep    5min
+
+Get s-channel statistics
+    [Documentation]    Get s-channel statistics
+    [Arguments]     ${IC}    ${stat}    ${downlink_ports}    ${sub_port_number}
+    ${IC_uris}    Get IC URI    ${IC}
+    Log to Console    \n${IC_uris}
+    ${ic_uri_downlink}    catenate    ${IC_uris}/${stat}/${downlink_ports}
+    Log to console    ${ic_uri_downlink}
+    ${statistics}    Fusion Api Get Interconnect    ${ic_uri_downlink}
+    ${subportStatistics}    Get From Dictionary    ${statistics}    subportStatistics
+    Set Variable    ${stat}
+    ${length}    Get Length    ${subportStatistics}
+    :FOR     ${x}   IN RANGE   0   ${length}
+    \    ${subport}    Get From Dictionary    ${subportStatistics[${x}]}    subportNumber
+    \    Run Keyword If    ${subport} != ${sub_port_number}    Continue For Loop
+    \    ...    ELSE    Run Keywords    Set Global Variable    ${stats}    ${subportStatistics[${x}]}    AND    Exit For Loop
+
+    Log to console      ${stats}
+    ${subport_commonstat}    Get From Dictionary    ${stats}    subportCommonStatistics
+    ${subport_advancedstat}    Get From Dictionary    ${stats}    subportAdvancedStatistics
+    [Return]    ${subportStatistics}    ${subport_commonstat}    ${subport_advancedstat}
+
+Verify Deleted connection displays subport statistics
+    [Documentation]    Verify Deleted connection displays subport statistics
+    [Arguments]    ${IC}    ${stat}    ${downlink_ports}    ${sub_port_number}
+    ${IC_uris}    Get IC URI    ${IC}
+    Log to Console    \n${IC_uris}
+    ${ic_uri_downlink}    catenate    ${IC_uris}/${stat}/${downlink_ports}
+    Log to console    ${ic_uri_downlink}
+    ${statistics}    Fusion Api Get Interconnect    ${ic_uri_downlink}
+    ${subportStatistics}    Get From Dictionary    ${statistics}    subportStatistics
+    ${length}    Get Length    ${subportStatistics}
+    :FOR     ${x}   IN RANGE   0   ${length}
+    \    ${subport}    Get From Dictionary    ${subportStatistics[${x}]}    subportNumber
+    \    Run Keyword If    ${subport} != ${sub_port_number}    Log to console    \n Statistics values are not present for deleted connection    ELSE    Fail
+
+Get s-channel Common Statistics
+    [Documentation]    Get s-channel Common Statistics
+    [Arguments]     ${IC}    ${stat}    ${downlink_ports}    ${sub_port_number}
+    ${subportStatistics}    ${subport_commonstat}    ${subport_advancedstat}    Get s-channel statistics    ${IC}    ${stat}    ${downlink_ports}    ${sub_port_number}
+    ${subport_commonstat_octets}    Get From Dictionary    ${subport_commonstat}    rfc1757StatsOctets
+    ${subport_commonstat_pkts}    Get From Dictionary    ${subport_commonstat}    rfc1757StatsPkts
+    [Return]    ${subport_commonstat_octets}    ${subport_commonstat_pkts}
+
+Get s-channel Advanced Statistics
+    [Documentation]    Get s-channel Advanced Statistics
+    [Arguments]     ${IC}    ${stat}    ${downlink_ports}    ${sub_port_number}
+    ${subportStatistics}    ${subport_commonstat}    ${subport_advancedstat}    Get s-channel statistics    ${IC}    ${stat}    ${downlink_ports}    ${sub_port_number}
+    ${receiveKilobitsPerSec}    Get From Dictionary    ${subport_advancedstat}    receiveKilobitsPerSec
+    ${receiveKilobitsPerSec_list}    Split String    ${receiveKilobitsPerSec}    :
+    ${sampleCount_kilobitsPerSec}    Set Variable    0
+    ${length}    Get Length   ${receiveKilobitsPerSec_list}
+    :FOR     ${x}   IN RANGE   0   ${length}
+    \    ${sampleCount_kilobitsPerSec}    Run Keyword If    ${receiveKilobitsPerSec_list[${x}]} != 0       Evaluate    ${sampleCount_kilobitsPerSec} + 1    ELSE    Continue For Loop
+
+    ${receivePacketsPerSec}    Get From Dictionary    ${subport_advancedstat}    receivePacketsPerSec
+    ${receivePacketsPerSec_list}    Split String    ${receivePacketsPerSec}    :
+    ${sampleCount_packetsPerSec}    Set Variable    0
+    ${length}    Get Length   ${receivePacketsPerSec_list}
+    :FOR     ${x}   IN RANGE   0   ${length}
+    \    ${val}    Convert To Integer    ${receivePacketsPerSec_list[${x}]}
+    \    ${sampleCount_packetsPerSec}    Run Keyword If    ${val} != 00       Evaluate    ${sampleCount_packetsPerSec} + 1    ELSE    Continue For Loop
+
+    [Return]    ${sampleCount_kilobitsPerSec}    ${sampleCount_packetsPerSec}
+
+Verifying Subport Common Statistics vaules
+    [Documentation]    Verifying Subport Common Statistics vaules
+    [Arguments]    ${IC}    ${stat}    ${downlink_ports}    ${time_interval}    ${min_octets}    ${min_pkts}    ${sub_port_number}
+    :FOR    ${x}    IN RANGE    0    3
+    \    ${subport_commonstat_octets_initial}    ${subport_commonstat_pkts_initial}    Get s-channel Common Statistics    ${IC}    ${stat}    ${downlink_ports}    ${sub_port_number}
+    \    Sleep    ${time_interval}
+    \    ${subport_commonstat_octets}    ${subport_commonstat_pkts}    Get s-channel Common Statistics    ${IC}    ${stat}    ${downlink_ports}    ${sub_port_number}
+    \    ${diff}    Evaluate    ${subport_commonstat_octets} - ${subport_commonstat_octets_initial}
+    \    Run Keyword If  ${diff} <= ${min_octets}    Fail
+    ...    ELSE    Log to console  \n Successfully validated octets value after passing traffic.
+    \    ${diff}    Evaluate    ${subport_commonstat_pkts} - ${subport_commonstat_pkts_initial}
+    \    Run Keyword If  ${diff} <= ${min_pkts}    Fail
+    ...    ELSE    Log to console  \n Successfully validated packets value after passing traffic.
+
+Verifying sample count in subport Advanced statistics
+    [Documentation]    Verifying sample count subport Advanced statistics
+    [Arguments]    ${IC}    ${stat}    ${downlink_ports}    ${sub_port_number}    ${sample_count}
+    ${sampleCount_kilobitsPerSec}    ${sampleCount_packetsPerSec}    Get s-channel Advanced Statistics    ${IC}    ${stat}    ${downlink_ports}    ${sub_port_number}
+    Run Keyword If  ${sampleCount_kilobitsPerSec} != ${sample_count}    Fail    ELSE    Log to console  \nsample count kilobite per sec is ${sample_count}
+    Run Keyword If  ${sampleCount_packetsPerSec} != ${sample_count}    Fail    ELSE    Log to console  \nsample values packets per sec is ${sample_count}
+
+Verifying common statistics and advanced statistics vaules
+    [Documentation]    Verifying common and advanced statistics vaules
+    [Arguments]    ${IC}    ${stat}    ${downlink_ports}    ${time_interval}    ${sub_port_number}
+    :FOR    ${x}    IN RANGE    0    2
+    \    Sleep    ${time_interval}
+    \    ${subport_commonstat_octets}    ${subport_commonstat_pkts}    Get s-channel Common Statistics    ${IC}    ${stat}    ${downlink_ports}    ${sub_port_number}
+    \    Run Keyword If  ${subport_commonstat_octets} > 100000    Log to console  \n Successfully validated octets value after passing traffic
+    ...    ELSE    Fail
+    \    Run Keyword If  ${subport_commonstat_pkts} > 100000    Log to console  \n Successfully validated packets value after passing traffic
+    ...    ELSE    Fail
+
+Clear Port Counters
+    [Documentation]    Clear Port Counters
+    [Arguments]     ${IC}
+    ${IC_uri}    Get IC URI    ${IC}
+    Log to console    ${IC_uri}
+    ${body}    Create Dictionary
+    ${Resp}    Fusion Api clear Interconnect Ports    ${body}    ${IC_uri}
+    Run Keyword If  '${Resp['status_code']}' != '200'  Fail    ELSE  log to console   \n-Port counters cleared Successfully
+    Sleep    2min
+
+Restore From Backup
+    [Documentation]    Restore From Backup
+    ${status}=    Set Variable    ${EMPTY}
+    ${Response}=    Fusion Api Get Backup
+    Run keyword If    ${Response['status_code']} != 200    Fail     msg="Failed to Get the latest backup"
+    ${restore_body}=   Create Dictionary    type=RESTORE
+    ...                                     uriOfBackupToRestore=${Response['members'][0]['uri']}
+    ${output}=    Fusion Api Restore Backup    ${restore_body}
+    Run keyword If    ${output['status_code']} != 202    Fail      msg="Failed to perform the restore from backup operation"
+    Sleep    10min
+    ${restore_resp}=     Fusion Api Get Restore Status
+    Run keyword If    ${restore_resp['status_code']} != 200    fail    msg="Failed to get the restore details"
+    :FOR   ${index}   IN RANGE   ${restore_resp['count']}
+    \   Run Keyword If    '${restore_resp['members'][${index}]['backupIdToRestore']}' != '${Response['members'][0]['id']}'   Continue For Loop
+    \   ${restore_id} =    Set Variable    ${restore_resp['members'][${index}]['id']}
+    :FOR   ${index}   IN RANGE   75
+    \   sleep   30sec
+    \   Log to console and logfile      "Restoring is in Progress..."
+    \   ${resp}=    Fusion Api Get Restore Status    param=?filter="'id'=='${restore_id}'"
+    \   Run keyword If     ${resp['status_code']}!= 200     Fail      msg="Unable to get the restore id details"
+    \   Run Keyword If     '${resp['members'][0]['restorePhase']}' != 'COMPLETED'    Continue For Loop
+    \   ${status} =    Set Variable    ${resp['members'][0]['status']}
+    \   Run Keyword If   '${resp['members'][0]['restorePhase']}' == 'COMPLETED'    Exit For Loop
+    Should Be Equal    ${status}    SUCCEEDED
+    Log to console and logfile     \nRestore process got succeeded
+
+Re-apply LI configuration
+    [Documentation]    Re-apply LI configuration
+    [Arguments]     ${LI_name}
+    ${li_uri}    Get LI URI   ${LI_name}
+    ${resp}    Fusion Api Reapply LI Configuration    uri=${li_uri}
+    ${task}    Wait For Task    ${resp}     30min   30s
+    ${valDict}    Create Dictionary    taskState=Completed
+    Validate Response    ${task}    ${valDict}
+
+Enable Disable uplink/downlink ports
+    [Documentation]    Enable's or Disable's the port.
+    [Arguments]     ${interconnects}    ${ports}    ${ic_port_body}
+    ${IC_uri}    Get IC URI    ${interconnects}
+    ${ic_resp}    Fusion Api Get Interconnect    ${IC_uri}
+    ${len}    Get Length    ${ic_resp['ports']}
+    Log to console and logfile    ${len}
+    :FOR    ${x}    IN RANGE    0   ${len}
+    \    Run keyword If  '${ic_resp['ports'][${x}]['name']}'=='${ports}'    Set Global Variable    ${port1_uri}    ${ic_resp['ports'][${x}]['uri']}
+    ${ic_port_resp}    Fusion Api Get Interconnect    uri=${port1_uri}
+    Set To Dictionary    ${ic_port_body[0]}    associatedUplinkSetUri    ${ic_port_resp['associatedUplinkSetUri']}
+    Set To Dictionary    ${ic_port_body[0]}    interconnectName    ${ic_port_resp['interconnectName']}
+    Set To Dictionary    ${ic_port_body[0]}    portId    ${ic_port_resp['portId']}
+    Set To Dictionary    ${ic_port_body[0]}    portName    ${ic_port_resp['portName']}
+    ${resp}    Fusion Api Edit Interconnect Ports    uri=${IC_uri}    body=${ic_port_body}
+    [Return]    ${resp}
+
+Get Port Status
+    [Documentation]    Get Port Status
+    [Arguments]     ${interconnect}    ${ports}    ${Linked_Unlinked}
+    ${ic}    Get IC URI    ${interconnect}
+    ${ic_resp}    Fusion Api Get Interconnect Ports    ${ic}
+    ${flag}=    set variable    ${empty}
+    ${len} =    Get Length  ${ic_resp['members']}
+    :FOR    ${x}    IN RANGE    0   ${len}
+    \    Run Keyword If  '${ic_resp['members'][${x}]['portName']}' == '${ports}' and '${ic_resp['members'][${x}]['portStatus']}' == '${Linked_Unlinked}'    Set Global Variable    ${flag}    True
+    Log to console    ${flag}
+    Run Keyword unless  '${flag}' == 'True'   Fail    Conditions didn't match
+
+Get Mac address Of Server Profile
+    [Documentation]    Get Mac address Of Server Profile
+    [Arguments]                  ${connections}
+    ${mac_address} =    Create List
+    ${connection_length} =    Get Length    ${connections}
+    :FOR    ${x}    IN RANGE    ${connection_length}
+    \   Append To List   ${mac_address}    ${connections[${x}]['mac']}
+    [return]            ${mac_address}
+
+Get Profile Details
+    [Documentation]    Get Profile Details
+    [Arguments]    ${resp}    ${profile_name}
+    ${profile_len} =    Get Length    ${resp['members']}
+    :FOR    ${x}    IN RANGE   ${profile_len}
+    \   ${y} =    Set Variable    ${resp['members'][${x}]['connectionSettings']}
+    \   ${mac_address} =    Run Keyword If  '${resp['members'][${x}]['name']}' == '${profile_name}'
+    \   ...    Get Mac address Of Server Profile    ${y['connections']}
+    \   ...    ELSE
+    \   ...    Continue For Loop
+    [Return]    ${mac_address}
+
+
+Get Mac Address
+    [Documentation]    Get Mac Address
+    [Arguments]    ${profile_name}    ${serverip_List_global}
+
+    ${resp} =    Fusion Api Get Server Profiles
+    ${mac_addr_list}=   Create List
+    ${mac} =    Get Profile Details    ${resp}    ${profile_name}
+    ${mac_length} =    Get Length    ${mac}
+    :FOR    ${x}    IN RANGE    ${mac_length}
+    \   ${mac_address} =    Replace String Using Regexp    ${mac[${x}]}    :    -
+    \   Append To List   ${mac_addr_list}    ${mac_address}
+    [Return]    ${mac_addr_list}    ${mac_length}
+
+Get Mac Address from server
+    [Documentation]    Get Mac Address from server
+    [Arguments]         ${IP}    ${Powershell_get_mac}
+    Telnet.Open Connection     ${IP}
+    Sleep    5sec
+    Telnet.Write    a
+    Sleep    5sec
+    ${login}    Telnet.Login     ${windows_server_details['username']}    ${windows_server_details['password']}    login_prompt=login:    password_prompt=password:
+    Log to console  \nLogged in to server
+    Sleep    30sec
+    Telnet.Write    \r
+    Telnet.Write    \r
+    Telnet.Write    Powershell
+    Sleep    30sec
+    Telnet.Write    \r
+    Telnet.Write    \r
+    Telnet.Write    ${Powershell_get_mac}
+    Sleep    30sec
+    ${stdout} =  Telnet.Read
+    Sleep    30sec
+    Telnet.Close Connection
+    Telnet.Close All Connections
+    [Return]    ${stdout}
+
+Compare Mac Address With Server
+    [Documentation]    Compare Mac Address With Server
+    [Arguments]    ${mac_length}    ${Powershell_get_mac}    ${mac_addr_list}    ${serverip_List_global}    ${windows_server_details}
+    ${adapter_name_list}=   Create List
+    :FOR    ${x}    IN RANGE    ${mac_length}
+    \   ${replaced_cmd} =   Replace String Using Regexp    ${Powershell_get_mac}    pppppppp    ${mac_addr_list[${x}]}
+    \   Log to console  \n the string is step2 ${replaced_cmd}
+    \   #calling Get Mac Address from server
+    \   Log to console  \n the ip is ${serverip_List_global[0]}
+    \   ${output}    Get Mac Address from server    ${serverip_List_global[0]}    ${replaced_cmd}
+    \   ${string}    Convert To String    ${output}
+    \   ${match}    ${port}     Should Match Regexp    ${string}    .*Ethernet\\s+(\\d+).*
+    \   ${adapter_name}    Catenate    ${eth}   ${port}
+    \   Append to List   ${adapter_name_list}   ${adapter_name}
+    [Return]    ${adapter_name_list}
+
+Reset ICM command
+    [Documentation]    Reset ICM command
+    [Arguments]     ${Enc1}    ${ICBay}    ${Action}
+    SSHLibrary.Open Connection     ${Host}
+    ${login}    SSHLibrary.Login               root     hpvse1
+    ${EM1}=  SSHLibrary.Execute Command   /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${Enc1}
+    Log to Console   \n em1 ${EM1}
+    ${EM}=  catenate   SEPARATOR=   ${EM1}%bond0
+    Log to Console   \n em ${EM}
+    ${XAUTH}=  SSHLibrary.Execute Command  /ci/bin/tbird/appliance-hal.sh get-enclosure-credentials -s ${Enc1} -o t
+    Log to Console   \n XAUTH ${XAUTH}
+    ${efuse_operation}=   SSHLibrary.Execute Command   curl -i -X POST https://[${EM}]/rest/v1/InterconnectBays/${ICBay} -k -H "X-Auth-Token: ${XAUTH}" -d '{"Action":"${Action}"}'
+    Log To Console   efuseresponce\n-${efuse_operation}
+    SSHLibrary.Close All Connections
+
+Efuse ICMS
+    [Documentation]    Efuse ICMS
+    [Arguments]     ${Enc1}    ${icbays}    ${Action}    ${INTERCONNECTS}   ${state}
+    Log to console and logfile  \n\nEfussing ICMS
+    Reset ICM command    ${Enc1}    ${icbays}    ${Action}
+    Log to console and logfile  \n\n completed
+    ${ic_uri} =    Get IC URI    ${INTERCONNECTS}
+    #Check IC is Configured
+    Wait Until Keyword Succeeds    12 min   15s     IC reached state    ${ic_uri}    ${state}
+    Log to console and logfile  \n\nThe IC module ${INTERCONNECTS} is in ${state} state
+    Sleep    60
+
+Create Windows Teaming
+    [Documentation]    Create Windows Teaming
+    [Arguments]         ${server_ip}    ${windows_server_details}    ${team_cmd}
+    Telnet.Open Connection     ${server_ip}     prompt=>     timeout=20s
+    Log to console  \nSuccessfully opened connection to the server
+    Sleep    5sec
+    Telnet.Write    a
+    Sleep    5sec
+    ${login}    Telnet.Login               ${windows_server_details['username']}     ${windows_server_details['password']}    login_prompt=login:    password_prompt=password:
+    Log to console  \nSuccessfully logged into the server
+    Sleep    30sec
+    Telnet.Write    PowerShell
+    Telnet.Write    \r
+    Telnet.Write    \r
+    Log to console  \n${team_cmd}
+    Telnet.Write    ${team_cmd}
+    Sleep    30sec
+    Telnet.Write    y
+    Sleep    30sec
+    Telnet.Close Connection
+    Telnet.Close All Connections
+    Log to Console    \nteaming completed
+
+Create Teaming windows
+    [Documentation]    Create Teaming windows
+    [Arguments]         ${adapter_name_1}   ${adapter_name_2}    ${Powershell_get_mac1}    ${windows_server_details}    ${serverip_List1_global[0]}
+    ${tmp}    Remove Whitespace   ${adapter_name_1}
+    ${tmp1}    Remove Whitespace   ${adapter_name_2}
+    ${replaced_cmd1} =  Replace String Using Regexp    ${Powershell_get_mac1}    pppp    ${tmp}
+    Log to Console  \nstrafter strip is${tmp}
+    Log to Console  \nreplaced_cmd1 is${replaced_cmd1}
+    ${replaced_cmd2} =  Replace String Using Regexp    ${replaced_cmd1}    qqq    ${tmp1}
+    Log to Console  \nstr is${replaced_cmd2}
+    Execute Powershell Command   ${serverip_List1_global[0]}    ${windows_server_details}    ${replaced_cmd2}
+
+Edit LIG with Different Sampling Interval and Update From Group in LI
+    [Documentation]    Edit LIG with Different Sampling Interval & Update From Group in LI
+    [Arguments]    ${lig_name}    ${diff_sample_interval}    ${li_name}
+    ${lig_uri}    Get LIG Uri     ${lig_name}
+    ${lig_member}    Get LIG member    ${lig_name}
+    set to dictionary    ${lig_member["telemetryConfiguration"]}    sampleInterval    ${diff_sample_interval}
+    ${resp}    Fusion Api Edit LIG     ${lig_member}    ${lig_uri}
+    ${task}    Wait For Task   ${resp}     200s    2s
+    Log to console    Successfully edited sampling interval in LIG.
+    ${li_uri}    Get LI URI    ${li_name}
+    Perform an Update From Group LI    ${li_uri}    15 min    15 s
+
+Power Off Interconnect
+    [Documentation]    Power Off Interconnect
+    [Arguments]         ${Interconnects}    ${interconnect_poweroff}    ${state}
+    ${resp} =    Fusion Api Get Interconnect    param=?filter="'name'=='${Interconnects}'"
+    ${uri} =    Set Variable    ${resp['members'][0]['uri']}
+    ${resp} =   fusion api patch interconnect   body=${interconnect_poweroff}    uri=${uri}
+    Run Keyword If  '${resp['status_code']}' != '202'  Fail    ELSE  log to console   \n-Successfully Powered OFF the Interconnect
+
+    #Check IC state
+    ${ic_uri}    Get IC URI    ${Interconnects}
+    Wait Until Keyword Succeeds    12 min   15s     IC reached state    ${ic_uri}    ${state}
+    Log to console and logfile  \n\nThe IC module ${Interconnects} is in ${state} state
+
+Power On Interconnect
+    [Documentation]    Power On Interconnect
+    [Arguments]         ${Interconnects}    ${interconnect_poweron}    ${state}
+    ${resp} =    Fusion Api Get Interconnect    param=?filter="'name'=='${Interconnects}'"
+    ${uri} =    Set Variable    ${resp['members'][0]['uri']}
+    ${resp} =   fusion api patch interconnect   body=${interconnect_poweron}    uri=${uri}
+    Run Keyword If  '${resp['status_code']}' != '202'  Fail    ELSE  log to console   \n-Successfully Powered ON the Interconnect
+
+    #Check IC state
+    ${ic_uri}    Get IC URI    ${Interconnects}
+    Wait Until Keyword Succeeds    20 min   15s     IC reached state    ${ic_uri}    ${state}
+    Log to console and logfile  \n\nThe IC module ${Interconnects} is in ${state} state
+
+Get Adapter Name
+    [Documentation]    Get Adapter Name
+    [Arguments]    ${port}    ${server_ip}    ${Powershell_get_mac}    ${windows_server_details}
+    ${resp}    Fusion Api Get Server Profiles
+    ${connectionsSetting}    Get From Dictionary    ${resp['members'][0]}    connectionSettings
+    ${connections}    Get From Dictionary    ${connectionsSetting}    connections
+    ${length}    Get Length    ${connections}
+    :FOR     ${x}   IN RANGE   0   ${length}
+    \    ${portIds}    Get From Dictionary    ${connections[${x}]}    portId
+    \    Run Keyword If    '${portIds}' != '${port}'    Continue For Loop
+    \    ...    ELSE    Run Keywords    Set Global Variable    ${mac}    ${connections[${x}]['mac']}    AND    Exit For Loop
+    ${mac_address}    Replace String Using Regexp    ${mac}    :    -
+    Log to console      ${mac_address}
+    ${replaced_cmd}    Replace String Using Regexp    ${Powershell_get_mac}    pppppppp    ${mac_address}
+    ${output}    Execute Powershell Command    ${server_ip}    ${windows_server_details}    ${replaced_cmd}
+    ${string}    Convert To String    ${output}
+    ${match}    ${port}     Should Match Regexp    ${string}    .*Ethernet\\s+(\\d+).*
+    ${adapter_name}    Catenate    ${eth}   ${port}
+    [Return]    ${adapter_name}
+
+Create Tagging
+    [Documentation]    Create Tagging
+    [Arguments]         ${IP}    ${tagging_cmd}
+    Telnet.Open Connection     ${IP}
+    Sleep    5sec
+    Telnet.Write    a
+    Sleep    5sec
+    ${login}    Telnet.Login     ${windows_server_details['username']}    ${windows_server_details['password']}    login_prompt=login:    password_prompt=password:
+    Log to console  \nLogged in to server
+    Sleep    30sec
+    Telnet.Write    Powershell
+    Sleep    30sec
+    Telnet.Write    \r
+    Telnet.Write    \r
+    Log to console  \n${tagging_cmd}
+    Telnet.Write    ${tagging_cmd}
+    Sleep    30sec
+    Telnet.Write    y
+    Sleep    30sec
+    ${stdout}    Telnet.Read
+    Telnet.Close Connection
+    Telnet.Close All Connections
+    [Return]    ${stdout}
+
+Edit Server Profiles from variable
+    [Documentation]    Edits Server Profiles
+    [Arguments]     ${profiles}
+    Log to console and logfile      Adding SERVER PROFILES
+    :FOR    ${profile}  IN  @{profiles}
+    \   ${profile} =    Copy Dictionary     ${profile}
+    \   Log to console  \n${profile}
+    \   ${shuri} =  Get from Dictionary    ${profile}  serverHardwareUri
+    \   Log to console  \nshuri ${shuri}
+    \   ${uri_harware} =    Get Server Hardware URI     ${shuri}
+    \   Set to Dictionary   ${profile}  serverHardwareUri   ${uri_harware}
+    \   Log to console  \nuri_harware ${uri_harware}
+    \   Log to console  \nprofile ${profile}
+    \   ${eg} =     Get from Dictionary    ${profile}  enclosureGroupUri
+    \   @{words} =  Split String    ${eg}   :
+    \   ${type} =   Get From List   ${words}    0
+    \   ${eg} =     Get From List   ${words}    1
+    \   ${uri} =    Get Enclosure Group URI    ${eg}
+    \   Log to console  \neguri ${uri}
+    \   Set to Dictionary   ${profile}  enclosureGroupUri   ${uri}
+    \   ${enc} =    Get from Dictionary    ${profile}  enclosureUri
+    \   @{words} =  Split String    ${enc}  :
+    \   ${type} =   Get From List   ${words}    0
+    \   ${enc} =    Get From List   ${words}    1
+    \   ${uri} =    Get Enclosure URI   ${enc}
+    \   Set to Dictionary   ${profile}  enclosureUri    ${uri}
+    \   ${profile} =    Update connections in profile    ${profile}
+    \   ${profiles} =     Fusion Api Get Server Profiles    param=?filter="'name'=='${profile['name']}'"
+    \   ${uri}      Get From Dictionary      ${profiles['members'][0]}    uri
+    \   Set to Dictionary   ${profile}  uri     ${uri}
+    \   Log to console  \nprofile ${profiles}
+    \   ${etag} =   Get From Dictionary    ${profiles['members'][0]}   eTag
+    \   Log to console  \netag ${etag}
+    \   Set to Dictionary   ${profile}  eTag     ${etag}
+    \   Log to console  \nprof ${profile}
+    \   ${resp} =   Fusion Api Edit Server Profile      body=${profile}     uri=${uri}
+    \   Log to console and logfile  ${resp}
+    \   ${task} =   Wait For Task   ${resp}     timeout=13 mins     interval=10s
+    \   ${task_state} =     Get From dictionary     ${task}     taskState
+    \   Log to console and logfile  ${task}
+    \   Should Match Regexp    ${task_state}   ((?i)Warning|Completed|Error)
+    [Return]    ${task}
+
+Execute Powershell Command
+    [Documentation]    Execute Powershell Command
+    [Arguments]         ${team_ip}    ${windows_server_details}    ${powershell_cmd}
+    Telnet.Open Connection     ${team_ip}     prompt=>     timeout=20s
+    Sleep    5sec
+    Log to console  \nSuccessfully opened connection to the server
+    Telnet.Write    a
+    Sleep    5sec
+    ${login}    Telnet.Login               ${windows_server_details['username']}     ${windows_server_details['password']}    login_prompt=login:    password_prompt=password:
+    Log to console  \nSuccessfully logged into the server
+    Sleep    30sec
+    Telnet.Write    \r
+    Telnet.Write    \r
+    Telnet.Write    powershell
+    Sleep    30sec
+    Telnet.Write    \r
+    Telnet.Write    \r
+    Log to console  \n${powershell_cmd}
+    Telnet.Write    ${powershell_cmd}
+    Sleep    30sec
+    Telnet.Write    y
+    Sleep    30sec
+    ${stdout} =  Telnet.Read
+    Log to Console   \nout is ${stdout}
+    Telnet.Close Connection
+    Telnet.Close All Connections
+    [Return]    ${stdout}
+
+
+Cleanup
+    [Documentation]  Initial Clean up.
+    Set Log Level    TRACE
+
+    Power off ALL Servers
+    Remove All Server Profiles
+    Remove All Logical Enclosures
+    Remove ALL Enclosure Groups
+    Remove ALL LIGs
+    Remove ALL Ethernet Networks
+    Remove ALL FC Networks
+    Remove ALL FCoE Networks
+    Remove ALL Network Sets

@@ -1,0 +1,379 @@
+*** Settings ***
+Documentation		Feature Test: US23953 LACP Timer
+
+Variables     data_variables.py		
+
+Suite Setup       Cleanup For Suite
+Suite Teardown     Suite Teardown
+
+Resource            ../../../../resource/fusion_api_all_resource_files.txt
+
+Library      FusionLibrary
+Library       RoboGalaxyLibrary
+Library				Collections
+Library             json
+Library             SSHLibrary
+Library        DateTime
+
+*** Variables ***
+${APPLIANCE_IP}            15.199.234.35
+${SWITCH_IP}                  15.245.128.84
+
+*** Test Cases ***
+
+US23953 LACP Timer
+
+#### Step-1 --Verify LACP timer setting when creating uplinks sets/LIG on the fly-
+
+     Set Log Level      TRACE
+     Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+     ${ethernet_networks} =    Get Variable Value    ${ethernet_lacp}
+     Run Keyword If    ${ethernet_networks} is not ${null}    Add Ethernet Networks from variable     ${ethernet_networks}
+
+#Creating LIG with 3 US with LACP timer as Long,short and failover
+    ${body} =   Build LIG body      ${ligs['lig_lacp']}
+    Log to console and logfile    \n-Creating LIG ${LIG1}
+    ${resp} =   Fusion Api Create LIG   ${body}
+    Run keyword unless   ${resp['status_code']}== 202    Fail    ${resp['message']}
+    ${task} =   Wait For Task   ${resp}    60s	2s
+    Log to console and logfile   \n Created LIG successfully
+
+#### Step-2 --Import using LIG LACP-1 Verify timers are correctly applied. 
+
+     Log to console and logfile    \n Creating EG	
+    ${enc_groups} =  Get Variable Value   ${eg_body1['EG_2']}
+	Run Keyword If   ${enc_groups} is not ${null}    Add Enclosure Group from variable   ${enc_groups}
+    ${EG_uri}=    Get Enclosure Group URI    ${EG1}
+    Log to console and logfile    EG created successfully
+
+    Log to console and logfile     \n Importing the enclosure
+    Set To Dictionary    ${enc_body1}    enclosureGroupUri    ${EG_uri}
+    ${resp_enc}=    Fusion Api Add Enclosure    ${enc_body1}
+    Run keyword unless	${resp_enc['status_code']}== 202    Fail    ${resp_lig['message']}
+	${task} =   Wait For Task    ${resp_enc}    500s   30s
+	Log to console and logfile    Enclosure imported successfully
+
+# Checking in the TOR switch if the timers are working correctly for the ports
+    Log to console and logfile    \nChecking in TOR switch for the LACPDUs duration for Long timer
+    Log to console and logfile    \n Getting the Interface name of the uplink port from the ICs
+    ${if}=    Create List
+    ${ic} =     Get IC          ${INTERCONNECTS[0]}
+    ${uri} =     Get From IC    ${ic}   uri
+    ${interconnect} =           Fusion Api Get Interconnect Ports           uri=${uri}
+    ${ports} =  Get From Dictionary     ${interconnect}     members
+    ${l} =    Get Length     ${ports}
+    Log     ${l}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${port_list} =   Get From List   ${ports}    ${x}
+    \   Exit For Loop If  '${port_list['portType']}' == 'Uplink' and '${port_list['portName']}' == '${IC_port}'
+      Append To List    ${if}   ${port_list['neighbor']['remotePortId']}
+
+    ${ic} =     Get IC          ${INTERCONNECTS[1]}
+    ${uri} =     Get From IC    ${ic}   uri
+    ${interconnect} =           Fusion Api Get Interconnect Ports           uri=${uri}
+    ${ports} =  Get From Dictionary     ${interconnect}     members
+    ${l} =    Get Length     ${ports}
+    Log     ${l}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${port_list} =   Get From List   ${ports}    ${x}
+    \   Exit For Loop If  '${port_list['portType']}' == 'Uplink' and '${port_list['portName']}' == '${IC_port}'
+      Append To List    ${if}   ${port_list['neighbor']['remotePortId']}
+
+    Login to Switch via SSH
+    Execute Switch Command     debugging link-aggregation lacp packet send interface ${if[0]}
+    :FOR    ${x}   IN RANGE   0   2
+    \  Execute Switch Command    ${debug[${x}]}
+    Sleep   1min
+    ${op}=    Read
+    Execute Switch Command    ${undodebug}
+    Log    ${op}
+    ${time}=      Get Regexp Matches   ${op}    ([0-9]{2})\:([0-9]{2})\:([0-9]{2})
+    ${diff}=    Subtract Time From Time     ${time[1]}    ${time[0]}
+    Run Keyword If     ${diff} != 30.0    Fail     msg="LACPDUs are not sent at 30 secs interval for Long timers"
+    ...          ELSE       Log to console and logfile    \n LACPDUs are sent at 30 secs interval for Long timers
+
+    Log to console and logfile    \nChecking in TOR switch for the LACPDUs duration for Short timer
+    Login to Switch via SSH
+    Execute Switch Command     debugging link-aggregation lacp packet send interface ${if[1]}
+    :FOR    ${x}   IN RANGE   0   2
+    \  Execute Switch Command    ${debug[${x}]}
+    Sleep   25s
+    ${op}=    Read
+    Execute Switch Command    ${undodebug}
+    Log    ${op}
+    ${time}=      Get Regexp Matches   ${op}    ([0-9]{2})\:([0-9]{2})\:([0-9]{2})
+    ${diff}=    Subtract Time From Time     ${time[1]}    ${time[0]}
+    Run Keyword If     ${diff} != 1.0    Fail     msg="LACPDUs are not sent at 1 secs interval for Long timers"
+    ...          ELSE       Log to console and logfile    \n LACPDUs are sent at 1 secs interval for Long timers
+
+#### Step-3--Verify LACP Timer can be set in Uplink Sets during LIG/Uplink Set create, verify LIG/ Uplink Set edit for LACP Timer. Verify LIG/LI Compliance for LACP Timer. 
+
+     log to console and logfile    \nCreating a new LIG to check the default LACP timer
+    ${body} =   Build LIG body      ${ligs['lig_lacp1']}
+    Log to console and logfile    \n-Creating LIG ${LIG1}
+    ${resp} =   Fusion Api Create LIG   ${body}
+    Run keyword unless   ${resp['status_code']}== 202    Fail    ${resp['message']}
+    ${task} =   Wait For Task   ${resp}    60s	2s
+    Log to console and logfile   \n Created LIG successfully
+    
+    LOg to console and logfile    \n Editing LIG to change the timer to Long
+    ${lig} =     Get LIG Member     ${LIG2}
+    Set to Dictionary    ${ligs['lig_lacp1']['uplinkSets'][0]}     lacpTimer=Long
+    ${body} =   Build LIG body      ${ligs['lig_lacp1']}
+    ${ethernetSettings} =   Get From Dictionary   ${lig}  ethernetSettings
+    Set to dictionary    ${body}     ethernetSettings    ${ethernetSettings}
+    ${lig_uri} =    Get LIG Uri     ${LIG2}
+    ${resp} =    Fusion Api Edit LIG     body=${body}    uri=${lig_uri}
+    Run keyword unless   ${resp['status_code']}== 202    Fail    ${resp['message']}
+    ${task} =    Wait For Task   ${resp}   120s   2s
+
+    Log to console and logfile     \n Edithing the other lig to have uplink set with Long Lacp timer
+    ${lig} =     Get LIG Member     ${LIG1}
+    ${lig_uri} =    Get LIG Uri     ${LIG1}
+    ${li_uri} = 	Get LI URI   ${LE1}-${LIG1}
+    Set to Dictionary    ${ligs['lig_lacp']['uplinkSets'][1]}     lacpTimer=Long
+    ${body} =   Build LIG body      ${ligs['lig_lacp']}
+    ${ethernetSettings} =   Get From Dictionary   ${lig}  ethernetSettings
+    Set to dictionary    ${body}     ethernetSettings    ${ethernetSettings}
+    ${resp} =    Fusion Api Edit LIG     body=${body}    uri=${lig_uri}
+    Run keyword unless   ${resp['status_code']}== 202    Fail    ${resp['message']}
+    ${task} =    Wait For Task   ${resp}   120s   2s
+    Perform an Update From Group LI    ${li_uri}   15min    15s
+    ${us_name}=     Get From Dictionary    ${ligs['lig_lacp']['uplinkSets'][1]}     name
+     ${resp}=     Fusion Api Get Uplink Set   param=?filter="'name'=='${us_name}'"
+     ${lacp}=     Get From Dictionary      ${resp['members'][0]}    lacpTimer
+     Run Keyword If    '${lacp}' != 'Long'    fail    msg=The Lacp timer is not set correctly"
+     ...           ELSE      Log to console and logfile   \nThe LACP timer is set correctly
+
+#### Step-4--Verify LACP Timer functions correctly with ToR Switch after editing the Uplink Set.
+     Set Log Level      TRACE
+     Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    ${lig} =     Get LIG Member     ${LIG1}
+    ${lig_uri} =    Get LIG Uri     ${LIG1}
+    ${li_uri} =     Get LI URI   ${LE1}-${LIG1}
+    ${body} =   Build LIG body      ${ligs['lig_edit']}
+    ${ethernetSettings} =   Get From Dictionary   ${lig}  ethernetSettings
+    Set to dictionary    ${body}     ethernetSettings    ${ethernetSettings}
+    ${resp} =    Fusion Api Edit LIG     body=${body}    uri=${lig_uri}
+    Run keyword unless   ${resp['status_code']}== 202    Fail    ${resp['message']}
+    ${task} =    Wait For Task   ${resp}   120s   2s
+    Perform an Update From Group LI    ${li_uri}   15min    15s
+    ${us_name}=     Get From Dictionary    ${ligs['lig_edit']['uplinkSets'][3]}     name
+     ${resp}=     Fusion Api Get Uplink Set   param=?filter="'name'=='${us_name}'"
+     ${lacp}=     Get From Dictionary      ${resp['members'][0]}    lacpTimer
+     Run Keyword If    '${lacp}' != 'Short'    fail    msg=The Lacp timer is not set correctly"
+     ...           ELSE      Log to console and logfile   \nThe LACP timer is set correctly
+
+    Set to Dictionary    ${ligs['lig_edit']['uplinkSets'][3]}       lacpTimer=Long  
+    ${body} =   Build LIG body      ${ligs['lig_edit']}
+    ${ethernetSettings} =   Get From Dictionary   ${lig}  ethernetSettings
+    Set to dictionary    ${body}     ethernetSettings    ${ethernetSettings}
+    ${resp} =    Fusion Api Edit LIG     body=${body}    uri=${lig_uri}
+    Run keyword unless   ${resp['status_code']}== 202    Fail    ${resp['message']}
+    ${task} =    Wait For Task   ${resp}   120s   2s
+    Perform an Update From Group LI    ${li_uri}   15min    15s
+    ${us_name}=     Get From Dictionary    ${ligs['lig_edit']['uplinkSets'][3]}     name
+     ${resp}=     Fusion Api Get Uplink Set   param=?filter="'name'=='${us_name}'"
+     ${lacp}=     Get From Dictionary      ${resp['members'][0]}    lacpTimer
+     Run Keyword If    '${lacp}' != 'Long'    fail    msg=The Lacp timer is not set correctly"
+     ...           ELSE      Log to console and logfile   \nThe LACP timer is set correctly
+     
+    Login to Switch via SSH
+    Log to console and logfile    \n Shutting down an interface via switch.
+    Write    sys
+    Write    interface ${if[0]}
+    Write    shutdown
+    Sleep    1min
+    ${ic} =     Get IC          ${INTERCONNECTS[0]}
+    ${uri} =     Get From IC    ${ic}   uri
+    ${interconnect} =           Fusion Api Get Interconnect Ports           uri=${uri}
+    ${ports} =  Get From Dictionary     ${interconnect}     members
+    ${l} =    Get Length     ${ports}
+       Log     ${l}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${port_list} =   Get From List   ${ports}    ${x}
+    \   Log         ${port_list}
+    \   Exit For Loop If      '${port_list['portType']}' == 'Uplink' and '${port_list['portName']}' == '${IC_port}'
+     Run Keyword If      '${port_list['portStatus']}' == 'Unlinked' and '${port_list['status']}' == 'Critical'     Log to console and logfile   \n Verified in OV that port is unlinked after shutdown
+     ...           ELSE      Log to console and logfile    \n The port has not become unlinked after shutdown of the interface
+
+    Log to console and logfile    \n Undoing the Shut down an interface via switch.
+    Write    undo shutdown
+    Sleep    1min
+    ${ic} =     Get IC          ${INTERCONNECTS[0]}
+    ${uri} =     Get From IC    ${ic}   uri
+    ${interconnect} =           Fusion Api Get Interconnect Ports           uri=${uri}
+    ${ports} =  Get From Dictionary     ${interconnect}     members
+    ${l} =    Get Length     ${ports}
+       Log     ${l}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${port_list} =   Get From List   ${ports}    ${x}
+    \   Log         ${port_list}
+    \   Exit For Loop If      '${port_list['portType']}' == 'Uplink' and '${port_list['portName']}' == '${IC_port}'
+     Run Keyword If      '${port_list['portStatus']}' == 'Linked' and '${port_list['status']}' == 'OK'     Log to console and logfile   \n Verified in OV that port is linked after undo shutdown
+     ...           ELSE      Log to console and logfile    \n The port has not become linked after undo shutdown of the interface
+
+#### Step-6 Authorization & Privilege Tests on LIG & LI pages 
+
+     Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+    :FOR   ${user}   IN   @{users}
+    \    ${user_name}=    Get From Dictionary   ${user}   userName
+    \    ${pw}=      Get From Dictionary   ${user}   password
+    \    ${credentials}=    Create Dictionary
+    \    Set To Dictionary     ${credentials}   userName=${user_name}   password=${pw}
+    \    ${resp} =   Fusion Api Add User     body=${user}
+    \    Run Keyword If  ${resp['status_code']} !=200    fail    msg=${user_name} creation failed
+    \    ...         ELSE    Log to console and logfile  \n ${user_name} created succesfully !!
+    \    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${credentials}
+    \    Log to console and logfile     \ Trying to edit LIG and LI
+    \    ${lig_uri} =    Get LIG Uri     ${LIG1}
+    \    ${lig} =     Get LIG Member     ${LIG1}
+    \    ${body} =   Build LIG body      ${ligs['lige']}
+    \    ${ethernetSettings} =   Get From Dictionary   ${lig}  ethernetSettings
+    \    Set to dictionary    ${body}     ethernetSettings    ${ethernetSettings}
+    \    ${resp} =    Fusion Api Edit LIG     body=${body}    uri=${lig_uri}
+    \    Validate Response      ${resp}      ${valDict_user}
+    \    Log to console and logfile    \n Verified the error message of User Authorization in LIG
+    \    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+
+    ${user_name}=    Get From Dictionary   ${network_user}   userName
+    ${pw}=      Get From Dictionary   ${network_user}   password
+    ${credentials}=    Create Dictionary
+    Set To Dictionary     ${credentials}   userName=${user_name}   password=${pw}
+    ${resp} =   Fusion Api Add User     body=${network_user}
+    Run Keyword If  ${resp['status_code']} !=200    fail    msg=${user_name} creation failed
+    ...         ELSE    Log to console and logfile  \n ${user_name} created succesfully !!
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${credentials}
+    Log to console and logfile     \ Trying to edit LIG and LI
+    ${lig_uri} =    Get LIG Uri     ${LIG1}
+    ${lig} =     Get LIG Member     ${LIG1}
+    ${body} =   Build LIG body      ${ligs['lige']}
+    ${ethernetSettings} =   Get From Dictionary   ${lig}  ethernetSettings
+    Set to dictionary    ${body}     ethernetSettings    ${ethernetSettings}
+    ${resp} =    Fusion Api Edit LIG     body=${body}    uri=${lig_uri}
+    Run keyword unless   ${resp['status_code']}== 202    Fail    ${resp['message']}
+    Fusion Api Login Appliance    ${APPLIANCE_IP}    ${admin_credentials}
+   
+####    Step-7 ---Back-up/Restore: Verify LACP Timer after Restore. 
+    Log to console and logfile    \n-Creating the backup in OV
+    ${resp}=    Fusion Api Create Backup
+    Run Keyword If  ${resp['status_code']} !=202    fail    msg=\nBackup failed. \n ErrorCode:${resp['errorCode']}\n ${resp['message']}
+    ${task} =   Wait For Task   ${resp}     10 min    20s
+    Run Keyword If  '${task['taskState']}' !='Completed'   or   ${task['status_code']} !=200   fail    msg=\nBackup failed. \n ErrorCode:${task['taskErrors']}\n ${task['taskStatus']}
+    ...         ELSE    Log to console and logfile  \n\nBackup Created Succesfully !! \n ${task['taskStatus']}
+    
+    ${usdel_name}=    Get from Dictionary    ${ligs['lig_lacp']['uplinkSets'][0]}     name
+    ${resp}=    Fusion Api Delete Uplink Set     name=${usdel_name}
+
+    Log to console and logfile     \n\nRestoring from the backup in the appliance
+    Restore From Backup
+    Sleep  1min
+
+    Fusion Api Login Appliance   ${APPLIANCE_IP}   ${admin_credentials}
+    Log to console and logfile     \nChecking if the uplinkset deleted after taking the backup is present after restore
+    ${resp} =   Fusion Api Get Uplink Set   param=?filter="'name'=='${usdel_name}'"
+    Run Keyword If      ${resp['count']} == 0       fail    Log to console and logfile   \nNot found Uplinkset ${usdel_name} after restore
+    ...         ELSE    Log to console and logfile  \nFound Uplinkset ${usdel_name} after restore
+    Run Keyword If     '${resp['members'][0]['lacpTimer']}' != 'Long'    fail    msg="The LACP timer is not showing correctly after restore" 
+    ...         ELSE    Log to console and logfile   \nLACP timer is shown correctly after restore
+    Log to console and logfile    \nChecking in TOR switch for the LACPDUs duration for Short timer
+
+    Login to Switch via SSH
+    Execute Switch Command     debugging link-aggregation lacp packet send interface ${if[0]}
+    :FOR    ${x}   IN RANGE   0   2
+    \  Execute Switch Command    ${debug[${x}]}
+    Sleep   1min
+    ${op}=    Read
+    Execute Switch Command    ${undodebug}
+    Log    ${op}
+    ${time}=      Get Regexp Matches   ${op}    ([0-9]{2})\:([0-9]{2})\:([0-9]{2})
+    ${diff}=    Subtract Time From Time     ${time[1]}    ${time[0]}
+    Run Keyword If     ${diff} != 30.0    Fail     msg="LACPDUs are not sent at 30 secs interval for Long timers"
+    ...          ELSE       Log to console and logfile    \n LACPDUs are sent at 30 secs interval for Long timers
+
+*** Keywords ***
+Login to OneView via REST	
+	[Documentation]		Login to the appliance with the cred
+	[Tags]  add   POSITIVE
+	Set Log Level    TRACE
+	${resp}     Fusion Api Login Appliance    ${appliance_IP}        ${admin_credentials}
+
+Cleanup For Suite	
+	[Documentation]	Returns appliance to a 'clean' state by removing all resources\enclosures
+	Log to console and logfile	[Cleanup]
+	Login to OneView via REST
+	Power off ALL Servers
+	Remove All Server Profiles
+	Remove ALL Enclosures
+	Remove ALL Enclosure Groups
+	Remove ALL LIGs
+	Remove ALL Ethernet Networks
+	Remove ALL FC Networks    
+	Remove ALL Users
+	
+Perform an Update From Group LI
+	[Arguments]		${liuri}	${timeout}=5 min 	${interval}=15s
+	${resp} = 	    Fusion Api Update From Group   uri=${li_uri}
+	Run Keyword If  ${resp['status_code']} !=202    fail    Update from group
+	${task} =	    Wait For Task 	${resp} 	${timeout}		${interval}
+	
+Restore From Backup
+    ${status}=    Set Variable    ${EMPTY}
+	${Response}=    Fusion Api Get Backup
+	Run keyword If    ${Response['status_code']} != 200    Fail     msg="Failed to Get the latest backup"
+	${restore_body}=   Create Dictionary    type=RESTORE 	
+	...                                     uriOfBackupToRestore=${Response['members'][0]['uri']}
+	${output}=    Fusion Api Restore Backup    ${restore_body}
+	Run keyword If    ${output['status_code']} != 202    Fail      msg="Failed to perform the restore from backup operation"
+	Sleep    10min
+	${restore_resp}=     Fusion Api Get Restore Status
+	Run keyword If    ${restore_resp['status_code']} != 200    fail    msg="Failed to get the restore details"
+	:FOR   ${index}   IN RANGE   ${restore_resp['count']}
+	\   Run Keyword If    '${restore_resp['members'][${index}]['backupIdToRestore']}' != '${Response['members'][0]['id']}'   Continue For Loop
+	\   ${restore_id} =    Set Variable    ${restore_resp['members'][${index}]['id']}
+	:FOR   ${index}   IN RANGE   50
+	\	sleep	30sec
+	\	Log to console and logfile		"Restoring is in Progress..."
+	\	${resp}=    Fusion Api Get Restore Status    param=?filter="'id'=='${restore_id}'"
+	\	Run keyword If     ${resp['status_code']}!= 200     Fail      msg="Unable to get the restore id details"
+	\	Run Keyword If     '${resp['members'][0]['progressStep']}' != 'COMPLETED'    Continue For Loop
+	\	${status} =    Set Variable    ${resp['members'][0]['status']}
+	\	Run Keyword If   '${resp['members'][0]['progressStep']}' == 'COMPLETED'    Exit For Loop
+	Should Be Equal    ${status}    SUCCEEDED
+	Log to console and logfile     \nRestore process got succeeded
+
+Login to Switch via SSH
+    [Documentation]    Connect to 5900AF Switch via SSH library
+    [Arguments]    ${IP}=${SWITCH_IP}    ${USERNAME}=${SWITCH_USERNAME}    ${PASSWORD}=${SWITCH_PASSWORD}    
+    ...            ${PROMPT}=${SWITCH_PROMPT}    ${TIMEOUT}=${SWITCH_TIMEOUT}
+    Log Many    ${IP}    ${USERNAME}    ${PASSWORD}    ${PROMPT}    ${TIMEOUT}
+    Set Default Configuration    prompt=${PROMPT}    timeout=${TIMEOUT}
+    ${Id}=    Open Connection    ${IP}
+    ${Output}=    Login    ${USERNAME}    ${PASSWORD}
+    # Disable paging on command output
+    Write    screen-length disable
+    Read Until Prompt
+    [Return]    ${Id}
+    
+Execute Switch Command
+    [Documentation]    SSH connections to the switch don't work well with Robots' Execute Command keyword
+    ...                Use this keyword only for indirect connections to simplify the read/write exchanges.
+    ...                This keyword assumes screen-length prompting has been disabled.
+    [Arguments]    ${COMMAND}    ${PROMPT}=${SWITCH_PROMPT}
+    Write    ${COMMAND}
+    Sleep   1
+    ${Output}=    Read Until    ${PROMPT}
+    [Return]    ${Output}
+
+Get IC
+    [Arguments]     ${ICM_NAME}
+    ${resp} =   fusion api get interconnect
+    Log     ${resp}
+    ${ics} =     Get From Dictionary     ${resp}    members
+    ${l} =  Get Length  ${ics}
+    :FOR    ${x}    IN RANGE    0   ${l}
+    \   ${ic} =     Get From List   ${ics}    ${x}
+    \   Exit For Loop If    '${ic['name']}' == '${ICM_NAME}'
+    [Return]    ${ic}
+    Log     ${ic}
+  
