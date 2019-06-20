@@ -7,7 +7,7 @@ __author__  = "i3S Automation QA"
 __version__ = "0.1"
 
 GENERAL = {
-        "fusion_IP"             :    '15.212.164.206',
+        "fusion_IP"             :    '15.212.164.214',
         "DEFAULT_USER"          :    'Administrator',
         "DEFAULT_PASSWORD"      :    'admin123',
         "SELENIUM_SPEED"        :    '0.0',
