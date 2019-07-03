@@ -6,13 +6,7 @@ admin_credentials = {
     'password': 'admin123'
 }
 
-serverHardwareUri  = ["CN7545061J, bay 11",
-                      "CN7545061J, bay 5"]
-serverHardwareTypeUri ="SY 480 Gen9 1"
-enclosureGroupUri= "EG"
-enclosureUri =["CN7545061J","CN7545061J"]
-networkUri_iscsi = "deploy"
-networkUri_mgmt = "mgmt"
+
 
 
 
