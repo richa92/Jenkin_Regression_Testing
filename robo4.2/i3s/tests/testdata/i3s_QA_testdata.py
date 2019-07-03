@@ -7,7 +7,6 @@ __author__  = "i3S Automation QA"
 __version__ = "0.1"
 
 GENERAL = {
-        
         "SELENIUM_SPEED"        :    '0.0',
         "BROWSER"               :    'Firefox',
 }
