@@ -73,7 +73,7 @@ planscript_delete = [{
 
 
 buildplan_create = [{
-    "type": "OeBuildPlanV5",
+    "type": "OeBuildPlan",
     "customAttributes": [
         {
             "constraints": "",
@@ -109,7 +109,7 @@ buildplan_create = [{
     "category": "oe-build-plans",
     "name": "BP-Single-buildStep-Multi-CA"
 }, {
-    "type": "OeBuildPlanV5",
+    "type": "OeBuildPlan",
     "customAttributes": [
         {
             "constraints": "",
@@ -131,7 +131,7 @@ buildplan_create = [{
     "category": "oe-build-plans",
     "name": "BP-Single-buildStep-Single-CA"
 }, {
-    "type": "OeBuildPlanV5",
+    "type": "OeBuildPlan",
     "customAttributes": [
         {
             "constraints": "",
@@ -179,11 +179,11 @@ buildplan_del = [{
 
 
 deploymentplan_create = [{  # 1 Valid DP having Multiple CA
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -191,7 +191,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -199,7 +199,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -212,11 +212,11 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "description": "Deployment Plan with all the valid fields and having multiple custom attributes",
     "name": "Valid DP with Multiple CA"
 }, {  # 2 Valid DP having single CA
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -229,11 +229,11 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "description": "Deployment Plan with all the valid fields and having only one custom attribute",
     "name": "Valid DP with Single CA"
 }, {  # 3 Valid DP with name containing 255 characters
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -241,7 +241,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -249,7 +249,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -262,11 +262,11 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "description": "Deployment Plan with all the valid fields and name containing 255 characters",
     "name": "Valid DP having name containing 255 characters thnamelengnamenamelengthnamelengthnamelengthnamelengthnamelengthnamelengthnamelengthnamelengthnamelengthnamelengthnamelengthnamelengthnamelengthnamelengthnamelengthnamelengthnamelengthnamelengthnamelengthname"
 }, {  # 4 Name_Having_More_Than_255_Char
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -274,7 +274,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -282,7 +282,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -295,11 +295,11 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "description": "Deployment Plan with all the valid fields and name containing more than 255 characters",
     "name": "Valid DP having name containing more than 255 characters thnamelengnamenamelengthnamelengthnamelengthnamelengthnamelengthnamelengthnamelengthnamelengthnamelengthnamelengthnamelengthnamelengthnamelengthnamelengthnamelengthnamelengthnamelengthnamelengthnamelength-255"
 }, {  # 5 Desc_Having_1000_Char
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -307,7 +307,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -315,7 +315,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -328,11 +328,11 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "description": "Deployment Plan with all the valid fields and description field having 1000 characters Deployment Plan with all the valid fields and description field having 1000 characters Deployment Plan with all the valid fields and description field having 1000 characters Deployment Plan with all the valid fields and description field having 1000 characters Deployment Plan with all the valid fields and description field having 1000 characters Deployment Plan with all the valid fields and description field having 1000 characters Deployment Plan with all the valid fields and description field having 1000 characters Deployment Plan with all the valid fields and description field having 1000 characters Deployment Plan with all the valid fields and description field having 1000 characters Deployment Plan with all the valid fields and description field having 1000 characters Deployment Plan with all the valid fields and description field having 1000 characters Deployment Plan with all the valid fiel END",
     "name": "Valid DP having description field containing 1000 characters"
 }, {  # 6 Desc_Having_More_Than_1000_Char
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -340,7 +340,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -348,7 +348,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -361,7 +361,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "description": "Deployment Plan with all the valid fields and description field having more 1000 characters Deployment Plan with all the valid fields and description field having 1000 characters Deployment Plan with all the valid fields and description field having 1000 characters Deployment Plan with all the valid fields and description field having 1000 characters Deployment Plan with all the valid fields and description field having 1000 characters Deployment Plan with all the valid fields and description field having 1000 characters Deployment Plan with all the valid fields and description field having 1000 characters Deployment Plan with all the valid fields and description field having 1000 characters Deployment Plan with all the valid fields and description field having 1000 characters Deployment Plan with all the valid fields and description field having 1000 characters Deployment Plan with all the valid fields and description field having 1000 characters Deployment Plan with all the valid fiel END",
     "name": "Valid DP having description field containing more than 1000 characters"
 }, {  # 7 DP having no Name, Desc, GI, BP and CA
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [],
     "goldenImageURI": "",
@@ -370,11 +370,11 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "description": "",
     "name": ""
 }, {  # 8 Valid_DP_Multi_CA for Update test 1- Change in Name
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -382,7 +382,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -390,7 +390,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -403,11 +403,11 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "description": "Deployment Plan with all the valid fields and having multiple custom attributes",
     "name": "Valid DP with multiple CA for Update test- Change in Name"
 }, {  # 9 Valid_DP_Multi_CA for Update test- Change in Name and Description
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
             "visible": False,
-            "constraints": "",
+            "constraints": "{}",
             "editable": True,
             "description": "desc domain name",
             "name": "DomainName",
@@ -415,7 +415,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
             "type": "string"
     }, {
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -423,7 +423,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -436,11 +436,11 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "description": "Deployment Plan with all the valid fields and having multiple custom attributes",
     "name": "Valid DP with multiple CA for Update test- Change in Name and Description"
 }, {  # 10 DP without Name, Desc, GI, BP, but having valid CA
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -448,7 +448,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -456,7 +456,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -469,11 +469,11 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "description": "",
     "name": ""
 }, {  # 11 DP having valid Name, Desc, GI and BP, but without any CA
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -481,7 +481,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -489,7 +489,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -502,7 +502,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "description": "Valid GI, BP, Name, Desc but blank CA value",
     "name": "Valid GI BP Name Desc but blank CA value"
 }, {  # 12 Valid GI, BP, Name, Desc, but NO CA
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "goldenImageURI": "ESXi_60",
     "oeBuildPlanURI": "BP-Single-buildStep-Multi-CA",
@@ -510,11 +510,11 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "description": "Valid GI, BP, Name, Desc, but without CA",
     "name": "Valid GI BP Name Desc but NO CA"
 }, {  # 13 Valid Name, Desc, GI, CA but blank BP
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -522,7 +522,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -530,7 +530,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -543,11 +543,11 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "description": "Valid GI, Name, Desc, CA but blank BP",
     "name": "Valid Name Desc GI CA but blank BP"
 }, {  # 14 DP having BP, Name, Desc, CA but blank GI
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -555,7 +555,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -563,7 +563,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -576,11 +576,11 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "description": "Valid Name, Desc, CA and BP, but blank GI",
     "name": "Valid Name Desc CA and BP but blank GI"
 }, {  # 15 GI, BP, Name, Desc, CA but duplicate name
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -588,7 +588,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -596,7 +596,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -609,11 +609,11 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "description": "Valid GI, BP, Name, Desc, CA but duplicate name",
     "name": "Valid DP with multiple CA"
 }, {  # 16 DP having GI, BP, Name, Desc, CA but Invalid name
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -621,7 +621,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -629,7 +629,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -642,11 +642,11 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "description": "DP having GI, BP, Name, Desc, CA but Name containing special characters",
     "name": "#@^& DP containg special charaters (($% --##"
 }, {  # 17 DP having only CA (It does not have any Name, Desc, GI and BP)
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -654,7 +654,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -662,7 +662,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -675,11 +675,11 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "description": "",
     "name": ""
 }, {  # 18 Valid DP having Multiple CA but hpProvided set to True
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": True,
     "customAttributes": [{
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -687,7 +687,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -695,7 +695,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -708,11 +708,11 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "description": "Deployment Plan with all the valid fields and having multiple custom attributes",
     "name": "DP having multiple CA and hpProvided set to True"
 }, {  # 19 Valid DP having Multiple CA and all CA visible set to True
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": True,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -720,7 +720,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -728,7 +728,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -741,11 +741,11 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "description": "Deployment Plan with all the valid fields and having multiple custom attributes",
     "name": "DP having multiple CA and all CA visible set to True"
 }, {  # 20 Valid DP having Multiple CA and some of the CA visible set to True
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": False,
         "description": "desc domain name",
         "name": "DomainName",
@@ -753,7 +753,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -761,7 +761,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -774,11 +774,11 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "description": "Deployment Plan with all the valid fields and having multiple custom attributes",
     "name": "DP having multiple CA and some of the CA visible set to True"
 }, {  # 21 Valid DP having Multiple CA and and all CA are not editable
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": False,
         "description": "desc domain name",
         "name": "DomainName",
@@ -786,7 +786,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": False,
         "description": "desc host name",
         "name": "hostname",
@@ -794,7 +794,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "",
+        "constraints": "{}",
         "editable": False,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -807,11 +807,11 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "description": "Deployment Plan with all the valid fields and having multiple custom attributes",
     "name": "DP having multiple CA and all CA are not editable"
 }, {  # 22 Valid DP to test GET Public API call
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -824,11 +824,11 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "description": "Deployment Plan with all the valid fields and having only one custom attribute",
     "name": "CL RHEL API_GET"
 }, {  # 23 Valid DP to test GET Public API call
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -841,11 +841,11 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "description": "Deployment Plan with all the valid fields and having only one custom attribute",
     "name": "cl artifact_for_GET"
 }, {  # 24 Valid DP to test GET Public API call
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -858,11 +858,11 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "description": "Deployment Plan with all the valid fields and having only one custom attribute",
     "name": "RHEL-7.2-deploymentplan"
 }, {  # 25 Valid DP to test GET Public API call
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -875,7 +875,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "description": "Deployment Plan with all the valid fields and having only one custom attribute",
     "name": "123_deploymentplan"
 }, {  # 26 Valid DP to test GET Public API call
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
@@ -895,7 +895,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
 
 
 deploymentplan_update = [{
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
@@ -928,7 +928,7 @@ deploymentplan_update = [{
     "description": "Deployment plan name and description got updated",
     "name": "Update DP- Change in Name and Description"
 }, {
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
@@ -961,7 +961,7 @@ deploymentplan_update = [{
     "description": "Deployment plan got changed",
     "name": "Update DP- Change in Name"
 }, {
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
@@ -994,7 +994,7 @@ deploymentplan_update = [{
     "description": "Update Deploymentplan- Change In CA",
     "name": "Update DP- Change In CA"
 }, {
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
@@ -1027,7 +1027,7 @@ deploymentplan_update = [{
     "description": "Update Deploymentplan- Change In GI",
     "name": "Update DP- Change In GI"
 }, {
-    "type": "OEDeploymentPlanV5",
+    "type": "OEDeploymentPlan",
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
