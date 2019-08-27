@@ -216,7 +216,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -233,7 +233,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -241,7 +241,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -249,7 +249,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -266,7 +266,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -274,7 +274,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -282,7 +282,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -299,7 +299,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -307,7 +307,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -315,7 +315,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -332,7 +332,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -340,7 +340,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -348,7 +348,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -374,7 +374,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -382,7 +382,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -390,7 +390,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -407,7 +407,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "hpProvided": False,
     "customAttributes": [{
             "visible": False,
-            "constraints": "{}",
+            "constraints": "",
             "editable": True,
             "description": "desc domain name",
             "name": "DomainName",
@@ -415,7 +415,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
             "type": "string"
     }, {
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -423,7 +423,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -440,7 +440,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -448,7 +448,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -456,7 +456,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -473,7 +473,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -481,7 +481,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -489,7 +489,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -514,7 +514,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -522,7 +522,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -530,7 +530,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -547,7 +547,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -555,7 +555,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -563,7 +563,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -580,7 +580,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -588,7 +588,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -596,7 +596,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -613,7 +613,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -621,7 +621,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -629,7 +629,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -646,7 +646,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -654,7 +654,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -662,7 +662,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -679,7 +679,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "hpProvided": True,
     "customAttributes": [{
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -687,7 +687,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -695,7 +695,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -712,7 +712,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "hpProvided": False,
     "customAttributes": [{
         "visible": True,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -720,7 +720,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -728,7 +728,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -745,7 +745,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": False,
         "description": "desc domain name",
         "name": "DomainName",
@@ -753,7 +753,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -761,7 +761,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -778,7 +778,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": False,
         "description": "desc domain name",
         "name": "DomainName",
@@ -786,7 +786,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": False,
         "description": "desc host name",
         "name": "hostname",
@@ -794,7 +794,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "{}",
+        "constraints": "",
         "editable": False,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
@@ -811,7 +811,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -828,7 +828,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -845,7 +845,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -862,7 +862,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "{}",
+        "constraints": "",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
