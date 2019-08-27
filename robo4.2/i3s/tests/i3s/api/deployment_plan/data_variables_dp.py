@@ -76,21 +76,21 @@ buildplan_create = [{
     "type": "OeBuildPlanV5",
     "customAttributes": [
         {
-            "constraints": "",
+            "constraints": "{}",
             "description": "desciption",
             "name": "KeyboardLayout",
             "value": "English",
             "type": "string"
         },
         {
-            "constraints": "",
+            "constraints": "{}",
             "description": "desciption",
             "name": "hostname",
             "value": "Bay8",
             "type": "string"
         },
         {
-            "constraints": "",
+            "constraints": "{}",
             "description": "desciption",
             "name": "DomainName",
             "value": "vse.rdlabs.hpecorp.net",
@@ -112,7 +112,7 @@ buildplan_create = [{
     "type": "OeBuildPlanV5",
     "customAttributes": [
         {
-            "constraints": "",
+            "constraints": "{}",
             "description": "desciption",
             "name": "hostname",
             "value": "Bay8",
@@ -134,21 +134,21 @@ buildplan_create = [{
     "type": "OeBuildPlanV5",
     "customAttributes": [
         {
-            "constraints": "",
+            "constraints": "{}",
             "description": "desciption",
             "name": "KeyboardLayout",
             "value": "English",
             "type": "string"
         },
         {
-            "constraints": "",
+            "constraints": "{}",
             "description": "desciption",
             "name": "hostname",
             "value": "Bay8",
             "type": "string"
         },
         {
-            "constraints": "",
+            "constraints": "{}",
             "description": "desciption",
             "name": "DomainName",
             "value": "vse.rdlabs.hpecorp.net",
@@ -183,7 +183,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
     "hpProvided": False,
     "customAttributes": [{
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc domain name",
         "name": "DomainName",
@@ -191,7 +191,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": False,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc host name",
         "name": "hostname",
@@ -199,7 +199,7 @@ deploymentplan_create = [{  # 1 Valid DP having Multiple CA
         "type": "string"
     }, {
         "visible": True,
-        "constraints": "",
+        "constraints": "{}",
         "editable": True,
         "description": "desc keyboard layout type",
         "name": "KeyboardLayout",
